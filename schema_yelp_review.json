@@ -1,0 +1,231 @@
+{
+  "version": 1,
+  "total_rows": 6990280,
+  "schemas": [
+    {
+      "name": "yelp_academic_dataset_review",
+      "path": [
+        "yelp_academic_dataset_review"
+      ],
+      "columns": [
+        {
+          "name": "j2s_id",
+          "original_name": "j2s_id",
+          "pg_type": "Uuid",
+          "not_null": true,
+          "is_generated": true,
+          "is_parent_fk": false
+        },
+        {
+          "name": "business_id",
+          "original_name": "business_id",
+          "pg_type": {
+            "VarChar": 27
+          },
+          "not_null": true,
+          "is_generated": false,
+          "is_parent_fk": false
+        },
+        {
+          "name": "cool",
+          "original_name": "cool",
+          "pg_type": "Integer",
+          "not_null": true,
+          "is_generated": false,
+          "is_parent_fk": false
+        },
+        {
+          "name": "date",
+          "original_name": "date",
+          "pg_type": "Timestamp",
+          "not_null": true,
+          "is_generated": false,
+          "is_parent_fk": false
+        },
+        {
+          "name": "funny",
+          "original_name": "funny",
+          "pg_type": "Integer",
+          "not_null": true,
+          "is_generated": false,
+          "is_parent_fk": false
+        },
+        {
+          "name": "review_id",
+          "original_name": "review_id",
+          "pg_type": {
+            "VarChar": 27
+          },
+          "not_null": true,
+          "is_generated": false,
+          "is_parent_fk": false
+        },
+        {
+          "name": "stars",
+          "original_name": "stars",
+          "pg_type": "Integer",
+          "not_null": true,
+          "is_generated": false,
+          "is_parent_fk": false
+        },
+        {
+          "name": "text",
+          "original_name": "text",
+          "pg_type": "Text",
+          "not_null": true,
+          "is_generated": false,
+          "is_parent_fk": false
+        },
+        {
+          "name": "useful",
+          "original_name": "useful",
+          "pg_type": "Integer",
+          "not_null": true,
+          "is_generated": false,
+          "is_parent_fk": false
+        },
+        {
+          "name": "user_id",
+          "original_name": "user_id",
+          "pg_type": {
+            "VarChar": 27
+          },
+          "not_null": true,
+          "is_generated": false,
+          "is_parent_fk": false
+        }
+      ],
+      "parent_table": null,
+      "child_kind": null,
+      "depth": 0,
+      "wide_strategy": "Columns"
+    }
+  ],
+  "truncated_names": [],
+  "column_collisions": [],
+  "stats": [
+    {
+      "table_name": "yelp_academic_dataset_review",
+      "column_name": "business_id",
+      "pg_type": {
+        "VarChar": 27
+      },
+      "total_count": 6990280,
+      "null_count": 0,
+      "type_histogram": [
+        [
+          "Varchar",
+          6990280
+        ]
+      ]
+    },
+    {
+      "table_name": "yelp_academic_dataset_review",
+      "column_name": "cool",
+      "pg_type": "Integer",
+      "total_count": 6990280,
+      "null_count": 0,
+      "type_histogram": [
+        [
+          "Integer",
+          6990280
+        ]
+      ]
+    },
+    {
+      "table_name": "yelp_academic_dataset_review",
+      "column_name": "date",
+      "pg_type": "Timestamp",
+      "total_count": 6990280,
+      "null_count": 0,
+      "type_histogram": [
+        [
+          "Timestamp",
+          6990280
+        ]
+      ]
+    },
+    {
+      "table_name": "yelp_academic_dataset_review",
+      "column_name": "funny",
+      "pg_type": "Integer",
+      "total_count": 6990280,
+      "null_count": 0,
+      "type_histogram": [
+        [
+          "Integer",
+          6990280
+        ]
+      ]
+    },
+    {
+      "table_name": "yelp_academic_dataset_review",
+      "column_name": "review_id",
+      "pg_type": {
+        "VarChar": 27
+      },
+      "total_count": 6990280,
+      "null_count": 0,
+      "type_histogram": [
+        [
+          "Varchar",
+          6990280
+        ]
+      ]
+    },
+    {
+      "table_name": "yelp_academic_dataset_review",
+      "column_name": "stars",
+      "pg_type": "Integer",
+      "total_count": 6990280,
+      "null_count": 0,
+      "type_histogram": [
+        [
+          "Integer",
+          6990280
+        ]
+      ]
+    },
+    {
+      "table_name": "yelp_academic_dataset_review",
+      "column_name": "text",
+      "pg_type": "Text",
+      "total_count": 6990280,
+      "null_count": 0,
+      "type_histogram": [
+        [
+          "Varchar",
+          6990280
+        ]
+      ]
+    },
+    {
+      "table_name": "yelp_academic_dataset_review",
+      "column_name": "useful",
+      "pg_type": "Integer",
+      "total_count": 6990280,
+      "null_count": 0,
+      "type_histogram": [
+        [
+          "Integer",
+          6990280
+        ]
+      ]
+    },
+    {
+      "table_name": "yelp_academic_dataset_review",
+      "column_name": "user_id",
+      "pg_type": {
+        "VarChar": 27
+      },
+      "total_count": 6990280,
+      "null_count": 0,
+      "type_histogram": [
+        [
+          "Varchar",
+          6990280
+        ]
+      ]
+    }
+  ]
+}

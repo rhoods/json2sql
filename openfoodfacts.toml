@@ -1,0 +1,42 @@
+# Schema config for OpenFoodFacts
+# Root table: openfoodfacts_products (derived from filename openfoodfacts-products.jsonl)
+#
+# AutoSplit is applied automatically to openfoodfacts_products:
+#   - 125 stable cols stay in openfoodfacts_products
+#   - 184 medium cols → openfoodfacts_products_wide (EAV)
+#   - 189572 rare keys dropped
+# No override needed for the root table.
+
+# images: the entire images subtree generates ~2600 child tables
+# (one per image type × language code × size variant).
+# Store the whole images object as a single JSONB column.
+# All child tables (uploaded_*, front_*, ingredients_*, nutrition_*, etc.) are excluded.
+[openfoodfacts_products_images]
+strategy = "jsonb"
+
+# ingredients_analysis: keys are enum values (palm oil, vegan, etc.)
+[openfoodfacts_products_ingredients_analysis]
+strategy = "jsonb"
+
+# nova_groups_markers: same pattern
+[openfoodfacts_products_nova_groups_markers]
+strategy = "jsonb"
+
+# packagings_materials: enum keys
+[openfoodfacts_products_packagings_materials]
+strategy = "jsonb"
+
+# sources_fields: per-source arbitrary fields
+[openfoodfacts_products_sources_fields]
+strategy = "jsonb"
+
+# ecoscore_extended_data: impact.recipes has hundreds of ingredient columns (all stable),
+# which would exceed PostgreSQL's 1600-column limit. Store entire subtree as jsonb.
+[openfoodfacts_products_ecoscore_extended_data]
+strategy = "jsonb"
+
+# nutriments has ~14k keys like calcium_100g / calcium_unit / calcium_serving etc.
+# StructuredPivot is auto-detected — uncomment to force explicit suffixes:
+# [openfoodfacts_products_nutriments]
+# strategy = "structured_pivot"
+# suffix_columns = ["_100g", "_serving", "_unit", "_label", "_modifier"]

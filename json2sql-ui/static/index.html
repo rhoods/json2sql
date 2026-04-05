@@ -1,0 +1,1175 @@
+<!DOCTYPE html>
+<html lang="fr" data-theme="night">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>json2sql-ui</title>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet"/>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { height: 100vh; overflow: hidden; }
+    .panel-left  { width: var(--w-left, 280px); min-width: 0; overflow: hidden; transition: width 0.15s; flex-shrink: 0; }
+    .panel-right { width: var(--w-right, 380px); min-width: 0; overflow: hidden; transition: width 0.15s; flex-shrink: 0; }
+    .panel-main  { flex: 1; min-width: 0; }
+    .panel-left.collapsed, .panel-right.collapsed { width: 0 !important; }
+    .scroll-area { overflow-y: auto; flex: 1; min-height: 0; }
+    .strategy-Columns        { @apply badge badge-ghost badge-sm; }
+    .strategy-AutoSplit      { @apply badge badge-info badge-sm; }
+    .strategy-KeyedPivot     { @apply badge badge-primary badge-sm; }
+    .strategy-StructuredPivot{ @apply badge badge-secondary badge-sm; }
+    .strategy-Pivot          { @apply badge badge-warning badge-sm; }
+    .strategy-Jsonb          { @apply badge badge-accent badge-sm; }
+    .strategy-Ignore         { @apply badge badge-ghost badge-sm opacity-50; }
+    pre { white-space: pre-wrap; word-break: break-all; }
+    /* Drag handles */
+    .drag-handle {
+      width: 6px; flex-shrink: 0; cursor: col-resize;
+      background: transparent; position: relative; z-index: 10;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .drag-handle:hover, .drag-handle.dragging { background: oklch(var(--p)/0.3); }
+    .drag-handle::after {
+      content: ''; display: block; width: 2px; height: 32px;
+      background: oklch(var(--bc)/0.2); border-radius: 1px;
+    }
+    .drag-handle:hover::after, .drag-handle.dragging::after { background: oklch(var(--p)/0.7); }
+    /* Schema tree selection */
+    .tree-row { display: flex; align-items: center; gap: 4px; padding: 2px 4px; border-radius: 4px; }
+    .tree-row:hover { background: oklch(var(--b3)/0.6); }
+    .tree-row.sel { background: oklch(var(--p)/0.18); }
+    .tree-row input[type=checkbox] { width: 12px; height: 12px; flex-shrink: 0; cursor: pointer; accent-color: oklch(var(--p)); opacity: 0; transition: opacity 0.1s; }
+    .tree-row:hover input[type=checkbox], .tree-row.sel input[type=checkbox], #schema-has-sel .tree-row input[type=checkbox] { opacity: 1; }
+    /* Context menu */
+    #ctx-menu { position: fixed; z-index: 1000; min-width: 190px;
+      background: oklch(var(--b1)/1); border: 1px solid oklch(var(--bc)/0.2);
+      border-radius: 8px; padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
+    #ctx-menu button { display: block; width: 100%; text-align: left;
+      padding: 5px 12px; border-radius: 4px; font-size: 12px; cursor: pointer;
+      background: none; border: none; color: inherit; }
+    #ctx-menu button:hover { background: oklch(var(--p)/0.2); }
+    #ctx-menu .ctx-sep { height: 1px; background: oklch(var(--bc)/0.15); margin: 3px 4px; }
+    #ctx-menu .ctx-header { font-size: 10px; padding: 3px 12px; opacity: 0.5; }
+    /* Collapse toggles */
+    .collapse-btn {
+      position: absolute; top: 50%; transform: translateY(-50%);
+      z-index: 20; width: 16px; height: 32px; display: flex; align-items: center;
+      justify-content: center; background: oklch(var(--b2)/1);
+      border: 1px solid oklch(var(--bc)/0.15); border-radius: 3px;
+      cursor: pointer; font-size: 10px; opacity: 0; transition: opacity 0.15s;
+    }
+    .drag-handle:hover .collapse-btn, .collapse-btn:hover { opacity: 1; }
+    .collapse-btn-left  { right: -8px; }
+    .collapse-btn-right { left:  -8px; }
+  </style>
+</head>
+<body class="bg-base-300 flex flex-col">
+
+<!-- TOP BAR -->
+<div class="navbar bg-base-100 shadow-lg px-4 min-h-12 h-12 flex-shrink-0">
+  <div class="flex-1 gap-3">
+    <span class="font-bold text-primary text-lg">json2sql-ui</span>
+    <div id="top-stats" class="flex gap-2 items-center text-sm opacity-70"></div>
+  </div>
+  <div class="flex-none gap-2">
+    <div id="alert-badge"></div>
+    <button id="btn-export" class="btn btn-sm btn-success" onclick="exportToml()">
+      Exporter TOML
+    </button>
+    <button id="btn-migrate" class="btn btn-sm btn-primary" onclick="startMigration()">
+      Lancer migration
+    </button>
+  </div>
+</div>
+
+<!-- MAIN LAYOUT -->
+<div class="flex flex-1 min-h-0 gap-0" id="main-layout">
+
+  <!-- PANEL GAUCHE -->
+  <div class="panel-left bg-base-100 flex flex-col" id="panel-left">
+    <!-- Recherche -->
+    <div class="p-2 border-b border-base-300">
+      <input id="search-input" type="text" placeholder="Rechercher une table..."
+        class="input input-sm input-bordered w-full"
+        oninput="filterTables()"/>
+    </div>
+    <!-- Filtres -->
+    <div class="p-2 border-b border-base-300 flex flex-wrap gap-1">
+      <button class="btn btn-xs btn-active" id="filter-all"      onclick="setFilter('all')">Tout</button>
+      <button class="btn btn-xs"            id="filter-wide"     onclick="setFilter('wide')">Wide</button>
+      <button class="btn btn-xs btn-warning" id="filter-alerts"  onclick="setFilter('alerts')" style="display:none">⚠ Alertes</button>
+      <button class="btn btn-xs"            id="filter-overridden" onclick="setFilter('overridden')">✏ Modifié</button>
+    </div>
+    <!-- Liste tables -->
+    <div class="scroll-area p-1" id="table-list"></div>
+    <!-- Alertes -->
+    <div id="alerts-panel" class="border-t border-base-300 p-2 max-h-48 overflow-y-auto"></div>
+  </div>
+
+  <!-- DRAG HANDLE LEFT -->
+  <div class="drag-handle border-r border-base-300" id="drag-left" title="Double-clic pour replier">
+    <div class="collapse-btn collapse-btn-left" onclick="togglePanel('left')" title="Replier/déplier">◀</div>
+  </div>
+
+  <!-- PANEL PRINCIPAL -->
+  <div class="panel-main bg-base-200 flex flex-col min-h-0">
+    <!-- Onglets -->
+    <div class="tabs tabs-bordered bg-base-100 px-4 flex-shrink-0 flex items-center">
+      <button class="tab tab-active" id="tab-info"    onclick="switchTab('info')">Info</button>
+      <button class="tab"            id="tab-groups"  onclick="switchTab('groups')">Groupes</button>
+      <button class="tab"            id="tab-schema"  onclick="switchTab('schema')">Schéma</button>
+      <div id="schema-mode-toggle" class="ml-auto flex gap-1 pr-1" style="display:none!important">
+        <button id="smode-structure" class="btn btn-xs btn-active"
+          onclick="setSchemaMode('structure')">Structure</button>
+        <button id="smode-result"    class="btn btn-xs"
+          onclick="setSchemaMode('result')">Résultat</button>
+      </div>
+    </div>
+    <!-- Contenu onglets -->
+    <div class="scroll-area p-4">
+      <div id="view-info"></div>
+      <div id="view-groups" style="display:none"></div>
+      <div id="view-schema" style="display:none"></div>
+    </div>
+  </div>
+
+  <!-- DRAG HANDLE RIGHT -->
+  <div class="drag-handle border-l border-base-300" id="drag-right" title="Double-clic pour replier">
+    <div class="collapse-btn collapse-btn-right" onclick="togglePanel('right')" title="Replier/déplier">▶</div>
+  </div>
+
+  <!-- PANEL DDL -->
+  <div class="panel-right bg-base-100 flex flex-col" id="panel-right">
+    <div class="p-2 border-b border-base-300 flex items-center justify-between">
+      <span class="font-mono text-sm font-bold" id="ddl-title">DDL</span>
+      <button class="btn btn-xs btn-ghost" onclick="copyDdl()">Copier</button>
+    </div>
+    <div class="scroll-area p-3">
+      <pre id="ddl-content" class="text-xs font-mono opacity-70">
+← Sélectionner une table</pre>
+    </div>
+  </div>
+
+</div>
+
+<!-- CONTEXT MENU -->
+<div id="ctx-menu" style="display:none"></div>
+
+<!-- MODAL MIGRATION -->
+<dialog id="modal-migration" class="modal">
+  <div class="modal-box max-w-lg">
+    <h3 class="font-bold text-lg mb-4" id="migration-title">Lancer la migration</h3>
+
+    <!-- Formulaire connexion (caché si déjà configuré) -->
+    <div id="migration-config" class="space-y-3 mb-4">
+      <div>
+        <label class="label label-text text-sm font-medium">URL PostgreSQL</label>
+        <input id="cfg-db-url" type="text" placeholder="postgresql://user:pass@localhost/db"
+          class="input input-bordered input-sm w-full font-mono text-xs" />
+      </div>
+      <div>
+        <label class="label label-text text-sm font-medium">Fichier JSON source</label>
+        <input id="cfg-input-file" type="text" placeholder="/chemin/vers/data.json"
+          class="input input-bordered input-sm w-full font-mono text-xs" />
+      </div>
+    </div>
+
+    <!-- Options drop -->
+    <div id="migration-options" class="mb-4 text-sm opacity-70">
+      Choisissez comment traiter les tables existantes dans la base.
+    </div>
+
+    <!-- Statut (caché jusqu'au démarrage) -->
+    <div id="migration-status" class="space-y-3"></div>
+
+    <div class="modal-action" id="migration-actions">
+      <button class="btn btn-sm btn-error" id="btn-migration-drop" onclick="confirmMigration(true)">
+        DROP CASCADE &amp; Importer
+      </button>
+      <button class="btn btn-sm btn-primary" id="btn-migration-append" onclick="confirmMigration(false)">
+        Importer
+      </button>
+      <button class="btn btn-sm btn-ghost" onclick="document.getElementById('modal-migration').close()">Annuler</button>
+    </div>
+    <div class="modal-action hidden" id="migration-close-action">
+      <button class="btn btn-sm" onclick="document.getElementById('modal-migration').close()">Fermer</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- MODAL TOML -->
+<dialog id="modal-toml" class="modal">
+  <div class="modal-box max-w-2xl">
+    <h3 class="font-bold text-lg mb-2">TOML exporté</h3>
+    <pre id="toml-content" class="text-xs font-mono bg-base-300 p-3 rounded max-h-96 overflow-y-auto"></pre>
+    <div class="modal-action">
+      <button class="btn btn-sm btn-success" onclick="downloadToml()">Télécharger</button>
+      <button class="btn btn-sm" onclick="document.getElementById('modal-toml').close()">Fermer</button>
+    </div>
+  </div>
+</dialog>
+
+<script>
+// ─── STATE ────────────────────────────────────────────────────────────────────
+const state = {
+  tables: [],
+  groups: [],
+  alerts: { blocking: [], warnings: [], blocking_count: 0, warning_count: 0 },
+  currentFilter: 'all',
+  currentSearch: '',
+  currentTab: 'info',
+  selectedTable: null,
+  lastToml: '',
+  schemaSelection: new Set(),   // tables sélectionnées dans l'onglet Schéma
+  schemaMode: 'structure',      // 'structure' | 'result'
+};
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+async function init() {
+  try {
+    await Promise.all([loadTables(), loadGroups(), loadAlerts()]);
+    renderTopStats();
+    renderAlertBadge();
+    renderAlertsPanel();
+    // Auto-select the first table so the DDL panel is populated on load.
+    if (state.tables.length > 0 && !state.selectedTable) {
+      state.selectedTable = state.tables[0].name;
+    }
+    renderTableList();
+    renderInfo();
+    // renderGroups() et renderSchema() sont coûteux (> 1 MB de HTML pour 2800+ tables).
+    // On les diffère : ils ne seront rendus qu'au premier accès à l'onglet concerné.
+    if (state.selectedTable) loadDdl(state.selectedTable);
+  } catch (err) {
+    document.body.innerHTML = `
+      <div class="flex items-center justify-center h-screen">
+        <div class="alert alert-error max-w-lg">
+          <span>Impossible de charger l'interface : ${escHtml(err.message)}</span>
+        </div>
+      </div>`;
+  }
+}
+
+// ─── UTILS ────────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// ─── API ──────────────────────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const r = await fetch('/api' + path, opts);
+  if (!r.ok && r.status !== 422) throw new Error(`${r.status} ${r.statusText}`);
+  const ct = r.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return { ok: r.ok, status: r.status, data: await r.json() };
+  return { ok: r.ok, status: r.status, data: await r.text() };
+}
+
+async function loadTables()  { const r = await api('/schema/tables'); state.tables = r.data; }
+async function loadGroups()  { const r = await api('/groups');         state.groups = r.data; }
+async function loadAlerts()  { const r = await api('/alerts');         state.alerts = r.data; }
+
+// ─── STRATÉGIE LABEL ──────────────────────────────────────────────────────────
+const STRATEGY_COLORS = {
+  Columns: 'badge-ghost', AutoSplit: 'badge-info', KeyedPivot: 'badge-primary',
+  StructuredPivot: 'badge-secondary', Pivot: 'badge-warning', Jsonb: 'badge-accent',
+  Ignore: 'badge-ghost opacity-40',
+};
+const STRATEGY_TIPS = {
+  Columns:         'Défaut — une colonne SQL par clé JSON. Aucune transformation.',
+  AutoSplit:       'Colonnes stables → table principale, colonnes rares → table _wide séparée.',
+  KeyedPivot:      'N tables sœurs fusionnées en 1 — la clé d\'origine devient la colonne key_id.',
+  StructuredPivot: 'Clés avec préfixe commun et suffixes typés → colonnes (ex: calcium_100g, calcium_unit).',
+  Pivot:           'EAV — une ligne par paire clé/valeur. Idéal si les clés sont dynamiques et les valeurs homogènes.',
+  Jsonb:           'L\'objet entier est stocké tel quel dans une colonne JSONB. Schéma flexible, requêtes moins efficaces.',
+  Ignore:          'Table exclue — ni DDL généré, ni données insérées.',
+};
+function strategyBadge(s, force = false) {
+  if (s === 'Columns' && !force) return '';
+  const cls = STRATEGY_COLORS[s] || 'badge-ghost';
+  const tip = STRATEGY_TIPS[s] || s;
+  return `<span class="badge badge-sm ${cls}" title="${tip}">${s}</span>`;
+}
+
+// ─── TOP STATS ────────────────────────────────────────────────────────────────
+function renderTopStats() {
+  const wide = state.tables.filter(t => t.is_wide).length;
+  document.getElementById('top-stats').innerHTML = `
+    <span>${state.tables.length} tables</span>
+    <span class="opacity-40">•</span>
+    <span>${wide} wide</span>
+    <span class="opacity-40">•</span>
+    <span>${state.groups.length} groupes</span>
+  `;
+}
+
+// ─── ALERT BADGE ──────────────────────────────────────────────────────────────
+function renderAlertBadge() {
+  const { blocking_count, warning_count } = state.alerts;
+  let html = '';
+  if (blocking_count > 0)
+    html += `<span class="badge badge-error gap-1">🔴 ${blocking_count} bloquante${blocking_count > 1 ? 's' : ''}</span>`;
+  if (warning_count > 0)
+    html += `<span class="badge badge-warning gap-1">⚠ ${warning_count}</span>`;
+  document.getElementById('alert-badge').innerHTML = html;
+
+  // Afficher le filtre alertes si pertinent
+  const btn = document.getElementById('filter-alerts');
+  btn.style.display = (blocking_count + warning_count) > 0 ? '' : 'none';
+
+  // Griser export si bloquantes
+  document.getElementById('btn-export').disabled = blocking_count > 0;
+  if (blocking_count > 0) {
+    document.getElementById('btn-export').title = `${blocking_count} alertes bloquantes à résoudre`;
+  }
+}
+
+// ─── ALERTS PANEL ─────────────────────────────────────────────────────────────
+function alertItemHtml(a, badgeCls) {
+  const actionBtn = a.action
+    ? `<button class="btn btn-xs btn-outline btn-accent ml-1 mt-0.5 flex-shrink-0"
+         onclick="applyStrategy(${JSON.stringify(a.table)}, ${JSON.stringify(a.action.strategy)})"
+         title="${escHtml(a.action.strategy)}">${escHtml(a.action.label)}</button>`
+    : '';
+  return `<div class="flex gap-1 items-start py-0.5">
+    <span class="badge ${badgeCls} badge-xs mt-1 flex-shrink-0"></span>
+    <div class="flex-1 min-w-0">
+      <span class="text-xs cursor-pointer hover:text-primary" onclick="selectTable(${JSON.stringify(a.table)})">${escHtml(a.table)}</span>
+      <br><span class="text-xs opacity-60">${escHtml(a.message)}</span>
+    </div>
+    ${actionBtn}
+  </div>`;
+}
+
+function renderAlertsPanel() {
+  const { blocking, warnings } = state.alerts;
+  if (!blocking.length && !warnings.length) {
+    document.getElementById('alerts-panel').innerHTML =
+      '<p class="text-xs opacity-40 text-center py-2">Aucune alerte</p>';
+    return;
+  }
+  const items = [
+    ...blocking.map(a => alertItemHtml(a, 'badge-error')),
+    ...warnings.map(a => alertItemHtml(a, 'badge-warning')),
+  ];
+  document.getElementById('alerts-panel').innerHTML = `
+    <p class="text-xs font-bold opacity-60 mb-1">ALERTES</p>
+    ${items.join('')}
+  `;
+}
+
+// ─── APPLY STRATEGY ──────────────────────────────────────────────────────────
+async function applyStrategy(tableName, strategy) {
+  try {
+    await api(`/schema/tables/${encodeURIComponent(tableName)}/strategy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strategy }),
+    });
+    await Promise.all([loadTables(), loadAlerts()]);
+    renderTopStats();
+    renderAlertBadge();
+    renderAlertsPanel();
+    renderTableList();
+    renderInfo();
+    if (state.selectedTable) loadDdl(state.selectedTable);
+  } catch (e) {
+    alert(`Erreur : ${e.message}`);
+  }
+}
+
+// ─── TABLE LIST ───────────────────────────────────────────────────────────────
+function setFilter(f) {
+  state.currentFilter = f;
+  document.querySelectorAll('[id^="filter-"]').forEach(b => b.classList.remove('btn-active'));
+  document.getElementById('filter-' + f)?.classList.add('btn-active');
+  renderTableList();
+}
+
+function filterTables() {
+  state.currentSearch = document.getElementById('search-input').value.toLowerCase();
+  renderTableList();
+}
+
+function visibleTables() {
+  const alertTables = new Set([
+    ...state.alerts.blocking.map(a => a.table),
+    ...state.alerts.warnings.map(a => a.table),
+  ]);
+  return state.tables.filter(t => {
+    if (state.currentSearch && !t.name.includes(state.currentSearch)) return false;
+    switch (state.currentFilter) {
+      case 'wide':      return t.is_wide;
+      case 'alerts':    return alertTables.has(t.name);
+      case 'overridden': return t.is_overridden;
+      default:          return true;
+    }
+  });
+}
+
+function renderTableList() {
+  const tables = visibleTables();
+  const alertTables = new Set([
+    ...state.alerts.blocking.map(a => a.table),
+    ...state.alerts.warnings.map(a => a.table),
+  ]);
+  const blockingTables = new Set(state.alerts.blocking.map(a => a.table));
+
+  if (!tables.length) {
+    document.getElementById('table-list').innerHTML =
+      '<p class="text-xs opacity-40 text-center py-4">Aucune table</p>';
+    return;
+  }
+
+  document.getElementById('table-list').innerHTML = tables.map(t => {
+    const isSelected = state.selectedTable === t.name;
+    const alertDot = blockingTables.has(t.name)
+      ? '<span class="badge badge-error badge-xs"></span>'
+      : alertTables.has(t.name)
+      ? '<span class="badge badge-warning badge-xs"></span>'
+      : '';
+    const modDot = t.is_overridden
+      ? '<span class="text-xs opacity-50">✏</span>' : '';
+    const absorbedDot = t.is_absorbed
+      ? '<span class="badge badge-ghost badge-xs opacity-40" title="Absorbée (JSONB)">⊂</span>' : '';
+    return `
+      <div class="flex items-center gap-1 px-2 py-1 rounded cursor-pointer hover:bg-base-300 ${isSelected ? 'bg-base-300 text-primary' : ''} ${t.is_absorbed ? 'opacity-50' : ''}"
+           onclick="selectTable(${JSON.stringify(t.name)})">
+        <span class="flex-1 text-xs font-mono truncate" title="${escHtml(t.name)}">${escHtml(t.name)}</span>
+        ${alertDot}${modDot}${absorbedDot}
+        ${strategyBadge(t.strategy)}
+      </div>`;
+  }).join('');
+}
+
+// ─── SELECT TABLE ─────────────────────────────────────────────────────────────
+async function selectTable(name) {
+  state.selectedTable = name;
+  renderTableList();
+  loadDdl(name);
+}
+
+// ─── DDL ──────────────────────────────────────────────────────────────────────
+async function loadDdl(name) {
+  document.getElementById('ddl-title').textContent = name;
+  document.getElementById('ddl-content').textContent = 'Chargement…';
+  try {
+    const r = await api(`/export/ddl/${encodeURIComponent(name)}`);
+    document.getElementById('ddl-content').textContent = r.data;
+  } catch (e) {
+    document.getElementById('ddl-content').textContent = `Erreur : ${e.message}`;
+  }
+}
+
+async function loadGroupDdl(id, name) {
+  document.getElementById('ddl-title').textContent = `⊕ ${name}`;
+  document.getElementById('ddl-content').textContent = 'Chargement…';
+  try {
+    const r = await api(`/export/ddl-group/${encodeURIComponent(id)}`);
+    document.getElementById('ddl-content').textContent = r.data;
+  } catch (e) {
+    document.getElementById('ddl-content').textContent = `Erreur : ${e.message}`;
+  }
+}
+
+function copyDdl() {
+  const text = document.getElementById('ddl-content').textContent;
+  navigator.clipboard.writeText(text);
+}
+
+// ─── ONGLETS ──────────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  state.currentTab = tab;
+  ['info', 'groups', 'schema'].forEach(t => {
+    document.getElementById('view-' + t).style.display   = t === tab ? '' : 'none';
+    document.getElementById('tab-'  + t).classList.toggle('tab-active', t === tab);
+  });
+  const toggle = document.getElementById('schema-mode-toggle');
+  toggle.style.setProperty('display', tab === 'schema' ? 'flex' : 'none', 'important');
+  // Rendu différé : ne générer les vues lourdes qu'au premier clic sur l'onglet.
+  if (tab === 'groups')  renderGroups();
+  if (tab === 'schema')  { if (state.schemaMode === 'structure') renderSchema(); else renderSchemaResult(); }
+}
+
+function setSchemaMode(mode) {
+  state.schemaMode = mode;
+  document.getElementById('smode-structure').classList.toggle('btn-active', mode === 'structure');
+  document.getElementById('smode-result').classList.toggle('btn-active', mode === 'result');
+  if (mode === 'structure') renderSchema();
+  else renderSchemaResult();
+}
+
+// ─── VUE INFO ────────────────────────────────────────────────────────────────
+function renderInfo() {
+  const total = state.tables.length;
+  const wide  = state.tables.filter(t => t.is_wide).length;
+  const roots = state.tables.filter(t => !t.parent_table).length;
+  const { blocking_count, warning_count } = state.alerts;
+
+  document.getElementById('view-info').innerHTML = `
+    <div class="grid grid-cols-2 gap-3 mb-6">
+      ${stat('Tables totales', total, 'badge-neutral')}
+      ${stat('Tables wide', wide, 'badge-info')}
+      ${stat('Tables racines', roots, 'badge-ghost')}
+      ${stat('Groupes', state.groups.length, 'badge-primary')}
+      ${stat('Alertes bloquantes', blocking_count, blocking_count ? 'badge-error' : 'badge-ghost')}
+      ${stat('Avertissements', warning_count, warning_count ? 'badge-warning' : 'badge-ghost')}
+    </div>
+    <div class="divider text-xs opacity-50">STRATÉGIES</div>
+    ${renderStrategyBreakdown()}
+    <div class="divider text-xs opacity-50">PRESETS DISPONIBLES</div>
+    <div id="presets-list"></div>
+  `;
+  loadPresets();
+}
+
+function stat(label, val, badge) {
+  return `<div class="stat bg-base-100 rounded-xl p-3">
+    <div class="stat-title text-xs">${label}</div>
+    <div class="stat-value text-2xl"><span class="badge ${badge} badge-lg">${val}</span></div>
+  </div>`;
+}
+
+function renderStrategyBreakdown() {
+  const counts = {};
+  state.tables.forEach(t => { counts[t.strategy] = (counts[t.strategy] || 0) + 1; });
+  return `<div class="flex flex-wrap gap-2 mb-4">` +
+    Object.entries(counts).sort((a,b) => b[1]-a[1]).map(([s, n]) =>
+      `<div class="flex items-center gap-1">${strategyBadge(s, true)}<span class="text-xs opacity-60">×${n}</span></div>`
+    ).join('') + `</div>`;
+}
+
+async function loadPresets() {
+  const r = await api('/presets');
+  document.getElementById('presets-list').innerHTML = r.data.map(p => `
+    <div class="card card-compact bg-base-200 mb-2">
+      <div class="card-body">
+        <div class="flex items-center justify-between">
+          <span class="font-semibold text-sm">${escHtml(p.name)}</span>
+          <span class="text-xs opacity-60">wide ≤ ${escHtml(p.params.wide_column_threshold)} cols</span>
+        </div>
+        <p class="text-xs opacity-70">${escHtml(p.description)}</p>
+        <div class="flex flex-wrap gap-1 text-xs opacity-50">
+          <span>sibling≥${p.params.sibling_threshold}</span>
+          <span>jaccard≥${p.params.sibling_jaccard}</span>
+          <span>stable≥${p.params.stable_threshold}</span>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ─── VUE GROUPES ─────────────────────────────────────────────────────────────
+function renderGroups() {
+  if (!state.groups.length) {
+    document.getElementById('view-groups').innerHTML =
+      `<div class="text-center opacity-50 py-8">
+        <p class="mb-2">Aucun groupe défini</p>
+        <button class="btn btn-sm btn-primary" onclick="createGroup()">+ Nouveau groupe</button>
+       </div>`;
+    return;
+  }
+
+  // Stratégies avec effet sur la structure (fusion / exclusion) vs transformation locale
+  const STRATEGIES_TABLE  = ['Columns','KeyedPivot','Jsonb','Pivot','StructuredPivot','Ignore'];
+  const STRATEGIES_COLUMN = ['Columns','StructuredPivot','Ignore'];
+  const STRATEGY_DESC = {
+    Columns:         'Une colonne SQL par clé JSON (défaut)',
+    KeyedPivot:      '⊕ Fusionne N tables → 1 table + colonne key_id',
+    Jsonb:           'Stocke l\'objet entier en colonne JSONB (1 table conservée)',
+    Pivot:           'EAV : une ligne par paire clé/valeur (1 table conservée)',
+    StructuredPivot: 'Préfixes → colonnes typées (1 table conservée)',
+    Ignore:          'Exclut les tables du schéma final',
+  };
+
+  document.getElementById('view-groups').innerHTML = `
+    <div class="flex justify-between items-center mb-3">
+      <span class="text-sm opacity-60">${state.groups.length} groupe(s)</span>
+      <button class="btn btn-xs btn-primary" onclick="createGroup()">+ Nouveau</button>
+    </div>
+    ${state.groups.map(g => {
+      const originBadge = g.origin === 'AutoDetected'
+        ? '<span class="badge badge-ghost badge-xs">🤖 Auto</span>'
+        : g.origin === 'Modified'
+        ? '<span class="badge badge-info badge-xs">✏ Modifié</span>'
+        : '<span class="badge badge-success badge-xs">🆕 Manuel</span>';
+      const strategies = g.kind === 'Table' ? STRATEGIES_TABLE : STRATEGIES_COLUMN;
+      return `
+      <div class="collapse collapse-arrow bg-base-100 mb-2 rounded-xl border border-base-300">
+        <input type="checkbox"/>
+        <div class="collapse-title flex items-center gap-2 py-2 min-h-0">
+          <span class="font-mono text-sm font-semibold flex-1 truncate">${escHtml(g.name)}</span>
+          ${originBadge}
+          ${strategyBadge(g.strategy || 'Columns')}
+          <span class="badge badge-ghost badge-xs">${g.kind}</span>
+        </div>
+        <div class="collapse-content">
+          <div class="pt-2 space-y-3">
+            <div>
+              <p class="text-xs opacity-60 mb-1">Tables membres (${g.table_members.length})</p>
+              <div class="flex flex-wrap gap-1">
+                ${(g.table_members.length > 20
+                  ? g.table_members.slice(0, 20)
+                  : g.table_members
+                ).map(m =>
+                  `<span class="badge badge-ghost badge-sm font-mono cursor-pointer hover:badge-primary"
+                    onclick="selectTable(${JSON.stringify(m)})">${escHtml(m)}</span>`
+                ).join('')}
+                ${g.table_members.length > 20
+                  ? `<span class="badge badge-ghost badge-sm opacity-50">… +${g.table_members.length - 20} autres</span>`
+                  : ''}
+              </div>
+            </div>
+            <div>
+              <p class="text-xs opacity-60 mb-1">Stratégie</p>
+              <div class="flex gap-2 flex-wrap mb-1">
+                ${strategies.map(s => `
+                  <button class="btn btn-xs ${g.strategy === s ? 'btn-primary' : 'btn-ghost'}"
+                    title="${escHtml(STRATEGY_DESC[s] || '')}"
+                    onclick="setGroupStrategy(${JSON.stringify(g.id)}, ${JSON.stringify(s)})">${escHtml(s)}</button>
+                `).join('')}
+              </div>
+              ${g.strategy ? `<p class="text-xs opacity-50 italic">${STRATEGY_DESC[g.strategy] || ''}</p>` : ''}
+            </div>
+            <div class="flex gap-2">
+              <button class="btn btn-xs btn-outline" onclick="loadGroupDdl(${JSON.stringify(g.id)},${JSON.stringify(g.name)})">Voir DDL</button>
+              <button class="btn btn-xs btn-error btn-outline" onclick="deleteGroup(${JSON.stringify(g.id)})">Supprimer</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }).join('')}
+  `;
+}
+
+async function setGroupStrategy(id, strategy) {
+  await api(`/groups/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ strategy }),
+  });
+  await Promise.all([loadGroups(), loadTables(), loadAlerts()]);
+  renderGroups();
+  renderTableList();
+  renderSchema();
+  renderAlertBadge();
+  renderAlertsPanel();
+  renderTopStats();
+}
+
+async function deleteGroup(id) {
+  await api(`/groups/${id}`, { method: 'DELETE' });
+  await Promise.all([loadGroups(), loadTables(), loadAlerts()]);
+  renderGroups();
+  renderTableList();
+  renderSchema();
+  renderAlertBadge();
+  renderAlertsPanel();
+  renderTopStats();
+}
+
+async function createGroup() {
+  const name = prompt('Nom du groupe :');
+  if (!name) return;
+  await api('/groups', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, kind: 'Table', table_members: [], strategy: 'Columns' }),
+  });
+  await loadGroups();
+  renderGroups();
+  renderTopStats();
+}
+
+// ─── VUE SCHÉMA ───────────────────────────────────────────────────────────────
+function renderSchema() {
+  const byParent = {};
+  state.tables.forEach(t => {
+    const p = t.parent_table || '__root__';
+    if (!byParent[p]) byParent[p] = [];
+    byParent[p].push(t);
+  });
+
+  function renderNode(tables, depth = 0) {
+    return tables.map(t => {
+      const allChildren = byParent[t.name] || [];
+      // Tables absorbées dans un JSONB parent : on ne les développe pas
+      const isJsonb = t.strategy === 'Jsonb';
+      const children = isJsonb ? [] : allChildren;
+      const indent = depth * 16;
+      const sel = state.schemaSelection.has(t.name);
+      const absorbedHint = isJsonb && allChildren.length
+        ? `<span class="text-xs opacity-30 ml-1">(${allChildren.length} absorbées)</span>`
+        : '';
+      const dimmed = t.is_absorbed ? 'opacity-40' : '';
+      return `
+        <div style="padding-left: ${indent}px" class="border-l border-base-300 ml-1 ${dimmed}">
+          <div class="tree-row ${sel ? 'sel' : ''}" oncontextmenu="onTreeRightClick(event,${JSON.stringify(t.name)})">
+            <input type="checkbox" ${sel ? 'checked' : ''}
+              onclick="event.stopPropagation(); toggleSchemaSelect(${JSON.stringify(t.name)})"/>
+            <span class="text-xs font-mono truncate flex-1 cursor-pointer hover:text-primary"
+                  title="${escHtml(t.name)}"
+                  onclick="selectTable(${JSON.stringify(t.name)})">
+              ${children.length ? '▸ ' : '· '}${escHtml(t.name)}
+            </span>
+            ${absorbedHint}
+            ${strategyBadge(t.strategy)}
+          </div>
+          ${children.length ? renderNode(children, depth + 1) : ''}
+        </div>`;
+    }).join('');
+  }
+
+  const roots = byParent['__root__'] || [];
+  const selCount = state.schemaSelection.size;
+  const selBar = selCount > 0 ? `
+    <div class="flex items-center gap-2 mb-2 px-2 py-1.5 bg-primary/10 border border-primary/20 rounded-lg sticky top-0 z-10">
+      <span class="text-xs font-semibold text-primary flex-1">${selCount} table(s) sélectionnée(s)</span>
+      <button class="btn btn-xs btn-primary" onclick="showGroupMenu(event)">+ Ajouter à un groupe</button>
+      <button class="btn btn-xs btn-ghost" onclick="clearSchemaSelection()">✕</button>
+    </div>` : '';
+
+  document.getElementById('view-schema').innerHTML = `
+    <div id="${selCount > 0 ? 'schema-has-sel' : 'schema-no-sel'}">
+      ${selBar}
+      <div class="font-mono text-xs">${renderNode(roots)}</div>
+    </div>
+  `;
+}
+
+// ─── VUE RÉSULTAT ─────────────────────────────────────────────────────────────
+function renderSchemaResult() {
+  // Tables absorbées par un groupe avec stratégie de fusion ou ignorées
+  const MERGE_STRATS = new Set(['KeyedPivot', 'StructuredPivot']);
+  const absorbedByGroup = new Map(); // tableName → group
+  for (const g of state.groups) {
+    if (MERGE_STRATS.has(g.strategy) || g.strategy === 'Ignore') {
+      for (const m of g.table_members) absorbedByGroup.set(m, g);
+    }
+  }
+
+  // Construire la liste effective : remplacer les tables absorbées par une entrée groupe unique
+  const seenGroups = new Set();
+  const effectiveList = [];
+  for (const t of state.tables) {
+    const g = absorbedByGroup.get(t.name);
+    if (!g) {
+      effectiveList.push({ kind: 'table', ...t });
+    } else if (g.strategy === 'Ignore') {
+      // exclue
+    } else if (!seenGroups.has(g.id)) {
+      seenGroups.add(g.id);
+      effectiveList.push({
+        kind: 'group', id: g.id, name: g.name, strategy: g.strategy,
+        count: g.table_members.length, depth: t.depth, parent_table: t.parent_table,
+      });
+    }
+  }
+
+  // byParent à partir de la liste effective
+  const byParent = {};
+  for (const e of effectiveList) {
+    const key = e.parent_table || '__root__';
+    if (!byParent[key]) byParent[key] = [];
+    byParent[key].push(e);
+  }
+
+  function renderNode(entries, depth = 0) {
+    return (entries || []).map(e => {
+      const indent = depth * 16;
+      if (e.kind === 'group') {
+        return `
+          <div style="padding-left:${indent}px" class="border-l border-primary/25 ml-1">
+            <div class="tree-row text-primary/80 cursor-pointer"
+                 onclick="loadGroupDdl(${JSON.stringify(e.id)},${JSON.stringify(e.name)})">
+              <span class="text-xs font-mono flex-1 truncate hover:text-primary" title="${escHtml(e.name)}">⊕ ${escHtml(e.name)}</span>
+              <span class="badge badge-ghost badge-xs opacity-60">${e.count}→1</span>
+              ${strategyBadge(e.strategy, true)}
+            </div>
+          </div>`;
+      }
+      const children = byParent[e.name] || [];
+      const wideNote = e.strategy === 'AutoSplit'
+        ? `<span class="text-xs opacity-40 ml-1">+_wide</span>` : '';
+      return `
+        <div style="padding-left:${indent}px" class="border-l border-base-300 ml-1">
+          <div class="tree-row cursor-pointer" onclick="selectTable(${JSON.stringify(e.name)})">
+            <span class="text-xs font-mono truncate flex-1 hover:text-primary" title="${escHtml(e.name)}">
+              ${children.length ? '▸ ' : '· '}${escHtml(e.name)}
+            </span>
+            ${wideNote}${strategyBadge(e.strategy)}
+          </div>
+          ${children.length ? renderNode(children, depth + 1) : ''}
+        </div>`;
+    }).join('');
+  }
+
+  const roots = byParent['__root__'] || [];
+  const totalEffective = effectiveList.length;
+  const ignored = state.tables.length - effectiveList.length - [...seenGroups].reduce((n, id) => {
+    const g = state.groups.find(g => g.id === id);
+    return n + (g ? g.table_members.length - 1 : 0);
+  }, 0);
+
+  document.getElementById('view-schema').innerHTML = `
+    <div class="text-xs opacity-50 mb-3 font-mono flex gap-3">
+      <span>${totalEffective} tables effectives</span>
+      <span class="opacity-50">/ ${state.tables.length} initiales</span>
+      ${seenGroups.size ? `<span class="text-primary">${seenGroups.size} fusion(s)</span>` : ''}
+    </div>
+    <div class="font-mono text-xs">${renderNode(roots)}</div>
+  `;
+}
+
+function toggleSchemaSelect(name) {
+  if (state.schemaSelection.has(name)) state.schemaSelection.delete(name);
+  else state.schemaSelection.add(name);
+  renderSchema();
+}
+
+function clearSchemaSelection() {
+  state.schemaSelection.clear();
+  renderSchema();
+}
+
+// ─── CONTEXT MENU ─────────────────────────────────────────────────────────────
+function onTreeRightClick(e, name) {
+  e.preventDefault();
+  // Si la table cliquée n'est pas dans la sélection, on sélectionne uniquement elle
+  if (!state.schemaSelection.has(name)) {
+    state.schemaSelection.clear();
+    state.schemaSelection.add(name);
+    renderSchema();
+  }
+  showCtxMenu(e.clientX, e.clientY);
+}
+
+function showCtxMenu(x, y) {
+  const sel = [...state.schemaSelection];
+  const menu = document.getElementById('ctx-menu');
+
+  const groupItems = state.groups.map(g => `
+    <button onclick="addSelectionToGroup(${JSON.stringify(g.id)}); hideCtxMenu()">
+      Ajouter à « ${escHtml(g.name)} »
+    </button>`).join('');
+
+  menu.innerHTML = `
+    <div class="ctx-header">${sel.length} table(s)</div>
+    <div class="ctx-sep"></div>
+    ${groupItems}
+    ${groupItems ? '<div class="ctx-sep"></div>' : ''}
+    <button onclick="createGroupFromSelection(); hideCtxMenu()">
+      + Nouveau groupe avec cette sélection
+    </button>
+  `;
+
+  // Repositionner sans déborder
+  menu.style.display = 'block';
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  menu.style.left = Math.min(x, vw - mw - 8) + 'px';
+  menu.style.top  = Math.min(y, vh - mh - 8) + 'px';
+}
+
+function hideCtxMenu() {
+  document.getElementById('ctx-menu').style.display = 'none';
+}
+
+document.addEventListener('click', e => {
+  const menu = document.getElementById('ctx-menu');
+  if (menu.style.display !== 'none' && !menu.contains(e.target)) hideCtxMenu();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(); });
+
+// ─── ACTIONS GROUPES DEPUIS SCHÉMA ────────────────────────────────────────────
+async function addSelectionToGroup(groupId) {
+  const group = state.groups.find(g => g.id === groupId);
+  if (!group) return;
+  const merged = [...new Set([...group.table_members, ...state.schemaSelection])];
+  await api(`/groups/${groupId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ table_members: merged }),
+  });
+  await Promise.all([loadGroups(), loadTables(), loadAlerts()]);
+  state.schemaSelection.clear();
+  renderSchema();
+  renderTableList();
+  renderGroups();
+  renderAlertBadge();
+  renderTopStats();
+}
+
+async function createGroupFromSelection() {
+  const name = prompt('Nom du groupe :', [...state.schemaSelection][0]?.replace(/_\d+$/, '') || '');
+  if (!name) return;
+  await api('/groups', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name,
+      kind: 'Table',
+      table_members: [...state.schemaSelection],
+      strategy: 'Columns',
+    }),
+  });
+  await Promise.all([loadGroups(), loadTables(), loadAlerts()]);
+  state.schemaSelection.clear();
+  renderSchema();
+  renderTableList();
+  renderGroups();
+  renderAlertBadge();
+  renderTopStats();
+}
+
+function showGroupMenu(e) {
+  e.stopPropagation();
+  const rect = e.currentTarget.getBoundingClientRect();
+  showCtxMenu(rect.left, rect.bottom + 4);
+}
+
+// ─── EXPORT TOML ──────────────────────────────────────────────────────────────
+async function exportToml() {
+  const r = await api('/export/toml');
+  if (!r.ok) {
+    const msg = typeof r.data === 'object'
+      ? r.data.blocking?.join('\n') || r.data.error
+      : r.data;
+    alert('Export bloqué :\n' + msg);
+    return;
+  }
+  state.lastToml = r.data;
+  document.getElementById('toml-content').textContent = r.data;
+  document.getElementById('modal-toml').showModal();
+}
+
+function downloadToml() {
+  const blob = new Blob([state.lastToml], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'json2sql-config.toml';
+  a.click();
+}
+
+// ─── MIGRATION ────────────────────────────────────────────────────────────────
+async function startMigration() {
+  // Charger la config pour pré-remplir les champs
+  const cfgR = await fetch('/api/config');
+  const cfg = cfgR.ok ? await cfgR.json() : {};
+
+  const urlInput  = document.getElementById('cfg-db-url');
+  const fileInput = document.getElementById('cfg-input-file');
+  const cfgBlock  = document.getElementById('migration-config');
+  const statusEl  = document.getElementById('migration-status');
+  const actionsEl = document.getElementById('migration-actions');
+  const closeEl   = document.getElementById('migration-close-action');
+
+  // Réinitialiser l'état de la boîte de dialogue
+  urlInput.value  = '';
+  fileInput.value = '';
+  statusEl.innerHTML = '';
+  actionsEl.classList.remove('hidden');
+  closeEl.classList.add('hidden');
+
+  // Rétablir la visibilité des blocs (réinitialisation complète)
+  document.getElementById('migration-options').style.display = '';
+  actionsEl.style.display = '';
+  cfgBlock.style.display = 'block';
+
+  // Placeholders adaptés selon ce qui est déjà renseigné
+  urlInput.placeholder  = cfg.has_db_url ? '(inchangé — laisser vide pour conserver)' : 'postgresql://user:pass@localhost/db (requis)';
+  fileInput.placeholder = cfg.has_input  ? '(inchangé — laisser vide pour conserver)' : '/chemin/vers/data.json (requis)';
+
+  document.getElementById('modal-migration').showModal();
+}
+
+async function confirmMigration(forceDrop) {
+  const urlInput  = document.getElementById('cfg-db-url');
+  const fileInput = document.getElementById('cfg-input-file');
+  const actionsEl = document.getElementById('migration-actions');
+  const closeEl   = document.getElementById('migration-close-action');
+  const statusEl  = document.getElementById('migration-status');
+
+  // Sauvegarder les valeurs saisies si non vides
+  const newUrl  = urlInput.value.trim();
+  const newFile = fileInput.value.trim();
+  if (newUrl || newFile) {
+    const cfgSave = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ db_url: newUrl || undefined, input_file: newFile || undefined }),
+    });
+    if (!cfgSave.ok) {
+      let errMsg = 'Impossible de sauvegarder la configuration';
+      try { errMsg = escHtml((await cfgSave.json()).error || errMsg); } catch (_) {}
+      statusEl.innerHTML = `<div class="alert alert-error text-sm">${errMsg}</div>`;
+      return; // actions already visible — user can correct and retry
+    }
+  }
+
+  // Passer en mode "en cours"
+  actionsEl.classList.add('hidden');
+  document.getElementById('migration-config').style.display = 'none';
+  document.getElementById('migration-options').style.display = 'none';
+  statusEl.innerHTML = '<div class="flex items-center gap-2 text-sm"><div class="loading loading-spinner loading-sm"></div> Démarrage…</div>';
+
+  const r = await fetch('/api/migration/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ drop_existing: forceDrop }),
+  });
+
+  if (!r.ok) {
+    let errMsg = 'Erreur inconnue';
+    try {
+      const body = await r.json();
+      errMsg = escHtml(body.error || errMsg);
+      if (body.detail && body.detail.length) {
+        errMsg += '<ul class="mt-1 list-disc list-inside text-xs">' +
+          body.detail.map(d => `<li>${escHtml(d)}</li>`).join('') + '</ul>';
+      }
+    } catch (_) { errMsg = escHtml(await r.text() || errMsg); }
+    statusEl.innerHTML = `<div class="alert alert-error text-sm">${errMsg}</div>`;
+    // Restaurer le formulaire pour permettre une correction et relance
+    document.getElementById('migration-config').style.display = '';
+    document.getElementById('migration-options').style.display = '';
+    actionsEl.classList.remove('hidden');
+    closeEl.classList.remove('hidden');
+    return;
+  }
+
+  // SSE progress
+  let migrationDone = false;
+  const sse = new EventSource('/api/migration/progress');
+  sse.onmessage = (e) => {
+    const status = JSON.parse(e.data);
+    renderMigrationStatus(status);
+    if (status.status === 'done' || status.status === 'failed') {
+      migrationDone = true;
+      sse.close();
+      closeEl.classList.remove('hidden');
+    }
+  };
+  sse.onerror = () => {
+    sse.close();
+    // Ignore spurious close events that fire after a clean migration completion
+    if (!migrationDone) {
+      statusEl.innerHTML += '<div class="alert alert-warning text-sm mt-2">Connexion SSE perdue.</div>';
+      closeEl.classList.remove('hidden');
+    }
+  };
+}
+
+function renderMigrationStatus(s) {
+  const el = document.getElementById('migration-status');
+  if (s.status === 'idle') {
+    el.innerHTML = '<p class="opacity-60">En attente…</p>';
+  } else if (s.status === 'running') {
+    el.innerHTML = `
+      <div class="flex items-center gap-3">
+        <div class="loading loading-spinner loading-sm text-primary"></div>
+        <span>Migration en cours — ${s.elapsed_secs}s</span>
+      </div>
+      <progress class="progress progress-primary w-full mt-2"></progress>`;
+  } else if (s.status === 'done') {
+    const rows = Object.entries(s.rows_per_table || {})
+      .sort((a,b) => b[1]-a[1]).slice(0, 10);
+    el.innerHTML = `
+      <div class="alert alert-success text-sm">✓ Terminé en ${s.elapsed_secs}s — ${s.total_rows?.toLocaleString()} lignes</div>
+      <div class="mt-2 space-y-1">
+        ${rows.map(([t,n]) =>
+          `<div class="flex justify-between text-xs font-mono">
+            <span class="truncate opacity-70">${t}</span>
+            <span class="font-bold">${n.toLocaleString()}</span>
+          </div>`
+        ).join('')}
+      </div>`;
+  } else if (s.status === 'failed') {
+    el.innerHTML = `<div class="alert alert-error text-sm">Erreur : ${escHtml(s.error)}</div>`;
+  }
+}
+
+// ─── START ────────────────────────────────────────────────────────────────────
+init();
+
+// ─── PANEL RESIZE ─────────────────────────────────────────────────────────────
+(function() {
+  const MIN = 140;
+  const MAX = 700;
+  const STORED_LEFT  = 'j2s_w_left';
+  const STORED_RIGHT = 'j2s_w_right';
+
+  // Restore from localStorage
+  const wLeft  = parseInt(localStorage.getItem(STORED_LEFT)  || '280', 10);
+  const wRight = parseInt(localStorage.getItem(STORED_RIGHT) || '380', 10);
+  document.documentElement.style.setProperty('--w-left',  wLeft  + 'px');
+  document.documentElement.style.setProperty('--w-right', wRight + 'px');
+
+  // Collapse state (separate from stored width so restoring brings back old size)
+  let collapsedLeft  = false;
+  let collapsedRight = false;
+
+  window.togglePanel = function(side) {
+    if (side === 'left') {
+      collapsedLeft = !collapsedLeft;
+      document.getElementById('panel-left').classList.toggle('collapsed', collapsedLeft);
+      document.querySelector('#drag-left .collapse-btn').textContent = collapsedLeft ? '▶' : '◀';
+    } else {
+      collapsedRight = !collapsedRight;
+      document.getElementById('panel-right').classList.toggle('collapsed', collapsedRight);
+      document.querySelector('#drag-right .collapse-btn').textContent = collapsedRight ? '◀' : '▶';
+    }
+  };
+
+  function makeDraggable(handleId, side) {
+    const handle = document.getElementById(handleId);
+    let startX, startW;
+
+    handle.addEventListener('mousedown', e => {
+      if (e.target.classList.contains('collapse-btn')) return;
+      e.preventDefault();
+      const panel = document.getElementById('panel-' + side);
+      const isLeft = side === 'left';
+      const collapsed = isLeft ? collapsedLeft : collapsedRight;
+      if (collapsed) return;
+      startX = e.clientX;
+      startW = panel.getBoundingClientRect().width;
+      handle.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+
+      function onMove(e) {
+        const delta = isLeft ? (e.clientX - startX) : (startX - e.clientX);
+        const newW = Math.max(MIN, Math.min(MAX, startW + delta));
+        document.documentElement.style.setProperty('--w-' + side, newW + 'px');
+        localStorage.setItem(isLeft ? STORED_LEFT : STORED_RIGHT, newW);
+      }
+
+      function onUp() {
+        handle.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    // Double-click on the handle itself (not the btn) to collapse
+    handle.addEventListener('dblclick', e => {
+      if (e.target.classList.contains('collapse-btn')) return;
+      togglePanel(side);
+    });
+  }
+
+  makeDraggable('drag-left',  'left');
+  makeDraggable('drag-right', 'right');
+})();
+</script>
+</body>
+</html>

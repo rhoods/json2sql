@@ -1,0 +1,3 @@
+{"name": "Alice", "bio": "Normal bio"}
+{"name": "Bob", "bio": "Bio with \u0000 null byte"}
+{"name": "Charlie", "bio": "Another normal bio"}

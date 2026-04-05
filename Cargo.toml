@@ -1,0 +1,58 @@
+[workspace]
+members = [".", "json2sql-ui"]
+resolver = "2"
+
+[package]
+name = "json2sql"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "json2sql"
+path = "src/main.rs"
+
+[lib]
+name = "json2sql"
+path = "src/lib.rs"
+
+[dependencies]
+# JSON parsing
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+simd-json = { version = "0.13", features = ["serde_impl"] }
+
+# PostgreSQL
+tokio-postgres = { version = "0.7", features = ["with-uuid-1"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs"] }
+bytes = "1"
+
+# UUID v7
+uuid = { version = "1", features = ["v7"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Progress bar
+indicatif = "0.17"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Ordered maps (preserve insertion order for columns)
+indexmap = "2"
+
+# Parallel iterators for finalize()
+rayon = "1"
+
+# CSV output for anomaly reports
+csv = "1"
+
+# Temp files for pass2 buffering
+tempfile = "3"
+
+# Futures utilities (SinkExt etc.)
+futures-util = "0.3"
+
+# TOML config for type overrides
+toml = "0.8"

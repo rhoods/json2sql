@@ -1,0 +1,5 @@
+{"name": "Alice", "score": 9.5}
+{"name": "Bob", "score": "NaN"}
+{"name": "Charlie", "score": "Infinity"}
+{"name": "Diana", "score": "-Infinity"}
+{"name": "Eve", "score": 7.2}

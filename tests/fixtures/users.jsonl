@@ -1,0 +1,3 @@
+{"id": 1, "name": "Alice", "age": 30, "score": 9.5, "active": true, "address": {"street": "123 Main St", "city": "Springfield"}, "tags": ["rust", "sql"], "orders": [{"ref": "ORD-001", "amount": 99.99, "items": [{"sku": "A1", "qty": 2}, {"sku": "B2", "qty": 1}]}, {"ref": "ORD-002", "amount": 49.50, "items": [{"sku": "C3", "qty": 5}]}]}
+{"id": 2, "name": "Bob", "age": 25, "score": 7.2, "active": false, "address": {"street": "456 Oak Ave", "city": "Shelbyville"}, "tags": ["python"], "orders": []}
+{"id": 3, "name": "Charlie", "age": 42, "score": 8.8, "active": true, "address": {"street": "789 Pine Rd", "city": "Capital City"}, "tags": ["go", "rust", "zig"], "orders": [{"ref": "ORD-003", "amount": 15.0, "items": []}]}

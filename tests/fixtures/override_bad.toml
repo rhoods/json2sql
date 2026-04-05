@@ -1,0 +1,6 @@
+[people]
+score = "INTEGER"
+nonexistent = "TEXT"
+
+[ghost_table]
+col = "TEXT"
