@@ -12,8 +12,8 @@ pub struct AnomalyEntry {
     pub expected_type: String,
     /// String representation of the actual value, truncated to 200 chars if longer.
     pub actual_value: String,
-    /// Original byte length of `actual_value` before truncation.
-    /// If equal to `actual_value.len()`, no truncation occurred.
+    /// Original character length of `actual_value` before truncation.
+    /// If greater than 200, the stored `actual_value` was truncated.
     pub actual_value_len: usize,
     /// Detected type of the actual value
     pub actual_type: String,
@@ -54,12 +54,13 @@ impl AnomalyCollector {
         actual_value: &str,
         actual_type: &str,
     ) {
+        let char_len = actual_value.chars().count();
         self.entries.push(AnomalyEntry {
             table: table.to_string(),
             column: column.to_string(),
             row_id: row_id.to_string(),
             expected_type: expected_type.to_string(),
-            actual_value_len: actual_value.len(),
+            actual_value_len: char_len,
             actual_value: truncate_value(actual_value, 200),
             actual_type: actual_type.to_string(),
         });
@@ -122,9 +123,9 @@ impl AnomalyCollector {
 }
 
 fn truncate_value(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max])
+    let mut chars = s.char_indices();
+    match chars.nth(max) {
+        None => s.to_string(),
+        Some((i, _)) => format!("{}…", &s[..i]),
     }
 }

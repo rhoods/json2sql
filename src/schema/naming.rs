@@ -382,4 +382,15 @@ mod tests {
         let name = reg.table_name(&path);
         assert!(name.len() <= PG_MAX_IDENT, "name too long: {} chars", name.len());
     }
+
+    #[test]
+    fn test_short_hash_stable() {
+        // Regression test: these values must never change — they are embedded in
+        // existing schema snapshots. Any change here means a snapshot format break.
+        assert_eq!(short_hash(""), "4222325");
+        assert_eq!(short_hash("abc"), "541574b");
+        assert_eq!(short_hash("ja:カルシウム"), "42c9fde");
+        // Two distinct inputs must produce distinct hashes
+        assert_ne!(short_hash("ja:カルシウム"), short_hash("ja:脂質"));
+    }
 }

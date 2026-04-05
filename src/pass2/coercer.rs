@@ -92,6 +92,9 @@ fn coerce_pg_array_element(value: &Value, pg_type: &PgType) -> String {
             // Text-like: get the raw string and double-quote it for array syntax.
             // Escape `\` and `"` inside the element so the array parser can read them back.
             // The outer escape_copy_text call will then COPY-escape the whole literal.
+            // Null bytes are stripped here (PostgreSQL rejects them); the caller's
+            // unwrap_or_default() on the outer escape_copy_text is safe because
+            // we guarantee no null bytes survive into the array literal.
             let raw = match value {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
@@ -102,6 +105,7 @@ fn coerce_pg_array_element(value: &Value, pg_type: &PgType) -> String {
                 match c {
                     '\\' => out.push_str("\\\\"),
                     '"' => out.push_str("\\\""),
+                    '\0' => {} // strip null bytes — PostgreSQL rejects them in array elements
                     other => out.push(other),
                 }
             }
@@ -390,6 +394,22 @@ mod tests {
             coerce_text(&serde_json::Value::String("hello\x00world".to_string())),
             CoerceResult::Anomaly { actual_type: "string_contains_null_byte", .. }
         ));
+    }
+
+    #[test]
+    fn test_pg_array_null_byte_stripped() {
+        // Un null byte dans un élément texte d'array doit être supprimé
+        // (PG rejette les null bytes dans les arrays text aussi)
+        let arr = vec![
+            serde_json::Value::String("hello\x00world".to_string()),
+            serde_json::Value::String("normal".to_string()),
+        ];
+        let result = coerce_pg_array(&arr, &PgType::Text);
+        assert!(matches!(result, CoerceResult::Ok(_)));
+        if let CoerceResult::Ok(s) = result {
+            assert!(!s.contains('\0'), "null byte should be stripped from array element");
+            assert!(s.contains("helloworld"), "content sans null byte doit être présent");
+        }
     }
 
     #[test]

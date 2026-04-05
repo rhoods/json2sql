@@ -495,8 +495,16 @@ fn build_entry_schema(
                 let rare_count = data_col_count
                     .saturating_sub(stable_col_count)
                     .saturating_sub(medium_keys.len());
+                // Build the companion table name. Strip any existing `_wide` suffix first
+                // to avoid `foo_wide_wide`. If the result still collides with the main
+                // table name (e.g. main table is itself named `foo_wide`), fall back to `_eav`.
                 let base_name = schema.name.strip_suffix("_wide").unwrap_or(&schema.name);
-                let wide_name = format!("{}_wide", base_name);
+                let wide_candidate = format!("{}_wide", base_name);
+                let wide_name = if wide_candidate == schema.name {
+                    format!("{}_eav", base_name)
+                } else {
+                    wide_candidate
+                };
 
                 eprintln!(
                     "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: AutoSplit \
