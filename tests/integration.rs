@@ -75,7 +75,7 @@ async fn test_nested_row_counts_json_array() {
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1)
+    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
         .await
         .unwrap();
 
@@ -118,7 +118,7 @@ async fn test_nested_row_counts_ndjson() {
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1)
+    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
         .await
         .unwrap();
 
@@ -153,7 +153,7 @@ async fn test_anomaly_detection() {
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1)
+    let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
         .await
         .unwrap();
 
@@ -198,7 +198,7 @@ async fn test_drop_existing() {
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1)
+    pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
         .await
         .unwrap();
     assert_eq!(row_count(&client, &schema, "users").await, 3);
@@ -208,7 +208,7 @@ async fn test_drop_existing() {
     db::ddl::create_tables(&client, &p1b.schemas, &schema, true)
         .await
         .unwrap();
-    pass2::runner::run(&path, "users", &p1b.schemas, &client, &schema, 1000, false, None, 1)
+    pass2::runner::run(&path, "users", &p1b.schemas, &client, &schema, 1000, false, None, 1, None)
         .await
         .unwrap();
 
@@ -240,7 +240,7 @@ async fn test_transaction_commit() {
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, true, None, 1)
+    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, true, None, 1, None)
         .await
         .unwrap();
 
@@ -328,7 +328,7 @@ async fn test_array_as_pg_array() {
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1)
+    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
         .await
         .unwrap();
 
@@ -363,7 +363,7 @@ async fn test_float_nan_infinity_anomaly() {
     let path = fixture("anomalies_float.jsonl");
     let p1 = pass1::runner::run(&path, "items", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
     db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
-    let p2 = pass2::runner::run(&path, "items", &p1.schemas, &client, &schema, 1000, false, None, 1)
+    let p2 = pass2::runner::run(&path, "items", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
         .await.unwrap();
 
     // Toutes les lignes sont insérées
@@ -395,7 +395,7 @@ async fn test_null_byte_anomaly() {
     let path = fixture("anomalies_nullbytes.jsonl");
     let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
     db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
-    let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1)
+    let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
         .await.unwrap();
 
     // Toutes les lignes sont insérées
@@ -443,7 +443,7 @@ async fn test_parallel_copy() {
     // parallel = 3: tables at the same depth level are COPYed concurrently
     let p2 = pass2::runner::run(
         &path, "users", &p1.schemas, &client, &schema, 1000, false,
-        Some(&db_url), 3,
+        Some(&db_url), 3, None,
     )
     .await
     .unwrap();

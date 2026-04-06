@@ -28,6 +28,11 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub drop_existing: bool,
 
+    /// Directory for per-table NDJSON anomaly files streamed during Pass 2
+    /// (one file per table with anomalies: <dir>/<table>_anomalies.ndjson)
+    #[arg(long, value_name = "DIR")]
+    pub anomaly_dir: Option<PathBuf>,
+
     /// Output file for anomaly report (stdout if omitted)
     #[arg(long, value_name = "FILE")]
     pub anomaly_output: Option<PathBuf>,

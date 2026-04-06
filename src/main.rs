@@ -257,6 +257,7 @@ async fn run(cli: Cli) -> Result<()> {
         cli.transaction,
         cli.db_url.as_deref(),
         cli.parallel,
+        cli.anomaly_dir.clone(),
     )
     .await?;
 
@@ -278,9 +279,28 @@ async fn run(cli: Cli) -> Result<()> {
 
     if total_anomalies > 0 {
         eprintln!(
-            "Anomaly rate: {:.4}%",
+            "Anomaly rate:        {:.4}%",
             pass2.anomaly_collector.overall_anomaly_rate() * 100.0
         );
+        // Per-table breakdown, sorted by anomaly count desc
+        let mut summaries = pass2.anomaly_collector.summaries();
+        summaries.sort_by(|a, b| b.anomaly_count.cmp(&a.anomaly_count).then(a.table.cmp(&b.table)));
+        eprintln!("\nAnomalies by table (top 10):");
+        for s in summaries.iter().take(10) {
+            eprintln!(
+                "  {:40} {:>8} anomalies / {:>10} rows ({:.2}%)",
+                s.table,
+                s.anomaly_count,
+                s.total_rows,
+                s.anomaly_rate * 100.0,
+            );
+        }
+        if summaries.len() > 10 {
+            eprintln!("  ... and {} more tables with anomalies", summaries.len() - 10);
+        }
+        if let Some(ref dir) = cli.anomaly_dir {
+            eprintln!("\nAnomaly files written to: {}", dir.display());
+        }
     }
 
     // -------------------------------------------------------------------------

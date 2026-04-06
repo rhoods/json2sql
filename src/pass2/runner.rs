@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -13,8 +13,8 @@ use crate::db::copy_sink::{RowBuilder, TempFileSink};
 use crate::error::{J2sError, Result};
 use crate::io::progress::ProgressTracker;
 use crate::io::reader::{file_size, JsonReader};
+use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::pass2::coercer::{coerce, CoerceResult};
-use crate::pass2::coercer::escape_copy_text;
 use crate::schema::table_schema::{ChildKind, SiblingSchema, SuffixSchema, TableSchema, WideStrategy};
 
 /// Pass 2 result summary.
@@ -27,6 +27,8 @@ pub struct Pass2Result {
 /// then COPY each table into PostgreSQL.
 ///
 /// `db_url` is only required when `parallel > 1` (each worker opens its own connection).
+/// `anomaly_dir` is the directory where per-table NDJSON anomaly files are streamed;
+/// `None` disables file streaming (counters and examples are still collected in RAM).
 pub async fn run(
     path: &Path,
     root_table: &str,
@@ -37,6 +39,7 @@ pub async fn run(
     use_transaction: bool,
     db_url: Option<&str>,
     parallel: usize,
+    anomaly_dir: Option<PathBuf>,
 ) -> Result<Pass2Result> {
     let total_bytes = file_size(path)?;
     let progress = ProgressTracker::new(total_bytes, "Pass 2");
@@ -54,7 +57,12 @@ pub async fn run(
         );
     }
 
-    let mut anomalies = AnomalyCollector::new();
+    // Create anomaly_dir if specified and not yet existing
+    if let Some(ref dir) = anomaly_dir {
+        std::fs::create_dir_all(dir).map_err(crate::error::J2sError::Io)?;
+    }
+
+    let mut anomalies = AnomalyCollector::new(anomaly_dir);
     let (reader, _format) = JsonReader::open(path)?;
 
     let root_schema = schemas
@@ -170,6 +178,7 @@ pub async fn run(
             }
         }
 
+        anomalies.finish()?;
         return Ok(Pass2Result { rows_per_table, anomaly_collector: anomalies });
     }
 
@@ -198,6 +207,7 @@ pub async fn run(
         match copy_result {
             Ok(rows_per_table) => {
                 client.execute("COMMIT", &[]).await.map_err(J2sError::Db)?;
+                anomalies.finish()?;
                 return Ok(Pass2Result { rows_per_table, anomaly_collector: anomalies });
             }
             Err(e) => {
@@ -210,10 +220,9 @@ pub async fn run(
         }
     }
 
-    Ok(Pass2Result {
-        rows_per_table: copy_result?,
-        anomaly_collector: anomalies,
-    })
+    let rows_per_table = copy_result?;
+    anomalies.finish()?;
+    Ok(Pass2Result { rows_per_table, anomaly_collector: anomalies })
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +250,10 @@ fn insert_object(
         builder.push_uuid(row_id); // j2s_id (no j2s_parent_id for root)
         let json_str =
             serde_json::to_string(&Value::Object(obj.clone())).unwrap_or_default();
-        builder.push_value(&escape_copy_text(&json_str).unwrap_or_default()); // data JSONB
+        match escape_copy_text(&json_str) {
+            Some(escaped) => builder.push_value(&escaped),
+            None => builder.push_null(), // null byte in JSON — treat as NULL, not empty string
+        }
         anomalies.inc_total(&schema.name);
         if let Some(sink) = sinks.get_mut(&schema.name) {
             sink.write_row(builder.finish())?;
@@ -305,7 +317,7 @@ fn insert_object(
                 match col.name.as_str() {
                     "j2s_id" => builder.push_uuid(row_id),
                     "j2s_order" => match order {
-                        Some(ord) => builder.push_value(&ord.to_string()),
+                        Some(ord) => builder.push_value(&CopyEscaped::from_safe_ascii(ord.to_string())),
                         None => builder.push_null(),
                     },
                     _ => builder.push_null(),
@@ -337,7 +349,7 @@ fn insert_object(
                     &col.pg_type.as_sql(),
                     &actual_value,
                     actual_type,
-                );
+                )?;
                 builder.push_null();
             }
         }
@@ -368,7 +380,11 @@ fn insert_object(
             let mut wb = RowBuilder::new();
             wb.push_uuid(wide_id);   // j2s_id
             wb.push_uuid(row_id);    // j2s_parent_id (anchor)
-            wb.push_value(field);                 // key
+            // JSON field names can contain COPY-unsafe chars (\t, \n, \\, \0).
+            match escape_copy_text(field) {
+                Some(escaped) => wb.push_value(&escaped),
+                None => wb.push_null(), // null byte in key — treat as NULL
+            }
             match &wide_value_type {
                 Some(pg_type) => match coerce(value, pg_type) {
                     CoerceResult::Ok(s) => wb.push_value(&s),
@@ -377,7 +393,7 @@ fn insert_object(
                         anomalies.record(
                             wide_table_name, "value", &wide_id.to_string(),
                             &pg_type.as_sql(), &actual_value, actual_type,
-                        );
+                        )?;
                         wb.push_null();
                     }
                 },
@@ -456,7 +472,10 @@ fn insert_pivot_object(
         let mut builder = RowBuilder::new();
         builder.push_uuid(child_id);   // j2s_id
         builder.push_uuid(parent_id);  // j2s_parent_id
-        builder.push_value(key);                     // key
+        match escape_copy_text(key) {
+            Some(escaped) => builder.push_value(&escaped),
+            None => builder.push_null(),
+        }
         if let Some(col) = value_col {
             match coerce(val, &col.pg_type) {
                 CoerceResult::Ok(s) => builder.push_value(&s),
@@ -465,7 +484,7 @@ fn insert_pivot_object(
                     anomalies.record(
                         &schema.name, "value", &child_id.to_string(),
                         &col.pg_type.as_sql(), &actual_value, actual_type,
-                    );
+                    )?;
                     builder.push_null();
                 }
             }
@@ -494,7 +513,10 @@ fn insert_jsonb_object(
     builder.push_uuid(child_id);   // j2s_id
     builder.push_uuid(parent_id);  // j2s_parent_id
     let json_str = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
-    builder.push_value(&escape_copy_text(&json_str).unwrap_or_default()); // data
+    match escape_copy_text(&json_str) {
+        Some(escaped) => builder.push_value(&escaped),
+        None => builder.push_null(), // null byte in JSON — treat as NULL, not empty string
+    }
     anomalies.inc_total(&schema.name);
     if let Some(sink) = sinks.get_mut(&schema.name) {
         sink.write_row(builder.finish())?;
@@ -562,9 +584,12 @@ fn insert_structured_pivot_object(
                 continue;
             }
 
-            // `name` column: the base string
+            // `name` column: the base string (may contain COPY-unsafe chars)
             if col.original_name == "name" {
-                builder.push_value(&base);
+                match escape_copy_text(&base) {
+                    Some(escaped) => builder.push_value(&escaped),
+                    None => builder.push_null(),
+                }
                 continue;
             }
 
@@ -578,7 +603,7 @@ fn insert_structured_pivot_object(
                             anomalies.record(
                                 &schema.name, &col.name, &child_id.to_string(),
                                 &col.pg_type.as_sql(), &actual_value, actual_type,
-                            );
+                            )?;
                             builder.push_null();
                         }
                     }
@@ -597,7 +622,7 @@ fn insert_structured_pivot_object(
                         anomalies.record(
                             &schema.name, &col.name, &child_id.to_string(),
                             &col.pg_type.as_sql(), &actual_value, actual_type,
-                        );
+                        )?;
                         builder.push_null();
                     }
                 }
@@ -651,9 +676,12 @@ fn insert_keyed_pivot_object(
                 continue;
             }
 
-            // Key column: the original JSON key of this sibling
+            // Key column: the original JSON key of this sibling (may contain COPY-unsafe chars)
             if col.original_name == sibling_schema.key_col_name {
-                builder.push_value(key);
+                match escape_copy_text(key) {
+                    Some(escaped) => builder.push_value(&escaped),
+                    None => builder.push_null(),
+                }
                 continue;
             }
 
@@ -676,7 +704,7 @@ fn insert_keyed_pivot_object(
                     anomalies.record(
                         &schema.name, &col.name, &row_id.to_string(),
                         &col.pg_type.as_sql(), &actual_value, actual_type,
-                    );
+                    )?;
                     builder.push_null();
                 }
             }
@@ -713,7 +741,7 @@ fn insert_array(
                 let mut builder = RowBuilder::new();
                 builder.push_uuid(child_id);   // j2s_id
                 builder.push_uuid(parent_id);  // j2s_parent_id
-                builder.push_value(&order.to_string());     // j2s_order
+                builder.push_value(&CopyEscaped::from_safe_ascii(order.to_string())); // j2s_order
 
                 // value column
                 let value_col = schema.find_by_original("value");
@@ -727,7 +755,7 @@ fn insert_array(
                                 &child_id.to_string(),
                                 &col.pg_type.as_sql(),
                                 &actual_value, actual_type,
-                            );
+                            )?;
                             builder.push_null();
                         }
                     }

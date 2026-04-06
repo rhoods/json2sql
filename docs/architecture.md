@@ -82,9 +82,18 @@ Définit la structure `Cli` via `clap`. Tous les paramètres CLI de l'outil y so
 
 | Paramètre | Défaut | Description |
 |---|---|---|
-| `--batch-size` | 1000 | Lignes par batch COPY |
+| `--batch-size` | 100 000 | Flush vers PostgreSQL toutes les N lignes par table |
 | `--parallel` | 1 | Connexions PostgreSQL parallèles |
 | `--transaction` | false | Enveloppe tout dans une transaction |
+
+### Paramètres d'anomalies
+
+| Paramètre | Défaut | Description |
+|---|---|---|
+| `--anomaly-dir` | aucun | Dossier pour les fichiers NDJSON d'anomalies par table |
+| `--anomaly-output` | stdout | Fichier du rapport de synthèse des anomalies |
+| `--anomaly-format` | json | Format du rapport (`json` ou `csv`) |
+| `--max-anomaly-rate` | aucun | Taux max acceptable (0.0–1.0) ; abort si dépassé |
 
 ---
 
@@ -110,15 +119,17 @@ Gestion des anomalies de type : valeurs dont le type JSON diffère du type domin
 
 ### `collector.rs`
 
-- **`AnomalyEntry`** : enregistrement d'une anomalie individuelle (table, colonne, row_id, type attendu, type reçu, valeur)
-- **`AnomalyCollector`** : accumulateur d'anomalies pendant la Pass 2. Méthodes : `record()`, `inc_total()`, `summaries()`, `overall_anomaly_rate()`
-- **`AnomalySummary`** : statistiques agrégées par `(table, colonne)` avec taux d'anomalie
+- **`AnomalyExample`** : un exemple d'anomalie conservé en mémoire (row_id, valeur tronquée à 200 chars, type)
+- **`AnomalyCollector`** : accumulateur d'anomalies pendant la Pass 2. Consommation mémoire bornée : compteurs + max 5 exemples par `(table, colonne)` — la liste d'entrées individuelle n'existe plus.
+  - Si `anomaly_dir` est fourni, chaque anomalie est aussi streamée dans `<dir>/<table>_anomalies.ndjson` (un objet JSON par ligne) pour investigation post-import.
+  - Méthodes : `record()` → `Result<()>` (I/O), `inc_total()`, `summaries()`, `total_anomalies()` (O(1)), `overall_anomaly_rate()`, `finish()` → flush les writers NDJSON
+- **`AnomalySummary`** : statistiques agrégées par `(table, colonne)` : count, total_rows, taux, et jusqu'à 5 exemples
 
 ### `reporter.rs`
 
-- **`write_report()`** : génère le rapport en JSON ou CSV vers un fichier ou stdout
-- Format JSON : objet avec `summaries` (agrégats par colonne) et `entries` (toutes les occurrences)
-- Format CSV : colonnes `table, column, row_id, expected_type, actual_value, actual_type`
+- **`write_report()`** : génère le rapport de synthèse en JSON ou CSV vers un fichier ou stdout (résumé uniquement — les lignes individuelles sont dans les fichiers NDJSON)
+- Format JSON : `{ summaries, total_anomalies, overall_anomaly_rate }`, summaries triés par count desc
+- Format CSV : `table, column, expected_type, anomaly_count, total_rows, anomaly_rate_pct, example_value, example_type`
 
 ---
 
@@ -136,11 +147,19 @@ Couche d'accès PostgreSQL.
 - **`generate_create_table()`** : génère le SQL `CREATE TABLE` complet pour une `TableSchema`
 - **`quote_ident()`** : échappe les identifiants PostgreSQL avec guillemets doubles (double les guillemets internes)
 
+### `copy_text.rs`
+
+Type et fonction garantissant la sécurité du format COPY PostgreSQL texte au niveau du type Rust.
+
+- **`CopyEscaped`** : newtype wrappant une `String` dont tous les caractères COPY-dangereux (`\t`, `\n`, `\r`, `\\`) ont été échappés et qui ne contient pas d'octet nul. S'obtient uniquement via `escape_copy_text()` ou `CopyEscaped::from_safe_ascii()`.
+- **`escape_copy_text()`** : échappe les caractères spéciaux et retourne `None` si la chaîne contient un octet nul (PostgreSQL les rejette — le site appelant les traite comme des anomalies → NULL).
+- **`CopyEscaped::from_safe_ascii()`** : wrapping sans échappement pour les valeurs dont la sécurité est une invariante de compilation (entiers, booléens, UUIDs générés, etc.).
+
 ### `copy_sink.rs`
 
 Implémente le chargement de données via le protocole `COPY FROM STDIN` (le plus rapide pour PostgreSQL).
 
-- **`RowBuilder`** : construit une ligne au format texte COPY (colonnes séparées par `\t`, NULL représenté par `\N`). Échappe les caractères spéciaux (`\`, tab, newline, `\r`).
+- **`RowBuilder`** : construit une ligne au format texte COPY (colonnes séparées par `\t`, NULL représenté par `\N`). `push_value()` prend un `&CopyEscaped` — l'échappement est garanti par le type, pas par une convention.
 - **`TempFileSink`** : accumule les lignes dans un fichier temporaire, puis les envoie en une seule passe COPY. Streaming par blocs de 1 Mo pour éviter la surcharge mémoire.
 - **`copy_to_db()`** : ouvre une session COPY, transmet le fichier temporaire, ferme la session.
 
@@ -186,11 +205,11 @@ Retourne `Pass1Result` contenant :
 
 Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cible.
 
-- **`CoerceResult`** : `Ok(String)`, `Null` ou `Anomaly`
+- **`CoerceResult`** : `Ok(CopyEscaped)`, `Null` ou `Anomaly` — la variante `Ok` transporte une valeur déjà COPY-safe
 - **`coerce()`** : dispatch principal vers des coerceurs spécialisés par type
 - Types gérés : Integer (contrôle de plage i32), BigInt, DoublePrecision (NaN/Infini → NULL), Boolean (flexible : "yes"/"no"/"1"/"0"...), UUID, Date, Timestamp, Text, VarChar, Jsonb, Array PG
 - **`coerce_pg_array()`** : sérialise un tableau JSON en litéral PostgreSQL `{elem1,elem2,NULL}`
-- **`escape_copy_text()`** : échappe les caractères spéciaux pour le format COPY texte
+- `escape_copy_text()` est maintenant dans `db/copy_text.rs`
 
 ### `runner.rs`
 

@@ -1,11 +1,12 @@
 use serde_json::Value;
 
+use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::schema::type_tracker::PgType;
 
 /// Result of attempting to coerce a JSON value to a PgType.
 pub enum CoerceResult {
-    /// Successfully converted: the string to include in COPY text format
-    Ok(String),
+    /// Successfully converted: a COPY-safe string ready to write to the buffer.
+    Ok(CopyEscaped),
     /// Value is SQL NULL
     Null,
     /// Value could not be coerced to the target type
@@ -38,7 +39,7 @@ pub fn coerce(value: &Value, pg_type: &PgType) -> CoerceResult {
                 // so use the raw string length for the limit check.
                 let raw_len = match value {
                     Value::String(sv) => sv.chars().count(),
-                    _ => s.len(),
+                    _ => s.as_str().len(),
                 };
                 if raw_len > *max_len as usize {
                     return CoerceResult::Anomaly {
@@ -73,9 +74,12 @@ fn coerce_pg_array(arr: &[Value], elem_type: &PgType) -> CoerceResult {
         parts.push(elem_str);
     }
     // Build `{e1,e2,...}` and COPY-escape the whole literal.
-    // Array literals are built from coerced elements which cannot contain null bytes.
+    // Null bytes were stripped from text elements in coerce_pg_array_element,
+    // so escape_copy_text will always return Some here.
     let literal = format!("{{{}}}", parts.join(","));
-    CoerceResult::Ok(escape_copy_text(&literal).unwrap_or_default())
+    let escaped = escape_copy_text(&literal)
+        .expect("array literal is null-byte-free by construction");
+    CoerceResult::Ok(escaped)
 }
 
 /// Produce the array-literal representation of one element (no outer COPY escaping yet).
@@ -84,7 +88,7 @@ fn coerce_pg_array_element(value: &Value, pg_type: &PgType) -> String {
     match pg_type {
         PgType::Integer | PgType::BigInt | PgType::DoublePrecision | PgType::Boolean => {
             match coerce(value, pg_type) {
-                CoerceResult::Ok(s) => s,
+                CoerceResult::Ok(s) => s.0, // numeric/bool: ASCII-safe, bare in array literal
                 _ => "NULL".to_string(),
             }
         }
@@ -120,12 +124,12 @@ fn coerce_integer(value: &Value) -> CoerceResult {
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
-                    return CoerceResult::Ok(i.to_string());
+                    return CoerceResult::Ok(CopyEscaped::from_safe_ascii(i.to_string()));
                 }
             }
             if let Some(f) = n.as_f64() {
                 if f.fract() == 0.0 && f >= i32::MIN as f64 && f <= i32::MAX as f64 {
-                    return CoerceResult::Ok((f as i64).to_string());
+                    return CoerceResult::Ok(CopyEscaped::from_safe_ascii((f as i64).to_string()));
                 }
             }
             CoerceResult::Anomaly {
@@ -135,7 +139,7 @@ fn coerce_integer(value: &Value) -> CoerceResult {
         }
         Value::String(s) => {
             if let Ok(i) = s.trim().parse::<i32>() {
-                CoerceResult::Ok(i.to_string())
+                CoerceResult::Ok(CopyEscaped::from_safe_ascii(i.to_string()))
             } else {
                 CoerceResult::Anomaly {
                     actual_value: s.clone(),
@@ -154,11 +158,11 @@ fn coerce_bigint(value: &Value) -> CoerceResult {
     match value {
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                return CoerceResult::Ok(i.to_string());
+                return CoerceResult::Ok(CopyEscaped::from_safe_ascii(i.to_string()));
             }
             if let Some(f) = n.as_f64() {
                 if f.fract() == 0.0 {
-                    return CoerceResult::Ok((f as i64).to_string());
+                    return CoerceResult::Ok(CopyEscaped::from_safe_ascii((f as i64).to_string()));
                 }
             }
             CoerceResult::Anomaly {
@@ -168,7 +172,7 @@ fn coerce_bigint(value: &Value) -> CoerceResult {
         }
         Value::String(s) => {
             if let Ok(i) = s.trim().parse::<i64>() {
-                CoerceResult::Ok(i.to_string())
+                CoerceResult::Ok(CopyEscaped::from_safe_ascii(i.to_string()))
             } else {
                 CoerceResult::Anomaly {
                     actual_value: s.clone(),
@@ -188,7 +192,7 @@ fn coerce_float(value: &Value) -> CoerceResult {
         Value::Number(n) => {
             if let Some(f) = n.as_f64() {
                 return match format_float(f) {
-                    Some(s) => CoerceResult::Ok(s),
+                    Some(s) => CoerceResult::Ok(CopyEscaped::from_safe_ascii(s)),
                     None => CoerceResult::Anomaly {
                         actual_value: value.to_string(),
                         actual_type: "float_not_finite",
@@ -203,7 +207,7 @@ fn coerce_float(value: &Value) -> CoerceResult {
         Value::String(s) => {
             if let Ok(f) = s.trim().parse::<f64>() {
                 match format_float(f) {
-                    Some(s) => CoerceResult::Ok(s),
+                    Some(s) => CoerceResult::Ok(CopyEscaped::from_safe_ascii(s)),
                     None => CoerceResult::Anomaly {
                         actual_value: value.to_string(),
                         actual_type: "float_not_finite",
@@ -225,18 +229,20 @@ fn coerce_float(value: &Value) -> CoerceResult {
 
 fn coerce_bool(value: &Value) -> CoerceResult {
     match value {
-        Value::Bool(b) => CoerceResult::Ok(if *b { "t".to_string() } else { "f".to_string() }),
+        Value::Bool(b) => CoerceResult::Ok(CopyEscaped::from_safe_ascii(
+            if *b { "t".to_string() } else { "f".to_string() },
+        )),
         Value::String(s) => match s.to_lowercase().as_str() {
-            "true" | "yes" | "1" | "on" => CoerceResult::Ok("t".to_string()),
-            "false" | "no" | "0" | "off" => CoerceResult::Ok("f".to_string()),
+            "true" | "yes" | "on" => CoerceResult::Ok(CopyEscaped::from_safe_ascii("t".to_string())),
+            "false" | "no" | "off" => CoerceResult::Ok(CopyEscaped::from_safe_ascii("f".to_string())),
             _ => CoerceResult::Anomaly {
                 actual_value: s.clone(),
                 actual_type: "string",
             },
         },
         Value::Number(n) => match n.as_i64() {
-            Some(1) => CoerceResult::Ok("t".to_string()),
-            Some(0) => CoerceResult::Ok("f".to_string()),
+            Some(1) => CoerceResult::Ok(CopyEscaped::from_safe_ascii("t".to_string())),
+            Some(0) => CoerceResult::Ok(CopyEscaped::from_safe_ascii("f".to_string())),
             _ => CoerceResult::Anomaly {
                 actual_value: value.to_string(),
                 actual_type: "number",
@@ -251,7 +257,13 @@ fn coerce_bool(value: &Value) -> CoerceResult {
 
 fn coerce_uuid(value: &Value) -> CoerceResult {
     match value {
-        Value::String(s) => CoerceResult::Ok(s.clone()),
+        Value::String(s) => match escape_copy_text(s) {
+            Some(escaped) => CoerceResult::Ok(escaped),
+            None => CoerceResult::Anomaly {
+                actual_value: value.to_string(),
+                actual_type: "string_contains_null_byte",
+            },
+        },
         _ => CoerceResult::Anomaly {
             actual_value: value.to_string(),
             actual_type: json_type_name(value),
@@ -261,7 +273,13 @@ fn coerce_uuid(value: &Value) -> CoerceResult {
 
 fn coerce_date(value: &Value) -> CoerceResult {
     match value {
-        Value::String(s) => CoerceResult::Ok(s.clone()),
+        Value::String(s) => match escape_copy_text(s) {
+            Some(escaped) => CoerceResult::Ok(escaped),
+            None => CoerceResult::Anomaly {
+                actual_value: value.to_string(),
+                actual_type: "string_contains_null_byte",
+            },
+        },
         _ => CoerceResult::Anomaly {
             actual_value: value.to_string(),
             actual_type: json_type_name(value),
@@ -271,7 +289,13 @@ fn coerce_date(value: &Value) -> CoerceResult {
 
 fn coerce_timestamp(value: &Value) -> CoerceResult {
     match value {
-        Value::String(s) => CoerceResult::Ok(s.clone()),
+        Value::String(s) => match escape_copy_text(s) {
+            Some(escaped) => CoerceResult::Ok(escaped),
+            None => CoerceResult::Anomaly {
+                actual_value: value.to_string(),
+                actual_type: "string_contains_null_byte",
+            },
+        },
         _ => CoerceResult::Anomaly {
             actual_value: value.to_string(),
             actual_type: json_type_name(value),
@@ -288,34 +312,13 @@ fn coerce_text(value: &Value) -> CoerceResult {
                 actual_type: "string_contains_null_byte",
             },
         },
-        Value::Number(n) => CoerceResult::Ok(n.to_string()),
-        Value::Bool(b) => CoerceResult::Ok(b.to_string()),
+        Value::Number(n) => CoerceResult::Ok(CopyEscaped::from_safe_ascii(n.to_string())),
+        Value::Bool(b) => CoerceResult::Ok(CopyEscaped::from_safe_ascii(b.to_string())),
         _ => CoerceResult::Anomaly {
             actual_value: value.to_string(),
             actual_type: json_type_name(value),
         },
     }
-}
-
-/// Escape a string for PostgreSQL COPY text format.
-/// Special characters: backslash, tab, newline, carriage return.
-/// Returns `None` if the string contains a null byte (PostgreSQL rejects them;
-/// callers should treat this as an anomaly rather than silently stripping the byte).
-pub fn escape_copy_text(s: &str) -> Option<String> {
-    if s.contains('\0') {
-        return None;
-    }
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            other => out.push(other),
-        }
-    }
-    Some(out)
 }
 
 fn format_float(f: f64) -> Option<String> {
@@ -361,14 +364,6 @@ mod tests {
     }
 
     #[test]
-    fn test_escape_copy_text() {
-        assert_eq!(escape_copy_text("hello\tworld"), Some("hello\\tworld".to_string()));
-        assert_eq!(escape_copy_text("line1\nline2"), Some("line1\\nline2".to_string()));
-        assert_eq!(escape_copy_text("back\\slash"), Some("back\\\\slash".to_string()));
-        assert_eq!(escape_copy_text("null\x00byte"), None);
-    }
-
-    #[test]
     fn test_coerce_float_nan_infinity() {
         // NaN et Infinity ne sont pas des valeurs JSON valides → anomalie
         // On ne peut pas les créer via serde_json::json!(), on passe par f64 directement
@@ -407,8 +402,8 @@ mod tests {
         let result = coerce_pg_array(&arr, &PgType::Text);
         assert!(matches!(result, CoerceResult::Ok(_)));
         if let CoerceResult::Ok(s) = result {
-            assert!(!s.contains('\0'), "null byte should be stripped from array element");
-            assert!(s.contains("helloworld"), "content sans null byte doit être présent");
+            assert!(!s.as_str().contains('\0'), "null byte should be stripped from array element");
+            assert!(s.as_str().contains("helloworld"), "content sans null byte doit être présent");
         }
     }
 

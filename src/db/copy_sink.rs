@@ -6,6 +6,7 @@ use tempfile::NamedTempFile;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
+use crate::db::copy_text::CopyEscaped;
 use crate::error::{J2sError, Result};
 use crate::schema::table_schema::TableSchema;
 
@@ -41,12 +42,12 @@ impl RowBuilder {
         }
     }
 
-    pub fn push_value(&mut self, value: &str) {
+    pub fn push_value(&mut self, value: &CopyEscaped) {
         if !self.first {
             self.buf.push(COPY_DELIMITER);
         }
         self.first = false;
-        self.buf.extend_from_slice(value.as_bytes());
+        self.buf.extend_from_slice(value.as_str().as_bytes());
     }
 
     pub fn push_null(&mut self) {
