@@ -71,6 +71,18 @@ pub struct AnomalyCollector {
     anomaly_dir: Option<PathBuf>,
     /// Paths of files actually written (populated as files are created).
     written_files: HashMap<String, PathBuf>,
+    /// Set to true after `finish()` to prevent double-flush.
+    finished: bool,
+}
+
+impl Drop for AnomalyCollector {
+    /// Best-effort flush on drop (e.g. when an error causes early return from Pass 2).
+    /// Errors are silently ignored — the caller already has a more important error to handle.
+    fn drop(&mut self) {
+        for writer in self.writers.values_mut() {
+            let _ = writer.flush();
+        }
+    }
 }
 
 impl AnomalyCollector {
@@ -85,6 +97,7 @@ impl AnomalyCollector {
             writers: HashMap::new(),
             anomaly_dir,
             written_files: HashMap::new(),
+            finished: false,
         }
     }
 
@@ -129,7 +142,8 @@ impl AnomalyCollector {
         // Stream to NDJSON file if a directory was configured
         if let Some(ref dir) = self.anomaly_dir {
             if !self.writers.contains_key(table) {
-                let path = dir.join(format!("{}_anomalies.ndjson", table));
+                let safe_name = sanitize_table_name(table);
+                let path = dir.join(format!("{}_anomalies.ndjson", safe_name));
                 let file = File::create(&path).map_err(J2sError::Io)?;
                 self.writers
                     .insert(table.to_string(), BufWriter::new(file));
@@ -198,14 +212,33 @@ impl AnomalyCollector {
         self.total_count as f64 / total as f64
     }
 
-    /// Flush all open NDJSON writers and return the paths of files produced.
-    /// Call once after Pass 2 is complete.
-    pub fn finish(&mut self) -> Result<HashMap<String, PathBuf>> {
+    /// Flush all open NDJSON writers. Idempotent — safe to call multiple times.
+    /// Call explicitly after Pass 2 completes; `Drop` provides a best-effort
+    /// flush on error paths.
+    pub fn finish(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
         for writer in self.writers.values_mut() {
             writer.flush().map_err(J2sError::Io)?;
         }
-        Ok(self.written_files.clone())
+        self.finished = true;
+        Ok(())
     }
+
+    /// Paths of NDJSON files produced so far (one per table with anomalies).
+    pub fn written_paths(&self) -> &HashMap<String, PathBuf> {
+        &self.written_files
+    }
+}
+
+/// Replace any character that is not alphanumeric or `_` with `_` so the
+/// table name is safe to use as a file-system component.
+/// This prevents path traversal (`../`) and invalid file names on any OS.
+fn sanitize_table_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .collect()
 }
 
 fn truncate_value(s: &str, max: usize) -> String {
@@ -264,7 +297,8 @@ mod tests {
         c.inc_total("products");
         c.record("products", "price", "row1", "double precision", "gratuit", "string").unwrap();
         c.record("products", "price", "row2", "double precision", "N/A", "string").unwrap();
-        let files = c.finish().unwrap();
+        c.finish().unwrap();
+        let files = c.written_paths();
 
         assert!(files.contains_key("products"));
         let path = &files["products"];
@@ -286,8 +320,8 @@ mod tests {
         let mut c = AnomalyCollector::new(Some(dir.path().to_path_buf()));
         c.inc_total("products");
         // No anomalies recorded
-        let files = c.finish().unwrap();
-        assert!(files.is_empty(), "no file should be created for a clean table");
+        c.finish().unwrap();
+        assert!(c.written_paths().is_empty(), "no file should be created for a clean table");
     }
 
     #[test]

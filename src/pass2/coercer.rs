@@ -88,7 +88,7 @@ fn coerce_pg_array_element(value: &Value, pg_type: &PgType) -> String {
     match pg_type {
         PgType::Integer | PgType::BigInt | PgType::DoublePrecision | PgType::Boolean => {
             match coerce(value, pg_type) {
-                CoerceResult::Ok(s) => s.0, // numeric/bool: ASCII-safe, bare in array literal
+                CoerceResult::Ok(s) => s.into_inner(), // numeric/bool: ASCII-safe, bare in array literal
                 _ => "NULL".to_string(),
             }
         }

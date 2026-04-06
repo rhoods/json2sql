@@ -8,15 +8,18 @@
 /// - [`escape_copy_text`] — for arbitrary user-controlled strings
 /// - [`CopyEscaped::from_safe_ascii`] — for values whose ASCII-safety is a
 ///   compile-time invariant (generated integers, booleans, UUIDs, etc.)
+///
+/// The inner `String` is private — external code cannot bypass the invariant
+/// by constructing `CopyEscaped` directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CopyEscaped(pub(crate) String);
+pub struct CopyEscaped(String);
 
 impl CopyEscaped {
     /// Wrap a value that is known to contain no COPY-unsafe bytes.
     ///
-    /// # Safety (logical, not `unsafe`)
-    /// Caller guarantees `s` contains none of `\t \n \r \\ \0`.
-    /// A `debug_assert!` enforces this in debug builds.
+    /// Panics in debug builds if `s` contains any of `\t \n \r \\ \0`.
+    /// In release builds the field is still private, so the only way to
+    /// obtain a `CopyEscaped` is through this constructor or `escape_copy_text`.
     pub fn from_safe_ascii(s: String) -> Self {
         debug_assert!(
             !s.contains(|c| matches!(c, '\t' | '\n' | '\r' | '\\' | '\0')),
@@ -28,6 +31,11 @@ impl CopyEscaped {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Consume and return the inner escaped string.
+    pub fn into_inner(self) -> String {
+        self.0
     }
 }
 
@@ -69,11 +77,11 @@ mod tests {
 
     #[test]
     fn test_escape_copy_text() {
-        assert_eq!(escape_copy_text("hello\tworld").map(|e| e.0), Some("hello\\tworld".to_string()));
-        assert_eq!(escape_copy_text("line1\nline2").map(|e| e.0), Some("line1\\nline2".to_string()));
-        assert_eq!(escape_copy_text("back\\slash").map(|e| e.0), Some("back\\\\slash".to_string()));
+        assert_eq!(escape_copy_text("hello\tworld").map(|e| e.into_inner()), Some("hello\\tworld".to_string()));
+        assert_eq!(escape_copy_text("line1\nline2").map(|e| e.into_inner()), Some("line1\\nline2".to_string()));
+        assert_eq!(escape_copy_text("back\\slash").map(|e| e.into_inner()), Some("back\\\\slash".to_string()));
         assert_eq!(escape_copy_text("null\x00byte"), None);
-        assert_eq!(escape_copy_text("plain text").map(|e| e.0), Some("plain text".to_string()));
+        assert_eq!(escape_copy_text("plain text").map(|e| e.into_inner()), Some("plain text".to_string()));
     }
 
     #[test]

@@ -175,6 +175,57 @@ async fn test_anomaly_detection() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 3b — anomaly_dir: NDJSON files are created for tables with anomalies
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_anomaly_dir_streaming() {
+    let Some(client) = connect_test_db().await else {
+        return;
+    };
+    let schema = unique_schema();
+    client
+        .execute(&format!("CREATE SCHEMA \"{}\"", schema), &[])
+        .await
+        .unwrap();
+
+    let path = fixture("anomalies.jsonl");
+    let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    db::ddl::create_tables(&client, &p1.schemas, &schema, false)
+        .await
+        .unwrap();
+
+    let anomaly_dir = tempfile::TempDir::new().unwrap();
+    let p2 = pass2::runner::run(
+        &path, "people", &p1.schemas, &client, &schema, 1000, false,
+        None, 1, Some(anomaly_dir.path().to_path_buf()),
+    )
+    .await
+    .unwrap();
+
+    // One anomaly recorded in memory
+    assert_eq!(p2.anomaly_collector.total_anomalies(), 1);
+
+    // One NDJSON file created for "people" table
+    let written = p2.anomaly_collector.written_paths();
+    assert!(written.contains_key("people"), "expected anomaly file for 'people'");
+
+    let file_path = &written["people"];
+    assert!(file_path.exists(), "NDJSON file must exist on disk");
+
+    let content = std::fs::read_to_string(file_path).unwrap();
+    let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 1, "exactly one anomaly line expected");
+
+    let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(entry["table"], "people");
+    assert_eq!(entry["column"], "score");
+    assert_eq!(entry["expected_type"], "double precision");
+    assert_eq!(entry["actual_type"], "string");
+
+    drop_schema(&client, &schema).await;
+}
+
+// ---------------------------------------------------------------------------
 // Test 4 — Option drop_existing
 //
 // Deux imports successifs avec drop_existing=true sur le second :

@@ -278,25 +278,30 @@ async fn run(cli: Cli) -> Result<()> {
     eprintln!("Total anomalies:     {}", total_anomalies);
 
     if total_anomalies > 0 {
-        eprintln!(
-            "Anomaly rate:        {:.4}%",
-            pass2.anomaly_collector.overall_anomaly_rate() * 100.0
-        );
-        // Per-table breakdown, sorted by anomaly count desc
-        let mut summaries = pass2.anomaly_collector.summaries();
-        summaries.sort_by(|a, b| b.anomaly_count.cmp(&a.anomaly_count).then(a.table.cmp(&b.table)));
+        // Aggregate per-(table,col) per-(table,col) summaries into per-table stats for display.
+        // `summaries()` returns one entry per column — summing them gives per-table totals.
+        let summaries = pass2.anomaly_collector.summaries();
+        let mut by_table: std::collections::HashMap<&str, (u64, u64)> = std::collections::HashMap::new();
+        for s in &summaries {
+            let e = by_table.entry(s.table.as_str()).or_insert((0, s.total_rows));
+            e.0 += s.anomaly_count;
+        }
+        let mut table_stats: Vec<(&str, u64, u64)> = by_table
+            .into_iter()
+            .map(|(t, (anom, rows))| (t, anom, rows))
+            .collect();
+        table_stats.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+
         eprintln!("\nAnomalies by table (top 10):");
-        for s in summaries.iter().take(10) {
+        for (table, anom, rows) in table_stats.iter().take(10) {
+            let rate = if *rows > 0 { *anom as f64 / *rows as f64 * 100.0 } else { 0.0 };
             eprintln!(
                 "  {:40} {:>8} anomalies / {:>10} rows ({:.2}%)",
-                s.table,
-                s.anomaly_count,
-                s.total_rows,
-                s.anomaly_rate * 100.0,
+                table, anom, rows, rate,
             );
         }
-        if summaries.len() > 10 {
-            eprintln!("  ... and {} more tables with anomalies", summaries.len() - 10);
+        if table_stats.len() > 10 {
+            eprintln!("  ... and {} more tables with anomalies", table_stats.len() - 10);
         }
         if let Some(ref dir) = cli.anomaly_dir {
             eprintln!("\nAnomaly files written to: {}", dir.display());
