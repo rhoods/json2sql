@@ -283,6 +283,8 @@ async fn run(cli: Cli) -> Result<()> {
         let summaries = pass2.anomaly_collector.summaries();
         let mut by_table: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
         for s in &summaries {
+            // s.total_rows is the same for all columns of a given table (it's the
+            // table-level row counter from inc_total), so or_insert is correct here.
             let e = by_table.entry(s.table.clone()).or_insert((0, s.total_rows));
             e.0 += s.anomaly_count;
         }

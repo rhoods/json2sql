@@ -120,9 +120,10 @@ Gestion des anomalies de type : valeurs dont le type JSON diffère du type domin
 ### `collector.rs`
 
 - **`AnomalyExample`** : un exemple d'anomalie conservé en mémoire (row_id, valeur tronquée à 200 chars, type)
-- **`AnomalyCollector`** : accumulateur d'anomalies pendant la Pass 2. Consommation mémoire bornée : compteurs + max 5 exemples par `(table, colonne)` — la liste d'entrées individuelle n'existe plus.
+- **`AnomalyCollector`** : accumulateur d'anomalies pendant la Pass 2. Consommation mémoire bornée : compteurs + max 5 exemples par `(table, colonne)`. `Debug` implémenté manuellement (les writers `BufWriter<File>` ne sont pas `Debug`).
   - Si `anomaly_dir` est fourni, chaque anomalie est aussi streamée dans `<dir>/<table>_anomalies.ndjson` (un objet JSON par ligne) pour investigation post-import.
-  - Méthodes : `record()` → `Result<()>` (I/O), `inc_total()`, `summaries()`, `total_anomalies()` (O(1)), `overall_anomaly_rate()`, `finish()` → flush les writers NDJSON
+  - `record()` → `Result<()>` : la troncature de valeur est skippée quand les exemples sont cappés et qu'il n'y a pas de streaming fichier (optimisation hot-path).
+  - Méthodes : `record()`, `inc_total()`, `summaries()`, `total_anomalies()` O(1), `finish()` flush + idempotent, `written_paths()`, `overall_anomaly_rate()` (réservé IHM)
 - **`AnomalySummary`** : statistiques agrégées par `(table, colonne)` : count, total_rows, taux, et jusqu'à 5 exemples
 
 ### `reporter.rs`
@@ -151,8 +152,8 @@ Couche d'accès PostgreSQL.
 
 Type et fonction garantissant la sécurité du format COPY PostgreSQL texte au niveau du type Rust.
 
-- **`CopyEscaped`** : newtype wrappant une `String` dont tous les caractères COPY-dangereux (`\t`, `\n`, `\r`, `\\`) ont été échappés et qui ne contient pas d'octet nul. S'obtient uniquement via `escape_copy_text()` ou `CopyEscaped::from_safe_ascii()`.
-- **`escape_copy_text()`** : échappe les caractères spéciaux et retourne `None` si la chaîne contient un octet nul (PostgreSQL les rejette — le site appelant les traite comme des anomalies → NULL).
+- **`CopyEscaped`** : newtype wrappant une `String` dont tous les caractères COPY-dangereux (`\t`, `\n`, `\r`, `\\`) ont été échappés et qui ne contient pas d'octet nul. Champ interne privé — s'obtient uniquement via `escape_copy_text()` ou `CopyEscaped::from_safe_ascii()`. Implémente `AsRef<str>` pour la compatibilité avec les APIs génériques ; pas de `Deref` intentionnellement (évite l'acceptation silencieuse dans des fonctions qui attendent une string brute non-échappée).
+- **`escape_copy_text()`** : fast-path sans allocation si la chaîne ne contient aucun caractère spécial (cas courant sur données propres) ; sinon échappe et retourne `None` si la chaîne contient un octet nul.
 - **`CopyEscaped::from_safe_ascii()`** : wrapping sans échappement pour les valeurs dont la sécurité est une invariante de compilation (entiers, booléens, UUIDs générés, etc.).
 
 ### `copy_sink.rs`

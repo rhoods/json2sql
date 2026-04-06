@@ -75,6 +75,19 @@ pub struct AnomalyCollector {
     finished: bool,
 }
 
+impl std::fmt::Debug for AnomalyCollector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnomalyCollector")
+            .field("total_count", &self.total_count)
+            .field("tables", &self.totals.len())
+            .field("columns_with_anomalies", &self.stats.len())
+            .field("anomaly_dir", &self.anomaly_dir)
+            .field("open_writers", &self.writers.len())
+            .field("finished", &self.finished)
+            .finish()
+    }
+}
+
 impl Drop for AnomalyCollector {
     /// Best-effort flush on drop (e.g. when an error causes early return from Pass 2).
     /// Skipped if `finish()` already completed successfully.
@@ -120,9 +133,6 @@ impl AnomalyCollector {
         actual_value: &str,
         actual_type: &str,
     ) -> Result<()> {
-        let char_len = actual_value.chars().count();
-        let truncated = truncate_value(actual_value, 200);
-
         // Update in-memory stats (O(1) per call)
         let col_stats = self
             .stats
@@ -133,6 +143,16 @@ impl AnomalyCollector {
                 examples: Vec::new(),
             });
         col_stats.count += 1;
+
+        // Only pay the truncation cost when we still need an example or will stream to file.
+        let needs_value = col_stats.examples.len() < MAX_EXAMPLES || self.anomaly_dir.is_some();
+        let (truncated, char_len) = if needs_value {
+            let len = actual_value.chars().count();
+            (truncate_value(actual_value, 200), len)
+        } else {
+            (String::new(), 0)
+        };
+
         if col_stats.examples.len() < MAX_EXAMPLES {
             col_stats.examples.push(AnomalyExample {
                 row_id: row_id.to_string(),

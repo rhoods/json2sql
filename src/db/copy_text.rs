@@ -32,18 +32,10 @@ impl CopyEscaped {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
 }
 
 impl AsRef<str> for CopyEscaped {
     fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::ops::Deref for CopyEscaped {
-    type Target = str;
-    fn deref(&self) -> &str {
         &self.0
     }
 }
@@ -54,12 +46,21 @@ impl std::ops::Deref for CopyEscaped {
 /// byte — PostgreSQL rejects null bytes in text columns and callers should
 /// treat this as an anomaly (→ NULL) rather than silently stripping.
 pub fn escape_copy_text(s: &str) -> Option<CopyEscaped> {
-    if s.contains('\0') {
-        return None;
-    }
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
+    // Fast-path: scan for any char that requires action before allocating.
+    // Most values in practice contain none of these — avoid the allocation entirely.
+    let first_special = s.find(|c| matches!(c, '\0' | '\\' | '\t' | '\n' | '\r'));
+    let escape_start = match first_special {
+        None => return Some(CopyEscaped(s.to_owned())), // nothing to escape
+        Some(i) if s.as_bytes()[i] == b'\0' => return None, // null byte
+        Some(i) => i,
+    };
+
+    // Slow-path: allocate and escape from the first special char onward.
+    let mut out = String::with_capacity(s.len() + 8);
+    out.push_str(&s[..escape_start]);
+    for c in s[escape_start..].chars() {
         match c {
+            '\0' => return None,
             '\\' => out.push_str("\\\\"),
             '\t' => out.push_str("\\t"),
             '\n' => out.push_str("\\n"),
@@ -80,11 +81,11 @@ mod tests {
 
     #[test]
     fn test_escape_copy_text() {
-        assert_eq!(escape_copy_text("hello\tworld").as_deref(), Some("hello\\tworld"));
-        assert_eq!(escape_copy_text("line1\nline2").as_deref(), Some("line1\\nline2"));
-        assert_eq!(escape_copy_text("back\\slash").as_deref(), Some("back\\\\slash"));
+        assert_eq!(escape_copy_text("hello\tworld").map(|e| e.as_str().to_owned()).as_deref(), Some("hello\\tworld"));
+        assert_eq!(escape_copy_text("line1\nline2").map(|e| e.as_str().to_owned()).as_deref(), Some("line1\\nline2"));
+        assert_eq!(escape_copy_text("back\\slash").map(|e| e.as_str().to_owned()).as_deref(), Some("back\\\\slash"));
         assert_eq!(escape_copy_text("null\x00byte"), None);
-        assert_eq!(escape_copy_text("plain text").as_deref(), Some("plain text"));
+        assert_eq!(escape_copy_text("plain text").map(|e| e.as_str().to_owned()).as_deref(), Some("plain text"));
     }
 
     #[test]
