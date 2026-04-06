@@ -233,16 +233,16 @@ fn coerce_bool(value: &Value) -> CoerceResult {
             if *b { "t".to_string() } else { "f".to_string() },
         )),
         Value::String(s) => match s.to_lowercase().as_str() {
-            "true" | "yes" | "on" => CoerceResult::Ok(CopyEscaped::from_safe_ascii("t".to_string())),
-            "false" | "no" | "off" => CoerceResult::Ok(CopyEscaped::from_safe_ascii("f".to_string())),
+            "true" | "yes" | "on" => CoerceResult::Ok(CopyEscaped::from_safe_ascii("t")),
+            "false" | "no" | "off" => CoerceResult::Ok(CopyEscaped::from_safe_ascii("f")),
             _ => CoerceResult::Anomaly {
                 actual_value: s.clone(),
                 actual_type: "string",
             },
         },
         Value::Number(n) => match n.as_i64() {
-            Some(1) => CoerceResult::Ok(CopyEscaped::from_safe_ascii("t".to_string())),
-            Some(0) => CoerceResult::Ok(CopyEscaped::from_safe_ascii("f".to_string())),
+            Some(1) => CoerceResult::Ok(CopyEscaped::from_safe_ascii("t")),
+            Some(0) => CoerceResult::Ok(CopyEscaped::from_safe_ascii("f")),
             _ => CoerceResult::Anomaly {
                 actual_value: value.to_string(),
                 actual_type: "number",

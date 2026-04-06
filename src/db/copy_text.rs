@@ -20,7 +20,8 @@ impl CopyEscaped {
     /// Panics in debug builds if `s` contains any of `\t \n \r \\ \0`.
     /// In release builds the field is still private, so the only way to
     /// obtain a `CopyEscaped` is through this constructor or `escape_copy_text`.
-    pub fn from_safe_ascii(s: String) -> Self {
+    pub fn from_safe_ascii(s: impl Into<String>) -> Self {
+        let s = s.into();
         debug_assert!(
             !s.contains(|c| matches!(c, '\t' | '\n' | '\r' | '\\' | '\0')),
             "from_safe_ascii called with unsafe value: {:?}",
@@ -56,7 +57,8 @@ pub fn escape_copy_text(s: &str) -> Option<CopyEscaped> {
     };
 
     // Slow-path: allocate and escape from the first special char onward.
-    let mut out = String::with_capacity(s.len() + 8);
+    // +16: small headroom for a handful of escape expansions (\\ doubles one char).
+    let mut out = String::with_capacity(s.len() + 16);
     out.push_str(&s[..escape_start]);
     for c in s[escape_start..].chars() {
         match c {
@@ -81,16 +83,25 @@ mod tests {
 
     #[test]
     fn test_escape_copy_text() {
-        assert_eq!(escape_copy_text("hello\tworld").map(|e| e.as_str().to_owned()).as_deref(), Some("hello\\tworld"));
-        assert_eq!(escape_copy_text("line1\nline2").map(|e| e.as_str().to_owned()).as_deref(), Some("line1\\nline2"));
-        assert_eq!(escape_copy_text("back\\slash").map(|e| e.as_str().to_owned()).as_deref(), Some("back\\\\slash"));
-        assert_eq!(escape_copy_text("null\x00byte"), None);
-        assert_eq!(escape_copy_text("plain text").map(|e| e.as_str().to_owned()).as_deref(), Some("plain text"));
+        assert_eq!(escape_copy_text("hello\tworld").unwrap().as_str(), "hello\\tworld");
+        assert_eq!(escape_copy_text("line1\nline2").unwrap().as_str(), "line1\\nline2");
+        assert_eq!(escape_copy_text("back\\slash").unwrap().as_str(), "back\\\\slash");
+        assert_eq!(escape_copy_text("plain text").unwrap().as_str(), "plain text");
+        // Fast-path null byte (first char)
+        assert_eq!(escape_copy_text("\x00abc"), None);
+        // Slow-path null byte (after a special char that triggers allocation)
+        assert_eq!(escape_copy_text("hello\\\x00world"), None);
+        // Slow-path null byte (after clean prefix, no prior special char — fast-path finds \0 first)
+        assert_eq!(escape_copy_text("abc\x00def"), None);
     }
 
     #[test]
     fn test_from_safe_ascii_roundtrip() {
-        let s = CopyEscaped::from_safe_ascii("42".to_string());
+        // Accepts &str without intermediate allocation
+        let s = CopyEscaped::from_safe_ascii("42");
         assert_eq!(s.as_str(), "42");
+        // Also accepts String
+        let s2 = CopyEscaped::from_safe_ascii("ok".to_string());
+        assert_eq!(s2.as_str(), "ok");
     }
 }

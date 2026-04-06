@@ -144,52 +144,64 @@ impl AnomalyCollector {
             });
         col_stats.count += 1;
 
-        // Only pay the truncation cost when we still need an example or will stream to file.
-        let needs_value = col_stats.examples.len() < MAX_EXAMPLES || self.anomaly_dir.is_some();
-        let (truncated, char_len) = if needs_value {
-            let len = actual_value.chars().count();
-            (truncate_value(actual_value, 200), len)
-        } else {
-            (String::new(), 0)
-        };
+        // Capture an in-memory example if still below the cap.
+        let want_example = col_stats.examples.len() < MAX_EXAMPLES;
+        // Stream to file regardless of the example cap.
+        let want_file = self.anomaly_dir.is_some();
 
-        if col_stats.examples.len() < MAX_EXAMPLES {
-            col_stats.examples.push(AnomalyExample {
-                row_id: row_id.to_string(),
-                actual_value: truncated.clone(),
-                actual_value_len: char_len,
-                actual_type: actual_type.to_string(),
-            });
+        // Avoid the O(n) truncation scan when neither path needs the value.
+        if want_example || want_file {
+            let char_len = actual_value.chars().count();
+            let truncated = truncate_value(actual_value, 200);
+
+            if want_example {
+                col_stats.examples.push(AnomalyExample {
+                    row_id: row_id.to_string(),
+                    actual_value: truncated.clone(),
+                    actual_value_len: char_len,
+                    actual_type: actual_type.to_string(),
+                });
+            }
+
+            if want_file {
+                self.stream_to_file(table, column, row_id, expected_type, &truncated, char_len, actual_type)?;
+            }
         }
         self.total_count += 1;
-
-        // Stream to NDJSON file if a directory was configured
-        if let Some(ref dir) = self.anomaly_dir {
-            if !self.writers.contains_key(table) {
-                let safe_name = sanitize_table_name(table);
-                let path = dir.join(format!("{}_anomalies.ndjson", safe_name));
-                let file = File::create(&path).map_err(J2sError::Io)?;
-                self.writers
-                    .insert(table.to_string(), BufWriter::new(file));
-                self.written_files.insert(table.to_string(), path);
-            }
-            let writer = self.writers.get_mut(table).unwrap();
-
-            // One JSON object per line — serde_json escapes all control chars
-            // including null bytes (\u0000), so the output is always valid UTF-8.
-            let line = serde_json::json!({
-                "table": table,
-                "column": column,
-                "row_id": row_id,
-                "expected_type": expected_type,
-                "actual_value": truncated,
-                "actual_value_len": char_len,
-                "actual_type": actual_type,
-            });
-            writeln!(writer, "{}", line).map_err(J2sError::Io)?;
-        }
-
         Ok(())
+    }
+
+    /// Append one NDJSON line to the per-table anomaly file, creating it if necessary.
+    fn stream_to_file(
+        &mut self,
+        table: &str,
+        column: &str,
+        row_id: &str,
+        expected_type: &str,
+        truncated: &str,
+        char_len: usize,
+        actual_type: &str,
+    ) -> Result<()> {
+        let dir = self.anomaly_dir.as_ref().expect("called only when anomaly_dir is Some");
+        if !self.writers.contains_key(table) {
+            let safe_name = sanitize_table_name(table);
+            let path = dir.join(format!("{}_anomalies.ndjson", safe_name));
+            let file = File::create(&path).map_err(J2sError::Io)?;
+            self.writers.insert(table.to_string(), BufWriter::new(file));
+            self.written_files.insert(table.to_string(), path);
+        }
+        let writer = self.writers.get_mut(table).unwrap();
+        // serde_json escapes all control chars incl. null bytes (\u0000) — always valid UTF-8.
+        let line = serde_json::json!({
+            "table": table,
+            "column": column,
+            "row_id": row_id,
+            "expected_type": expected_type,
+            "actual_value": truncated,
+            "actual_value_len": char_len,
+            "actual_type": actual_type,
+        });
+        writeln!(writer, "{}", line).map_err(J2sError::Io)
     }
 
     /// Increment the total-row counter for a table (used as anomaly-rate denominator).
@@ -228,8 +240,7 @@ impl AnomalyCollector {
     }
 
     /// Overall anomaly rate across all tables.
-    /// Reserved for future IHM use; not currently displayed in the CLI summary.
-    #[allow(dead_code)]
+    /// Used for `--max-anomaly-rate` threshold checks and the JSON anomaly report.
     pub fn overall_anomaly_rate(&self) -> f64 {
         let total: u64 = self.totals.values().sum();
         if total == 0 {

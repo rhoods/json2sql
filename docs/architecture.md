@@ -123,7 +123,7 @@ Gestion des anomalies de type : valeurs dont le type JSON diffère du type domin
 - **`AnomalyCollector`** : accumulateur d'anomalies pendant la Pass 2. Consommation mémoire bornée : compteurs + max 5 exemples par `(table, colonne)`. `Debug` implémenté manuellement (les writers `BufWriter<File>` ne sont pas `Debug`).
   - Si `anomaly_dir` est fourni, chaque anomalie est aussi streamée dans `<dir>/<table>_anomalies.ndjson` (un objet JSON par ligne) pour investigation post-import.
   - `record()` → `Result<()>` : la troncature de valeur est skippée quand les exemples sont cappés et qu'il n'y a pas de streaming fichier (optimisation hot-path).
-  - Méthodes : `record()`, `inc_total()`, `summaries()`, `total_anomalies()` O(1), `finish()` flush + idempotent, `written_paths()`, `overall_anomaly_rate()` (réservé IHM)
+  - Méthodes : `record()`, `inc_total()`, `summaries()`, `total_anomalies()` O(1), `finish()` flush + idempotent, `written_paths()`, `overall_anomaly_rate()` (utilisé pour `--max-anomaly-rate` et le rapport JSON)
 - **`AnomalySummary`** : statistiques agrégées par `(table, colonne)` : count, total_rows, taux, et jusqu'à 5 exemples
 
 ### `reporter.rs`
