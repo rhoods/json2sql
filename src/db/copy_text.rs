@@ -33,14 +33,17 @@ impl CopyEscaped {
         &self.0
     }
 
-    /// Consume and return the inner escaped string.
-    pub fn into_inner(self) -> String {
-        self.0
-    }
 }
 
 impl AsRef<str> for CopyEscaped {
     fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for CopyEscaped {
+    type Target = str;
+    fn deref(&self) -> &str {
         &self.0
     }
 }
@@ -77,11 +80,11 @@ mod tests {
 
     #[test]
     fn test_escape_copy_text() {
-        assert_eq!(escape_copy_text("hello\tworld").map(|e| e.into_inner()), Some("hello\\tworld".to_string()));
-        assert_eq!(escape_copy_text("line1\nline2").map(|e| e.into_inner()), Some("line1\\nline2".to_string()));
-        assert_eq!(escape_copy_text("back\\slash").map(|e| e.into_inner()), Some("back\\\\slash".to_string()));
+        assert_eq!(escape_copy_text("hello\tworld").as_deref(), Some("hello\\tworld"));
+        assert_eq!(escape_copy_text("line1\nline2").as_deref(), Some("line1\\nline2"));
+        assert_eq!(escape_copy_text("back\\slash").as_deref(), Some("back\\\\slash"));
         assert_eq!(escape_copy_text("null\x00byte"), None);
-        assert_eq!(escape_copy_text("plain text").map(|e| e.into_inner()), Some("plain text".to_string()));
+        assert_eq!(escape_copy_text("plain text").as_deref(), Some("plain text"));
     }
 
     #[test]

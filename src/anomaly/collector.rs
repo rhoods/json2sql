@@ -77,8 +77,12 @@ pub struct AnomalyCollector {
 
 impl Drop for AnomalyCollector {
     /// Best-effort flush on drop (e.g. when an error causes early return from Pass 2).
+    /// Skipped if `finish()` already completed successfully.
     /// Errors are silently ignored — the caller already has a more important error to handle.
     fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
         for writer in self.writers.values_mut() {
             let _ = writer.flush();
         }
@@ -204,6 +208,8 @@ impl AnomalyCollector {
     }
 
     /// Overall anomaly rate across all tables.
+    /// Reserved for future IHM use; not currently displayed in the CLI summary.
+    #[allow(dead_code)]
     pub fn overall_anomaly_rate(&self) -> f64 {
         let total: u64 = self.totals.values().sum();
         if total == 0 {
@@ -215,6 +221,11 @@ impl AnomalyCollector {
     /// Flush all open NDJSON writers. Idempotent — safe to call multiple times.
     /// Call explicitly after Pass 2 completes; `Drop` provides a best-effort
     /// flush on error paths.
+    ///
+    /// # Partial failure
+    /// If this returns `Err`, some writers may have been flushed and others not.
+    /// `finished` remains `false`, so `Drop` will attempt a best-effort re-flush.
+    /// Files listed in `written_paths()` may be truncated in this case.
     pub fn finish(&mut self) -> Result<()> {
         if self.finished {
             return Ok(());
@@ -232,12 +243,22 @@ impl AnomalyCollector {
     }
 }
 
-/// Replace any character that is not alphanumeric or `_` with `_` so the
-/// table name is safe to use as a file-system component.
-/// This prevents path traversal (`../`) and invalid file names on any OS.
+/// Replace any character that is not ASCII alphanumeric or `_` with `_` so
+/// the table name is safe as a file-system component on all platforms.
+///
+/// In practice, table names produced by json2sql (`sanitize_pg_name`) are
+/// already `[a-z0-9_]`, so this is a defensive last-resort guard — not a
+/// primary sanitization layer. Using `is_ascii_alphanumeric` (not
+/// `is_alphanumeric`) avoids Unicode characters that may be invalid or
+/// platform-dependent on Windows/FAT32 file systems.
+///
+/// Collision note: if two distinct table names map to the same sanitized
+/// name, the second `File::create` would overwrite the first. This cannot
+/// happen with j2s-generated names (already ASCII-safe and unique), but
+/// callers should not rely on this for externally-supplied table names.
 fn sanitize_table_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
         .collect()
 }
 

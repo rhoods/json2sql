@@ -278,19 +278,19 @@ async fn run(cli: Cli) -> Result<()> {
     eprintln!("Total anomalies:     {}", total_anomalies);
 
     if total_anomalies > 0 {
-        // Aggregate per-(table,col) per-(table,col) summaries into per-table stats for display.
+        // Aggregate per-(table,col) summaries into per-table stats for display.
         // `summaries()` returns one entry per column — summing them gives per-table totals.
         let summaries = pass2.anomaly_collector.summaries();
-        let mut by_table: std::collections::HashMap<&str, (u64, u64)> = std::collections::HashMap::new();
+        let mut by_table: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
         for s in &summaries {
-            let e = by_table.entry(s.table.as_str()).or_insert((0, s.total_rows));
+            let e = by_table.entry(s.table.clone()).or_insert((0, s.total_rows));
             e.0 += s.anomaly_count;
         }
-        let mut table_stats: Vec<(&str, u64, u64)> = by_table
+        let mut table_stats: Vec<(String, u64, u64)> = by_table
             .into_iter()
             .map(|(t, (anom, rows))| (t, anom, rows))
             .collect();
-        table_stats.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        table_stats.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
         eprintln!("\nAnomalies by table (top 10):");
         for (table, anom, rows) in table_stats.iter().take(10) {

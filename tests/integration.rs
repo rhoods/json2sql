@@ -195,7 +195,7 @@ async fn test_anomaly_dir_streaming() {
         .unwrap();
 
     let anomaly_dir = tempfile::TempDir::new().unwrap();
-    let p2 = pass2::runner::run(
+    let mut p2 = pass2::runner::run(
         &path, "people", &p1.schemas, &client, &schema, 1000, false,
         None, 1, Some(anomaly_dir.path().to_path_buf()),
     )
@@ -204,6 +204,9 @@ async fn test_anomaly_dir_streaming() {
 
     // One anomaly recorded in memory
     assert_eq!(p2.anomaly_collector.total_anomalies(), 1);
+
+    // Explicit finish() — verifies the file is flushed by finish(), not just by Drop.
+    p2.anomaly_collector.finish().unwrap();
 
     // One NDJSON file created for "people" table
     let written = p2.anomaly_collector.written_paths();
@@ -220,7 +223,8 @@ async fn test_anomaly_dir_streaming() {
     assert_eq!(entry["table"], "people");
     assert_eq!(entry["column"], "score");
     assert_eq!(entry["expected_type"], "double precision");
-    assert_eq!(entry["actual_type"], "string");
+    // "score": true is a JSON boolean coerced to double precision → actual_type = "boolean"
+    assert_eq!(entry["actual_type"], "boolean");
 
     drop_schema(&client, &schema).await;
 }
