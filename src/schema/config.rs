@@ -5,7 +5,8 @@ use serde::Deserialize;
 
 use crate::error::{J2sError, Result};
 use crate::schema::registry::{
-    apply_structured_pivot_columns, apply_wide_strategy_columns, build_union_columns,
+    apply_flatten, apply_normalize_dynamic_keys, apply_structured_pivot_columns,
+    apply_wide_strategy_columns, build_union_columns,
 };
 use crate::schema::suffix_detector::build_suffix_schema_from_list;
 use crate::schema::table_schema::{ColumnSchema, KeyShape, SiblingSchema, TableSchema, WideStrategy};
@@ -62,6 +63,13 @@ impl SchemaConfig {
 /// Matches by table name and column name (both sanitized PostgreSQL identifiers).
 /// Unknown tables or columns are silently ignored but reported via eprintln.
 pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) {
+    // Collect deferred operations that require the full schemas slice.
+    // These cannot be applied inside the single-schema iteration below.
+    struct DeferredNormalize { table_name: String, id_column: String }
+    struct DeferredFlatten  { table_name: String, prefix: String, max_depth: u8 }
+    let mut deferred_normalize: Vec<DeferredNormalize> = Vec::new();
+    let mut deferred_flatten:   Vec<DeferredFlatten>   = Vec::new();
+
     for (table_name, col_overrides) in &config.tables {
         match schemas.iter_mut().find(|s| &s.name == table_name) {
             None => {
@@ -73,28 +81,59 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) {
             Some(schema) => {
                 // --- strategy override ---
                 // Must run before suffix_columns so the column layout is correct.
+                // NormalizeDynamicKeys and Flatten are deferred (need full schemas slice).
                 if let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") {
-                    let new_strategy = match strategy_str.to_lowercase().as_str() {
-                        "pivot" => Some(WideStrategy::Pivot),
-                        "jsonb" => Some(WideStrategy::Jsonb),
-                        "columns" => Some(WideStrategy::Columns),
+                    match strategy_str.to_lowercase().as_str() {
+                        "pivot" => {
+                            if schema.wide_strategy != WideStrategy::Pivot {
+                                eprintln!("  Override strategy: {} → Pivot", table_name);
+                                apply_wide_strategy_columns(schema, WideStrategy::Pivot);
+                            }
+                        }
+                        "jsonb" => {
+                            if schema.wide_strategy != WideStrategy::Jsonb {
+                                eprintln!("  Override strategy: {} → Jsonb", table_name);
+                                apply_wide_strategy_columns(schema, WideStrategy::Jsonb);
+                            }
+                        }
+                        "columns" => {
+                            if schema.wide_strategy != WideStrategy::Columns {
+                                eprintln!("  Override strategy: {} → Columns", table_name);
+                                apply_wide_strategy_columns(schema, WideStrategy::Columns);
+                            }
+                        }
                         // "structured_pivot" is handled via suffix_columns below
-                        "structured_pivot" => None,
+                        "structured_pivot" => {}
+                        "normalize_dynamic_keys" => {
+                            let id_col = col_overrides
+                                .get("id_column")
+                                .and_then(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
+                                .unwrap_or_else(|| "key_id".to_string());
+                            deferred_normalize.push(DeferredNormalize {
+                                table_name: table_name.clone(),
+                                id_column: id_col,
+                            });
+                        }
+                        "flatten" => {
+                            let prefix = col_overrides
+                                .get("prefix")
+                                .and_then(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
+                                .unwrap_or_else(|| format!("{}_", table_name));
+                            let max_depth = col_overrides
+                                .get("max_depth")
+                                .and_then(|v| if let toml::Value::Integer(n) = v { Some(*n as u8) } else { None })
+                                .unwrap_or(1);
+                            deferred_flatten.push(DeferredFlatten {
+                                table_name: table_name.clone(),
+                                prefix,
+                                max_depth,
+                            });
+                        }
                         other => {
                             eprintln!(
                                 "WARNING: schema-config: unknown strategy '{}' for '{}', ignored",
                                 other, table_name
                             );
-                            None
-                        }
-                    };
-                    if let Some(strategy) = new_strategy {
-                        if strategy != schema.wide_strategy {
-                            eprintln!(
-                                "  Override strategy: {} {:?} → {:?}",
-                                table_name, schema.wide_strategy, strategy
-                            );
-                            apply_wide_strategy_columns(schema, strategy);
                         }
                     }
                 }
@@ -141,7 +180,10 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) {
 
                 // --- column-level type overrides ---
                 for (col_name, value) in col_overrides {
-                    if col_name == "strategy" || col_name == "suffix_columns" {
+                    if matches!(
+                        col_name.as_str(),
+                        "strategy" | "suffix_columns" | "id_column" | "prefix" | "max_depth"
+                    ) {
                         continue;
                     }
                     let type_str = match value {
@@ -177,6 +219,14 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) {
                 }
             }
         }
+    }
+
+    // Apply deferred operations that need the full schemas slice.
+    for op in deferred_normalize {
+        apply_normalize_dynamic_keys(schemas, &op.table_name, op.id_column);
+    }
+    for op in deferred_flatten {
+        apply_flatten(schemas, &op.table_name, &op.prefix, op.max_depth);
     }
 }
 

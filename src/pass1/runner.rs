@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use crate::error::Result;
 use crate::io::progress::ProgressTracker;
+use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonReader};
 use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::registry::SchemaRegistry;
@@ -23,6 +24,9 @@ pub struct Pass1Result {
 
 /// Run Pass 1: stream through the entire file and build the schema.
 /// Returns finalized table schemas sorted topologically.
+///
+/// `progress_tx` — optional channel for streaming progress to the IHM.
+/// Pass `None` for CLI / headless mode (terminal progress bar is used instead).
 pub fn run(
     path: &Path,
     root_table: &str,
@@ -33,14 +37,22 @@ pub fn run(
     sibling_jaccard: f64,
     stable_threshold: f64,
     rare_threshold: f64,
+    progress_tx: Option<ProgressTx>,
 ) -> Result<Pass1Result> {
     let total_bytes = file_size(path)?;
-    let progress = ProgressTracker::new(total_bytes, "Pass 1");
+    // Terminal progress bar: used only in CLI mode (when no IHM channel provided).
+    let progress = if progress_tx.is_none() {
+        Some(ProgressTracker::new(total_bytes, "Pass 1"))
+    } else {
+        None
+    };
 
     let mut registry = SchemaRegistry::new(text_threshold, array_as_pg_array, wide_column_threshold, sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold);
     let (mut reader, _format) = JsonReader::open(path)?;
 
     let mut total_rows = 0u64;
+    // Emit a progress event every 1000 rows to keep the channel lean.
+    const PROGRESS_INTERVAL: u64 = 1_000;
 
     while let Some(item) = reader.next() {
         let value = item?;
@@ -56,11 +68,26 @@ pub fn run(
                 )));
             }
         }
-        progress.inc_rows(1);
-        progress.set_bytes(reader.bytes_read());
+
+        if let Some(ref bar) = progress {
+            bar.inc_rows(1);
+            bar.set_bytes(reader.bytes_read());
+        }
+
+        if let Some(ref tx) = progress_tx {
+            if total_rows % PROGRESS_INTERVAL == 0 {
+                let _ = tx.send(ProgressEvent::Pass1Progress {
+                    rows_scanned: total_rows,
+                    bytes_read: reader.bytes_read(),
+                    total_bytes,
+                });
+            }
+        }
     }
 
-    progress.finish();
+    if let Some(ref bar) = progress {
+        bar.finish();
+    }
     eprintln!("Pass 1 complete: {} rows, building schema...", total_rows);
 
     let schemas = registry.finalize();
@@ -68,11 +95,13 @@ pub fn run(
     let truncated_names = registry.truncated_names().to_vec();
     let column_collisions = registry.column_collisions().to_vec();
 
-    eprintln!(
-        "Schema: {} tables, {} total columns",
-        schemas.len(),
-        schemas.iter().map(|s| s.columns.len()).sum::<usize>()
-    );
+    let tables_count = schemas.len();
+    let columns_count = schemas.iter().map(|s| s.columns.len()).sum::<usize>();
+    eprintln!("Schema: {} tables, {} total columns", tables_count, columns_count);
+
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
+    }
 
     Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions })
 }

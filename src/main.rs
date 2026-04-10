@@ -67,6 +67,7 @@ async fn run(cli: Cli) -> Result<()> {
             cli.sibling_jaccard,
             cli.stable_threshold,
             cli.rare_threshold,
+            None, // no IHM channel in CLI mode
         )?
     };
 
@@ -258,6 +259,7 @@ async fn run(cli: Cli) -> Result<()> {
         cli.db_url.as_deref(),
         cli.parallel,
         cli.anomaly_dir.clone(),
+        None, // no IHM channel in CLI mode
     )
     .await?;
 

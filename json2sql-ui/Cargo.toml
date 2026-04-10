@@ -11,10 +11,8 @@ path = "src/main.rs"
 # Shared types from the CLI
 json2sql = { path = ".." }
 
-# Web framework
-axum = { version = "0.7", features = ["macros"] }
-tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.5", features = ["fs", "cors"] }
+# Desktop UI
+dioxus = { version = "0.6", features = ["desktop"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -22,12 +20,3 @@ serde_json = "1"
 
 # Error handling
 anyhow = "1"
-
-# CLI args
-clap = { version = "4", features = ["derive", "env"] }
-
-# UUID pour les IDs de groupes
-uuid = { version = "1", features = ["v4"] }
-
-# Stream pour SSE
-tokio-stream = { version = "0.1", features = ["sync"] }

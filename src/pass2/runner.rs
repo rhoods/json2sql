@@ -12,10 +12,12 @@ use crate::anomaly::collector::AnomalyCollector;
 use crate::db::copy_sink::{RowBuilder, TempFileSink};
 use crate::error::{J2sError, Result};
 use crate::io::progress::ProgressTracker;
+use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonReader};
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::pass2::coercer::{coerce, CoerceResult};
 use crate::schema::table_schema::{ChildKind, SiblingSchema, SuffixSchema, TableSchema, WideStrategy};
+// NormalizeDynamicKeys and Flatten are handled via dedicated insert functions below.
 
 /// Pass 2 result summary.
 pub struct Pass2Result {
@@ -29,6 +31,7 @@ pub struct Pass2Result {
 /// `db_url` is only required when `parallel > 1` (each worker opens its own connection).
 /// `anomaly_dir` is the directory where per-table NDJSON anomaly files are streamed;
 /// `None` disables file streaming (counters and examples are still collected in RAM).
+/// `progress_tx` — optional channel for streaming progress to the IHM.
 pub async fn run(
     path: &Path,
     root_table: &str,
@@ -40,9 +43,16 @@ pub async fn run(
     db_url: Option<&str>,
     parallel: usize,
     anomaly_dir: Option<PathBuf>,
+    progress_tx: Option<ProgressTx>,
 ) -> Result<Pass2Result> {
     let total_bytes = file_size(path)?;
-    let progress = ProgressTracker::new(total_bytes, "Pass 2");
+    let progress = if progress_tx.is_none() {
+        Some(ProgressTracker::new(total_bytes, "Pass 2"))
+    } else {
+        None
+    };
+    let mut rows_processed = 0u64;
+    const PROGRESS_INTERVAL: u64 = 1_000;
 
     // Build path → schema lookup
     let path_map: HashMap<String, &TableSchema> =
@@ -97,7 +107,19 @@ pub async fn run(
                 None,
                 None,
             )?;
-            progress.inc_rows(1);
+            rows_processed += 1;
+            if let Some(ref bar) = progress {
+                bar.inc_rows(1);
+            }
+            if let Some(ref tx) = progress_tx {
+                if rows_processed % PROGRESS_INTERVAL == 0 {
+                    let _ = tx.send(ProgressEvent::Pass2Progress {
+                        rows_processed,
+                        bytes_read: 0, // reader bytes not accessible here; updated below
+                        total_bytes,
+                    });
+                }
+            }
 
             // Periodic flush: when any sink reaches the threshold, flush ALL sinks
             // in topological order (parents before children). This keeps temp-file
@@ -110,7 +132,14 @@ pub async fn run(
                         for name in &topo_order {
                             if let Some(sink) = sinks.get_mut(name.as_str()) {
                                 if sink.row_count > 0 {
+                                    let flushed = sink.row_count;
                                     sink.flush_to_db(client).await?;
+                                    if let Some(ref tx) = progress_tx {
+                                        let _ = tx.send(ProgressEvent::Pass2Flush {
+                                            table_name: name.clone(),
+                                            rows_flushed: flushed,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -120,7 +149,9 @@ pub async fn run(
         }
     }
 
-    progress.finish();
+    if let Some(ref bar) = progress {
+        bar.finish();
+    }
     eprintln!("Pass 2 streaming done. Flushing remaining rows to PostgreSQL...");
 
     // Group sinks by depth level (topological order: parents before children).
@@ -178,6 +209,13 @@ pub async fn run(
             }
         }
 
+        if let Some(ref tx) = progress_tx {
+            let total_rows: u64 = rows_per_table.values().sum();
+            let _ = tx.send(ProgressEvent::Pass2Done {
+                total_rows,
+                anomaly_count: anomalies.total_anomalies(),
+            });
+        }
         anomalies.finish()?;
         return Ok(Pass2Result { rows_per_table, anomaly_collector: anomalies });
     }
@@ -195,8 +233,19 @@ pub async fn run(
             if let Some(sink) = sinks.remove(name) {
                 let count = sink.row_count;
                 eprintln!("  COPY {} ({} rows)...", name, count);
+                if let Some(ref tx) = progress_tx {
+                    let _ = tx.send(ProgressEvent::Pass2Log(
+                        format!("COPY {} ({} rows)", name, count)
+                    ));
+                }
                 let inserted = sink.copy_to_db(client).await?;
                 rows_per_table.insert(name.clone(), inserted);
+                if let Some(ref tx) = progress_tx {
+                    let _ = tx.send(ProgressEvent::Pass2Flush {
+                        table_name: name.clone(),
+                        rows_flushed: inserted,
+                    });
+                }
             }
         }
         Ok::<_, J2sError>(rows_per_table)
@@ -207,6 +256,13 @@ pub async fn run(
         match copy_result {
             Ok(rows_per_table) => {
                 client.execute("COMMIT", &[]).await.map_err(J2sError::Db)?;
+                if let Some(ref tx) = progress_tx {
+                    let total_rows: u64 = rows_per_table.values().sum();
+                    let _ = tx.send(ProgressEvent::Pass2Done {
+                        total_rows,
+                        anomaly_count: anomalies.total_anomalies(),
+                    });
+                }
                 anomalies.finish()?;
                 return Ok(Pass2Result { rows_per_table, anomaly_collector: anomalies });
             }
@@ -221,6 +277,13 @@ pub async fn run(
     }
 
     let rows_per_table = copy_result?;
+    if let Some(ref tx) = progress_tx {
+        let total_rows: u64 = rows_per_table.values().sum();
+        let _ = tx.send(ProgressEvent::Pass2Done {
+            total_rows,
+            anomaly_count: anomalies.total_anomalies(),
+        });
+    }
     anomalies.finish()?;
     Ok(Pass2Result { rows_per_table, anomaly_collector: anomalies })
 }
@@ -281,9 +344,15 @@ fn insert_object(
                                     sinks, anomalies, child_schema, nested, row_id, sibling_schema,
                                 )?;
                             }
+                            WideStrategy::NormalizeDynamicKeys { id_column } => {
+                                insert_normalize_dynamic_keys(
+                                    sinks, anomalies, child_schema, nested, row_id, id_column,
+                                )?;
+                            }
                             WideStrategy::Columns
                             | WideStrategy::AutoSplit { .. }
-                            | WideStrategy::Ignore => {
+                            | WideStrategy::Ignore
+                            | WideStrategy::Flatten { .. } => {
                                 let child_id = Uuid::now_v7();
                                 insert_object(
                                     path_map, sinks, anomalies, child_schema,
@@ -326,7 +395,16 @@ fn insert_object(
             continue;
         }
 
-        let json_val = obj.get(&col.original_name).unwrap_or(&Value::Null);
+        // For columns inlined via Flatten strategy, look up the value in the nested object.
+        // flatten_sources maps column name → source JSON field (e.g. "nutrients_calories" → "nutrients").
+        let json_val = if let Some(source_field) = schema.flatten_sources.get(col.name.as_str()) {
+            obj.get(source_field.as_str())
+                .and_then(|v| v.as_object())
+                .and_then(|nested| nested.get(col.original_name.as_str()))
+                .unwrap_or(&Value::Null)
+        } else {
+            obj.get(&col.original_name).unwrap_or(&Value::Null)
+        };
 
         // Objects and non-array-typed arrays become child tables, not columns.
         // Arrays typed as PgType::Array fall through to coerce() below.
@@ -430,9 +508,15 @@ fn insert_object(
                                 sinks, anomalies, child_schema, nested, row_id, sibling_schema,
                             )?;
                         }
+                        WideStrategy::NormalizeDynamicKeys { id_column } => {
+                            insert_normalize_dynamic_keys(
+                                sinks, anomalies, child_schema, nested, row_id, id_column,
+                            )?;
+                        }
                         WideStrategy::Columns
                         | WideStrategy::AutoSplit { .. }
-                        | WideStrategy::Ignore => {
+                        | WideStrategy::Ignore
+                        | WideStrategy::Flatten { .. } => {
                             let child_id = Uuid::now_v7();
                             insert_object(
                                 path_map, sinks, anomalies, child_schema,
@@ -689,6 +773,82 @@ fn insert_keyed_pivot_object(
             let json_val = child_obj.get(&col.original_name).unwrap_or(&Value::Null);
 
             // Sub-objects and arrays within the child → NULL (they have no column)
+            if matches!(json_val, Value::Object(_))
+                || (matches!(json_val, Value::Array(_))
+                    && !matches!(col.pg_type, crate::schema::type_tracker::PgType::Array(_)))
+            {
+                builder.push_null();
+                continue;
+            }
+
+            match coerce(json_val, &col.pg_type) {
+                CoerceResult::Ok(s) => builder.push_value(&s),
+                CoerceResult::Null => builder.push_null(),
+                CoerceResult::Anomaly { actual_value, actual_type } => {
+                    anomalies.record(
+                        &schema.name, &col.name, &row_id.to_string(),
+                        &col.pg_type.as_sql(), &actual_value, actual_type,
+                    )?;
+                    builder.push_null();
+                }
+            }
+        }
+
+        anomalies.inc_total(&schema.name);
+        if let Some(sink) = sinks.get_mut(&schema.name) {
+            sink.write_row(builder.finish())?;
+        }
+    }
+    Ok(())
+}
+
+/// Insert one row per key for a NormalizeDynamicKeys table.
+/// Columns: j2s_id, j2s_parent_id, {id_column} TEXT, <union data cols...>
+///
+/// Mirrors insert_keyed_pivot_object but uses the user-configured id_column name
+/// instead of a SiblingSchema. Non-Object values (scalars, arrays) are skipped.
+fn insert_normalize_dynamic_keys(
+    sinks: &mut HashMap<String, TempFileSink>,
+    anomalies: &mut AnomalyCollector,
+    schema: &TableSchema,
+    obj: &serde_json::Map<String, Value>,
+    parent_id: Uuid,
+    id_column: &str,
+) -> Result<()> {
+    for (key, value) in obj {
+        let child_obj = match value {
+            Value::Object(o) => o,
+            _ => continue, // skip scalars and arrays
+        };
+
+        let row_id = Uuid::now_v7();
+        let mut builder = RowBuilder::new();
+
+        for col in &schema.columns {
+            if col.is_generated {
+                if col.is_parent_fk {
+                    builder.push_uuid(parent_id);
+                } else {
+                    match col.name.as_str() {
+                        "j2s_id" => builder.push_uuid(row_id),
+                        _ => builder.push_null(),
+                    }
+                }
+                continue;
+            }
+
+            // ID column: the original JSON key of this entry
+            if col.original_name == id_column {
+                match escape_copy_text(key) {
+                    Some(escaped) => builder.push_value(&escaped),
+                    None => builder.push_null(),
+                }
+                continue;
+            }
+
+            // Data column: look up in child object by original field name
+            let json_val = child_obj.get(&col.original_name).unwrap_or(&Value::Null);
+
             if matches!(json_val, Value::Object(_))
                 || (matches!(json_val, Value::Array(_))
                     && !matches!(col.pg_type, crate::schema::type_tracker::PgType::Array(_)))

@@ -71,11 +71,11 @@ async fn test_nested_row_counts_json_array() {
         .unwrap();
 
     let path = fixture("users.json");
-    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
+    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
         .await
         .unwrap();
 
@@ -114,11 +114,11 @@ async fn test_nested_row_counts_ndjson() {
         .unwrap();
 
     let path = fixture("users.jsonl");
-    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
+    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
         .await
         .unwrap();
 
@@ -149,11 +149,11 @@ async fn test_anomaly_detection() {
         .unwrap();
 
     let path = fixture("anomalies.jsonl");
-    let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
+    let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
         .await
         .unwrap();
 
@@ -189,7 +189,7 @@ async fn test_anomaly_dir_streaming() {
         .unwrap();
 
     let path = fixture("anomalies.jsonl");
-    let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
@@ -249,21 +249,21 @@ async fn test_drop_existing() {
     let path = fixture("users.json");
 
     // Premier import
-    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
+    pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
         .await
         .unwrap();
     assert_eq!(row_count(&client, &schema, "users").await, 3);
 
     // Second import avec drop_existing=true → repart de zéro
-    let p1b = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1b = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
     db::ddl::create_tables(&client, &p1b.schemas, &schema, true)
         .await
         .unwrap();
-    pass2::runner::run(&path, "users", &p1b.schemas, &client, &schema, 1000, false, None, 1, None)
+    pass2::runner::run(&path, "users", &p1b.schemas, &client, &schema, 1000, false, None, 1, None, None)
         .await
         .unwrap();
 
@@ -291,11 +291,11 @@ async fn test_transaction_commit() {
         .unwrap();
 
     let path = fixture("users.json");
-    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, true, None, 1, None)
+    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, true, None, 1, None, None)
         .await
         .unwrap();
 
@@ -317,7 +317,7 @@ async fn test_transaction_commit() {
 #[test]
 fn test_schema_inference_no_db() {
     let path = fixture("users.json");
-    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
     // 5 tables attendues
     assert_eq!(p1.schemas.len(), 5);
@@ -360,7 +360,7 @@ async fn test_array_as_pg_array() {
 
     let path = fixture("users.json");
     // array_as_pg_array = true → scalar arrays become columns
-    let p1 = pass1::runner::run(&path, "users", 256, true, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1 = pass1::runner::run(&path, "users", 256, true, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
     // users_tags table must NOT exist; we expect 4 tables instead of 5
     assert_eq!(p1.schemas.len(), 4);
@@ -383,7 +383,7 @@ async fn test_array_as_pg_array() {
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();
-    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
+    let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
         .await
         .unwrap();
 
@@ -416,9 +416,9 @@ async fn test_float_nan_infinity_anomaly() {
     client.execute(&format!("CREATE SCHEMA \"{}\"", schema), &[]).await.unwrap();
 
     let path = fixture("anomalies_float.jsonl");
-    let p1 = pass1::runner::run(&path, "items", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1 = pass1::runner::run(&path, "items", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
     db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
-    let p2 = pass2::runner::run(&path, "items", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
+    let p2 = pass2::runner::run(&path, "items", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
         .await.unwrap();
 
     // Toutes les lignes sont insérées
@@ -448,9 +448,9 @@ async fn test_null_byte_anomaly() {
     client.execute(&format!("CREATE SCHEMA \"{}\"", schema), &[]).await.unwrap();
 
     let path = fixture("anomalies_nullbytes.jsonl");
-    let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
     db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
-    let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1, None)
+    let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
         .await.unwrap();
 
     // Toutes les lignes sont insérées
@@ -490,7 +490,7 @@ async fn test_parallel_copy() {
         .unwrap();
 
     let path = fixture("users.json");
-    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001).unwrap();
+    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
     db::ddl::create_tables(&client, &p1.schemas, &schema, false)
         .await
         .unwrap();

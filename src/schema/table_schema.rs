@@ -1,4 +1,6 @@
-use super::type_tracker::{widen_pg_types, PgType};
+use std::collections::HashMap;
+
+use super::type_tracker::PgType;
 
 /// One suffix column in a StructuredPivot table.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -76,6 +78,23 @@ pub enum WideStrategy {
     /// Key is present in < rare_threshold of rows — excluded from all schemas and data.
     /// Applied during finalize() before column building.
     Ignore,
+    /// Normalize dynamic keys: each key in the object becomes a row, the key itself becomes
+    /// a typed ID column. Similar to KeyedPivot but applied manually via the IHM.
+    /// e.g. images.12584 → { image_id: "12584", url: ..., width: ... }
+    NormalizeDynamicKeys {
+        /// Name of the column that will hold the original JSON key (e.g. "image_id").
+        id_column: String,
+    },
+    /// Flatten nested object: inlines the child object's scalar fields as columns in the
+    /// parent table. The child table is removed from the schema.
+    /// e.g. nutrients.calories → parent.nutrients_calories
+    /// Set temporarily during apply_flatten(); removed from schema by the end of that function.
+    Flatten {
+        /// Prefix prepended to inlined column names (e.g. "nutrients_").
+        prefix: String,
+        /// Maximum nesting depth to flatten. Currently only depth = 1 is implemented.
+        max_depth: u8,
+    },
 }
 
 /// A column in a finalized table schema.
@@ -157,6 +176,11 @@ pub struct TableSchema {
     pub depth: usize,
     /// How wide-table keys are stored (auto-detected or user-overridden).
     pub wide_strategy: WideStrategy,
+    /// Maps prefixed column name → source JSON field for columns inlined via Flatten strategy.
+    /// e.g. "nutrients_calories" → "nutrients" means: look up obj["nutrients"]["calories"].
+    /// Empty for tables that have no flattened children.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub flatten_sources: HashMap<String, String>,
 }
 
 impl TableSchema {
@@ -169,6 +193,7 @@ impl TableSchema {
             child_kind: None,
             depth,
             wide_strategy: WideStrategy::default(),
+            flatten_sources: HashMap::new(),
         }
     }
 
@@ -212,6 +237,7 @@ impl WideStrategy {
     /// Returns true if child tables should be excluded from the schema because their
     /// data is absorbed into this table's wide column (Pivot / Jsonb / etc.).
     /// AutoSplit does NOT absorb children — they remain as separate tables.
+    /// NormalizeDynamicKeys and Flatten absorb their child tables.
     pub fn absorbs_children(&self) -> bool {
         matches!(
             self,
@@ -219,6 +245,8 @@ impl WideStrategy {
                 | WideStrategy::Jsonb
                 | WideStrategy::StructuredPivot(_)
                 | WideStrategy::KeyedPivot(_)
+                | WideStrategy::NormalizeDynamicKeys { .. }
+                | WideStrategy::Flatten { .. }
         )
     }
 }

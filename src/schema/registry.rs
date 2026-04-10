@@ -707,6 +707,10 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: WideStrat
             // AutoSplit is handled inline in finalize(); Ignore is per-key, not per-table.
             // Neither reaches this function.
         }
+        WideStrategy::NormalizeDynamicKeys { .. } | WideStrategy::Flatten { .. } => {
+            // These strategies require the full schemas slice.
+            // Use apply_normalize_dynamic_keys() or apply_flatten() instead.
+        }
     }
 }
 
@@ -926,7 +930,7 @@ pub fn build_union_columns(children: &[&TableSchema]) -> Vec<ColumnSchema> {
 }
 
 /// Classify the shape of sibling keys to produce a semantic column name.
-fn classify_key_shape(keys: &[&str]) -> KeyShape {
+pub fn classify_key_shape(keys: &[&str]) -> KeyShape {
     let total = keys.len();
     if total == 0 {
         return KeyShape::Slug;
@@ -954,6 +958,164 @@ fn classify_key_shape(keys: &[&str]) -> KeyShape {
     } else {
         KeyShape::Slug
     }
+}
+
+/// Apply NormalizeDynamicKeys strategy to a table: collapse all its direct Object children
+/// into a single normalized table with `id_column` TEXT + union of value columns.
+///
+/// Equivalent to a user-triggered KeyedPivot with a custom ID column name.
+/// Call `exclude_absorbed_children` after to remove the now-absorbed child tables.
+pub fn apply_normalize_dynamic_keys(
+    schemas: &mut Vec<TableSchema>,
+    table_name: &str,
+    id_column: String,
+) {
+    let target_idx = match schemas.iter().position(|s| s.name == table_name) {
+        Some(i) => i,
+        None => {
+            eprintln!("WARNING: apply_normalize_dynamic_keys: table '{}' not found", table_name);
+            return;
+        }
+    };
+
+    let child_indices: Vec<usize> = schemas
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            s.parent_table.as_deref() == Some(table_name)
+                && matches!(s.child_kind, Some(ChildKind::Object))
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    if child_indices.is_empty() {
+        eprintln!(
+            "WARNING: apply_normalize_dynamic_keys: no Object children found for '{}'; strategy not applied",
+            table_name
+        );
+        return;
+    }
+
+    let children: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
+    let union_cols = build_union_columns(&children);
+
+    let keys: Vec<String> = child_indices
+        .iter()
+        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
+        .collect();
+    let key_shape = classify_key_shape(&keys.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+
+    let target = &mut schemas[target_idx];
+    target.columns.retain(|c| c.is_generated);
+    target.columns.push(ColumnSchema {
+        name: id_column.clone(),
+        original_name: id_column.clone(),
+        pg_type: PgType::Text,
+        not_null: true,
+        is_generated: false,
+        is_parent_fk: false,
+    });
+    for col in union_cols {
+        target.columns.push(col);
+    }
+    eprintln!(
+        "  NormalizeDynamicKeys: {} ({} child tables → 1, id_col: {} [{}])",
+        table_name,
+        child_indices.len(),
+        id_column,
+        key_shape,
+    );
+    target.wide_strategy = WideStrategy::NormalizeDynamicKeys { id_column };
+
+    exclude_absorbed_children(schemas);
+}
+
+/// Apply Flatten strategy to a child table: inline its scalar columns into the parent table
+/// with the given prefix. The child table is removed from the schema after inlining.
+///
+/// After this call, `schemas` no longer contains `child_table_name`. The parent table gains
+/// new data columns and a populated `flatten_sources` map for Pass 2 lookups.
+pub fn apply_flatten(
+    schemas: &mut Vec<TableSchema>,
+    child_table_name: &str,
+    prefix: &str,
+    max_depth: u8,
+) {
+    // Collect info before any mutations (avoids borrow conflicts)
+    let (parent_name, field_name, new_cols) = {
+        let child = match schemas.iter().find(|s| s.name == child_table_name) {
+            Some(c) => c,
+            None => {
+                eprintln!("WARNING: apply_flatten: table '{}' not found", child_table_name);
+                return;
+            }
+        };
+
+        let parent_name = match child.parent_table.clone() {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "WARNING: apply_flatten: '{}' is a root table, cannot flatten into parent",
+                    child_table_name
+                );
+                return;
+            }
+        };
+
+        // The JSON field name is the last path segment of the child table
+        let field_name = child.path.last()
+            .cloned()
+            .unwrap_or_else(|| child_table_name.to_string());
+
+        // Build prefixed copies of all data columns (max_depth=1: scalars only)
+        let new_cols: Vec<ColumnSchema> = child
+            .data_columns()
+            .map(|col| ColumnSchema {
+                name: format!("{}{}", prefix, col.name),
+                original_name: col.original_name.clone(),
+                pg_type: col.pg_type.clone(),
+                not_null: false, // flattened columns are always nullable in parent
+                is_generated: false,
+                is_parent_fk: false,
+            })
+            .collect();
+
+        (parent_name, field_name, new_cols)
+    };
+
+    // Mark child as Flatten so absorbs_children() returns true for its descendants
+    if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
+        child.wide_strategy = WideStrategy::Flatten { prefix: prefix.to_string(), max_depth };
+    }
+
+    // Remove descendants of the child (e.g. nutrients.sub_items)
+    exclude_absorbed_children(schemas);
+
+    // Add flattened columns + flatten_sources to parent
+    if let Some(parent) = schemas.iter_mut().find(|s| s.name == parent_name) {
+        for col in &new_cols {
+            if !parent.columns.iter().any(|c| c.name == col.name) {
+                parent.flatten_sources.insert(col.name.clone(), field_name.clone());
+                parent.columns.push(col.clone());
+            }
+        }
+        eprintln!(
+            "  Flatten: {}.{} → {} columns inlined into {} (prefix: {:?})",
+            parent_name,
+            field_name,
+            new_cols.len(),
+            parent_name,
+            prefix,
+        );
+    } else {
+        eprintln!(
+            "WARNING: apply_flatten: parent table '{}' not found for '{}'",
+            parent_name, child_table_name
+        );
+    }
+
+    // Remove the flattened child table from the schema
+    schemas.retain(|s| !matches!(s.wide_strategy, WideStrategy::Flatten { .. }));
 }
 
 fn type_histogram(tracker: &TypeTracker) -> Vec<(String, u64)> {
