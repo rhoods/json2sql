@@ -196,7 +196,10 @@ impl Default for AppState {
 impl AppState {
     /// Convenience: true when both source file and PG config are ready.
     pub fn ready_to_start(&self) -> bool {
-        self.source_file.is_some() && self.pg.is_complete()
+        self.source_file.is_some()
+            && self.pg.is_complete()
+            && !self.pg_schema.is_empty()
+            && self.pg_schema.chars().all(|c| c.is_alphanumeric() || c == '_')
     }
 
     /// Abort the running task (if any), reset all transient state, and return to Setup.

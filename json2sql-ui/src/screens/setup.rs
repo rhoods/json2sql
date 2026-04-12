@@ -16,9 +16,19 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "No file selected".to_string());
-    let source_size_gb: Option<f64> = source_path.as_ref().and_then(|p| {
-        std::fs::metadata(p).ok().map(|m| m.len() as f64 / 1_073_741_824.0)
+    // File size for display — computed once per render from already-known path.
+    let source_size_bytes: Option<u64> = source_path.as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len());
+    let source_size_label: Option<String> = source_size_bytes.map(|b| {
+        if b >= 1_073_741_824 {
+            format!("{:.1} GB", b as f64 / 1_073_741_824.0)
+        } else {
+            format!("{} MB", b / 1_048_576)
+        }
     });
+    // Warn if > 5 GB — analysis may be slow.
+    let source_large = source_size_bytes.map(|b| b > 5 * 1_073_741_824).unwrap_or(false);
 
     let pg_ok = state.read().pg_ok;
     let pg_testing = state.read().pg_testing;
@@ -73,19 +83,17 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                         span {
                             style: "flex:1;font-family:{theme::FONT_CODE};font-size:0.8125rem;color:{theme::ON_SURFACE_VARIANT};background:{theme::BG_INPUT};padding:7px 10px;border-radius:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                             "{source_label}"
-                            if let Some(gb) = source_size_gb {
+                            if let Some(ref size) = source_size_label {
                                 span {
                                     style: "margin-left:8px;color:{theme::ON_SURFACE_DIM};font-size:0.75rem;",
-                                    "({gb:.1} GB)"
+                                    "({size})"
                                 }
                             }
                         }
-                        if let Some(gb) = source_size_gb {
-                            if gb > 5.0 {
-                                span {
-                                    style: "color:{theme::TERTIARY};font-size:0.75rem;",
-                                    "Large file — analysis may take several minutes"
-                                }
+                        if source_large {
+                            span {
+                                style: "color:{theme::TERTIARY};font-size:0.75rem;",
+                                "Large file — analysis may take several minutes"
                             }
                         }
                         button {
@@ -206,21 +214,33 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                     }
 
                     // Schema
-                    div {
-                        style: "margin-bottom:12px;",
-                        label {
-                            style: "display:block;color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;margin-bottom:3px;",
-                            "Schema"
-                        }
-                        input {
-                            style: "{theme::STYLE_INPUT}",
-                            r#type: "text",
-                            value: "{pg_schema}",
-                            placeholder: "public",
-                            oninput: move |e| {
-                                let v = e.value();
-                                state.write().pg_schema = if v.is_empty() { "public".to_string() } else { v };
-                            },
+                    {
+                        // Valid PG identifier: letters, digits, underscore only.
+                        let schema_invalid = !pg_schema.chars().all(|c| c.is_alphanumeric() || c == '_');
+                        rsx! {
+                            div {
+                                style: "margin-bottom:12px;",
+                                label {
+                                    style: "display:block;color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;margin-bottom:3px;",
+                                    "Schema"
+                                }
+                                input {
+                                    style: "{theme::STYLE_INPUT}",
+                                    r#type: "text",
+                                    value: "{pg_schema}",
+                                    placeholder: "public",
+                                    oninput: move |e| {
+                                        let v = e.value().trim().to_string();
+                                        state.write().pg_schema = if v.is_empty() { "public".to_string() } else { v };
+                                    },
+                                }
+                                if schema_invalid {
+                                    span {
+                                        style: "font-size:0.6875rem;color:{theme::ERROR};",
+                                        "Only letters, digits and underscores allowed"
+                                    }
+                                }
+                            }
                         }
                     }
 
