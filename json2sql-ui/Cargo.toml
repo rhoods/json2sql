@@ -13,10 +13,18 @@ json2sql = { path = ".." }
 
 # Desktop UI
 dioxus = { version = "0.6", features = ["desktop"] }
+rfd = { version = "0.14", default-features = false, features = ["tokio", "xdg-portal"] }
+
+# Async runtime (needed for spawn + channels alongside Dioxus)
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# PostgreSQL — test connection from Setup screen
+tokio-postgres = { version = "0.7", default-features = false }
+urlencoding = "2"
 
 # Error handling
 anyhow = "1"

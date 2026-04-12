@@ -3,9 +3,15 @@
 _Mis à jour automatiquement en fin de session._
 
 ## Prochaines tâches
-- IHM Leptos : consolider la visualisation du schéma (compteur d'anomalies par table)
-- Log des flush périodiques (`flush tablename (N rows)`)
-- Tester l'import OpenFoodFacts avec `--anomaly-dir` pour valider le streaming NDJSON à grande échelle
+- IHM : tester le flow complet sur un fichier réel (Setup → Analysis → Strategy → Preview → Import)
+- IHM : `selected_idx` dans AppState pour persister la sélection Strategy ↔ Preview
+- IHM : option `--anomaly-dir` exposable (checkbox + dossier) pour streamer les anomalies
+- IHM : compteur d'anomalies par table dans le panneau droit de Strategy/Preview
+- IHM : barre per-table dans Import = proportion, pas progression — à labelliser ou revoir
+- Tester l'import OpenFoodFacts avec l'IHM pour valider le flow à grande échelle
 
 ## Contexte de la session précédente
-<!-- Résumé de là où on en était -->
+
+### 2026-04-12 — Migration Leptos → Dioxus + squelette IHM
+Migration complète vers Dioxus desktop. Squelette 5 écrans implémenté, design system `theme.rs` créé,
+état global `Signal<AppState>` avec `apply_progress_event`. Pas encore de logique câblée dans les écrans.

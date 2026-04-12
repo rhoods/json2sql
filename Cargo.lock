@@ -2590,8 +2590,12 @@ dependencies = [
  "anyhow",
  "dioxus",
  "json2sql",
+ "rfd",
  "serde",
  "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "urlencoding",
 ]
 
 [[package]]
