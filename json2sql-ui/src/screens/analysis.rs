@@ -22,7 +22,9 @@ use crate::theme;
 #[component]
 pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
     let progress = state.read().pass1_progress.clone();
-    let pct = if progress.total_bytes > 0 {
+    let pct = if progress.done {
+        100
+    } else if progress.total_bytes > 0 {
         (progress.bytes_read as f64 / progress.total_bytes as f64 * 100.0) as u32
     } else if progress.rows_scanned > 0 {
         // Show some progress even when total_bytes is unknown

@@ -73,7 +73,7 @@ pub async fn run(
     }
 
     let mut anomalies = AnomalyCollector::new(anomaly_dir);
-    let (reader, _format) = JsonReader::open(path)?;
+    let (mut reader, _format) = JsonReader::open(path)?;
 
     let root_schema = schemas
         .iter()
@@ -93,7 +93,7 @@ pub async fn run(
     let flush_check_interval = if flush_threshold > 0 { (flush_threshold / 100).max(1) } else { 0 };
     let mut flush_check_counter = 0u64;
 
-    for item in reader {
+    while let Some(item) = reader.next() {
         let value = item?;
         if let Value::Object(ref obj) = value {
             let row_id = Uuid::now_v7();
@@ -115,7 +115,7 @@ pub async fn run(
                 if rows_processed % PROGRESS_INTERVAL == 0 {
                     let _ = tx.send(ProgressEvent::Pass2Progress {
                         rows_processed,
-                        bytes_read: 0, // reader bytes not accessible here; updated below
+                        bytes_read: reader.bytes_read(),
                         total_bytes,
                     });
                 }
@@ -146,6 +146,16 @@ pub async fn run(
                     }
                 }
             }
+        }
+    }
+
+    if let Some(ref tx) = progress_tx {
+        if rows_processed > 0 && rows_processed % PROGRESS_INTERVAL != 0 {
+            let _ = tx.send(ProgressEvent::Pass2Progress {
+                rows_processed,
+                bytes_read: reader.bytes_read(),
+                total_bytes,
+            });
         }
     }
 
@@ -238,12 +248,13 @@ pub async fn run(
                         format!("COPY {} ({} rows)", name, count)
                     ));
                 }
+                let remaining = sink.row_count;
                 let inserted = sink.copy_to_db(client).await?;
                 rows_per_table.insert(name.clone(), inserted);
                 if let Some(ref tx) = progress_tx {
                     let _ = tx.send(ProgressEvent::Pass2Flush {
                         table_name: name.clone(),
-                        rows_flushed: inserted,
+                        rows_flushed: remaining,
                     });
                 }
             }

@@ -85,6 +85,16 @@ pub fn run(
         }
     }
 
+    if let Some(ref tx) = progress_tx {
+        if total_rows > 0 && total_rows % PROGRESS_INTERVAL != 0 {
+            let _ = tx.send(ProgressEvent::Pass1Progress {
+                rows_scanned: total_rows,
+                bytes_read: reader.bytes_read(),
+                total_bytes,
+            });
+        }
+    }
+
     if let Some(ref bar) = progress {
         bar.finish();
     }
