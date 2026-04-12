@@ -74,7 +74,7 @@ pub const STYLE_INPUT: &str =
 
 /// Progress bar track.
 pub const STYLE_PROGRESS_TRACK: &str =
-    "background:#353535;height:6px;width:100%;";
+    "background:#353535;height:6px;width:100%;overflow:hidden;border-radius:3px;";
 
 /// Progress bar indicator (gradient, no rounded corners — "Brutalist").
 pub const STYLE_PROGRESS_BAR: &str =

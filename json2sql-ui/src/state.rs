@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use urlencoding::encode;
+use zeroize::Zeroize;
 use json2sql::io::progress_event::ProgressEvent;
 use json2sql::schema::table_schema::TableSchema;
 
@@ -32,6 +33,12 @@ pub struct PgConfig {
     pub password: String,
 }
 
+impl Drop for PgConfig {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
+}
+
 impl Default for PgConfig {
     fn default() -> Self {
         Self {
@@ -48,10 +55,11 @@ impl PgConfig {
     /// Build a postgres connection URL from the config fields.
     /// All user-provided components are percent-encoded to handle special characters.
     pub fn to_url(&self) -> String {
+        // IPv6 addresses must be bracketed; encode host for all other special chars.
         let host = if self.host.contains(':') && !self.host.starts_with('[') {
-            format!("[{}]", self.host)
+            format!("[{}]", encode(&self.host))
         } else {
-            self.host.clone()
+            encode(&self.host).into_owned()
         };
 
         format!(
@@ -125,16 +133,20 @@ impl Pass2Progress {
 // Root application state
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct AppState {
     pub screen: AppScreen,
 
     // — Screen 1 —
     pub source_file: Option<PathBuf>,
     pub pg: PgConfig,
+    /// Target PostgreSQL schema (default: "public").
+    pub pg_schema: String,
     /// Drop and recreate tables before import (destructive — clean slate).
     /// False = CREATE IF NOT EXISTS (safe for reruns, may accumulate data).
     pub drop_existing: bool,
+    /// Optional directory where anomaly NDJSON files are streamed during Pass 2.
+    pub anomaly_dir: Option<PathBuf>,
     /// True while the "Test connection" check is in flight.
     pub pg_testing: bool,
     /// Some(true/false) after the test completes.
@@ -158,6 +170,27 @@ pub struct AppState {
     /// Handle to the currently running Pass 1 or Pass 2 task.
     /// Set by the screen that spawns the task; cleared by `cancel()`.
     pub abort_handle: Option<tokio::task::AbortHandle>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            screen: AppScreen::default(),
+            source_file: None,
+            pg: PgConfig::default(),
+            pg_schema: "public".to_string(),
+            drop_existing: false,
+            anomaly_dir: None,
+            pg_testing: false,
+            pg_ok: None,
+            pg_error: None,
+            pass1_progress: Pass1Progress::default(),
+            schemas: Vec::new(),
+            selected_table_idx: 0,
+            pass2_progress: Pass2Progress::default(),
+            abort_handle: None,
+        }
+    }
 }
 
 impl AppState {

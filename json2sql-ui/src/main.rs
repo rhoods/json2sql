@@ -19,8 +19,10 @@ fn main() {
     // mousedown event — otherwise the webview receives the click but the DOM element
     // never gets keyboard focus and typing is silently dropped.
     let head = r#"<style>
-/* Override webkit system theme for all inputs */
-input, textarea, select {
+/* Override webkit system theme for text inputs */
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+textarea,
+select {
     -webkit-appearance: none;
     -webkit-text-fill-color: #E4E2E6 !important;
     background-color: #353535 !important;
@@ -29,7 +31,8 @@ input, textarea, select {
     min-height: 32px;
     caret-color: #E4E2E6;
 }
-input::placeholder, textarea::placeholder {
+input:not([type="checkbox"]):not([type="radio"])::placeholder,
+textarea::placeholder {
     -webkit-text-fill-color: #717680 !important;
     opacity: 1;
 }
@@ -38,6 +41,23 @@ input:-webkit-autofill {
     -webkit-box-shadow: 0 0 0 100px #353535 inset !important;
     -webkit-text-fill-color: #E4E2E6 !important;
 }
+/* Buttons: ensure inline color is respected by webkit */
+button {
+    -webkit-text-fill-color: inherit;
+    color: inherit;
+}
+/* Checkbox: restore system appearance */
+input[type="checkbox"],
+input[type="radio"] {
+    -webkit-appearance: auto !important;
+    appearance: auto !important;
+    background-color: transparent !important;
+    min-height: unset !important;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+/* Progress bar track must clip its fill */
 </style>
 <script>
 document.addEventListener('DOMContentLoaded', function () {

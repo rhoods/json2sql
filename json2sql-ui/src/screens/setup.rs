@@ -10,18 +10,28 @@ use crate::theme;
 #[component]
 pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let ready = state.read().ready_to_start();
-    let source_label = state
-        .read()
-        .source_file
+    let source_path = state.read().source_file.clone();
+    let source_label = source_path
         .as_ref()
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "No file selected".to_string());
+    let source_size_gb: Option<f64> = source_path.as_ref().and_then(|p| {
+        std::fs::metadata(p).ok().map(|m| m.len() as f64 / 1_073_741_824.0)
+    });
 
     let pg_ok = state.read().pg_ok;
     let pg_testing = state.read().pg_testing;
     let pg_error = state.read().pg_error.clone();
     let drop_existing = state.read().drop_existing;
+    let pg_schema = state.read().pg_schema.clone();
+    let anomaly_label = state
+        .read()
+        .anomaly_dir
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "None".to_string());
     let pg_host = state.read().pg.host.clone();
     let pg_port = if state.read().pg.port == 0 {
         String::new()
@@ -63,6 +73,20 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                         span {
                             style: "flex:1;font-family:{theme::FONT_CODE};font-size:0.8125rem;color:{theme::ON_SURFACE_VARIANT};background:{theme::BG_INPUT};padding:7px 10px;border-radius:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                             "{source_label}"
+                            if let Some(gb) = source_size_gb {
+                                span {
+                                    style: "margin-left:8px;color:{theme::ON_SURFACE_DIM};font-size:0.75rem;",
+                                    "({gb:.1} GB)"
+                                }
+                            }
+                        }
+                        if let Some(gb) = source_size_gb {
+                            if gb > 5.0 {
+                                span {
+                                    style: "color:{theme::TERTIARY};font-size:0.75rem;",
+                                    "Large file — analysis may take several minutes"
+                                }
+                            }
                         }
                         button {
                             style: "{theme::STYLE_BTN_GHOST}white-space:nowrap;",
@@ -124,6 +148,12 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                     }
                                 },
                             }
+                            if state.read().pg.port == 0 {
+                                span {
+                                    style: "font-size:0.6875rem;color:{theme::ERROR};",
+                                    "Required"
+                                }
+                            }
                         }
                     }
 
@@ -175,6 +205,25 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                         }
                     }
 
+                    // Schema
+                    div {
+                        style: "margin-bottom:12px;",
+                        label {
+                            style: "display:block;color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;margin-bottom:3px;",
+                            "Schema"
+                        }
+                        input {
+                            style: "{theme::STYLE_INPUT}",
+                            r#type: "text",
+                            value: "{pg_schema}",
+                            placeholder: "public",
+                            oninput: move |e| {
+                                let v = e.value();
+                                state.write().pg_schema = if v.is_empty() { "public".to_string() } else { v };
+                            },
+                        }
+                    }
+
                     // Test connection
                     div {
                         style: "display:flex;align-items:center;gap:12px;",
@@ -186,11 +235,18 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                 state.write().pg_testing = true;
                                 state.write().pg_ok = None;
                                 state.write().pg_error = None;
-                                let result = tokio_postgres::connect(&url, tokio_postgres::NoTls).await;
-                                let ok = result.is_ok();
+                                let result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    tokio_postgres::connect(&url, tokio_postgres::NoTls),
+                                ).await;
+                                let (ok, err_msg) = match result {
+                                    Ok(Ok(_))    => (true, None),
+                                    Ok(Err(e))   => (false, Some(e.to_string())),
+                                    Err(_)       => (false, Some("Connection timed out (5s)".to_string())),
+                                };
                                 state.write().pg_testing = false;
                                 state.write().pg_ok = Some(ok);
-                                state.write().pg_error = result.err().map(|e| e.to_string());
+                                state.write().pg_error = err_msg;
                             },
                             "{test_btn_label}"
                         }
@@ -210,17 +266,52 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
 
                 // ── Options ──────────────────────────────────────────────
                 div {
-                    style: "display:flex;align-items:center;gap:8px;margin-bottom:20px;",
-                    input {
-                        r#type: "checkbox",
-                        id: "drop_existing",
-                        checked: drop_existing,
-                        onchange: move |e| { state.write().drop_existing = e.checked(); },
+                    style: "margin-bottom:20px;display:flex;flex-direction:column;gap:10px;",
+
+                    div {
+                        style: "display:flex;align-items:center;gap:8px;",
+                        input {
+                            r#type: "checkbox",
+                            id: "drop_existing",
+                            checked: drop_existing,
+                            onchange: move |e| { state.write().drop_existing = e.checked(); },
+                        }
+                        label {
+                            r#for: "drop_existing",
+                            style: "color:{theme::TERTIARY};font-size:0.8125rem;cursor:pointer;",
+                            "Drop existing tables before import (CASCADE)"
+                        }
                     }
-                    label {
-                        r#for: "drop_existing",
-                        style: "color:{theme::TERTIARY};font-size:0.8125rem;cursor:pointer;",
-                        "Drop existing tables before import (CASCADE)"
+
+                    div {
+                        style: "display:flex;align-items:center;gap:8px;",
+                        label {
+                            style: "color:{theme::ON_SURFACE_DIM};font-size:0.8125rem;white-space:nowrap;",
+                            "Anomaly output:"
+                        }
+                        span {
+                            style: "flex:1;font-family:{theme::FONT_CODE};font-size:0.75rem;color:{theme::ON_SURFACE_VARIANT};background:{theme::BG_INPUT};padding:5px 8px;border-radius:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                            "{anomaly_label}"
+                        }
+                        button {
+                            style: "{theme::STYLE_BTN_GHOST}padding:5px 10px;font-size:0.75rem;white-space:nowrap;",
+                            onclick: move |_| async move {
+                                if let Some(dir) = rfd::AsyncFileDialog::new()
+                                    .pick_folder()
+                                    .await
+                                {
+                                    state.write().anomaly_dir = Some(dir.path().to_path_buf());
+                                }
+                            },
+                            "Browse…"
+                        }
+                        if state.read().anomaly_dir.is_some() {
+                            button {
+                                style: "{theme::STYLE_BTN_GHOST}padding:5px 10px;font-size:0.75rem;",
+                                onclick: move |_| { state.write().anomaly_dir = None; },
+                                "✕"
+                            }
+                        }
                     }
                 }
 

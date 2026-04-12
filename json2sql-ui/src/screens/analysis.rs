@@ -49,6 +49,9 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
 
     // Launch Pass 1 once on mount. The coroutine runs until the component unmounts.
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
+        // Reset progress in case the screen is remounted (e.g. Cancel → re-navigate).
+        state.write().pass1_progress = crate::state::Pass1Progress::default();
+
         // Derive root table name from file stem (same logic as CLI).
         let (source_file, root_table) = {
             let source_file_opt = state.read().source_file.clone();
@@ -147,9 +150,24 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 // Right — live counters (40%)
                 div {
                     style: "flex:0 1 40%;min-width:0;min-height:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};padding:24px;",
-                    p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0 0 8px 0;", "Tables detected: {progress.tables_count}" }
-                    p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0 0 8px 0;", "Columns total: {progress.columns_count}" }
-                    p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0;", "Records scanned: {progress.rows_scanned}" }
+                    {
+                        let detecting = progress.rows_scanned > 0 && !progress.done;
+                        let tables_str = if detecting && progress.tables_count == 0 {
+                            "Detecting…".to_string()
+                        } else {
+                            progress.tables_count.to_string()
+                        };
+                        let cols_str = if detecting && progress.columns_count == 0 {
+                            "Detecting…".to_string()
+                        } else {
+                            progress.columns_count.to_string()
+                        };
+                        rsx! {
+                            p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0 0 8px 0;", "Tables detected: {tables_str}" }
+                            p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0 0 8px 0;", "Columns total: {cols_str}" }
+                            p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0;", "Records scanned: {progress.rows_scanned}" }
+                        }
+                    }
                 }
             }
 

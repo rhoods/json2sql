@@ -33,11 +33,12 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
         };
     }
 
+    let pg_schema = state.read().pg_schema.clone();
     let idx = state.read().selected_table_idx.min(schemas.len().saturating_sub(1));
     let selected = &schemas[idx];
 
     // Generate DDL for the selected table (preview mode: no DROP, IF NOT EXISTS).
-    let ddl = generate_create_table(selected, "public", false);
+    let ddl = generate_create_table(selected, &pg_schema, false);
 
     // Pre-calculate column counts for better performance
     let (data_cols, gen_cols) = selected.columns.iter()
