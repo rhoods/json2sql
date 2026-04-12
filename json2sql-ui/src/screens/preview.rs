@@ -4,6 +4,13 @@
 ///   left 25%  — table list with strategy badges
 ///   center 45% — generated DDL for selected table
 ///   right 30%  — table summary (strategy, columns, FK)
+
+// UI Constants
+const SELECTED_ROW_BG: &str = "#00A57233";
+const SELECTED_ACCENT_COLOR: &str = "#4EDEA3";
+const BORDER_COLOR: &str = "#40475233";
+const BADGE_TEXT_COLOR: &str = "#0D0D0D";
+
 use dioxus::prelude::*;
 
 use json2sql::db::ddl::generate_create_table;
@@ -32,8 +39,12 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
     // Generate DDL for the selected table (preview mode: no DROP, IF NOT EXISTS).
     let ddl = generate_create_table(selected, "public", false);
 
-    let data_cols = selected.columns.iter().filter(|c| !c.is_generated).count();
-    let gen_cols  = selected.columns.iter().filter(|c| c.is_generated).count();
+    // Pre-calculate column counts for better performance
+    let (data_cols, gen_cols) = selected.columns.iter()
+        .fold((0, 0), |(data, gen), col| {
+            if col.is_generated { (data, gen + 1) } else { (data + 1, gen) }
+        });
+
     let strategy_lbl = strategy_label(&selected.wide_strategy);
     let strategy_col = strategy_color(&selected.wide_strategy);
 
@@ -55,19 +66,19 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
 
             // ── Three-panel workspace ─────────────────────────────────────
             div {
-                style: "display:flex;flex:1;overflow:hidden;",
+                style: "display:flex;flex:1;overflow:hidden;min-height:0;min-width:0;",
 
                 // ── Left — table list (25%) ───────────────────────────────
                 div {
-                    style: "flex:0 0 25%;background:{theme::BG_SIDEBAR};overflow-y:auto;padding:4px 0;",
+                    style: "flex:0 1 25%;min-width:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};overflow-y:auto;padding:4px 0;",
                     for (i, table) in schemas.iter().enumerate() {
                         {
                             let is_selected = i == idx;
                             let indent = table.depth * 12;
                             let label = strategy_label(&table.wide_strategy);
                             let badge_color = strategy_color(&table.wide_strategy);
-                            let row_bg = if is_selected { "background:#00A57233;" } else { "background:transparent;" };
-                            let accent = if is_selected { "border-left:2px solid #4EDEA3;" } else { "border-left:2px solid transparent;" };
+                            let row_bg = if is_selected { format!("background:{};", SELECTED_ROW_BG) } else { "background:transparent;".to_string() };
+                            let accent = if is_selected { format!("border-left:2px solid {};", SELECTED_ACCENT_COLOR) } else { "border-left:2px solid transparent;".to_string() };
                             rsx! {
                                 div {
                                     key: "{i}",
@@ -78,7 +89,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                                         "{table.name}"
                                     }
                                     span {
-                                        style: "font-size:0.5625rem;font-weight:700;letter-spacing:0.04em;color:#0D0D0D;background:{badge_color};padding:1px 4px;border-radius:2px;flex-shrink:0;",
+                                        style: "font-size:0.5625rem;font-weight:700;letter-spacing:0.04em;color:{BADGE_TEXT_COLOR};background:{badge_color};padding:1px 4px;border-radius:2px;flex-shrink:0;",
                                         "{label}"
                                     }
                                 }
@@ -89,7 +100,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
 
                 // ── Center — DDL preview (45%) ────────────────────────────
                 div {
-                    style: "flex:0 0 45%;background:{theme::BG_EDITOR};overflow-y:auto;padding:16px;",
+                    style: "flex:0 1 45%;min-width:0;box-sizing:border-box;background:{theme::BG_EDITOR};overflow-y:auto;padding:16px;",
                     pre {
                         style: "font-family:{theme::FONT_CODE};font-size:0.8125rem;color:{theme::ON_SURFACE};margin:0;white-space:pre-wrap;word-break:break-all;",
                         "{ddl}"
@@ -98,7 +109,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
 
                 // ── Right — table summary (30%) ───────────────────────────
                 div {
-                    style: "flex:0 0 30%;background:{theme::BG_SIDEBAR};padding:16px;overflow-y:auto;",
+                    style: "flex:0 1 30%;min-width:0;min-height:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};padding:16px;overflow-y:auto;",
                     h3 {
                         style: "color:{theme::ON_SURFACE};font-size:0.875rem;font-weight:600;margin:0 0 16px 0;",
                         "Table summary"
@@ -111,7 +122,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                         style: "display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #40475233;",
                         span { style: "color:{theme::ON_SURFACE_DIM};font-size:0.8125rem;", "Strategy" }
                         span {
-                            style: "font-size:0.6875rem;font-weight:700;color:#0D0D0D;background:{strategy_col};padding:2px 6px;border-radius:2px;",
+                            style: "font-size:0.6875rem;font-weight:700;color:{BADGE_TEXT_COLOR};background:{strategy_col};padding:2px 6px;border-radius:2px;",
                             "{strategy_lbl}"
                         }
                     }
@@ -156,11 +167,13 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                 button {
                     style: "{theme::STYLE_BTN_GHOST}",
                     onclick: move |_| { state.write().screen = AppScreen::Strategy; },
+                    "aria-label": "Return to strategy editor",
                     "← Back to Strategies"
                 }
                 button {
                     style: "{theme::STYLE_BTN_PRIMARY}",
                     onclick: move |_| { state.write().screen = AppScreen::Import; },
+                    "aria-label": "Proceed to data import",
                     "Start Import →"
                 }
             }
@@ -182,7 +195,7 @@ fn SummaryRow(label: &'static str, value: String, mono: bool) -> Element {
 
     rsx! {
         div {
-            style: "display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #40475233;",
+            style: "display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid {BORDER_COLOR};",
             span { style: "color:{theme::ON_SURFACE_DIM};font-size:0.8125rem;", "{label}" }
             span { style: "{value_style}", "{value}" }
         }

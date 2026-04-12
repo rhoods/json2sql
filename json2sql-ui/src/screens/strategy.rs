@@ -4,6 +4,14 @@
 ///   left 25%  — table list with strategy badges
 ///   center 45% — column list for selected table
 ///   right 30%  — strategy configurator
+
+// UI constants
+const SELECTED_ROW_BG: &str = "#00A57233";
+const SELECTED_ACCENT_COLOR: &str = "#4EDEA3";
+const BORDER_COLOR_LIGHT: &str = "#40475266";
+const BORDER_COLOR_MEDIUM: &str = "#40475233";
+const BADGE_TEXT_COLOR: &str = "#0D0D0D";
+
 use dioxus::prelude::*;
 
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
@@ -40,6 +48,9 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let current_strategy = selected.wide_strategy.clone();
     let current_label = strategy_label(&current_strategy);
 
+    let normalize_id_col_value = normalize_id_col.read().trim().to_string();
+    let normalize_id_col_invalid = normalize_id_col_value.is_empty() || selected.columns.iter().any(|col| col.name == normalize_id_col_value);
+
     rsx! {
         div {
             style: "display:flex;flex-direction:column;height:100vh;background:{theme::BG_ROOT};",
@@ -63,11 +74,11 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
             // ── Three-panel workspace ─────────────────────────────────────
             div {
-                style: "display:flex;flex:1;overflow:hidden;",
+                style: "display:flex;flex:1;overflow:hidden;min-height:0;min-width:0;",
 
                 // ── Left — table list (25%) ───────────────────────────────
                 div {
-                    style: "flex:0 0 25%;background:{theme::BG_SIDEBAR};overflow-y:auto;padding:4px 0;",
+                    style: "flex:0 1 25%;min-width:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};overflow-y:auto;padding:4px 0;",
                     for (i, table) in schemas.iter().enumerate() {
                         {
                             let is_selected = i == idx;
@@ -75,14 +86,14 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             let label = strategy_label(&table.wide_strategy);
                             let badge_color = strategy_color(&table.wide_strategy);
                             let row_bg = if is_selected {
-                                "background:#00A57233;"
+                                format!("background:{};", SELECTED_ROW_BG)
                             } else {
-                                "background:transparent;"
+                                "background:transparent;".to_string()
                             };
                             let accent = if is_selected {
-                                "border-left:2px solid #4EDEA3;"
+                                format!("border-left:2px solid {};", SELECTED_ACCENT_COLOR)
                             } else {
-                                "border-left:2px solid transparent;"
+                                "border-left:2px solid transparent;".to_string()
                             };
                             rsx! {
                                 div {
@@ -105,7 +116,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
                 // ── Center — column list (45%) ────────────────────────────
                 div {
-                    style: "flex:0 0 45%;background:{theme::BG_WORKSPACE};overflow-y:auto;padding:16px;",
+                    style: "flex:0 1 45%;min-width:0;box-sizing:border-box;background:{theme::BG_WORKSPACE};overflow-y:auto;padding:16px;",
                     // Table header
                     div {
                         style: "margin-bottom:16px;",
@@ -121,8 +132,8 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                     div {
                         style: "display:grid;grid-template-columns:1fr auto;gap:0;",
                         // Header row
-                        span { style: "font-size:0.6875rem;text-transform:uppercase;letter-spacing:0.05em;color:{theme::ON_SURFACE_DIM};padding:4px 0;border-bottom:1px solid #40475266;", "Column" }
-                        span { style: "font-size:0.6875rem;text-transform:uppercase;letter-spacing:0.05em;color:{theme::ON_SURFACE_DIM};padding:4px 0;border-bottom:1px solid #40475266;text-align:right;", "Type" }
+                        span { style: "font-size:0.6875rem;text-transform:uppercase;letter-spacing:0.05em;color:{theme::ON_SURFACE_DIM};padding:4px 0;border-bottom:1px solid {BORDER_COLOR_LIGHT};", "Column" }
+                        span { style: "font-size:0.6875rem;text-transform:uppercase;letter-spacing:0.05em;color:{theme::ON_SURFACE_DIM};padding:4px 0;border-bottom:1px solid {BORDER_COLOR_LIGHT};text-align:right;", "Type" }
                         // Data rows
                         for col in selected.columns.iter() {
                             {
@@ -135,11 +146,11 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                 rsx! {
                                     span {
                                         key: "{col.name}",
-                                        style: "font-family:{theme::FONT_CODE};font-size:0.8125rem;color:{name_color};padding:4px 0;border-bottom:1px solid #40475233;",
+                                        style: "font-family:{theme::FONT_CODE};font-size:0.8125rem;color:{name_color};padding:4px 0;border-bottom:1px solid {BORDER_COLOR_MEDIUM};",
                                         "{col.name}"
                                     }
                                     span {
-                                        style: "font-family:{theme::FONT_CODE};font-size:0.8125rem;color:{theme::TERTIARY};padding:4px 0;border-bottom:1px solid #40475233;text-align:right;",
+                                        style: "font-family:{theme::FONT_CODE};font-size:0.8125rem;color:{theme::TERTIARY};padding:4px 0;border-bottom:1px solid {BORDER_COLOR_MEDIUM};text-align:right;",
                                         "{type_str}"
                                     }
                                 }
@@ -150,7 +161,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
                 // ── Right — strategy configurator (30%) ──────────────────
                 div {
-                    style: "flex:0 0 30%;background:{theme::BG_SIDEBAR};padding:16px;display:flex;flex-direction:column;overflow-y:auto;",
+                    style: "flex:0 1 30%;min-width:0;min-height:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};padding:16px;display:flex;flex-direction:column;overflow-y:auto;",
                     h3 {
                         style: "color:{theme::ON_SURFACE};font-size:0.875rem;font-weight:600;margin:0 0 4px 0;",
                         "Strategy"
@@ -201,7 +212,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
                     // NormalizeDynamicKeys — needs an id_column name
                     div {
-                        style: "border-top:1px solid #40475266;padding-top:12px;margin-bottom:6px;",
+                        style: "border-top:1px solid {BORDER_COLOR_LIGHT};padding-top:12px;margin-bottom:6px;",
                         p {
                             style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.75rem;margin:0 0 8px 0;font-weight:600;",
                             "Normalize dynamic keys"
@@ -219,6 +230,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                         }
                         button {
                             style: "{theme::STYLE_BTN_GHOST}width:100%;",
+                            disabled: normalize_id_col_invalid,
                             onclick: move |_| {
                                 let col = normalize_id_col.read().trim().to_string();
                                 let id_col = if col.is_empty() { "id".to_string() } else { col };
@@ -226,6 +238,12 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                     WideStrategy::NormalizeDynamicKeys { id_column: id_col };
                             },
                             "Apply Normalize"
+                        }
+                        if normalize_id_col_invalid {
+                            p {
+                                style: "color:{theme::ERROR};font-size:0.75rem;margin:8px 0 0 0;",
+                                "Enter a non-empty, unique key column name."
+                            }
                         }
                     }
 
@@ -269,8 +287,8 @@ fn StrategyButton(
 ) -> Element {
     let style = if active {
         format!(
-            "background:{};color:#0D0D0D;border:none;border-radius:2px;padding:7px 12px;font-size:0.8125rem;font-weight:600;cursor:pointer;text-align:left;width:100%;",
-            color
+            "background:{};color:{};border:none;border-radius:2px;padding:7px 12px;font-size:0.8125rem;font-weight:600;cursor:pointer;text-align:left;width:100%;",
+            color, BADGE_TEXT_COLOR
         )
     } else {
         format!(
@@ -282,6 +300,7 @@ fn StrategyButton(
     rsx! {
         button {
             style: "{style}",
+            aria_label: "{label}",
             onclick: move |e| onclick.call(e),
             "{label}"
         }

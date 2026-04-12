@@ -2,6 +2,16 @@
 ///
 /// Split layout: left 60% log panel, right 40% live stats.
 /// Launches the Pass 1 runner on mount via a Dioxus coroutine.
+
+// Pass 1 configuration constants
+const TEXT_THRESHOLD: u32 = 256;
+const WIDE_COLUMN_THRESHOLD: usize = 100;
+const SIBLING_THRESHOLD: usize = 3;
+const SIBLING_JACCARD: f64 = 0.5;
+const STABLE_THRESHOLD: f64 = 0.10;
+const RARE_THRESHOLD: f64 = 0.001;
+const MAX_VISIBLE_LOG_LINES: usize = 1000;
+
 use dioxus::prelude::*;
 
 use json2sql::io::progress_event::ProgressEvent;
@@ -14,6 +24,9 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
     let progress = state.read().pass1_progress.clone();
     let pct = if progress.total_bytes > 0 {
         (progress.bytes_read as f64 / progress.total_bytes as f64 * 100.0) as u32
+    } else if progress.rows_scanned > 0 {
+        // Show some progress even when total_bytes is unknown
+        ((progress.rows_scanned % 100) as u32).min(90)
     } else {
         0
     };
@@ -21,6 +34,15 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         theme::STYLE_BTN_PRIMARY.to_string()
     } else {
         format!("{}opacity:0.4;", theme::STYLE_BTN_PRIMARY)
+    };
+
+    // Determine status text based on current state
+    let status_text = if progress.done {
+        "Schema ready"
+    } else if progress.rows_scanned == 0 && progress.bytes_read == 0 {
+        "Starting analysis..."
+    } else {
+        "Analyzing schema..."
     };
 
     // Launch Pass 1 once on mount. The coroutine runs until the component unmounts.
@@ -36,8 +58,8 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
             let root = path
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .unwrap_or("root")
-                .to_string();
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "root".to_string());
             (path, root)
         };
 
@@ -48,13 +70,13 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
             json2sql::pass1::runner::run(
                 &source_file,
                 &root_table,
-                256,   // text_threshold
+                TEXT_THRESHOLD,
                 false, // array_as_pg_array
-                100,   // wide_column_threshold
-                3,     // sibling_threshold
-                0.5,   // sibling_jaccard
-                0.10,  // stable_threshold
-                0.001, // rare_threshold
+                WIDE_COLUMN_THRESHOLD,
+                SIBLING_THRESHOLD,
+                SIBLING_JACCARD,
+                STABLE_THRESHOLD,
+                RARE_THRESHOLD,
                 Some(tx),
             )
         });
@@ -98,25 +120,31 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 style: "padding:16px 24px;background:{theme::BG_WORKSPACE};",
                 span {
                     style: "color:{theme::ON_SURFACE};font-size:1rem;font-weight:600;",
-                    if progress.done { "Schema ready" } else { "Analyzing schema…" }
+                    "{status_text}"
                 }
             }
 
             // Main split area
             div {
-                style: "display:flex;flex:1;overflow:hidden;",
+                style: "display:flex;flex:1;overflow:hidden;min-height:0;min-width:0;",
 
                 // Left — log panel (60%)
                 div {
-                    style: "flex:0 0 60%;{theme::STYLE_LOG_PANEL}overflow-y:auto;",
-                    for line in progress.log_lines.iter() {
+                    style: "flex:0 1 60%;min-width:0;box-sizing:border-box;{theme::STYLE_LOG_PANEL}overflow-y:auto;",
+                    for line in progress.log_lines.iter().rev().take(MAX_VISIBLE_LOG_LINES).rev() {
                         p { style: "margin:2px 0;", "{line}" }
+                    }
+                    if progress.log_lines.len() > MAX_VISIBLE_LOG_LINES {
+                        p {
+                            style: "margin:8px 0;color:{theme::ON_SURFACE_VARIANT};font-size:0.75rem;font-style:italic;",
+                            "... and {progress.log_lines.len() - MAX_VISIBLE_LOG_LINES} more lines"
+                        }
                     }
                 }
 
                 // Right — live counters (40%)
                 div {
-                    style: "flex:0 0 40%;background:{theme::BG_SIDEBAR};padding:24px;",
+                    style: "flex:0 1 40%;min-width:0;min-height:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};padding:24px;",
                     p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0 0 8px 0;", "Tables detected: {progress.tables_count}" }
                     p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0 0 8px 0;", "Columns total: {progress.columns_count}" }
                     p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0;", "Records scanned: {progress.rows_scanned}" }

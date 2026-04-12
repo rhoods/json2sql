@@ -48,10 +48,16 @@ impl PgConfig {
     /// Build a postgres connection URL from the config fields.
     /// All user-provided components are percent-encoded to handle special characters.
     pub fn to_url(&self) -> String {
+        let host = if self.host.contains(':') && !self.host.starts_with('[') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+
         format!(
             "postgres://{}:{}@{}:{}/{}",
             encode(&self.username), encode(&self.password),
-            self.host, self.port, encode(&self.database)
+            host, self.port, encode(&self.database)
         )
     }
 
@@ -59,6 +65,7 @@ impl PgConfig {
         !self.host.is_empty()
             && !self.database.is_empty()
             && !self.username.is_empty()
+            && self.port != 0
     }
 }
 
@@ -132,6 +139,8 @@ pub struct AppState {
     pub pg_testing: bool,
     /// Some(true/false) after the test completes.
     pub pg_ok: Option<bool>,
+    /// Connection error details when the PG health check fails.
+    pub pg_error: Option<String>,
 
     // — Screen 2 —
     pub pass1_progress: Pass1Progress,
@@ -168,7 +177,7 @@ impl AppState {
         self.schemas = Vec::new();
         self.pg_testing = false;
         self.pg_ok = None;
-        self.drop_existing = false;
+        self.pg_error = None;
         self.screen = AppScreen::Setup;
     }
 

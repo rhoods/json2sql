@@ -65,10 +65,12 @@ pub const STYLE_BTN_GHOST: &str =
 
 /// Text input field.
 pub const STYLE_INPUT: &str =
-    "background:#353535;color:#E4E2E6;\
+    "background:#353535;color:#E4E2E6;-webkit-text-fill-color:#E4E2E6;\
+     -webkit-appearance:none;\
      border:none;border-bottom:1px solid #40475266;\
      border-radius:2px 2px 0 0;padding:6px 10px;\
-     font-family:Inter,system-ui,sans-serif;width:100%;box-sizing:border-box;";
+     font-family:Inter,system-ui,sans-serif;font-size:0.8125rem;\
+     width:100%;box-sizing:border-box;min-height:32px;";
 
 /// Progress bar track.
 pub const STYLE_PROGRESS_TRACK: &str =

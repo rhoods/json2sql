@@ -20,7 +20,18 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
 
     let pg_ok = state.read().pg_ok;
     let pg_testing = state.read().pg_testing;
+    let pg_error = state.read().pg_error.clone();
     let drop_existing = state.read().drop_existing;
+    let pg_host = state.read().pg.host.clone();
+    let pg_port = if state.read().pg.port == 0 {
+        String::new()
+    } else {
+        state.read().pg.port.to_string()
+    };
+    let pg_database = state.read().pg.database.clone();
+    let pg_username = state.read().pg.username.clone();
+    let pg_password = state.read().pg.password.clone();
+    let test_btn_label = if pg_testing { "Testing…" } else { "Test connection" };
 
     let btn_style = if ready {
         theme::STYLE_BTN_PRIMARY.to_string()
@@ -30,9 +41,9 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
 
     rsx! {
         div {
-            style: "display:flex;align-items:center;justify-content:center;height:100vh;background:{theme::BG_ROOT};",
+            style: "display:flex;align-items:center;justify-content:center;height:100vh;background:{theme::BG_ROOT};min-width:0;",
             div {
-                style: "background:{theme::BG_SIDEBAR};border-radius:6px;padding:40px;width:520px;",
+                style: "background:{theme::BG_SIDEBAR};border-radius:6px;padding:40px;width:100%;max-width:520px;box-sizing:border-box;",
 
                 // App title
                 h1 {
@@ -80,51 +91,88 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                     // Host + Port on one row
                     div {
                         style: "display:flex;gap:8px;margin-bottom:8px;",
-                        input {
-                            style: "{theme::STYLE_INPUT}",
-                            r#type: "text",
-                            placeholder: "Host",
-                            value: "{state.read().pg.host}",
-                            oninput: move |e| { state.write().pg.host = e.value(); },
+                        div {
+                            style: "flex:1;",
+                            label {
+                                style: "display:block;color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;margin-bottom:3px;",
+                                "Host"
+                            }
+                            input {
+                                style: "{theme::STYLE_INPUT}",
+                                r#type: "text",
+                                value: "{pg_host}",
+                                placeholder: "localhost",
+                                oninput: move |e| { state.write().pg.host = e.value(); },
+                            }
                         }
-                        input {
-                            style: "background:{theme::BG_INPUT};color:{theme::ON_SURFACE};border:none;border-bottom:1px solid #40475266;border-radius:2px 2px 0 0;padding:6px 10px;width:80px;box-sizing:border-box;font-family:Inter,system-ui,sans-serif;",
-                            r#type: "number",
-                            placeholder: "Port",
-                            value: "{state.read().pg.port}",
-                            oninput: move |e| {
-                                if let Ok(p) = e.value().parse::<u16>() {
-                                    state.write().pg.port = p;
-                                }
-                            },
+                        div {
+                            label {
+                                style: "display:block;color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;margin-bottom:3px;",
+                                "Port"
+                            }
+                            input {
+                                style: "{theme::STYLE_INPUT}width:80px;",
+                                r#type: "number",
+                                value: "{pg_port}",
+                                placeholder: "5432",
+                                oninput: move |e| {
+                                    let value = e.value();
+                                    if value.is_empty() {
+                                        state.write().pg.port = 0;
+                                    } else if let Ok(p) = value.parse::<u16>() {
+                                        state.write().pg.port = p;
+                                    }
+                                },
+                            }
                         }
                     }
 
                     // Database
-                    input {
-                        style: "{theme::STYLE_INPUT}margin-bottom:8px;",
-                        r#type: "text",
-                        placeholder: "Database",
-                        value: "{state.read().pg.database}",
-                        oninput: move |e| { state.write().pg.database = e.value(); },
+                    div {
+                        style: "margin-bottom:8px;",
+                        label {
+                            style: "display:block;color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;margin-bottom:3px;",
+                            "Database"
+                        }
+                        input {
+                            style: "{theme::STYLE_INPUT}",
+                            r#type: "text",
+                            value: "{pg_database}",
+                            placeholder: "my_database",
+                            oninput: move |e| { state.write().pg.database = e.value(); },
+                        }
                     }
 
                     // Username
-                    input {
-                        style: "{theme::STYLE_INPUT}margin-bottom:8px;",
-                        r#type: "text",
-                        placeholder: "Username",
-                        value: "{state.read().pg.username}",
-                        oninput: move |e| { state.write().pg.username = e.value(); },
+                    div {
+                        style: "margin-bottom:8px;",
+                        label {
+                            style: "display:block;color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;margin-bottom:3px;",
+                            "Username"
+                        }
+                        input {
+                            style: "{theme::STYLE_INPUT}",
+                            r#type: "text",
+                            value: "{pg_username}",
+                            placeholder: "postgres",
+                            oninput: move |e| { state.write().pg.username = e.value(); },
+                        }
                     }
 
                     // Password
-                    input {
-                        style: "{theme::STYLE_INPUT}margin-bottom:12px;",
-                        r#type: "password",
-                        placeholder: "Password",
-                        value: "{state.read().pg.password}",
-                        oninput: move |e| { state.write().pg.password = e.value(); },
+                    div {
+                        style: "margin-bottom:12px;",
+                        label {
+                            style: "display:block;color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;margin-bottom:3px;",
+                            "Password"
+                        }
+                        input {
+                            style: "{theme::STYLE_INPUT}",
+                            r#type: "password",
+                            value: "{pg_password}",
+                            placeholder: "••••••••",
+                            oninput: move |e| { state.write().pg.password = e.value(); },
+                        }
                     }
 
                     // Test connection
@@ -137,18 +185,25 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                 let url = state.read().pg.to_url();
                                 state.write().pg_testing = true;
                                 state.write().pg_ok = None;
-                                let ok = tokio_postgres::connect(&url, tokio_postgres::NoTls)
-                                    .await
-                                    .is_ok();
+                                state.write().pg_error = None;
+                                let result = tokio_postgres::connect(&url, tokio_postgres::NoTls).await;
+                                let ok = result.is_ok();
                                 state.write().pg_testing = false;
                                 state.write().pg_ok = Some(ok);
+                                state.write().pg_error = result.err().map(|e| e.to_string());
                             },
-                            if pg_testing { "Testing…" } else { "Test connection" }
+                            "{test_btn_label}"
                         }
-                        match pg_ok {
-                            Some(true)  => rsx! { span { style: "color:{theme::SECONDARY};font-size:0.8125rem;", "Connected" } },
-                            Some(false) => rsx! { span { style: "color:{theme::ERROR};font-size:0.8125rem;",    "Connection failed" } },
-                            None        => rsx! { span {} },
+                        if let Some(true) = pg_ok {
+                            span { style: "color:{theme::SECONDARY};font-size:0.8125rem;", "Connected" }
+                        } else if let Some(false) = pg_ok {
+                            span { style: "color:{theme::ERROR};font-size:0.8125rem;", "Connection failed" }
+                        }
+                        if let Some(error) = pg_error.as_ref() {
+                            span {
+                                style: "color:{theme::ERROR};font-size:0.75rem;display:block;margin-top:4px;",
+                                "{error}"
+                            }
                         }
                     }
                 }

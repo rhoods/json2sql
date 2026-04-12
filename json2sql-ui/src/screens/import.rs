@@ -103,7 +103,8 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         .collect();
     table_rows.sort_by(|a, b| b.1.cmp(&a.1));
 
-    let total_rows_known: u64 = table_rows.iter().map(|(_, n)| n).sum();
+    let total_rows_imported: u64 = table_rows.iter().map(|(_, n)| n).sum();
+    let status_text = if progress.done { "Import complete" } else { "Importing data…" };
 
     rsx! {
         div {
@@ -114,17 +115,16 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 style: "padding:16px 24px;background:{theme::BG_WORKSPACE};",
                 span {
                     style: "color:{theme::ON_SURFACE};font-size:1rem;font-weight:600;",
-                    if progress.done { "Import complete" } else { "Importing data…" }
+                    "{status_text}"
                 }
             }
 
             // ── Main split ───────────────────────────────────────────────
             div {
-                style: "display:flex;flex:1;overflow:hidden;",
-
+                    style: "display:flex;flex:1;overflow:hidden;min-height:0;min-width:0;",
                 // Left — import log (60%)
                 div {
-                    style: "flex:0 0 60%;{theme::STYLE_LOG_PANEL}overflow-y:auto;",
+                    style: "flex:0 1 60%;min-width:0;box-sizing:border-box;{theme::STYLE_LOG_PANEL}overflow-y:auto;",
                     for line in progress.log_lines.iter() {
                         p { style: "margin:2px 0;", "{line}" }
                     }
@@ -132,7 +132,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
 
                 // Right — per-table row counts (40%)
                 div {
-                    style: "flex:0 0 40%;background:{theme::BG_SIDEBAR};padding:16px;overflow-y:auto;",
+                    style: "flex:0 1 40%;min-width:0;min-height:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};padding:16px;overflow-y:auto;",
                     p {
                         style: "color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;text-transform:uppercase;letter-spacing:0.05em;margin:0 0 12px 0;",
                         "Rows flushed"
@@ -141,14 +141,14 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                         p { style: "color:{theme::ON_SURFACE_DIM};font-size:0.8125rem;", "Waiting for first flush…" }
                     } else {
                         div {
-                            style: "display:flex;flex-direction:column;gap:8px;",
+                            style: "display:flex;flex-direction:column;gap:8px;min-height:0;min-width:0;",
                             for (table_name, count) in table_rows.iter() {
                                 div {
                                     key: "{table_name}",
-                                    // Progress bar proportional to the largest table
+                                    // Progress bar proportional to the table's share of total imported rows
                                     {
-                                        let bar_pct = if total_rows_known > 0 {
-                                            (count * 100 / total_rows_known).min(100)
+                                        let bar_pct = if total_rows_imported > 0 {
+                                            (count * 100 / total_rows_imported).min(100)
                                         } else { 0 };
                                         rsx! {
                                             div {
@@ -192,13 +192,10 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                             style: "color:{theme::SECONDARY};font-weight:600;margin:0 0 12px 0;",
                             "✓ {progress.rows_processed} rows imported · {progress.total_anomalies} anomalies"
                         }
-                        div { style: "display:flex;gap:12px;",
-                            button {
-                                style: "{theme::STYLE_BTN_PRIMARY}",
-                                onclick: move |_| { state.write().cancel(); },
-                                "New Import"
-                            }
-                        }
+                                p {
+                                    style: "color:{theme::ON_SURFACE_DIM};margin:0 0 12px 0;",
+                                    "{table_rows.len()} tables updated"
+                                }
                     }
                 }
 
