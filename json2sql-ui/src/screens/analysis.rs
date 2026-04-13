@@ -32,11 +32,6 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
     } else {
         0
     };
-    let btn_style = if progress.done {
-        theme::STYLE_BTN_PRIMARY.to_string()
-    } else {
-        format!("{}opacity:0.4;", theme::STYLE_BTN_PRIMARY)
-    };
 
     // Determine status text based on current state
     let status_text = if progress.done {
@@ -135,7 +130,8 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
 
                 // Left — log panel (60%)
                 div {
-                    style: "flex:0 1 60%;min-width:0;box-sizing:border-box;{theme::STYLE_LOG_PANEL}overflow-y:auto;",
+                    class: "log-panel",
+                    style: "flex:0 1 60%;min-width:0;box-sizing:border-box;",
                     for line in progress.log_lines.iter().rev().take(MAX_VISIBLE_LOG_LINES).rev() {
                         p { style: "margin:2px 0;", "{line}" }
                     }
@@ -174,17 +170,17 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
             // Bottom bar — progress + buttons
             div {
                 style: "padding:16px 24px;background:{theme::BG_WORKSPACE};",
-                div { style: "{theme::STYLE_PROGRESS_TRACK}margin-bottom:12px;",
-                    div { style: "{theme::STYLE_PROGRESS_BAR}width:{pct}%;", "" }
+                div { class: "progress-track", style: "margin-bottom:12px;",
+                    div { class: "progress-bar", style: "width:{pct}%;", "" }
                 }
                 div { style: "display:flex;justify-content:space-between;",
                     button {
-                        style: "{theme::STYLE_BTN_GHOST}",
+                        class: "btn-ghost",
                         onclick: move |_| { state.write().cancel(); },
                         "Cancel"
                     }
                     button {
-                        style: "{btn_style}",
+                        class: "btn-primary",
                         disabled: !progress.done,
                         onclick: move |_| {
                             state.write().screen = AppScreen::Strategy;

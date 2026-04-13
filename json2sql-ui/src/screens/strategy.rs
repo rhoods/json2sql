@@ -222,14 +222,16 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             "Each JSON key becomes a row. The key itself is stored in the column named below."
                         }
                         input {
-                            style: "{theme::STYLE_INPUT}margin-bottom:8px;",
+                            class: "input-field",
+                            style: "margin-bottom:8px;",
                             r#type: "text",
                             placeholder: "id_column (e.g. image_id)",
                             value: "{normalize_id_col.read()}",
                             oninput: move |e| { *normalize_id_col.write() = e.value(); },
                         }
                         button {
-                            style: "{theme::STYLE_BTN_GHOST}width:100%;",
+                            class: "btn-ghost",
+                            style: "width:100%;",
                             disabled: normalize_id_col_invalid,
                             onclick: move |_| {
                                 let col = normalize_id_col.read().trim().to_string();
@@ -263,7 +265,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
             div {
                 style: "padding:12px 24px;background:{theme::BG_WORKSPACE};display:flex;justify-content:flex-end;align-items:center;",
                 button {
-                    style: "{theme::STYLE_BTN_PRIMARY}",
+                    class: "btn-primary",
                     onclick: move |_| {
                         state.write().screen = AppScreen::Preview;
                     },
@@ -287,13 +289,17 @@ fn StrategyButton(
 ) -> Element {
     let style = if active {
         format!(
-            "background:{};color:{};border:none;border-radius:2px;padding:7px 12px;font-size:0.8125rem;font-weight:600;cursor:pointer;text-align:left;width:100%;",
-            color, BADGE_TEXT_COLOR
+            "background:{c};color:{t};-webkit-text-fill-color:{t};\
+             border:none;border-radius:2px;padding:7px 12px;\
+             font-size:0.8125rem;font-weight:600;cursor:pointer;text-align:left;width:100%;",
+            c = color, t = BADGE_TEXT_COLOR
         )
     } else {
         format!(
-            "background:transparent;color:{};border:1px solid {}66;border-radius:2px;padding:7px 12px;font-size:0.8125rem;cursor:pointer;text-align:left;width:100%;",
-            color, color
+            "background:transparent;color:{c};-webkit-text-fill-color:{c};\
+             border:1px solid {c}66;border-radius:2px;padding:7px 12px;\
+             font-size:0.8125rem;cursor:pointer;text-align:left;width:100%;",
+            c = color
         )
     };
 

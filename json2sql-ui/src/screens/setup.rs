@@ -7,6 +7,51 @@ use dioxus::prelude::*;
 use crate::state::{AppScreen, AppState};
 use crate::theme;
 
+/// Open a file picker using zenity (avoids xdg-portal D-Bus issues with rfd on Linux).
+/// Returns the selected path, or None if cancelled.
+async fn pick_file_zenity(filters: &[(&str, &str)]) -> Option<std::path::PathBuf> {
+    let mut args = vec!["--file-selection".to_string(), "--title=Select file".to_string()];
+    for (_, glob) in filters {
+        args.push(format!("--file-filter={}", glob));
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("zenity")
+            .args(&args)
+            .output()
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()?;
+
+    if result.status.success() {
+        let path = String::from_utf8_lossy(&result.stdout).trim().to_string();
+        if path.is_empty() { None } else { Some(std::path::PathBuf::from(path)) }
+    } else {
+        None
+    }
+}
+
+/// Open a folder picker using zenity.
+async fn pick_folder_zenity() -> Option<std::path::PathBuf> {
+    let result = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("zenity")
+            .args(&["--file-selection", "--directory", "--title=Select folder"])
+            .output()
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()?;
+
+    if result.status.success() {
+        let path = String::from_utf8_lossy(&result.stdout).trim().to_string();
+        if path.is_empty() { None } else { Some(std::path::PathBuf::from(path)) }
+    } else {
+        None
+    }
+}
+
 #[component]
 pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let ready = state.read().ready_to_start();
@@ -53,11 +98,10 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let pg_password = state.read().pg.password.clone();
     let test_btn_label = if pg_testing { "Testing…" } else { "Test connection" };
 
-    let btn_style = if ready {
-        theme::STYLE_BTN_PRIMARY.to_string()
-    } else {
-        format!("{}opacity:0.4;width:100%;", theme::STYLE_BTN_PRIMARY)
-    };
+    // Guards against concurrent picks — zenity is blocking (spawn_blocking),
+    // a second click while the dialog is open is silently ignored.
+    let mut picking_source  = use_signal(|| false);
+    let mut picking_anomaly = use_signal(|| false);
 
     rsx! {
         div {
@@ -97,22 +141,25 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                             }
                         }
                         button {
-                            style: "{theme::STYLE_BTN_GHOST}white-space:nowrap;",
+                            class: "btn-ghost",
+                            style: "white-space:nowrap;",
+                            disabled: picking_source(),
                             onclick: move |_| async move {
-                                if let Some(path) = rfd::AsyncFileDialog::new()
-                                    .add_filter("JSON / JSONL", &["json", "jsonl", "ndjson"])
-                                    .pick_file()
-                                    .await
-                                {
-                                    state.write().source_file = Some(path.path().to_path_buf());
+                                if picking_source() { return; }
+                                picking_source.set(true);
+                                if let Some(path) = pick_file_zenity(&[
+                                    ("JSON / JSONL", "*.json *.jsonl *.ndjson"),
+                                ]).await {
+                                    state.write().source_file = Some(path);
                                 }
+                                picking_source.set(false);
                             },
                             "Browse…"
                         }
                     }
                 }
 
-                // ── Target — PostgreSQL ─────────────────────────────��─────
+                // ── Target — PostgreSQL ───────────────────────────────────
                 section {
                     style: "margin-bottom:32px;",
                     label {
@@ -130,7 +177,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                 "Host"
                             }
                             input {
-                                style: "{theme::STYLE_INPUT}",
+                                class: "input-field",
                                 r#type: "text",
                                 value: "{pg_host}",
                                 placeholder: "localhost",
@@ -143,7 +190,8 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                 "Port"
                             }
                             input {
-                                style: "{theme::STYLE_INPUT}width:80px;",
+                                class: "input-field",
+                                style: "width:80px;",
                                 r#type: "number",
                                 value: "{pg_port}",
                                 placeholder: "5432",
@@ -173,7 +221,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                             "Database"
                         }
                         input {
-                            style: "{theme::STYLE_INPUT}",
+                            class: "input-field",
                             r#type: "text",
                             value: "{pg_database}",
                             placeholder: "my_database",
@@ -189,7 +237,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                             "Username"
                         }
                         input {
-                            style: "{theme::STYLE_INPUT}",
+                            class: "input-field",
                             r#type: "text",
                             value: "{pg_username}",
                             placeholder: "postgres",
@@ -205,7 +253,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                             "Password"
                         }
                         input {
-                            style: "{theme::STYLE_INPUT}",
+                            class: "input-field",
                             r#type: "password",
                             value: "{pg_password}",
                             placeholder: "••••••••",
@@ -215,7 +263,6 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
 
                     // Schema
                     {
-                        // Valid PG identifier: letters, digits, underscore only.
                         let schema_invalid = !pg_schema.chars().all(|c| c.is_alphanumeric() || c == '_');
                         rsx! {
                             div {
@@ -225,7 +272,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                     "Schema"
                                 }
                                 input {
-                                    style: "{theme::STYLE_INPUT}",
+                                    class: "input-field",
                                     r#type: "text",
                                     value: "{pg_schema}",
                                     placeholder: "public",
@@ -248,7 +295,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                     div {
                         style: "display:flex;align-items:center;gap:12px;",
                         button {
-                            style: "{theme::STYLE_BTN_GHOST}",
+                            class: "btn-ghost",
                             disabled: pg_testing,
                             onclick: move |_| async move {
                                 let url = state.read().pg.to_url();
@@ -314,20 +361,22 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                             "{anomaly_label}"
                         }
                         button {
-                            style: "{theme::STYLE_BTN_GHOST}padding:5px 10px;font-size:0.75rem;white-space:nowrap;",
+                            class: "btn-ghost btn-ghost--sm",
+                            style: "white-space:nowrap;",
+                            disabled: picking_anomaly(),
                             onclick: move |_| async move {
-                                if let Some(dir) = rfd::AsyncFileDialog::new()
-                                    .pick_folder()
-                                    .await
-                                {
-                                    state.write().anomaly_dir = Some(dir.path().to_path_buf());
+                                if picking_anomaly() { return; }
+                                picking_anomaly.set(true);
+                                if let Some(dir) = pick_folder_zenity().await {
+                                    state.write().anomaly_dir = Some(dir);
                                 }
+                                picking_anomaly.set(false);
                             },
                             "Browse…"
                         }
                         if state.read().anomaly_dir.is_some() {
                             button {
-                                style: "{theme::STYLE_BTN_GHOST}padding:5px 10px;font-size:0.75rem;",
+                                class: "btn-ghost btn-ghost--sm",
                                 onclick: move |_| { state.write().anomaly_dir = None; },
                                 "✕"
                             }
@@ -337,7 +386,8 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
 
                 // ── CTA ───────────────────────────────────────────────────
                 button {
-                    style: "{btn_style}width:100%;",
+                    class: "btn-primary",
+                    style: "width:100%;",
                     disabled: !ready,
                     onclick: move |_| {
                         state.write().screen = AppScreen::Analysis;

@@ -2587,7 +2587,6 @@ dependencies = [
 name = "json2sql-ui"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "dioxus",
  "json2sql",
  "rfd",

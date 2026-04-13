@@ -160,7 +160,8 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                     style: "display:flex;flex:1;overflow:hidden;min-height:0;min-width:0;",
                 // Left — import log (60%)
                 div {
-                    style: "flex:0 1 60%;min-width:0;box-sizing:border-box;{theme::STYLE_LOG_PANEL}overflow-y:auto;",
+                    class: "log-panel",
+                    style: "flex:0 1 60%;min-width:0;box-sizing:border-box;",
                     for line in progress.log_lines.iter() {
                         p { style: "margin:2px 0;", "{line}" }
                     }
@@ -201,8 +202,8 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             div {
                 style: "padding:16px 24px;background:{theme::BG_WORKSPACE};",
                 // Overall progress
-                div { style: "{theme::STYLE_PROGRESS_TRACK}margin-bottom:8px;",
-                    div { style: "{theme::STYLE_PROGRESS_BAR}width:{pct}%;", "" }
+                div { class: "progress-track", style: "margin-bottom:8px;",
+                    div { class: "progress-bar", style: "width:{pct}%;", "" }
                 }
                 p {
                     style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.8125rem;margin:4px 0 12px 0;",
@@ -219,14 +220,14 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                                 "✓ {total_rows_flushed} rows imported into {table_rows.len()} tables · {progress.total_anomalies} anomalies"
                             }
                             button {
-                                style: "{theme::STYLE_BTN_PRIMARY}",
+                                class: "btn-primary",
                                 onclick: move |_| { state.write().cancel(); },
                                 "New Import"
                             }
                         }
                     } else {
                         button {
-                            style: "{theme::STYLE_BTN_GHOST}",
+                            class: "btn-ghost",
                             onclick: move |_| { state.write().cancel(); },
                             "Cancel"
                         }

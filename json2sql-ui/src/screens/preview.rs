@@ -166,13 +166,13 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
             div {
                 style: "padding:12px 24px;background:{theme::BG_WORKSPACE};display:flex;justify-content:space-between;",
                 button {
-                    style: "{theme::STYLE_BTN_GHOST}",
+                    class: "btn-ghost",
                     onclick: move |_| { state.write().screen = AppScreen::Strategy; },
                     "aria-label": "Return to strategy editor",
                     "← Back to Strategies"
                 }
                 button {
-                    style: "{theme::STYLE_BTN_PRIMARY}",
+                    class: "btn-primary",
                     onclick: move |_| { state.write().screen = AppScreen::Import; },
                     "aria-label": "Proceed to data import",
                     "Start Import →"

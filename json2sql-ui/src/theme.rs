@@ -42,46 +42,7 @@ pub const FONT_UI: &str = "Inter, system-ui, sans-serif";
 pub const FONT_CODE: &str = "'JetBrains Mono', 'Fira Code', monospace";
 
 // ---------------------------------------------------------------------------
-// Common inline style fragments
+// Note: component styles (.btn-primary, .btn-ghost, .input-field, etc.) live
+// in the CSS injected via with_custom_head() in main.rs — not here.
+// This file contains only design tokens (raw values, no CSS fragments).
 // ---------------------------------------------------------------------------
-
-/// Full-window root container.
-pub const STYLE_ROOT: &str =
-    "background:#131313;color:#E4E2E6;\
-     font-family:Inter,system-ui,sans-serif;\
-     height:100vh;overflow:hidden;";
-
-/// Primary gradient CTA button (135° from PRIMARY to PRIMARY_DARK).
-pub const STYLE_BTN_PRIMARY: &str =
-    "background:linear-gradient(135deg,#99CBFF,#007BC4);\
-     color:#0D0D0D;border:none;border-radius:2px;\
-     padding:8px 20px;font-weight:600;cursor:pointer;";
-
-/// Ghost secondary button.
-pub const STYLE_BTN_GHOST: &str =
-    "background:transparent;color:#99CBFF;\
-     border:1px solid #40475266;border-radius:2px;\
-     padding:8px 20px;cursor:pointer;";
-
-/// Text input field.
-pub const STYLE_INPUT: &str =
-    "background:#353535;color:#E4E2E6;-webkit-text-fill-color:#E4E2E6;\
-     -webkit-appearance:none;\
-     border:none;border-bottom:1px solid #40475266;\
-     border-radius:2px 2px 0 0;padding:6px 10px;\
-     font-family:Inter,system-ui,sans-serif;font-size:0.8125rem;\
-     width:100%;box-sizing:border-box;min-height:32px;";
-
-/// Progress bar track.
-pub const STYLE_PROGRESS_TRACK: &str =
-    "background:#353535;height:6px;width:100%;overflow:hidden;border-radius:3px;";
-
-/// Progress bar indicator (gradient, no rounded corners — "Brutalist").
-pub const STYLE_PROGRESS_BAR: &str =
-    "background:linear-gradient(90deg,#4EDEA3,#00C47A);height:6px;border-radius:0;";
-
-/// Monospace log panel.
-pub const STYLE_LOG_PANEL: &str =
-    "background:#111111;color:#C5C6D0;\
-     font-family:'JetBrains Mono','Fira Code',monospace;\
-     font-size:0.8125rem;padding:12px;overflow-y:auto;";
