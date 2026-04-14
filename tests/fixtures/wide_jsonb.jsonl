@@ -1,0 +1,3 @@
+{"id": 1, "name": "Widget", "attrs": {"color": "red", "weight": 100, "material": "plastic"}}
+{"id": 2, "name": "Gadget", "attrs": {"color": "blue", "speed": 42, "power": "high"}}
+{"id": 3, "name": "Doohickey", "attrs": {"size": "large", "fragile": true}}
