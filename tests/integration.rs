@@ -5,12 +5,31 @@
 //!   TEST_DATABASE_URL=postgres://user:pass@localhost/testdb cargo test --test integration
 //!
 //! Sans cette variable, tous les tests sont silencieusement ignorés.
+//!
+//! ## Schémas de test
+//!
+//! Chaque test crée un schéma `j2s_test_<random>` et le supprime à la fin.
+//! En cas de panic avant le `drop_schema()` final, le schéma reste dans la base.
+//! Rust async ne fournit pas d'équivalent RAII pour garantir le nettoyage en cas
+//! de panic (pas d'`async Drop`). Pour supprimer manuellement les schémas orphelins :
+//!
+//! ```text
+//! DO $$ DECLARE r RECORD; BEGIN
+//!   FOR r IN (SELECT schema_name FROM information_schema.schemata
+//!             WHERE schema_name LIKE 'j2s_test_%')
+//!   LOOP EXECUTE 'DROP SCHEMA IF EXISTS ' || quote_ident(r.schema_name) || ' CASCADE';
+//!   END LOOP;
+//! END $$;
+//! ```
+//! (à exécuter dans `psql` directement ou via `psql -f cleanup.sql`)
 
 use std::path::PathBuf;
 
 use uuid::Uuid;
 
 use json2sql::{db, pass1, pass2};
+use json2sql::schema::registry::{apply_flatten, apply_wide_strategy_columns};
+use json2sql::schema::table_schema::WideStrategy;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -29,9 +48,11 @@ async fn connect_test_db() -> Option<tokio_postgres::Client> {
 }
 
 fn unique_schema() -> String {
-    // e.g. "j2s_test_019123abcdef" — safe PostgreSQL identifier
+    // UUID v7 without dashes: first 12 hex chars are the 48-bit millisecond timestamp.
+    // Chars [20..32] are in the rand_b field (62 mostly-random bits after the 2-bit
+    // variant marker), which avoids collisions between runs starting within the same ms.
     let id = Uuid::now_v7().to_string().replace('-', "");
-    format!("j2s_test_{}", &id[..12])
+    format!("j2s_test_{}", &id[20..32])
 }
 
 async fn row_count(client: &tokio_postgres::Client, schema: &str, table: &str) -> i64 {
@@ -529,6 +550,348 @@ async fn test_parallel_copy() {
     assert_eq!(row_count(&client, &schema, "users_tags").await, 6);
     assert_eq!(row_count(&client, &schema, "users_orders_items").await, 3);
     assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+
+    drop_schema(&client, &schema).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 12 — WideStrategy::Jsonb sur une table enfant
+//
+// Fixture : 3 produits avec un objet enfant `attrs` à clés dynamiques.
+// Après apply_wide_strategy_columns(Jsonb), la table products_attrs doit
+// avoir une seule colonne `data JSONB` qui contient l'objet entier.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_jsonb_strategy() {
+    let Some(client) = connect_test_db().await else { return };
+    let schema = unique_schema();
+    client.execute(&format!("CREATE SCHEMA \"{}\"", schema), &[]).await.unwrap();
+
+    let path = fixture("wide_jsonb.jsonl");
+    let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    // Deux tables attendues : products et products_attrs
+    assert_eq!(p1.schemas.len(), 2);
+    assert!(p1.schemas.iter().any(|s| s.name == "products"));
+    assert!(p1.schemas.iter().any(|s| s.name == "products_attrs"));
+
+    // Appliquer la stratégie Jsonb sur la table enfant
+    let mut schemas = p1.schemas;
+    apply_wide_strategy_columns(
+        schemas
+            .iter_mut()
+            .find(|s| s.name == "products_attrs")
+            .expect("products_attrs not found — naming regression in pass1?"),
+        WideStrategy::Jsonb,
+    );
+
+    // La table products_attrs doit maintenant avoir exactement une colonne data JSONB
+    let attrs_schema = schemas.iter().find(|s| s.name == "products_attrs").unwrap();
+    let data_cols: Vec<_> = attrs_schema.data_columns().collect();
+    assert_eq!(data_cols.len(), 1, "Jsonb strategy: exactly one data column expected");
+    assert_eq!(data_cols[0].name, "data");
+    assert!(
+        matches!(data_cols[0].pg_type, json2sql::schema::type_tracker::PgType::Jsonb),
+        "data column must be PgType::Jsonb"
+    );
+    // Dériver les noms de colonnes depuis les schémas pour ne pas coupler le test
+    // aux conventions de nommage internes (parent_fk, generated id).
+    let fk_col_name = attrs_schema
+        .columns
+        .iter()
+        .find(|c| c.is_parent_fk)
+        .map(|c| c.name.clone())
+        .expect("products_attrs must have a parent FK column");
+    // "j2s_id" est le nom de convention fixe de la colonne d'identité générée.
+    // La recherche vérifie l'existence sans dériver le nom (toujours "j2s_id").
+    schemas
+        .iter()
+        .find(|s| s.name == "products")
+        .and_then(|s| s.columns.iter().find(|c| c.name == "j2s_id"))
+        .expect("products must have a j2s_id column");
+    let products_id_col = "j2s_id";
+
+    db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+
+    // Vérification intermédiaire : les deux tables existent avant de démarrer Pass 2
+    let tables_created: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_name IN ('products', 'products_attrs')",
+            &[&schema],
+        )
+        .await.unwrap().get("count");
+    assert_eq!(tables_created, 2, "products et products_attrs doivent exister avant Pass 2");
+
+    let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1000, false, None, 1, None, None)
+        .await.unwrap();
+
+    // 3 produits, 3 objets attrs — vérification compteur mémoire ET base
+    assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
+    assert_eq!(*p2.rows_per_table.get("products_attrs").unwrap(), 3);
+    assert_eq!(row_count(&client, &schema, "products").await, 3);
+    assert_eq!(row_count(&client, &schema, "products_attrs").await, 3);
+    // La stratégie Jsonb bypasse la coercion : aucune anomalie attendue,
+    // même si les clés sont hétérogènes entre les lignes (color/weight/speed/fragile…).
+    assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+
+    // Les trois produits en une seule jointure — JSONB ->> renvoie du TEXT.
+    // Les nombres JSON (42, 100) deviennent des chaînes ("42", "100").
+    // Les clés absentes retournent NULL (pas une erreur).
+    let sql_all = format!(
+        "SELECT p.name, \
+                pa.data->>'color'  AS color, \
+                pa.data->>'weight' AS weight, \
+                pa.data->>'speed'  AS speed, \
+                pa.data->>'size'   AS size \
+         FROM \"{s}\".\"products\" p \
+         JOIN \"{s}\".\"products_attrs\" pa ON pa.{fk} = p.{id} \
+         ORDER BY p.id",
+        s = schema,
+        fk = fk_col_name,
+        id = products_id_col,
+    );
+    let rows = client.query(&sql_all, &[]).await.unwrap();
+    assert_eq!(rows.len(), 3, "3 lignes attendues depuis la jointure JSONB");
+
+    // Widget : color='red', weight='100' (nombre JSON → string via ->>)
+    let widget = rows.iter().find(|r| r.get::<_, &str>("name") == "Widget")
+        .expect("Widget not found");
+    assert_eq!(widget.get::<_, Option<String>>("color").as_deref(), Some("red"));
+    assert_eq!(widget.get::<_, Option<String>>("weight").as_deref(), Some("100"));
+
+    // Gadget : speed='42' (nombre JSON → string via ->>), color='blue'
+    let gadget = rows.iter().find(|r| r.get::<_, &str>("name") == "Gadget")
+        .expect("Gadget not found");
+    assert_eq!(gadget.get::<_, Option<String>>("speed").as_deref(), Some("42"));
+    assert_eq!(gadget.get::<_, Option<String>>("color").as_deref(), Some("blue"));
+
+    // Doohickey : 'color' absent → NULL, 'size' présent → 'large'
+    let doohickey = rows.iter().find(|r| r.get::<_, &str>("name") == "Doohickey")
+        .expect("Doohickey not found");
+    assert!(doohickey.get::<_, Option<String>>("color").is_none(),
+        "clé absente dans JSONB doit retourner NULL, pas une erreur");
+    assert_eq!(doohickey.get::<_, Option<String>>("size").as_deref(), Some("large"),
+        "Doohickey attrs.size doit être 'large'");
+
+    drop_schema(&client, &schema).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 13 — WideStrategy Flatten : colonnes enfant inlinées dans le parent
+//
+// Fixture : 3 produits avec un objet enfant `dims` (width, height, depth).
+// Après apply_flatten("products_dims", "dims_", 1) :
+//   - products_dims est supprimé des schémas
+//   - products gagne les colonnes dims_width, dims_height, dims_depth
+//   - dims_depth = NULL pour Doohickey (clé absente dans la fixture)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_flatten_strategy() {
+    let Some(client) = connect_test_db().await else { return };
+    let schema = unique_schema();
+    client.execute(&format!("CREATE SCHEMA \"{}\"", schema), &[]).await.unwrap();
+
+    let path = fixture("flatten_nested.jsonl");
+    let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    // Avant flatten : 2 tables
+    assert_eq!(p1.schemas.len(), 2);
+    assert!(p1.schemas.iter().any(|s| s.name == "products_dims"));
+
+    let mut schemas = p1.schemas;
+    apply_flatten(&mut schemas, "products_dims", "dims_", 1);
+
+    // Après flatten : products_dims supprimé, il reste 1 table
+    assert_eq!(schemas.len(), 1);
+    assert!(schemas.iter().all(|s| s.name != "products_dims"));
+
+    // products doit avoir les colonnes dims_width, dims_height, dims_depth
+    // On vérifie le nom PG ET le original_name séparément pour détecter tout bug partiel.
+    let products_schema = schemas.iter().find(|s| s.name == "products").unwrap();
+    assert!(
+        products_schema.columns.iter().any(|c| c.name == "dims_width"),
+        "dims_width column expected in products after flatten (pg name)"
+    );
+    assert!(
+        products_schema.find_by_original("width").is_some(),
+        "column with original_name 'width' expected after flatten"
+    );
+    assert!(products_schema.columns.iter().any(|c| c.name == "dims_height"), "dims_height missing");
+    assert!(products_schema.columns.iter().any(|c| c.name == "dims_depth"), "dims_depth missing");
+    // 5 colonnes de données au total : id, name + 3 dims inlinées (width, height, depth)
+    let data_col_count = products_schema.data_columns().count();
+    assert_eq!(data_col_count, 5, "products doit avoir 5 colonnes de données après flatten (id, name, dims_*)");
+
+    db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+
+    // Vérification intermédiaire : products existe, products_dims n'a pas été créé
+    let products_exists: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_name = 'products'",
+            &[&schema],
+        )
+        .await.unwrap().get("count");
+    assert_eq!(products_exists, 1, "products doit exister après create_tables");
+    let dims_absent_before: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_name = 'products_dims'",
+            &[&schema],
+        )
+        .await.unwrap().get("count");
+    assert_eq!(dims_absent_before, 0, "products_dims ne doit pas être créé (flatten supprime la table enfant)");
+
+    let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1000, false, None, 1, None, None)
+        .await.unwrap();
+
+    // 3 produits insérés dans la table unique
+    assert_eq!(row_count(&client, &schema, "products").await, 3);
+    assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
+    // products_dims ne doit PAS apparaître — si apply_flatten a no-opé silencieusement,
+    // Pass 2 aurait tenté d'écrire dans la table enfant et ce compteur serait non-nul.
+    assert!(
+        p2.rows_per_table.get("products_dims").is_none(),
+        "products_dims must not receive any rows after flatten"
+    );
+    assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+
+    // Valeurs inlinées : Widget width=10, height=20, depth=5
+    let sql = format!(
+        "SELECT dims_width, dims_height, dims_depth \
+         FROM \"{}\".\"products\" WHERE name = 'Widget'",
+        schema
+    );
+    let row = client.query_opt(&sql, &[]).await.unwrap().expect("Widget row not found");
+    let w: i32 = row.get("dims_width");
+    let h: i32 = row.get("dims_height");
+    let d: i32 = row.get("dims_depth");
+    assert_eq!(w, 10);
+    assert_eq!(h, 20);
+    assert_eq!(d, 5);
+
+    // Gadget : ligne complète sans NULL (width=15, height=30, depth=8)
+    let sql_gadget = format!(
+        "SELECT dims_width, dims_height, dims_depth \
+         FROM \"{}\".\"products\" WHERE name = 'Gadget'",
+        schema
+    );
+    let row_g = client.query_opt(&sql_gadget, &[]).await.unwrap().expect("Gadget row not found");
+    assert_eq!(row_g.get::<_, i32>("dims_width"), 15);
+    assert_eq!(row_g.get::<_, i32>("dims_height"), 30);
+    assert_eq!(row_g.get::<_, i32>("dims_depth"), 8);
+
+    // Doohickey n'a pas de depth → dims_depth IS NULL
+    let sql_null = format!(
+        "SELECT dims_depth FROM \"{}\".\"products\" WHERE name = 'Doohickey'",
+        schema
+    );
+    let row_null = client
+        .query_opt(&sql_null, &[])
+        .await
+        .unwrap()
+        .expect("Doohickey row not found");
+    let depth_null: Option<i32> = row_null.get("dims_depth");
+    assert!(depth_null.is_none(), "dims_depth should be NULL for Doohickey");
+
+    // Vérification DB : products_dims ne doit pas exister en tant que table
+    let absent: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_name = 'products_dims'",
+            &[&schema],
+        )
+        .await
+        .unwrap()
+        .get("count");
+    assert_eq!(absent, 0, "products_dims table must not be created in DB after flatten");
+
+    drop_schema(&client, &schema).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 14 — Motifs null : clé absente vs null JSON vs string "null"
+//
+// Fixture : 4 lignes, colonne `tag` TEXT.
+//   - Alice  : tag = "present"  → stocké tel quel
+//   - Bob    : tag = null       → SQL NULL (null JSON explicite)
+//   - Charlie: (pas de clé tag) → SQL NULL (clé absente)
+//   - Diana  : tag = "null"     → stocké comme la chaîne 'null', PAS SQL NULL
+//
+// Les deux formes de null (explicite et absent) doivent produire IS NULL en base.
+// La string JSON "null" est distincte : stockée littéralement comme 'null'.
+// Note : si la colonne était INTEGER, "null" string produirait une anomalie de
+// coercion (PgType::Integer ne peut pas coercer une string non-numérique).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_null_patterns() {
+    let Some(client) = connect_test_db().await else { return };
+    let schema = unique_schema();
+    client.execute(&format!("CREATE SCHEMA \"{}\"", schema), &[]).await.unwrap();
+
+    let path = fixture("null_patterns.jsonl");
+    let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    // Pass 1 doit inférer TEXT ou VarChar pour `tag` (string "present" et "null" présentes).
+    // Si la colonne était inférée comme autre chose (e.g. Boolean à cause des null majoritaires),
+    // les insertions suivantes produiraient des anomalies non attendues.
+    // L'assertion est faite ici — avant tout autre usage de p1.schemas — pour garantir
+    // qu'elle porte sur les schémas non-mutés tels qu'ils seront passés à create_tables.
+    let people_schema = p1.schemas.iter().find(|s| s.name == "people").unwrap();
+    let tag_col = people_schema.find_by_original("tag").unwrap();
+    assert!(
+        matches!(
+            &tag_col.pg_type,
+            json2sql::schema::type_tracker::PgType::Text
+                | json2sql::schema::type_tracker::PgType::VarChar(_)
+        ),
+        "tag doit être inféré TEXT/VarChar (valeurs string présentes), obtenu {:?}",
+        tag_col.pg_type
+    );
+
+    db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
+    let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
+        .await.unwrap();
+
+    // 4 lignes insérées, aucune anomalie (tag est TEXT, toutes les valeurs sont coerçables)
+    assert_eq!(*p2.rows_per_table.get("people").unwrap(), 4);
+    assert_eq!(row_count(&client, &schema, "people").await, 4);
+    assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+
+    // Alice → tag = 'present'
+    let sql_present = format!(
+        "SELECT tag FROM \"{}\".\"people\" WHERE name = 'Alice'",
+        schema
+    );
+    let row = client.query_opt(&sql_present, &[]).await.unwrap().expect("Alice row not found");
+    let tag: Option<String> = row.get("tag");
+    assert_eq!(tag.as_deref(), Some("present"));
+
+    // Bob (null JSON) → IS NULL
+    let sql_bob = format!(
+        "SELECT COUNT(*) FROM \"{}\".\"people\" WHERE name = 'Bob' AND tag IS NULL",
+        schema
+    );
+    let bob_null: i64 = client.query_one(&sql_bob, &[]).await.unwrap().get("count");
+    assert_eq!(bob_null, 1, "JSON null should produce SQL NULL");
+
+    // Charlie (clé absente) → IS NULL
+    let sql_charlie = format!(
+        "SELECT COUNT(*) FROM \"{}\".\"people\" WHERE name = 'Charlie' AND tag IS NULL",
+        schema
+    );
+    let charlie_null: i64 = client.query_one(&sql_charlie, &[]).await.unwrap().get("count");
+    assert_eq!(charlie_null, 1, "absent key should produce SQL NULL");
+
+    // Diana (string "null") → stocké comme 'null', PAS IS NULL
+    let sql_diana = format!(
+        "SELECT tag FROM \"{}\".\"people\" WHERE name = 'Diana'",
+        schema
+    );
+    let row_diana = client.query_opt(&sql_diana, &[]).await.unwrap().expect("Diana row not found");
+    let diana_tag: Option<String> = row_diana.get("tag");
+    assert_eq!(diana_tag.as_deref(), Some("null"), "string 'null' must be stored as text, not SQL NULL");
 
     drop_schema(&client, &schema).await;
 }
