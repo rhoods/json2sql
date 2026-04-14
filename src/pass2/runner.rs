@@ -251,9 +251,12 @@ pub async fn run(
                 let inserted = sink.copy_to_db(client).await?;
                 rows_per_table.insert(name.clone(), inserted);
                 if let Some(ref tx) = progress_tx {
+                    // Use `count` (the final batch size), not `inserted` (cumulative total
+                    // including previous streaming flushes). The UI accumulates all flush
+                    // events; sending the cumulative total here would double-count.
                     let _ = tx.send(ProgressEvent::Pass2Flush {
                         table_name: name.clone(),
-                        rows_flushed: inserted,
+                        rows_flushed: count,
                     });
                 }
             }
