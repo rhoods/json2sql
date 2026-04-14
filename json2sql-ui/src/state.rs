@@ -80,6 +80,18 @@ impl PgConfig {
 /// Maximum log lines kept in memory per pass (ring-buffer via VecDeque).
 const LOG_MAX: usize = 500;
 
+/// Format a byte count as a human-readable string using SI units (powers of 1 000).
+/// Shows KB for < 1 MB so sub-megabyte values are never displayed as "0 MB".
+pub fn format_bytes(b: u64) -> String {
+    if b >= 1_000_000_000 {
+        format!("{:.1} GB", b as f64 / 1_000_000_000.0)
+    } else if b >= 1_000_000 {
+        format!("{} MB", b / 1_000_000)
+    } else {
+        format!("{} KB", b / 1_000)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pass 1 progress (fed by ProgressEvent stream)
 // ---------------------------------------------------------------------------
@@ -229,10 +241,10 @@ impl AppState {
                 self.pass1_progress.bytes_read = bytes_read;
                 self.pass1_progress.total_bytes = total_bytes;
                 self.pass1_progress.push_log(format!(
-                    "Scanned {} records ({} MB / {} MB)",
+                    "Scanned {} records ({} / {})",
                     rows_scanned,
-                    bytes_read / 1_000_000,
-                    total_bytes / 1_000_000,
+                    format_bytes(bytes_read),
+                    format_bytes(total_bytes),
                 ));
             }
             Pass1Done { total_rows, tables_count, columns_count } => {

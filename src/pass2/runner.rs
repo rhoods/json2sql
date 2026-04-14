@@ -248,13 +248,12 @@ pub async fn run(
                         format!("COPY {} ({} rows)", name, count)
                     ));
                 }
-                let remaining = sink.row_count;
                 let inserted = sink.copy_to_db(client).await?;
                 rows_per_table.insert(name.clone(), inserted);
                 if let Some(ref tx) = progress_tx {
                     let _ = tx.send(ProgressEvent::Pass2Flush {
                         table_name: name.clone(),
-                        rows_flushed: remaining,
+                        rows_flushed: inserted,
                     });
                 }
             }

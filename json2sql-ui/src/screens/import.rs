@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 use json2sql::db::ddl;
 use json2sql::io::progress_event::ProgressEvent;
 
-use crate::state::AppState;
+use crate::state::{format_bytes, AppState};
 use crate::theme;
 
 #[component]
@@ -24,17 +24,17 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     };
     let progress_caption = if progress.done {
         format!(
-            "Rows imported: {} · File read: {} MB / {} MB",
+            "Rows imported: {} · File read: {} / {}",
             progress.rows_processed,
-            progress.bytes_read / 1_000_000,
-            progress.total_bytes / 1_000_000,
+            format_bytes(progress.bytes_read),
+            format_bytes(progress.total_bytes),
         )
     } else {
         format!(
-            "Objects processed: {} · File read: {} MB / {} MB",
+            "Objects processed: {} · File read: {} / {}",
             progress.rows_processed,
-            progress.bytes_read / 1_000_000,
-            progress.total_bytes / 1_000_000,
+            format_bytes(progress.bytes_read),
+            format_bytes(progress.total_bytes),
         )
     };
 

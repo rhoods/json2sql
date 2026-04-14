@@ -4,52 +4,61 @@
 /// Transitions to Screen 2 (Analysis) when both source and target are configured.
 use dioxus::prelude::*;
 
-use crate::state::{AppScreen, AppState};
+use crate::state::{format_bytes, AppScreen, AppState};
 use crate::theme;
 
-/// Open a file picker using zenity (avoids xdg-portal D-Bus issues with rfd on Linux).
-/// Returns the selected path, or None if cancelled.
-async fn pick_file_zenity(filters: &[(&str, &str)]) -> Option<std::path::PathBuf> {
+/// Result of a zenity picker invocation.
+enum PickResult {
+    /// User selected a path.
+    Selected(std::path::PathBuf),
+    /// User closed or cancelled the dialog.
+    Cancelled,
+    /// `zenity` binary is not installed on this system.
+    NotAvailable,
+}
+
+/// Run zenity with the given args. Returns `NotAvailable` when the binary is
+/// missing (`io::ErrorKind::NotFound`), `Cancelled` on any other failure or
+/// empty selection, and `Selected` on success.
+async fn run_zenity(args: Vec<String>) -> PickResult {
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("zenity").args(&args).output()
+    })
+    .await;
+
+    let output = match output {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => return PickResult::NotAvailable,
+        _ => return PickResult::Cancelled,
+    };
+
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            PickResult::Cancelled
+        } else {
+            PickResult::Selected(std::path::PathBuf::from(path))
+        }
+    } else {
+        PickResult::Cancelled
+    }
+}
+
+async fn pick_file_zenity(filters: &[(&str, &str)]) -> PickResult {
     let mut args = vec!["--file-selection".to_string(), "--title=Select file".to_string()];
     for (_, glob) in filters {
         args.push(format!("--file-filter={}", glob));
     }
-    let result = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("zenity")
-            .args(&args)
-            .output()
-            .ok()
-    })
-    .await
-    .ok()
-    .flatten()?;
-
-    if result.status.success() {
-        let path = String::from_utf8_lossy(&result.stdout).trim().to_string();
-        if path.is_empty() { None } else { Some(std::path::PathBuf::from(path)) }
-    } else {
-        None
-    }
+    run_zenity(args).await
 }
 
-/// Open a folder picker using zenity.
-async fn pick_folder_zenity() -> Option<std::path::PathBuf> {
-    let result = tokio::task::spawn_blocking(|| {
-        std::process::Command::new("zenity")
-            .args(&["--file-selection", "--directory", "--title=Select folder"])
-            .output()
-            .ok()
-    })
+async fn pick_folder_zenity() -> PickResult {
+    run_zenity(vec![
+        "--file-selection".to_string(),
+        "--directory".to_string(),
+        "--title=Select folder".to_string(),
+    ])
     .await
-    .ok()
-    .flatten()?;
-
-    if result.status.success() {
-        let path = String::from_utf8_lossy(&result.stdout).trim().to_string();
-        if path.is_empty() { None } else { Some(std::path::PathBuf::from(path)) }
-    } else {
-        None
-    }
 }
 
 #[component]
@@ -65,13 +74,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let source_size_bytes: Option<u64> = source_path.as_ref()
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|m| m.len());
-    let source_size_label: Option<String> = source_size_bytes.map(|b| {
-        if b >= 1_073_741_824 {
-            format!("{:.1} GB", b as f64 / 1_073_741_824.0)
-        } else {
-            format!("{} MB", b / 1_048_576)
-        }
-    });
+    let source_size_label: Option<String> = source_size_bytes.map(format_bytes);
     // Warn if > 5 GB — analysis may be slow.
     let source_large = source_size_bytes.map(|b| b > 5 * 1_073_741_824).unwrap_or(false);
 
@@ -102,6 +105,8 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     // a second click while the dialog is open is silently ignored.
     let mut picking_source  = use_signal(|| false);
     let mut picking_anomaly = use_signal(|| false);
+    // Set to Some(msg) when zenity is not installed; displayed near the Browse button.
+    let mut picker_error: Signal<Option<String>> = use_signal(|| None);
 
     rsx! {
         div {
@@ -147,14 +152,26 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                             onclick: move |_| async move {
                                 if picking_source() { return; }
                                 picking_source.set(true);
-                                if let Some(path) = pick_file_zenity(&[
+                                picker_error.set(None);
+                                let result = pick_file_zenity(&[
                                     ("JSON / JSONL", "*.json *.jsonl *.ndjson"),
-                                ]).await {
-                                    state.write().source_file = Some(path);
-                                }
+                                ]).await;
                                 picking_source.set(false);
+                                match result {
+                                    PickResult::Selected(path) => { state.write().source_file = Some(path); }
+                                    PickResult::Cancelled => {}
+                                    PickResult::NotAvailable => {
+                                        picker_error.set(Some("zenity not found — install it: sudo apt install zenity".to_string()));
+                                    }
+                                }
                             },
                             "Browse…"
+                        }
+                        if let Some(ref err) = picker_error() {
+                            span {
+                                style: "color:{theme::ERROR};font-size:0.75rem;",
+                                "{err}"
+                            }
                         }
                     }
                 }
@@ -367,10 +384,15 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                             onclick: move |_| async move {
                                 if picking_anomaly() { return; }
                                 picking_anomaly.set(true);
-                                if let Some(dir) = pick_folder_zenity().await {
-                                    state.write().anomaly_dir = Some(dir);
-                                }
+                                let result = pick_folder_zenity().await;
                                 picking_anomaly.set(false);
+                                match result {
+                                    PickResult::Selected(dir) => { state.write().anomaly_dir = Some(dir); }
+                                    PickResult::Cancelled => {}
+                                    PickResult::NotAvailable => {
+                                        picker_error.set(Some("zenity not found — install it: sudo apt install zenity".to_string()));
+                                    }
+                                }
                             },
                             "Browse…"
                         }
