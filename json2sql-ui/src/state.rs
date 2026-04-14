@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use urlencoding::encode;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 use json2sql::io::progress_event::ProgressEvent;
 use json2sql::schema::table_schema::TableSchema;
 
@@ -54,7 +54,11 @@ impl Default for PgConfig {
 impl PgConfig {
     /// Build a postgres connection URL from the config fields.
     /// All user-provided components are percent-encoded to handle special characters.
-    pub fn to_url(&self) -> String {
+    ///
+    /// Returns `Zeroizing<String>` so the heap allocation containing the password
+    /// is overwritten when the value is dropped, not only when `PgConfig` itself
+    /// is dropped (which would be too late for URL copies passed to connect()).
+    pub fn to_url(&self) -> Zeroizing<String> {
         // IPv6 addresses must be bracketed; encode host for all other special chars.
         let host = if self.host.contains(':') && !self.host.starts_with('[') {
             format!("[{}]", encode(&self.host))
@@ -62,11 +66,11 @@ impl PgConfig {
             encode(&self.host).into_owned()
         };
 
-        format!(
+        Zeroizing::new(format!(
             "postgres://{}:{}@{}:{}/{}",
             encode(&self.username), encode(&self.password),
             host, self.port, encode(&self.database)
-        )
+        ))
     }
 
     pub fn is_complete(&self) -> bool {
