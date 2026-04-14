@@ -197,7 +197,7 @@ async fn test_anomaly_dir_streaming() {
     let anomaly_dir = tempfile::TempDir::new().unwrap();
     let mut p2 = pass2::runner::run(
         &path, "people", &p1.schemas, &client, &schema, 1000, false,
-        None, 1, Some(anomaly_dir.path().to_path_buf()),
+        None, 1, Some(anomaly_dir.path().to_path_buf()), None,
     )
     .await
     .unwrap();
@@ -222,7 +222,7 @@ async fn test_anomaly_dir_streaming() {
     let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(entry["table"], "people");
     assert_eq!(entry["column"], "score");
-    assert_eq!(entry["expected_type"], "double precision");
+    assert_eq!(entry["expected_type"], "DOUBLE PRECISION");
     // "score": true is a JSON boolean coerced to double precision → actual_type = "boolean"
     assert_eq!(entry["actual_type"], "boolean");
 
@@ -404,19 +404,35 @@ async fn test_array_as_pg_array() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 10 — NaN / Infinity → anomalie + NULL
+// Test 10 — Float anomaly : boolean dans une colonne DOUBLE PRECISION
 //
-// Fixture : 5 enregistrements, colonne `score` DOUBLE PRECISION.
-// 3 valeurs non-finies ("NaN", "Infinity", "-Infinity") → 3 anomalies, NULL inséré.
+// Fixture : 5 enregistrements, colonne `score` majoritairement float.
+// Pass 1 infère DOUBLE PRECISION (Float gagne sur Boolean dans to_pg_type).
+// La valeur `true` (boolean) ne peut pas être coercée → 1 anomalie, NULL inséré.
+//
+// Note : les strings "NaN"/"Infinity" ne produisent PAS d'anomalie dans le
+// pipeline complet car Pass 1 voit un mélange Float+Varchar et élargit la
+// colonne à VARCHAR (les strings gagnent toujours sur les numériques dans
+// to_pg_type). Les anomalies de coerce_float sont testées en unitaire dans
+// coercer.rs.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn test_float_nan_infinity_anomaly() {
+async fn test_float_anomaly_boolean_value() {
     let Some(client) = connect_test_db().await else { return };
     let schema = unique_schema();
     client.execute(&format!("CREATE SCHEMA \"{}\"", schema), &[]).await.unwrap();
 
     let path = fixture("anomalies_float.jsonl");
     let p1 = pass1::runner::run(&path, "items", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    // Pass 1 doit inférer DOUBLE PRECISION (Float domine, Boolean minoritaire)
+    let items_schema = p1.schemas.iter().find(|s| s.name == "items").unwrap();
+    let score_col = items_schema.find_by_original("score").unwrap();
+    assert!(
+        matches!(score_col.pg_type, json2sql::schema::type_tracker::PgType::DoublePrecision),
+        "score should be inferred as DOUBLE PRECISION, got {:?}", score_col.pg_type
+    );
+
     db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
     let p2 = pass2::runner::run(&path, "items", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
         .await.unwrap();
@@ -424,13 +440,13 @@ async fn test_float_nan_infinity_anomaly() {
     // Toutes les lignes sont insérées
     assert_eq!(row_count(&client, &schema, "items").await, 5);
 
-    // 3 anomalies : NaN, Infinity, -Infinity
-    assert_eq!(p2.anomaly_collector.total_anomalies(), 3);
+    // 1 anomalie : `true` (boolean) non-coerçable en DOUBLE PRECISION
+    assert_eq!(p2.anomaly_collector.total_anomalies(), 1);
 
-    // Les 3 lignes non-finies ont score = NULL
+    // La ligne avec le boolean a score = NULL
     let sql = format!("SELECT COUNT(*) FROM \"{}\".\"items\" WHERE \"score\" IS NULL", schema);
     let null_count: i64 = client.query_one(&sql, &[]).await.unwrap().get(0);
-    assert_eq!(null_count, 3);
+    assert_eq!(null_count, 1);
 
     drop_schema(&client, &schema).await;
 }
@@ -498,7 +514,7 @@ async fn test_parallel_copy() {
     // parallel = 3: tables at the same depth level are COPYed concurrently
     let p2 = pass2::runner::run(
         &path, "users", &p1.schemas, &client, &schema, 1000, false,
-        Some(&db_url), 3, None,
+        Some(&db_url), 3, None, None,
     )
     .await
     .unwrap();

@@ -1,0 +1,4 @@
+# Integration tests hit a real PostgreSQL instance.
+# Run them single-threaded to avoid connection pool saturation.
+[test]
+test-threads = 1
