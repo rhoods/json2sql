@@ -40,7 +40,13 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
 
     // Launch the full import pipeline once on mount.
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
-        // Reset progress in case the screen is remounted.
+        // Guard: abort_handle is Some while a runner is in flight.
+        // Bail out on remount to prevent two Pass 2 pipelines writing concurrently.
+        if state.read().abort_handle.is_some() {
+            return;
+        }
+
+        // Reset progress only after confirming no runner is active.
         state.write().pass2_progress = crate::state::Pass2Progress::default();
 
         let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, pg_schema) = {

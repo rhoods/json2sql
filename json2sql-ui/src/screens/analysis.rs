@@ -10,8 +10,6 @@ const SIBLING_THRESHOLD: usize = 3;
 const SIBLING_JACCARD: f64 = 0.5;
 const STABLE_THRESHOLD: f64 = 0.10;
 const RARE_THRESHOLD: f64 = 0.001;
-const MAX_VISIBLE_LOG_LINES: usize = 1000;
-
 use dioxus::prelude::*;
 
 use json2sql::io::progress_event::ProgressEvent;
@@ -27,8 +25,9 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
     } else if progress.total_bytes > 0 {
         (progress.bytes_read as f64 / progress.total_bytes as f64 * 100.0) as u32
     } else if progress.rows_scanned > 0 {
-        // Show some progress even when total_bytes is unknown
-        ((progress.rows_scanned % 100) as u32).min(90)
+        // total_bytes unknown — show monotonically increasing fake progress capped at 89%.
+        // Increments by 1% per 1 000 rows scanned; never oscillates, never reaches 100.
+        ((progress.rows_scanned / 1_000) as u32).min(89)
     } else {
         0
     };
@@ -44,7 +43,15 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
 
     // Launch Pass 1 once on mount. The coroutine runs until the component unmounts.
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
-        // Reset progress in case the screen is remounted (e.g. Cancel → re-navigate).
+        // Guard: abort_handle is Some while a runner is in flight.
+        // If it is already set, a previous coroutine instance is still active
+        // (Dioxus can re-run use_coroutine on component remount); bail out
+        // immediately to avoid running two Pass 1 instances concurrently.
+        if state.read().abort_handle.is_some() {
+            return;
+        }
+
+        // Reset progress only after confirming no runner is active.
         state.write().pass1_progress = crate::state::Pass1Progress::default();
 
         // Derive root table name from file stem (same logic as CLI).
@@ -132,14 +139,8 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 div {
                     class: "log-panel",
                     style: "flex:0 1 60%;min-width:0;box-sizing:border-box;",
-                    for line in progress.log_lines.iter().rev().take(MAX_VISIBLE_LOG_LINES).rev() {
+                    for line in progress.log_lines.iter() {
                         p { style: "margin:2px 0;", "{line}" }
-                    }
-                    if progress.log_lines.len() > MAX_VISIBLE_LOG_LINES {
-                        p {
-                            style: "margin:8px 0;color:{theme::ON_SURFACE_VARIANT};font-size:0.75rem;font-style:italic;",
-                            "... and {progress.log_lines.len() - MAX_VISIBLE_LOG_LINES} more lines"
-                        }
                     }
                 }
 

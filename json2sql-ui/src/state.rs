@@ -203,7 +203,9 @@ impl AppState {
     }
 
     /// Abort the running task (if any), reset all transient state, and return to Setup.
-    /// Preserves `source_file`, `pg`, and `drop_existing` (user preferences).
+    /// Preserves `source_file` and `pg` (user preferences).
+    /// `drop_existing` is intentionally reset — it is a destructive flag that must be
+    /// re-enabled explicitly on each import.
     pub fn cancel(&mut self) {
         if let Some(handle) = self.abort_handle.take() {
             handle.abort();
@@ -214,6 +216,7 @@ impl AppState {
         self.pg_testing = false;
         self.pg_ok = None;
         self.pg_error = None;
+        self.drop_existing = false;
         self.screen = AppScreen::Setup;
     }
 
