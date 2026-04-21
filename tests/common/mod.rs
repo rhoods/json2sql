@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use futures_util::FutureExt;
 use uuid::Uuid;
 
-use json2sql::db;
+use json2sql::db::connection;
 
 pub fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -33,7 +33,7 @@ pub fn db_url() -> Option<String> {
 
 pub async fn connect_test_db() -> Option<tokio_postgres::Client> {
     let url = db_url()?;
-    db::connection::connect(&url).await.ok()
+    connection::connect(&url).await.ok()
 }
 
 pub fn unique_schema() -> String {
@@ -73,7 +73,7 @@ where
         None => return,
     };
 
-    let client = match db::connection::connect(&url).await {
+    let client = match connection::connect(&url).await {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -89,7 +89,7 @@ where
         .await;
 
     // Always drop — open a fresh connection since the original was consumed by f().
-    if let Ok(cleanup) = db::connection::connect(&url).await {
+    if let Ok(cleanup) = connection::connect(&url).await {
         drop_schema(&cleanup, &schema).await;
     }
 
@@ -110,7 +110,7 @@ where
         None => return,
     };
 
-    let client = match db::connection::connect(&url).await {
+    let client = match connection::connect(&url).await {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -125,7 +125,7 @@ where
         .catch_unwind()
         .await;
 
-    if let Ok(cleanup) = db::connection::connect(&url).await {
+    if let Ok(cleanup) = connection::connect(&url).await {
         drop_schema(&cleanup, &schema).await;
     }
 

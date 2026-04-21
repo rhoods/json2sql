@@ -1,5 +1,7 @@
 mod common;
 
+// pass2 is used by all async tests in this file; pass1-only test_schema_inference_no_db
+// does not use it but sharing the import avoids per-test redundancy.
 use json2sql::{db, pass1, pass2};
 
 #[tokio::test]
@@ -156,6 +158,12 @@ async fn test_array_as_pg_array() {
 // ---------------------------------------------------------------------------
 // parallel=3 : tables au même niveau de profondeur COPYées en concurrence.
 // Nécessite l'URL brute pour ouvrir des connexions supplémentaires.
+//
+// Note CI : ce test ouvre 3 connexions PG simultanées (pool interne pass2).
+// Sur une instance avec max_connections <= 5, il peut interférer avec les
+// autres crates de test lancées en parallèle par cargo test.
+// Exécution isolée si nécessaire :
+//   cargo test --test integration_schema test_parallel_copy
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_parallel_copy() {
