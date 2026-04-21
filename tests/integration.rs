@@ -934,6 +934,29 @@ async fn test_override_type_valid() {
     assert_eq!(*p2.rows_per_table.get("people").unwrap(), 3);
     assert_eq!(p2.anomaly_collector.total_anomalies(), 0, "no anomalies expected — score values are valid text");
 
+    // #3 — score IS NOT NULL pour les 3 lignes : total_anomalies()==0 ne détecte pas un NULL silencieux
+    let not_null_sql = format!(
+        "SELECT COUNT(*) FROM \"{}\".\"people\" WHERE score IS NOT NULL",
+        schema
+    );
+    let not_null_count: i64 = client.query_one(&not_null_sql, &[]).await.unwrap().get(0);
+    assert_eq!(not_null_count, 3, "score doit être NOT NULL pour les 3 lignes (coercion TEXT réussie)");
+
+    // #8 — valeurs exactes : float JSON → string, pas de représentation inattendue
+    for (name, expected_score) in [("Alice", "9.5"), ("Bob", "7.2"), ("Charlie", "8.8")] {
+        let sql = format!(
+            "SELECT score FROM \"{}\".\"people\" WHERE name = '{}'",
+            schema, name
+        );
+        let row = client.query_opt(&sql, &[]).await.unwrap()
+            .unwrap_or_else(|| panic!("ligne introuvable pour {}", name));
+        let score: Option<String> = row.get("score");
+        assert_eq!(
+            score.as_deref(), Some(expected_score),
+            "score de {} doit être '{}' (string exacte), obtenu {:?}", name, expected_score, score
+        );
+    }
+
     let type_sql = "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) \
          FROM pg_attribute a \
          JOIN pg_class c ON c.oid = a.attrelid \
@@ -968,6 +991,14 @@ async fn test_override_bad() {
 
     let path = fixture("users.jsonl");
     let mut p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    // #1 — Pass1 doit inférer DoublePrecision AVANT override, pour prouver que l'override a un effet réel
+    let pre_schema = p1.schemas.iter().find(|s| s.name == "people").unwrap();
+    let pre_col = pre_schema.find_by_original("score").unwrap();
+    assert!(
+        matches!(&pre_col.pg_type, json2sql::schema::type_tracker::PgType::DoublePrecision),
+        "Pass1 doit inférer DoublePrecision pour score avant override, obtenu {:?}", pre_col.pg_type
+    );
 
     let config = SchemaConfig::from_file(&fixture("override_bad.toml")).unwrap();
     apply_overrides(&mut p1.schemas, &config);
