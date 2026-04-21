@@ -1026,24 +1026,42 @@ async fn test_override_bad() {
     let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
         .await.unwrap();
 
-    // P2/#1 — les 3 lignes arrivent en base même si score est en anomalie (pas de rejet de ligne)
+    // rows_per_table = compteur pipeline interne ; row_count = vérité DB via COUNT(*).
+    // Les deux sont nécessaires : rows_per_table détecte un bug dans le flush/batch,
+    // row_count détecte une divergence silencieuse entre ce que le pipeline croit avoir inséré et la réalité.
     assert_eq!(*p2.rows_per_table.get("people").unwrap(), 3);
-    // P2/#3 — nonexistent col + ghost_table n'ont aucun side-effect sur le row count DB réel
     assert_eq!(row_count(&client, &schema, "people").await, 3);
 
-    // P2/#8 — exactement 3 anomalies : une par ligne sur score, les tables enfants n'en produisent pas
-    assert_eq!(
-        p2.anomaly_collector.total_anomalies(), 3,
-        "exactement 3 anomalies attendues (score sur 3 lignes), obtenu: {}", p2.anomaly_collector.total_anomalies()
-    );
+    // Les 3 anomalies viennent exclusivement de people.score (float→INTEGER).
+    // Les tables enfants (people_address, people_tags, people_orders, people_orders_items)
+    // ne contiennent pas de colonne score et ne sont pas affectées par l'override.
+    let summaries = p2.anomaly_collector.summaries();
+    assert_eq!(summaries.len(), 1, "une seule paire (table, col) en anomalie attendue, obtenu: {:?}",
+        summaries.iter().map(|s| format!("{}.{}", s.table, s.column)).collect::<Vec<_>>());
+    assert_eq!(summaries[0].table, "people");
+    assert_eq!(summaries[0].column, "score");
+    assert_eq!(summaries[0].anomaly_count, 3,
+        "exactement 3 anomalies sur people.score, obtenu: {}", summaries[0].anomaly_count);
 
-    // P2/#10 — coerceur strict : score IS NULL pour les 3 lignes, pas de trunc silencieux (9.5 → 9)
+    // Coerceur strict : score IS NULL pour les 3 lignes (pas de trunc silencieux 9.5 → 9).
     let null_count_sql = format!(
         "SELECT COUNT(*) FROM \"{}\".\"people\" WHERE score IS NULL",
         schema
     );
     let null_count: i64 = client.query_one(&null_count_sql, &[]).await.unwrap().get(0);
-    assert_eq!(null_count, 3, "score doit être NULL pour les 3 lignes (coercion stricte float→INTEGER), obtenu {} NULL", null_count);
+    assert_eq!(null_count, 3, "score doit être NULL pour les 3 lignes (coercion stricte), obtenu {} NULL", null_count);
+
+    // L'override sur score ne corrompt pas les colonnes adjacentes.
+    let alice_row = client
+        .query_opt(&format!("SELECT name FROM \"{}\".\"people\" WHERE name = 'Alice'", schema), &[])
+        .await.unwrap()
+        .expect("ligne Alice introuvable — l'override a peut-être corrompu la table");
+    let alice_name: String = alice_row.get("name");
+    assert_eq!(alice_name, "Alice");
+
+    // Les tables enfants reçoivent leurs lignes normalement malgré l'override sur la table root.
+    assert_eq!(row_count(&client, &schema, "people_address").await, 3,
+        "people_address doit avoir 3 lignes (une par utilisateur)");
 
     drop_schema(&client, &schema).await;
 }
