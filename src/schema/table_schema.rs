@@ -95,6 +95,10 @@ pub enum WideStrategy {
         /// Maximum nesting depth to flatten. Currently only depth = 1 is implemented.
         max_depth: u8,
     },
+    /// Inline the child table's raw JSON into a JSONB column on the parent table.
+    /// The child table is removed from the schema; the parent gains a `{child_name} JSONB` column.
+    /// One-to-one child → single JSONB object; one-to-many → JSONB array.
+    JsonbFlatten,
 }
 
 /// A column in a finalized table schema.
@@ -247,6 +251,7 @@ impl WideStrategy {
                 | WideStrategy::KeyedPivot(_)
                 | WideStrategy::NormalizeDynamicKeys { .. }
                 | WideStrategy::Flatten { .. }
+                | WideStrategy::JsonbFlatten
         )
     }
 }

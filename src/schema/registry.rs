@@ -707,9 +707,9 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: WideStrat
             // AutoSplit is handled inline in finalize(); Ignore is per-key, not per-table.
             // Neither reaches this function.
         }
-        WideStrategy::NormalizeDynamicKeys { .. } | WideStrategy::Flatten { .. } => {
+        WideStrategy::NormalizeDynamicKeys { .. } | WideStrategy::Flatten { .. } | WideStrategy::JsonbFlatten => {
             // These strategies require the full schemas slice.
-            // Use apply_normalize_dynamic_keys() or apply_flatten() instead.
+            // Use apply_normalize_dynamic_keys(), apply_flatten(), or apply_jsonb_flatten() instead.
         }
     }
 }
@@ -1116,6 +1116,67 @@ pub fn apply_flatten(
 
     // Remove the flattened child table from the schema
     schemas.retain(|s| !matches!(s.wide_strategy, WideStrategy::Flatten { .. }));
+}
+
+/// Inline a child table as a single JSONB column on the parent table.
+/// The child table is removed from the schema; the parent gains `{child_table_name} JSONB`.
+/// Used for WideStrategy::JsonbFlatten (IHM override "JSONB inline").
+pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &str) {
+    let (parent_name, field_name) = {
+        let child = match schemas.iter().find(|s| s.name == child_table_name) {
+            Some(c) => c,
+            None => {
+                eprintln!("WARNING: apply_jsonb_flatten: table '{}' not found", child_table_name);
+                return;
+            }
+        };
+        let parent = match child.parent_table.clone() {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "WARNING: apply_jsonb_flatten: '{}' is a root table, cannot inline into parent",
+                    child_table_name
+                );
+                return;
+            }
+        };
+        // The JSON field name is the last path segment of the child table.
+        let field = child.path.last()
+            .cloned()
+            .unwrap_or_else(|| child_table_name.to_string());
+        (parent, field)
+    };
+
+    // Mark child as JsonbFlatten so absorbs_children() returns true for its descendants
+    if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
+        child.wide_strategy = WideStrategy::JsonbFlatten;
+    }
+
+    // Remove any nested children of the child table
+    exclude_absorbed_children(schemas);
+
+    // Add JSONB column to parent (SQL name = child table name, original = JSON field name).
+    if let Some(parent) = schemas.iter_mut().find(|s| s.name == parent_name) {
+        if !parent.columns.iter().any(|c| c.name == child_table_name) {
+            parent.columns.push(ColumnSchema {
+                name: child_table_name.to_string(),
+                original_name: field_name,
+                pg_type: PgType::Jsonb,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
+            });
+        }
+    } else {
+        eprintln!(
+            "WARNING: apply_jsonb_flatten: parent table '{}' not found for '{}'",
+            parent_name, child_table_name
+        );
+        return;
+    }
+
+    // Remove the child table and its absorbed descendants
+    schemas.retain(|s| !matches!(s.wide_strategy, WideStrategy::JsonbFlatten));
 }
 
 fn type_histogram(tracker: &TypeTracker) -> Vec<(String, u64)> {

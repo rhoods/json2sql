@@ -40,11 +40,12 @@ pub const OUTLINE_VARIANT: &str = "#40475266"; // #404752 at ~40% opacity
 pub const PRIMARY_ALPHA_08: &str = "rgba(153, 203, 255, 0.08)";
 
 // Strategy badge colors
-pub const BADGE_DEFAULT: &str = "#4A90D9";   // blue
-pub const BADGE_JSONB: &str = "#9B59B6";     // purple
-pub const BADGE_FLATTEN: &str = "#27AE60";   // green
-pub const BADGE_NORMALIZE: &str = "#E67E22"; // orange
-pub const BADGE_SKIP: &str = "#E74C3C";      // red
+pub const BADGE_DEFAULT: &str = "#4A90D9";        // blue
+pub const BADGE_JSONB: &str = "#9B59B6";          // purple  — JSONB séparé (table propre)
+pub const BADGE_JSONB_INLINE: &str = "#16A085";   // teal    — JSONB inline (colonne parent)
+pub const BADGE_FLATTEN: &str = "#27AE60";        // green
+pub const BADGE_NORMALIZE: &str = "#E67E22";      // orange
+pub const BADGE_SKIP: &str = "#E74C3C";           // red
 
 // ---------------------------------------------------------------------------
 // Typography helpers (used as CSS font-family values)

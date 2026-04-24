@@ -45,7 +45,10 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
     let idx = state.read().selected_table_idx.min(schemas.len().saturating_sub(1));
     let selected: &TableSchema = &schemas[idx];
-    let current_strategy = selected.wide_strategy.clone();
+    let current_strategy = state.read().strategy_overrides
+        .get(&selected.name)
+        .cloned()
+        .unwrap_or_else(|| selected.wide_strategy.clone());
     let current_label = strategy_label(&current_strategy);
 
     let normalize_id_col_value = normalize_id_col.read().trim().to_string();
@@ -83,8 +86,12 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                         {
                             let is_selected = i == idx;
                             let indent = table.depth * 12;
-                            let label = strategy_label(&table.wide_strategy);
-                            let badge_color = strategy_color(&table.wide_strategy);
+                            let effective = state.read().strategy_overrides
+                                .get(&table.name)
+                                .cloned()
+                                .unwrap_or_else(|| table.wide_strategy.clone());
+                            let label = strategy_label(&effective);
+                            let badge_color = strategy_color(&effective);
                             let row_bg = if is_selected {
                                 format!("background:{};", SELECTED_ROW_BG)
                             } else {
@@ -181,15 +188,26 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             active: matches!(current_strategy, WideStrategy::Columns),
                             color: theme::BADGE_DEFAULT,
                             onclick: move |_| {
-                                state.write().schemas[idx].wide_strategy = WideStrategy::Columns;
+                                let name = state.read().schemas[idx].name.clone();
+                                state.write().strategy_overrides.remove(&name);
                             }
                         }
                         StrategyButton {
-                            label: "JSONB (store as-is)",
+                            label: "JSONB séparé (table propre)",
                             active: matches!(current_strategy, WideStrategy::Jsonb),
                             color: theme::BADGE_JSONB,
                             onclick: move |_| {
-                                state.write().schemas[idx].wide_strategy = WideStrategy::Jsonb;
+                                let name = state.read().schemas[idx].name.clone();
+                                state.write().strategy_overrides.insert(name, WideStrategy::Jsonb);
+                            }
+                        }
+                        StrategyButton {
+                            label: "JSONB inline (colonne parent)",
+                            active: matches!(current_strategy, WideStrategy::JsonbFlatten),
+                            color: theme::BADGE_JSONB_INLINE,
+                            onclick: move |_| {
+                                let name = state.read().schemas[idx].name.clone();
+                                state.write().strategy_overrides.insert(name, WideStrategy::JsonbFlatten);
                             }
                         }
                         StrategyButton {
@@ -197,7 +215,8 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             active: matches!(current_strategy, WideStrategy::Pivot),
                             color: theme::BADGE_NORMALIZE,
                             onclick: move |_| {
-                                state.write().schemas[idx].wide_strategy = WideStrategy::Pivot;
+                                let name = state.read().schemas[idx].name.clone();
+                                state.write().strategy_overrides.insert(name, WideStrategy::Pivot);
                             }
                         }
                         StrategyButton {
@@ -205,7 +224,8 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             active: matches!(current_strategy, WideStrategy::Ignore),
                             color: theme::BADGE_SKIP,
                             onclick: move |_| {
-                                state.write().schemas[idx].wide_strategy = WideStrategy::Ignore;
+                                let name = state.read().schemas[idx].name.clone();
+                                state.write().strategy_overrides.insert(name, WideStrategy::Ignore);
                             }
                         }
                     }
@@ -236,8 +256,11 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             onclick: move |_| {
                                 let col = normalize_id_col.read().trim().to_string();
                                 let id_col = if col.is_empty() { "id".to_string() } else { col };
-                                state.write().schemas[idx].wide_strategy =
-                                    WideStrategy::NormalizeDynamicKeys { id_column: id_col };
+                                let name = state.read().schemas[idx].name.clone();
+                                state.write().strategy_overrides.insert(
+                                    name,
+                                    WideStrategy::NormalizeDynamicKeys { id_column: id_col },
+                                );
                             },
                             "Apply Normalize"
                         }

@@ -1,10 +1,10 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use urlencoding::encode;
 use zeroize::{Zeroize, Zeroizing};
 use json2sql::io::progress_event::ProgressEvent;
-use json2sql::schema::table_schema::TableSchema;
+use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 
 // ---------------------------------------------------------------------------
 // Screen navigation
@@ -174,8 +174,11 @@ pub struct AppState {
     pub pass1_progress: Pass1Progress,
 
     // — Screen 3 / 4 —
-    /// Working copy of schemas; mutated by strategy editor (Screen 3).
+    /// Original schemas from pass1 — never mutated after being set.
     pub schemas: Vec<TableSchema>,
+    /// User-chosen strategy overrides: table_name → WideStrategy.
+    /// Applied on top of `schemas` at DDL generation and import time.
+    pub strategy_overrides: HashMap<String, WideStrategy>,
     /// Index of the table currently selected in Strategy / Preview panels.
     /// Persisted in AppState so the selection survives navigation between the two screens.
     pub selected_table_idx: usize,
@@ -202,6 +205,7 @@ impl Default for AppState {
             pg_error: None,
             pass1_progress: Pass1Progress::default(),
             schemas: Vec::new(),
+            strategy_overrides: HashMap::new(),
             selected_table_idx: 0,
             pass2_progress: Pass2Progress::default(),
             abort_handle: None,
@@ -210,6 +214,66 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Build a copy of schemas with all user strategy overrides applied.
+    ///
+    /// The original `self.schemas` is never mutated — this produces a fresh
+    /// Vec ready for DDL generation and pass2 import.
+    pub fn build_effective_schemas(&self) -> Vec<json2sql::schema::table_schema::TableSchema> {
+        use json2sql::schema::registry::{apply_jsonb_flatten, apply_normalize_dynamic_keys, apply_wide_strategy_columns};
+
+        let mut schemas = self.schemas.clone();
+
+        // Pass 1: apply overrides that operate on a single table at a time.
+        for (table_name, strategy) in &self.strategy_overrides {
+            if let Some(s) = schemas.iter_mut().find(|s| &s.name == table_name) {
+                match strategy {
+                    WideStrategy::NormalizeDynamicKeys { .. } => {} // handled in pass 2
+                    WideStrategy::JsonbFlatten => {}                // handled in pass 3
+                    other => apply_wide_strategy_columns(s, other.clone()),
+                }
+            }
+        }
+
+        // Pass 2: apply NormalizeDynamicKeys (needs full schemas vec + removes child tables).
+        let normalize_targets: Vec<(String, String)> = self.strategy_overrides
+            .iter()
+            .filter_map(|(name, strategy)| {
+                if let WideStrategy::NormalizeDynamicKeys { id_column } = strategy {
+                    Some((name.clone(), id_column.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (table_name, id_column) in normalize_targets {
+            apply_normalize_dynamic_keys(&mut schemas, &table_name, id_column);
+        }
+
+        // Pass 3: apply JsonbFlatten (needs full schemas vec + removes child table).
+        let jsonb_flatten_targets: Vec<String> = self.strategy_overrides
+            .iter()
+            .filter_map(|(name, strategy)| {
+                if matches!(strategy, WideStrategy::JsonbFlatten) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for table_name in jsonb_flatten_targets {
+            apply_jsonb_flatten(&mut schemas, &table_name);
+        }
+
+        // Remove tables explicitly skipped by the user.
+        schemas.retain(|s| {
+            !matches!(self.strategy_overrides.get(&s.name), Some(WideStrategy::Ignore))
+        });
+
+        schemas
+    }
+
     /// Convenience: true when both source file and PG config are ready.
     pub fn ready_to_start(&self) -> bool {
         self.source_file.is_some()
@@ -229,6 +293,7 @@ impl AppState {
         self.pass1_progress = Pass1Progress::default();
         self.pass2_progress = Pass2Progress::default();
         self.schemas = Vec::new();
+        self.strategy_overrides = HashMap::new();
         self.pg_testing = false;
         self.pg_ok = None;
         self.pg_error = None;

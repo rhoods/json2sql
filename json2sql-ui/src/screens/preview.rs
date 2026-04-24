@@ -22,7 +22,7 @@ use crate::theme;
 
 #[component]
 pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
-    let schemas = state.read().schemas.clone();
+    let schemas = state.read().build_effective_schemas();
 
     if schemas.is_empty() {
         return rsx! {
@@ -37,7 +37,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
     let idx = state.read().selected_table_idx.min(schemas.len().saturating_sub(1));
     let selected = &schemas[idx];
 
-    // Generate DDL for the selected table (preview mode: no DROP, IF NOT EXISTS).
+    // Generate DDL for the selected table with overrides applied.
     let ddl = generate_create_table(selected, &pg_schema, false);
 
     // Pre-calculate column counts for better performance

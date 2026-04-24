@@ -61,7 +61,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 .and_then(|s| s.to_str())
                 .unwrap_or("root")
                 .to_string();
-            (path, root, s.pg.to_url(), s.schemas.clone(), s.drop_existing, s.anomaly_dir.clone(), s.pg_schema.clone())
+            (path, root, s.pg.to_url(), s.build_effective_schemas(), s.drop_existing, s.anomaly_dir.clone(), s.pg_schema.clone())
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();

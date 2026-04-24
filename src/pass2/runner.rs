@@ -365,7 +365,8 @@ fn insert_object(
                             WideStrategy::Columns
                             | WideStrategy::AutoSplit { .. }
                             | WideStrategy::Ignore
-                            | WideStrategy::Flatten { .. } => {
+                            | WideStrategy::Flatten { .. }
+                            | WideStrategy::JsonbFlatten => {
                                 let child_id = Uuid::now_v7();
                                 insert_object(
                                     path_map, sinks, anomalies, child_schema,
@@ -418,6 +419,21 @@ fn insert_object(
         } else {
             obj.get(&col.original_name).unwrap_or(&Value::Null)
         };
+
+        // JSONB columns (added by JsonbFlatten) accept any JSON value, including objects
+        // and arrays — serialize the raw value directly.
+        if matches!(col.pg_type, crate::schema::type_tracker::PgType::Jsonb) {
+            if matches!(json_val, Value::Null) {
+                builder.push_null();
+            } else {
+                let json_str = serde_json::to_string(json_val).unwrap_or_default();
+                match escape_copy_text(&json_str) {
+                    Some(escaped) => builder.push_value(&escaped),
+                    None => builder.push_null(),
+                }
+            }
+            continue;
+        }
 
         // Objects and non-array-typed arrays become child tables, not columns.
         // Arrays typed as PgType::Array fall through to coerce() below.
@@ -529,7 +545,8 @@ fn insert_object(
                         WideStrategy::Columns
                         | WideStrategy::AutoSplit { .. }
                         | WideStrategy::Ignore
-                        | WideStrategy::Flatten { .. } => {
+                        | WideStrategy::Flatten { .. }
+                        | WideStrategy::JsonbFlatten => {
                             let child_id = Uuid::now_v7();
                             insert_object(
                                 path_map, sinks, anomalies, child_schema,

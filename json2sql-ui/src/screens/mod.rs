@@ -11,7 +11,8 @@ pub fn strategy_label(s: &WideStrategy) -> &'static str {
     match s {
         WideStrategy::Columns                     => "DEFAULT",
         WideStrategy::Pivot                       => "PIVOT",
-        WideStrategy::Jsonb                       => "JSONB",
+        WideStrategy::Jsonb                       => "JSONB SÉP.",
+        WideStrategy::JsonbFlatten                => "JSONB INLINE",
         WideStrategy::StructuredPivot(_)          => "STRUCT PIVOT",
         WideStrategy::KeyedPivot(_)               => "KEYED PIVOT",
         WideStrategy::AutoSplit { .. }            => "AUTO SPLIT",
@@ -26,6 +27,7 @@ pub fn strategy_color(s: &WideStrategy) -> &'static str {
         WideStrategy::Columns                     => theme::BADGE_DEFAULT,
         WideStrategy::Pivot                       => theme::BADGE_NORMALIZE,
         WideStrategy::Jsonb                       => theme::BADGE_JSONB,
+        WideStrategy::JsonbFlatten                => theme::BADGE_JSONB_INLINE,
         WideStrategy::StructuredPivot(_)          => theme::BADGE_FLATTEN,
         WideStrategy::KeyedPivot(_)               => theme::BADGE_FLATTEN,
         WideStrategy::AutoSplit { .. }            => theme::BADGE_NORMALIZE,
