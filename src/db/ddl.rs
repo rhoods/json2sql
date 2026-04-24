@@ -115,6 +115,50 @@ pub fn generate_create_table(schema: &TableSchema, pg_schema: &str, drop_existin
     )
 }
 
+/// Generate a human-readable DDL preview for a single schema, including the FK constraint inline.
+/// This is for display only — execution uses `generate_create_table` + a separate ALTER TABLE.
+pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
+    let mut col_defs = Vec::new();
+
+    for col in &schema.columns {
+        let null_constraint = if col.not_null && col.is_generated { " NOT NULL" } else { "" };
+        col_defs.push(format!(
+            "    {} {}{}",
+            quote_ident(&col.name),
+            col.pg_type.as_sql(),
+            null_constraint
+        ));
+    }
+
+    col_defs.push(format!(
+        "    CONSTRAINT {} PRIMARY KEY (j2s_id)",
+        quote_ident(&format!("pk_{}", schema.name))
+    ));
+
+    if let Some(ref parent_name) = schema.parent_table {
+        let fk_col = schema
+            .columns
+            .iter()
+            .find(|c| c.is_parent_fk)
+            .map(|c| c.name.as_str())
+            .unwrap_or("j2s_parent_id");
+        col_defs.push(format!(
+            "    CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}.{} (j2s_id)",
+            quote_ident(&format!("fk_{}_parent", schema.name)),
+            quote_ident(fk_col),
+            quote_ident(pg_schema),
+            quote_ident(parent_name),
+        ));
+    }
+
+    format!(
+        "CREATE TABLE IF NOT EXISTS {}.{} (\n{}\n)",
+        quote_ident(pg_schema),
+        quote_ident(&schema.name),
+        col_defs.join(",\n")
+    )
+}
+
 /// Quote a PostgreSQL identifier with double quotes, escaping internal quotes.
 pub fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))

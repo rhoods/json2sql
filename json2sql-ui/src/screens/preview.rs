@@ -13,7 +13,7 @@ const BADGE_TEXT_COLOR: &str = "#0D0D0D";
 
 use dioxus::prelude::*;
 
-use json2sql::db::ddl::generate_create_table;
+use json2sql::db::ddl::generate_ddl_preview;
 use json2sql::schema::table_schema::WideStrategy;
 
 use crate::screens::{strategy_color, strategy_label};
@@ -38,7 +38,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
     let selected = &schemas[idx];
 
     // Generate DDL for the selected table with overrides applied.
-    let ddl = generate_create_table(selected, &pg_schema, false);
+    let ddl = generate_ddl_preview(selected, &pg_schema);
 
     // Pre-calculate column counts for better performance
     let (data_cols, gen_cols) = selected.columns.iter()

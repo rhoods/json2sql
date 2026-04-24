@@ -761,16 +761,21 @@ pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: S
 /// The sibling child schemas remain in the vector; the exclusion pass that follows
 /// in `finalize()` will drop them (and their descendants) because the parent is now wide.
 fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jaccard: f64) {
-    // Build parent_name → [child_index] map (only Object children, not arrays/junctions)
+    // Build parent_name → [child_index] maps: one for Object children, one for ObjectArray.
     let mut parent_to_object_children: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    let mut parent_to_array_children: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
     for (i, schema) in schemas.iter().enumerate() {
         if let Some(ref parent) = schema.parent_table {
-            if matches!(schema.child_kind, Some(ChildKind::Object)) {
-                parent_to_object_children
-                    .entry(parent.clone())
-                    .or_default()
-                    .push(i);
+            match schema.child_kind {
+                Some(ChildKind::Object) => {
+                    parent_to_object_children.entry(parent.clone()).or_default().push(i);
+                }
+                Some(ChildKind::ObjectArray) => {
+                    parent_to_array_children.entry(parent.clone()).or_default().push(i);
+                }
+                _ => {}
             }
         }
     }
@@ -781,6 +786,7 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
         key_col_name: String,
         key_shape: KeyShape,
         union_cols: Vec<ColumnSchema>,
+        array_children: bool,
         log_msg: String,
     }
 
@@ -793,58 +799,72 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
         .map(|(i, s)| (s.name.as_str(), i))
         .collect();
 
-    for (parent_name, child_indices) in &parent_to_object_children {
-        if child_indices.len() < threshold {
-            continue;
+    // Process both Object and ObjectArray sibling groups with the same logic.
+    let groups: [(&std::collections::HashMap<String, Vec<usize>>, bool); 2] = [
+        (&parent_to_object_children, false),
+        (&parent_to_array_children, true),
+    ];
+
+    for (parent_map, array_children) in groups {
+        for (parent_name, child_indices) in parent_map {
+            if child_indices.len() < threshold {
+                continue;
+            }
+
+            let parent_idx = match name_to_idx.get(parent_name.as_str()) {
+                Some(&i) => i,
+                None => continue,
+            };
+
+            // Only pure containers (parent has 0 data columns — all fields are child objects)
+            if schemas[parent_idx].data_columns().count() > 0 {
+                continue;
+            }
+
+            // All children must have good pairwise Jaccard similarity
+            let actual_jaccard = pairwise_jaccard_min(schemas, child_indices);
+            if actual_jaccard < min_jaccard {
+                continue;
+            }
+
+            let keys: Vec<String> = child_indices
+                .iter()
+                .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
+                .collect();
+
+            let key_shape = classify_key_shape(&keys.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+
+            let key_col_name = match &key_shape {
+                KeyShape::Numeric => "key_id".to_string(),
+                KeyShape::IsoLang => "lang_code".to_string(),
+                _ => "key".to_string(),
+            };
+
+            let children: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
+            let union_cols = build_union_columns(&children);
+
+            let key_examples = keys.iter().take(5).map(|s| s.as_str()).collect::<Vec<_>>().join("\", \"");
+            let more = if keys.len() > 5 {
+                format!("\" (+{} more)", keys.len() - 5)
+            } else {
+                "\"".to_string()
+            };
+            let kind_label = if array_children { "ObjectArray" } else { "Object" };
+            let log_msg = format!(
+                "  Sibling {} tables detected: {} ({} tables → 1)\n  Keys: \"{}{}\n  Jaccard min: {:.2} → strategy: KeyedPivot (col: {} {})",
+                kind_label, parent_name, child_indices.len(), key_examples, more,
+                min_jaccard, key_col_name, key_shape,
+            );
+
+            collapses.push(Collapse {
+                parent_idx,
+                key_col_name,
+                key_shape,
+                union_cols,
+                array_children,
+                log_msg,
+            });
         }
-
-        // Find parent index in O(1)
-        let parent_idx = match name_to_idx.get(parent_name.as_str()) {
-            Some(&i) => i,
-            None => continue,
-        };
-
-        // Only pure containers (parent has 0 data columns — all fields are child objects)
-        if schemas[parent_idx].data_columns().count() > 0 {
-            continue;
-        }
-
-        // All children must have good pairwise Jaccard similarity
-        let actual_jaccard = pairwise_jaccard_min(schemas, child_indices);
-        if actual_jaccard < min_jaccard {
-            continue;
-        }
-
-        // Extract the sibling key (last path segment) for each child
-        let keys: Vec<String> = child_indices
-            .iter()
-            .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
-            .collect();
-
-        let key_shape = classify_key_shape(&keys.iter().map(|s| s.as_str()).collect::<Vec<_>>());
-
-        let key_col_name = match &key_shape {
-            KeyShape::Numeric => "key_id".to_string(),
-            KeyShape::IsoLang => "lang_code".to_string(),
-            _ => "key".to_string(),
-        };
-
-        let children: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
-        let union_cols = build_union_columns(&children);
-
-        let key_examples = keys.iter().take(5).map(|s| s.as_str()).collect::<Vec<_>>().join("\", \"");
-        let more = if keys.len() > 5 {
-            format!("\" (+{} more)", keys.len() - 5)
-        } else {
-            "\"".to_string()
-        };
-        let log_msg = format!(
-            "  Sibling tables detected: {} ({} tables → 1)\n  Keys: \"{}{}\n  Jaccard min: {:.2} → strategy: KeyedPivot (col: {} {})",
-            parent_name, child_indices.len(), key_examples, more,
-            min_jaccard, key_col_name, key_shape,
-        );
-
-        collapses.push(Collapse { parent_idx, key_col_name, key_shape, union_cols, log_msg });
     }
 
     // Apply collapses
@@ -854,9 +874,14 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
         let sibling_schema = SiblingSchema {
             key_col_name: collapse.key_col_name.clone(),
             key_shape: collapse.key_shape,
+            array_children: collapse.array_children,
         };
         let parent = &mut schemas[collapse.parent_idx];
         parent.columns.retain(|c| c.is_generated);
+        // ObjectArray siblings need j2s_order to track position within each array.
+        if collapse.array_children {
+            parent.columns.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
+        }
         parent.columns.push(ColumnSchema {
             name: collapse.key_col_name.clone(),
             original_name: collapse.key_col_name,

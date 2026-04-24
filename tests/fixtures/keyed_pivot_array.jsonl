@@ -1,0 +1,2 @@
+{"id": 1, "genomes": {"gcf_001": [{"length": 100, "source": "A", "target": "B"}, {"length": 150, "source": "C", "target": "D"}], "gcf_002": [{"length": 200, "source": "E", "target": "F"}], "gcf_003": [{"length": 300, "source": "G", "target": "H"}]}}
+{"id": 2, "genomes": {"gcf_001": [{"length": 50, "source": "X", "target": "Y"}], "gcf_002": [{"length": 75, "source": "Z", "target": "W"}], "gcf_003": [{"length": 90, "source": "V", "target": "U"}]}}

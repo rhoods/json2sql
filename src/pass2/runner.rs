@@ -760,6 +760,9 @@ fn insert_structured_pivot_object(
 /// Each key in `obj` maps to a child object; the key becomes the `key_col`,
 /// and the child object's scalar fields are spread across the union columns.
 /// Non-Object values (scalars, arrays) are skipped.
+///
+/// When `sibling_schema.array_children` is true, each key maps to an array of objects
+/// instead of a single object. One row is emitted per array element, with j2s_order set.
 fn insert_keyed_pivot_object(
     sinks: &mut HashMap<String, TempFileSink>,
     anomalies: &mut AnomalyCollector,
@@ -768,6 +771,10 @@ fn insert_keyed_pivot_object(
     parent_id: Uuid,
     sibling_schema: &SiblingSchema,
 ) -> Result<()> {
+    if sibling_schema.array_children {
+        return insert_keyed_pivot_array_of_objects(sinks, anomalies, schema, obj, parent_id, sibling_schema);
+    }
+
     for (key, value) in obj {
         let child_obj = match value {
             Value::Object(o) => o,
@@ -827,6 +834,91 @@ fn insert_keyed_pivot_object(
         anomalies.inc_total(&schema.name);
         if let Some(sink) = sinks.get_mut(&schema.name) {
             sink.write_row(builder.finish())?;
+        }
+    }
+    Ok(())
+}
+
+/// Insert one row per array element per sibling key for an ObjectArray KeyedPivot table.
+/// Columns: j2s_id, j2s_parent_id, j2s_order BIGINT, key TEXT, <union data cols...>
+///
+/// Each key in `obj` maps to an array of objects. One row is emitted per element,
+/// with j2s_order tracking the element's position within the array.
+fn insert_keyed_pivot_array_of_objects(
+    sinks: &mut HashMap<String, TempFileSink>,
+    anomalies: &mut AnomalyCollector,
+    schema: &TableSchema,
+    obj: &serde_json::Map<String, Value>,
+    parent_id: Uuid,
+    sibling_schema: &SiblingSchema,
+) -> Result<()> {
+    for (key, value) in obj {
+        let arr = match value {
+            Value::Array(a) => a,
+            _ => continue, // skip non-array values
+        };
+        for (order, item) in arr.iter().enumerate() {
+            let item_obj = match item {
+                Value::Object(o) => o,
+                _ => continue, // skip non-object array elements
+            };
+
+            let row_id = Uuid::now_v7();
+            let mut builder = RowBuilder::new();
+
+            for col in &schema.columns {
+                if col.is_generated {
+                    if col.is_parent_fk {
+                        builder.push_uuid(parent_id);
+                    } else {
+                        match col.name.as_str() {
+                            "j2s_id" => builder.push_uuid(row_id),
+                            "j2s_order" => builder.push_value(
+                                &CopyEscaped::from_safe_ascii(order.to_string()),
+                            ),
+                            _ => builder.push_null(),
+                        }
+                    }
+                    continue;
+                }
+
+                // Key column: the original JSON key (genome name, etc.)
+                if col.original_name == sibling_schema.key_col_name {
+                    match escape_copy_text(key) {
+                        Some(escaped) => builder.push_value(&escaped),
+                        None => builder.push_null(),
+                    }
+                    continue;
+                }
+
+                // Data column: look up in the array element object
+                let json_val = item_obj.get(&col.original_name).unwrap_or(&Value::Null);
+
+                if matches!(json_val, Value::Object(_))
+                    || (matches!(json_val, Value::Array(_))
+                        && !matches!(col.pg_type, crate::schema::type_tracker::PgType::Array(_)))
+                {
+                    builder.push_null();
+                    continue;
+                }
+
+                match coerce(json_val, &col.pg_type) {
+                    CoerceResult::Ok(s) => builder.push_value(&s),
+                    CoerceResult::Null => builder.push_null(),
+                    CoerceResult::Anomaly { actual_value, actual_type } => {
+                        anomalies.record(
+                            &schema.name, &col.name, &row_id.to_string(),
+                            &col.pg_type.as_sql(), &actual_value, actual_type,
+                        )?;
+                        builder.push_null();
+                    }
+                }
+            }
+
+            anomalies.inc_total(&schema.name);
+            if let Some(sink) = sinks.get_mut(&schema.name) {
+                sink.write_row(builder.finish())?;
+            }
         }
     }
     Ok(())

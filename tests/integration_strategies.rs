@@ -2,7 +2,7 @@ mod common;
 
 use json2sql::{db, pass1, pass2};
 use json2sql::schema::registry::{apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys, apply_structured_pivot_columns, apply_wide_strategy_columns};
-use json2sql::schema::table_schema::{SuffixColumn, SuffixSchema, WideStrategy};
+use json2sql::schema::table_schema::{SiblingSchema, SuffixColumn, SuffixSchema, WideStrategy};
 use json2sql::schema::type_tracker::PgType;
 
 // ---------------------------------------------------------------------------
@@ -745,5 +745,127 @@ async fn test_jsonb_flatten_strategy() {
         let dims3: serde_json::Value = serde_json::from_str(doohickey.get::<_, &str>("products_dims")).unwrap();
         assert_eq!(dims3["width"], serde_json::json!(5));
         assert!(dims3.get("depth").is_none() || dims3["depth"].is_null());
+    }).await;
+}
+
+// ---------------------------------------------------------------------------
+// WideStrategy::KeyedPivot sur des siblings ObjectArray.
+// Fixture : 2 enregistrements "graph", chacun avec un objet `genomes`
+// contenant 3 clés génome (gcf_001/002/003) qui valent chacune un tableau
+// d'objets {length, source, target}. gcf_001 a 2 éléments pour id=1.
+//
+// Conditions auto-détection (sibling_threshold=3, jaccard=0.5) :
+//   - graph_genomes_{gcf_001,gcf_002,gcf_003} → 3 siblings ObjectArray, même schéma
+//   - graph_genomes fusionné → (j2s_id, j2s_graph_id, j2s_order, key, length, source, target)
+//   - SiblingSchema::array_children = true
+//
+// Assertions Pass 1 :
+//   - 2 schemas (graph + graph_genomes), tables gcf_* absorbées
+//   - graph_genomes a KeyedPivot avec array_children=true
+//   - graph_genomes a j2s_order parmi les colonnes générées
+//
+// Assertions Pass 2 :
+//   - 2 lignes dans graph, 7 dans graph_genomes
+//   - id=1/gcf_001 → 2 lignes (j2s_order 0 et 1)
+//   - order=0 → length=100, source="A", target="B"
+//   - order=1 → length=150, source="C", target="D"
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_keyed_pivot_array_strategy() {
+    common::with_schema(|client, schema| async move {
+        let path = common::fixture("keyed_pivot_array.jsonl");
+        let p1 = pass1::runner::run(&path, "graph", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+        // gcf_001/002/003 absorbés → exactement 2 schemas
+        assert_eq!(p1.schemas.len(), 2, "les tables gcf_* doivent être absorbées, 2 schemas attendus");
+        assert!(p1.schemas.iter().any(|s| s.name == "graph"),         "table graph manquante");
+        assert!(p1.schemas.iter().any(|s| s.name == "graph_genomes"), "table graph_genomes manquante");
+
+        let genomes_schema = p1.schemas.iter().find(|s| s.name == "graph_genomes").unwrap();
+
+        // La stratégie doit être KeyedPivot avec array_children=true
+        match &genomes_schema.wide_strategy {
+            WideStrategy::KeyedPivot(SiblingSchema { array_children: true, .. }) => {}
+            other => panic!("expected KeyedPivot(array_children=true), got {:?}", other),
+        }
+
+        // j2s_order doit être présent parmi les colonnes générées
+        assert!(
+            genomes_schema.columns.iter().any(|c| c.is_generated && c.name == "j2s_order"),
+            "j2s_order manquant dans graph_genomes"
+        );
+
+        // Colonnes de données : key + length + source + target
+        let data_cols: Vec<_> = genomes_schema.data_columns().collect();
+        assert!(data_cols.iter().any(|c| c.name == "key"),    "colonne key absente");
+        assert!(data_cols.iter().any(|c| c.name == "length"), "colonne length absente");
+        assert!(data_cols.iter().any(|c| c.name == "source"), "colonne source absente");
+        assert!(data_cols.iter().any(|c| c.name == "target"), "colonne target absente");
+
+        let schemas = p1.schemas;
+        db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+
+        // Vérifier que les tables gcf_* ne sont PAS créées en base
+        let gcf_tables: i64 = client.query_one(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_name LIKE 'graph_genomes_gcf_%'",
+            &[&schema],
+        ).await.unwrap().get(0);
+        assert_eq!(gcf_tables, 0, "les tables gcf_* ne doivent pas être créées");
+
+        let p2 = pass2::runner::run(
+            &path, "graph", &schemas, &client, &schema,
+            1000, false, None, 1, None, None,
+        ).await.unwrap();
+
+        // graph : 2 lignes
+        // graph_genomes : id=1 → gcf_001×2 + gcf_002×1 + gcf_003×1 = 4; id=2 → 3 = 7 total
+        assert_eq!(*p2.rows_per_table.get("graph").unwrap(),         2);
+        assert_eq!(*p2.rows_per_table.get("graph_genomes").unwrap(), 7);
+        assert_eq!(common::row_count(&client, &schema, "graph").await,         2);
+        assert_eq!(common::row_count(&client, &schema, "graph_genomes").await, 7);
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+
+        // id=1 / gcf_001 → 2 lignes (j2s_order 0 et 1)
+        let gcf001_count: i64 = client.query_one(
+            &format!(
+                "SELECT COUNT(*) FROM \"{s}\".\"graph_genomes\" g \
+                 JOIN \"{s}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
+                 WHERE r.id = 1 AND g.key = 'gcf_001'",
+                s = schema,
+            ),
+            &[],
+        ).await.unwrap().get(0);
+        assert_eq!(gcf001_count, 2, "id=1/gcf_001 doit avoir 2 lignes");
+
+        // order=0 → length=100, source="A", target="B"
+        let first = client.query_one(
+            &format!(
+                "SELECT g.length, g.source, g.target \
+                 FROM \"{s}\".\"graph_genomes\" g \
+                 JOIN \"{s}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
+                 WHERE r.id = 1 AND g.key = 'gcf_001' AND g.j2s_order = 0",
+                s = schema,
+            ),
+            &[],
+        ).await.unwrap();
+        assert_eq!(first.get::<_, i32>("length"),  100);
+        assert_eq!(first.get::<_, &str>("source"), "A");
+        assert_eq!(first.get::<_, &str>("target"), "B");
+
+        // order=1 → length=150, source="C", target="D"
+        let second = client.query_one(
+            &format!(
+                "SELECT g.length, g.source, g.target \
+                 FROM \"{s}\".\"graph_genomes\" g \
+                 JOIN \"{s}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
+                 WHERE r.id = 1 AND g.key = 'gcf_001' AND g.j2s_order = 1",
+                s = schema,
+            ),
+            &[],
+        ).await.unwrap();
+        assert_eq!(second.get::<_, i32>("length"),  150);
+        assert_eq!(second.get::<_, &str>("source"), "C");
+        assert_eq!(second.get::<_, &str>("target"), "D");
     }).await;
 }

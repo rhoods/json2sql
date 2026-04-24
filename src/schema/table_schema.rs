@@ -42,6 +42,10 @@ pub struct SiblingSchema {
     pub key_col_name: String,
     /// Detected shape of the sibling keys
     pub key_shape: KeyShape,
+    /// True when the collapsed siblings were ObjectArray children (each key maps to an array of
+    /// objects). Pass 2 iterates the array and emits one row per element with j2s_order.
+    #[serde(default)]
+    pub array_children: bool,
 }
 
 /// Strategy for handling "wide" tables — tables with many dynamic keys.
