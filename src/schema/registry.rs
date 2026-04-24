@@ -45,10 +45,14 @@ impl TableEntry {
     }
 
     fn observe_field(&mut self, field: &str, value: &Value, text_threshold: u32) {
-        self.columns
-            .entry(field.to_string())
-            .or_insert_with(|| TypeTracker::new(text_threshold))
-            .observe(value);
+        if let Some(tracker) = self.columns.get_mut(field) {
+            tracker.observe(value);
+        } else {
+            self.columns
+                .entry(field.to_string())
+                .or_insert_with(|| TypeTracker::new(text_threshold))
+                .observe(value);
+        }
     }
 }
 
@@ -102,18 +106,18 @@ impl SchemaRegistry {
     ///
     /// Uses an explicit heap stack instead of recursion to handle arbitrarily
     /// deep nesting without risk of stack overflow.
+    ///
+    /// The stack stores pre-joined path keys (String) rather than Vec<String> to
+    /// avoid recomputing path.join(".") and cloning the path Vec on every node visit.
     pub fn observe_root(&mut self, root_name: &str, obj: &serde_json::Map<String, Value>) {
-        let root_path = vec![root_name.to_string()];
-        self.ensure_table(root_path.clone(), String::new(), None);
+        self.ensure_table_key(root_name, "", None);
 
-        // Stack items: (path of current object, reference to its field map).
-        // Lifetimes are tied to `obj` which lives for the duration of this call.
-        let mut stack: Vec<(Vec<String>, &serde_json::Map<String, Value>)> =
-            vec![(root_path, obj)];
+        // Stack items: (dot-joined path key, reference to field map).
+        // Lifetimes of the map references are tied to `obj`.
+        let mut stack: Vec<(String, &serde_json::Map<String, Value>)> =
+            vec![(root_name.to_string(), obj)];
 
-        while let Some((path, map)) = stack.pop() {
-            let path_key = path.join(".");
-
+        while let Some((path_key, map)) = stack.pop() {
             if let Some(entry) = self.tables.get_mut(&path_key) {
                 entry.row_count += 1;
             }
@@ -121,46 +125,43 @@ impl SchemaRegistry {
             for (field, value) in map {
                 match value {
                     Value::Object(nested) => {
-                        let child = child_path(&path, field);
-                        self.ensure_table(child.clone(), path_key.clone(), Some(ChildKind::Object));
-                        stack.push((child, nested));
+                        let child_key = format!("{}.{}", path_key, field);
+                        self.ensure_table_key(&child_key, &path_key, Some(ChildKind::Object));
+                        stack.push((child_key, nested));
                     }
                     Value::Array(arr) => {
                         if arr.is_empty() {
                             continue;
                         }
-                        let child = child_path(&path, field);
+                        let child_key = format!("{}.{}", path_key, field);
                         let first_is_object = arr.iter().any(|v| matches!(v, Value::Object(_)));
 
                         if first_is_object {
-                            self.ensure_table(
-                                child.clone(),
-                                path_key.clone(),
-                                Some(ChildKind::ObjectArray),
-                            );
+                            self.ensure_table_key(&child_key, &path_key, Some(ChildKind::ObjectArray));
                             for item in arr {
                                 if let Value::Object(nested_obj) = item {
-                                    stack.push((child.clone(), nested_obj));
+                                    stack.push((child_key.clone(), nested_obj));
                                 }
                                 // Non-object items in an array-of-objects → skip (anomaly)
                             }
                         } else if self.array_as_pg_array {
                             let threshold = self.text_threshold;
                             let entry = self.tables.get_mut(&path_key).unwrap();
-                            let tracker = entry
-                                .array_columns
-                                .entry(field.to_string())
-                                .or_insert_with(|| TypeTracker::new(threshold));
-                            for item in arr {
-                                tracker.observe(item);
+                            if let Some(tracker) = entry.array_columns.get_mut(field.as_str()) {
+                                for item in arr {
+                                    tracker.observe(item);
+                                }
+                            } else {
+                                let tracker = entry
+                                    .array_columns
+                                    .entry(field.to_string())
+                                    .or_insert_with(|| TypeTracker::new(threshold));
+                                for item in arr {
+                                    tracker.observe(item);
+                                }
                             }
                         } else {
-                            let child_key = child.join(".");
-                            self.ensure_table(
-                                child,
-                                path_key.clone(),
-                                Some(ChildKind::ScalarArray),
-                            );
+                            self.ensure_table_key(&child_key, &path_key, Some(ChildKind::ScalarArray));
                             let threshold = self.text_threshold;
                             let entry = self.tables.get_mut(&child_key).unwrap();
                             let tracker = entry
@@ -183,16 +184,15 @@ impl SchemaRegistry {
         }
     }
 
-    fn ensure_table(
-        &mut self,
-        path: Vec<String>,
-        parent_key: String,
-        child_kind: Option<ChildKind>,
-    ) {
-        let key = path.join(".");
-        self.tables
-            .entry(key)
-            .or_insert_with(|| TableEntry::new(path, parent_key, child_kind));
+    /// Register a table by its pre-joined dot-key. Only allocates when the table is new.
+    fn ensure_table_key(&mut self, key: &str, parent_key: &str, child_kind: Option<ChildKind>) {
+        if !self.tables.contains_key(key) {
+            let path: Vec<String> = key.split('.').map(|s| s.to_string()).collect();
+            self.tables.insert(
+                key.to_string(),
+                TableEntry::new(path, parent_key.to_string(), child_kind),
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
