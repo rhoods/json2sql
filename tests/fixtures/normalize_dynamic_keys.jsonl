@@ -1,0 +1,3 @@
+{"id": 1, "name": "Widget", "images": {"img_123": {"url": "http://a.com", "width": 800}, "img_456": {"url": "http://b.com", "width": 600}}}
+{"id": 2, "name": "Gadget", "images": {"img_789": {"url": "http://c.com", "width": 1024}}}
+{"id": 3, "name": "Doohickey", "images": {"img_001": {"url": "http://d.com", "width": 400}, "img_002": {"url": "http://e.com", "width": 300}}}

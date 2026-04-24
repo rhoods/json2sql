@@ -1,0 +1,5 @@
+{"id": 1, "name": "Widget", "details": {"color": "red"}, "tag_a": "x1", "tag_b": "y1"}
+{"id": 2, "name": "Gadget", "details": {"color": "blue"}, "tag_a": "x2", "tag_b": "y2"}
+{"id": 3, "name": "Doohickey", "details": {"color": "green"}, "tag_a": "x3", "tag_b": "y3"}
+{"id": 4, "name": "Thingamajig", "details": {"color": "purple"}}
+{"id": 5, "name": "Whatsit", "details": {"color": "orange"}, "rare_key": "rare_value"}

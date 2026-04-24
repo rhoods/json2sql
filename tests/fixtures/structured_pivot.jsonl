@@ -1,0 +1,3 @@
+{"name": "Widget", "nutrients": {"calories": 100, "calories_100g": 200, "calories_serving": 150, "fat": 5, "fat_100g": 10, "fat_serving": 8}}
+{"name": "Gadget", "nutrients": {"calories": 300, "calories_100g": 400, "fat": 12, "fat_100g": 20}}
+{"name": "Doohickey", "nutrients": {"calories": 80, "calories_100g": 160, "calories_serving": 120}}

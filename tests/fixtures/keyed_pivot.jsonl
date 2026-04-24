@@ -1,0 +1,2 @@
+{"id": 1, "name": "Widget", "translations": {"fr": {"label": "Bonjour", "desc": "Rouge"}, "en": {"label": "Hello", "desc": "Red"}, "de": {"label": "Hallo", "desc": "Rot"}}}
+{"id": 2, "name": "Gadget", "translations": {"fr": {"label": "Gadget fr", "desc": "Bleu"}, "en": {"label": "Gadget en", "desc": "Blue"}, "de": {"label": "Gadget de", "desc": "Blau"}}}

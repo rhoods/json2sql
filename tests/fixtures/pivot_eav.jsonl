@@ -1,0 +1,3 @@
+{"id": 1, "name": "Widget", "nutrients": {"calories": 100, "fat": 5, "protein": 10, "carbs": 20}}
+{"id": 2, "name": "Gadget", "nutrients": {"calories": 200, "fat": 8, "protein": 15, "carbs": 30}}
+{"id": 3, "name": "Doohickey", "nutrients": {"calories": 150, "fat": 6, "protein": 12}}
