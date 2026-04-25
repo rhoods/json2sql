@@ -203,9 +203,11 @@ impl SchemaRegistry {
     /// sorted topologically (parents before children).
     pub fn finalize(&mut self) -> Vec<TableSchema> {
         // Pre-register all table names so that table_name_lookup() (read-only) works in parallel.
-        let paths: Vec<Vec<String>> = self.tables.values().map(|e| e.path.clone()).collect();
-        for path in &paths {
-            self.naming.table_name(path);
+        // Collect dot-keys (one String clone per entry) rather than cloning the full path Vec
+        // (which would be N_segments String clones per entry).
+        let dot_keys: Vec<String> = self.tables.keys().cloned().collect();
+        for key in &dot_keys {
+            self.naming.table_name_from_dot_key(key);
         }
 
         // Pre-compute set of path_keys that have at least one Object/ObjectArray child.
@@ -267,7 +269,7 @@ impl SchemaRegistry {
         let mut result = Vec::new();
 
         for entry in self.tables.values() {
-            let table_name = self.naming.table_name(&entry.path);
+            let table_name = self.naming.table_name_from_dot_key(&entry.path_key);
 
             // Regular scalar columns
             for (original_field, tracker) in &entry.columns {
@@ -357,14 +359,12 @@ fn build_entry_schema(
     rare_threshold: f64,
     text_threshold: u32,
 ) -> (TableSchema, Option<TableSchema>, Vec<ColumnCollision>) {
-    let pg_name = naming.table_name_lookup(&entry.path);
+    let pg_name = naming.table_name_lookup_from_dot_key(&entry.path_key);
     let depth = entry.path.len().saturating_sub(1);
     let parent_table: Option<String> = if entry.parent_key.is_empty() {
         None
     } else {
-        let parent_path: Vec<String> =
-            entry.parent_key.split('.').map(|s| s.to_string()).collect();
-        Some(naming.table_name_lookup(&parent_path))
+        Some(naming.table_name_lookup_from_dot_key(&entry.parent_key))
     };
 
     let mut schema = TableSchema::new(pg_name.clone(), entry.path.clone(), depth);
