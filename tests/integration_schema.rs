@@ -117,6 +117,40 @@ fn test_schema_inference_no_db() {
 }
 
 // ---------------------------------------------------------------------------
+// Pass 1 parallèle doit produire le même schéma que séquentiel.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_schema_inference_parallel_parity() {
+    let path = common::fixture("users.json");
+
+    let seq = pass1::runner::run(
+        &path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None,
+    ).unwrap();
+
+    let par = pass1::runner::run_parallel(
+        &path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None, 2,
+    ).unwrap();
+
+    assert_eq!(seq.total_rows, par.total_rows, "row count must match");
+    assert_eq!(seq.schemas.len(), par.schemas.len(), "table count must match");
+
+    for s in &seq.schemas {
+        let p = par.schemas.iter().find(|ps| ps.name == s.name)
+            .unwrap_or_else(|| panic!("table {} missing from parallel result", s.name));
+        assert_eq!(s.columns.len(), p.columns.len(),
+            "column count mismatch for table {}", s.name);
+        for col in &s.columns {
+            let pc = p.columns.iter().find(|c| c.name == col.name)
+                .unwrap_or_else(|| panic!("column {}.{} missing from parallel result", s.name, col.name));
+            assert_eq!(col.pg_type, pc.pg_type,
+                "pg_type mismatch for {}.{}", s.name, col.name);
+            assert_eq!(col.not_null, pc.not_null,
+                "not_null mismatch for {}.{}", s.name, col.name);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Avec array_as_pg_array=true : users_tags devient une colonne TEXT[]
 // ---------------------------------------------------------------------------
 #[tokio::test]

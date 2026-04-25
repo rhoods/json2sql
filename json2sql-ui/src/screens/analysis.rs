@@ -55,7 +55,7 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         state.write().pass1_progress = crate::state::Pass1Progress::default();
 
         // Derive root table name from file stem (same logic as CLI).
-        let (source_file, root_table) = {
+        let (source_file, root_table, workers) = {
             let source_file_opt = state.read().source_file.clone();
             let Some(path) = source_file_opt else {
                 // Should never happen — Setup disables "Start" when no file is selected.
@@ -67,25 +67,42 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 .and_then(|s| s.to_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "root".to_string());
-            (path, root)
+            let workers = state.read().workers;
+            (path, root, workers)
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
 
         // Run Pass 1 in a blocking thread — it's CPU/IO bound.
         let handle = tokio::task::spawn_blocking(move || {
-            json2sql::pass1::runner::run(
-                &source_file,
-                &root_table,
-                TEXT_THRESHOLD,
-                false, // array_as_pg_array
-                WIDE_COLUMN_THRESHOLD,
-                SIBLING_THRESHOLD,
-                SIBLING_JACCARD,
-                STABLE_THRESHOLD,
-                RARE_THRESHOLD,
-                Some(tx),
-            )
+            if workers > 1 {
+                json2sql::pass1::runner::run_parallel(
+                    &source_file,
+                    &root_table,
+                    TEXT_THRESHOLD,
+                    false, // array_as_pg_array
+                    WIDE_COLUMN_THRESHOLD,
+                    SIBLING_THRESHOLD,
+                    SIBLING_JACCARD,
+                    STABLE_THRESHOLD,
+                    RARE_THRESHOLD,
+                    Some(tx),
+                    workers,
+                )
+            } else {
+                json2sql::pass1::runner::run(
+                    &source_file,
+                    &root_table,
+                    TEXT_THRESHOLD,
+                    false, // array_as_pg_array
+                    WIDE_COLUMN_THRESHOLD,
+                    SIBLING_THRESHOLD,
+                    SIBLING_JACCARD,
+                    STABLE_THRESHOLD,
+                    RARE_THRESHOLD,
+                    Some(tx),
+                )
+            }
         });
 
         state.write().abort_handle = Some(handle.abort_handle());

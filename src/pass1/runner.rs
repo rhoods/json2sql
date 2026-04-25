@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
@@ -111,6 +112,155 @@ pub fn run(
 
     if let Some(ref tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
+    }
+
+    Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions })
+}
+
+/// Run Pass 1 with `num_workers` parallel schema-inference threads.
+///
+/// One reader thread streams and parses the file sequentially (preserving I/O order),
+/// distributing each parsed object to `num_workers` worker threads via a bounded channel.
+/// Each worker maintains its own `SchemaRegistry`; they are merged and finalized once
+/// the reader is done.
+///
+/// Using `num_workers = 1` is equivalent to sequential processing with extra overhead;
+/// prefer `run()` for single-threaded use.
+pub fn run_parallel(
+    path: &Path,
+    root_table: &str,
+    text_threshold: u32,
+    array_as_pg_array: bool,
+    wide_column_threshold: usize,
+    sibling_threshold: usize,
+    sibling_jaccard: f64,
+    stable_threshold: f64,
+    rare_threshold: f64,
+    progress_tx: Option<ProgressTx>,
+    num_workers: usize,
+) -> Result<Pass1Result> {
+    let num_workers = num_workers.max(1);
+    let total_bytes = file_size(path)?;
+
+    let progress = if progress_tx.is_none() {
+        Some(ProgressTracker::new(total_bytes, "Pass 1 (parallel)"))
+    } else {
+        None
+    };
+
+    // Bounded channel — backpressure prevents unbounded RAM growth on fast readers.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<serde_json::Map<String, Value>>(num_workers * 4);
+    let rx = Arc::new(Mutex::new(rx));
+
+    // Spawn worker threads, each with its own SchemaRegistry.
+    let root_table_owned = root_table.to_string();
+    let worker_handles: Vec<std::thread::JoinHandle<SchemaRegistry>> = (0..num_workers)
+        .map(|_| {
+            let rx = Arc::clone(&rx);
+            let root = root_table_owned.clone();
+            let mut reg = SchemaRegistry::new(
+                text_threshold, array_as_pg_array, wide_column_threshold,
+                sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold,
+            );
+            std::thread::spawn(move || {
+                loop {
+                    let msg = rx.lock().unwrap().recv();
+                    match msg {
+                        Ok(obj) => reg.observe_root(&root, &obj),
+                        Err(_) => break, // channel closed — reader finished
+                    }
+                }
+                reg
+            })
+        })
+        .collect();
+
+    // Reader: current thread streams the file and sends objects to workers.
+    let mut total_rows = 0u64;
+    let (mut reader, _format) = JsonReader::open(path)?;
+    let mut reader_err: Option<crate::error::J2sError> = None;
+    const PROGRESS_INTERVAL: u64 = 1_000;
+
+    while let Some(item) = reader.next() {
+        match item {
+            Ok(Value::Object(obj)) => {
+                // sync_channel::send blocks when the channel is full (backpressure).
+                if tx.send(obj).is_err() {
+                    break; // all workers died — stop reading
+                }
+                total_rows += 1;
+            }
+            Ok(other) => {
+                reader_err = Some(crate::error::J2sError::InvalidInput(format!(
+                    "Expected JSON object at root level, found: {}", other
+                )));
+                break;
+            }
+            Err(e) => {
+                reader_err = Some(e);
+                break;
+            }
+        }
+
+        if let Some(ref bar) = progress {
+            bar.inc_rows(1);
+            bar.set_bytes(reader.bytes_read());
+        }
+        if let Some(ref tx_prog) = progress_tx {
+            if total_rows % PROGRESS_INTERVAL == 0 {
+                let _ = tx_prog.send(ProgressEvent::Pass1Progress {
+                    rows_scanned: total_rows,
+                    bytes_read: reader.bytes_read(),
+                    total_bytes,
+                });
+            }
+        }
+    }
+
+    // Signal workers that reading is done.
+    drop(tx);
+
+    // Collect and merge all worker registries.
+    let mut merged = SchemaRegistry::new(
+        text_threshold, array_as_pg_array, wide_column_threshold,
+        sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold,
+    );
+    for handle in worker_handles {
+        let reg = handle.join().expect("Pass 1 worker thread panicked");
+        merged.merge(reg);
+    }
+
+    if let Some(ref bar) = progress {
+        bar.finish();
+    }
+
+    if let Some(e) = reader_err {
+        return Err(e);
+    }
+
+    if let Some(ref tx_prog) = progress_tx {
+        if total_rows > 0 && total_rows % PROGRESS_INTERVAL != 0 {
+            let _ = tx_prog.send(ProgressEvent::Pass1Progress {
+                rows_scanned: total_rows,
+                bytes_read: total_bytes, // file fully read at this point
+                total_bytes,
+            });
+        }
+    }
+
+    eprintln!("Pass 1 complete (parallel, {} workers): {} rows, building schema...", num_workers, total_rows);
+
+    let schemas = merged.finalize();
+    let stats = merged.collect_stats();
+    let truncated_names = merged.truncated_names().to_vec();
+    let column_collisions = merged.column_collisions().to_vec();
+
+    let tables_count = schemas.len();
+    let columns_count = schemas.iter().map(|s| s.columns.len()).sum::<usize>();
+    eprintln!("Schema: {} tables, {} total columns", tables_count, columns_count);
+
+    if let Some(ref tx_prog) = progress_tx {
+        let _ = tx_prog.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
     }
 
     Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions })

@@ -57,18 +57,35 @@ async fn run(cli: Cli) -> Result<()> {
         }
     } else {
         eprintln!("Pass 1: inferring schema from '{}'...", input_path.display());
-        pass1::runner::run(
-            &input_path,
-            &root_table,
-            cli.text_threshold,
-            cli.array_as_pg_array,
-            cli.wide_column_threshold,
-            cli.sibling_threshold,
-            cli.sibling_jaccard,
-            cli.stable_threshold,
-            cli.rare_threshold,
-            None, // no IHM channel in CLI mode
-        )?
+        if cli.workers > 1 {
+            eprintln!("Using {} parallel workers for schema inference.", cli.workers);
+            pass1::runner::run_parallel(
+                &input_path,
+                &root_table,
+                cli.text_threshold,
+                cli.array_as_pg_array,
+                cli.wide_column_threshold,
+                cli.sibling_threshold,
+                cli.sibling_jaccard,
+                cli.stable_threshold,
+                cli.rare_threshold,
+                None,
+                cli.workers,
+            )?
+        } else {
+            pass1::runner::run(
+                &input_path,
+                &root_table,
+                cli.text_threshold,
+                cli.array_as_pg_array,
+                cli.wide_column_threshold,
+                cli.sibling_threshold,
+                cli.sibling_jaccard,
+                cli.stable_threshold,
+                cli.rare_threshold,
+                None,
+            )?
+        }
     };
 
     eprintln!("\nInferred schema ({} tables):", pass1.schemas.len());

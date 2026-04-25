@@ -189,6 +189,9 @@ pub struct AppState {
     /// Handle to the currently running Pass 1 or Pass 2 task.
     /// Set by the screen that spawns the task; cleared by `cancel()`.
     pub abort_handle: Option<tokio::task::AbortHandle>,
+
+    /// Number of worker threads for Pass 1 schema inference (1 = sequential).
+    pub workers: usize,
 }
 
 impl Default for AppState {
@@ -209,6 +212,7 @@ impl Default for AppState {
             selected_table_idx: 0,
             pass2_progress: Pass2Progress::default(),
             abort_handle: None,
+            workers: 1,
         }
     }
 }

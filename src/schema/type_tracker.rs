@@ -139,6 +139,19 @@ impl TypeTracker {
         }
     }
 
+    /// Merge observations from `other` into `self`.
+    /// Used to combine per-worker TypeTrackers after parallel Pass 1.
+    pub fn merge(&mut self, other: &TypeTracker) {
+        self.total_count += other.total_count;
+        self.null_count  += other.null_count;
+        for i in 0..InferredType::COUNT {
+            self.type_counts[i] += other.type_counts[i];
+        }
+        if other.max_len > self.max_len {
+            self.max_len = other.max_len;
+        }
+    }
+
     /// The dominant (most frequent) non-null type.
     pub fn dominant_type(&self) -> InferredType {
         InferredType::ALL
@@ -480,5 +493,32 @@ mod tests {
         assert!(!t.has_anomalies());
         t.observe(&json!("str"));
         assert!(t.has_anomalies());
+    }
+
+    /// Parity test: observing on two separate trackers then merging must equal
+    /// observing all values on a single tracker.
+    #[test]
+    fn test_merge_parity() {
+        let values = vec![
+            json!(1), json!(2), json!(null), json!("hello"),
+            json!(true), json!(3.14), json!(null), json!("world"),
+        ];
+
+        // Single tracker
+        let mut single = TypeTracker::new(256);
+        for v in &values { single.observe(v); }
+
+        // Two separate trackers, merged
+        let mut a = TypeTracker::new(256);
+        let mut b = TypeTracker::new(256);
+        for v in &values[..4] { a.observe(v); }
+        for v in &values[4..] { b.observe(v); }
+        a.merge(&b);
+
+        assert_eq!(a.total_count, single.total_count);
+        assert_eq!(a.null_count,  single.null_count);
+        assert_eq!(a.type_counts, single.type_counts);
+        assert_eq!(a.max_len,     single.max_len);
+        assert_eq!(a.to_pg_type(), single.to_pg_type());
     }
 }

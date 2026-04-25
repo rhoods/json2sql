@@ -44,6 +44,29 @@ impl TableEntry {
         }
     }
 
+    fn merge(&mut self, other: TableEntry) {
+        self.row_count += other.row_count;
+        for (name, tracker) in other.columns {
+            if let Some(existing) = self.columns.get_mut(&name) {
+                existing.merge(&tracker);
+            } else {
+                self.columns.insert(name, tracker);
+            }
+        }
+        for (name, tracker) in other.array_columns {
+            if let Some(existing) = self.array_columns.get_mut(&name) {
+                existing.merge(&tracker);
+            } else {
+                self.array_columns.insert(name, tracker);
+            }
+        }
+        match (&mut self.scalar_tracker, other.scalar_tracker) {
+            (Some(a), Some(b)) => a.merge(&b),
+            (None, Some(b))    => self.scalar_tracker = Some(b),
+            _                  => {}
+        }
+    }
+
     fn observe_field(&mut self, field: &str, value: &Value, text_threshold: u32) {
         if let Some(tracker) = self.columns.get_mut(field) {
             tracker.observe(value);
@@ -334,6 +357,20 @@ impl SchemaRegistry {
     /// Return all column name collisions detected during finalize().
     pub fn column_collisions(&self) -> &[ColumnCollision] {
         &self.column_collisions
+    }
+
+    /// Merge all observations from `other` into `self`.
+    /// Used after parallel Pass 1: each worker builds its own registry, then
+    /// they are all merged into one before calling `finalize()`.
+    /// The `NamingRegistry` is NOT merged — it is recomputed by `finalize()`.
+    pub fn merge(&mut self, other: SchemaRegistry) {
+        for (key, other_entry) in other.tables {
+            if let Some(entry) = self.tables.get_mut(&key) {
+                entry.merge(other_entry);
+            } else {
+                self.tables.insert(key, other_entry);
+            }
+        }
     }
 
     /// Return anomaly info for reporting: (table_pg_name, col_original, TypeTracker)
@@ -1640,5 +1677,74 @@ mod tests {
             child.depth, 1,
             "direct array child with dotted name must be at depth 1, got depth {}", child.depth
         );
+    }
+
+    /// Parity: observing rows split across two registries then merging must equal
+    /// observing all rows on a single registry — for a flat table.
+    #[test]
+    fn test_registry_merge_parity_flat() {
+        let rows = vec![
+            json!({"name": "Alice", "age": 30}),
+            json!({"name": "Bob",   "age": 25}),
+            json!({"name": "Carol", "age": 40, "email": "carol@example.com"}),
+            json!({"name": "Dave",  "age": null}),
+        ];
+
+        // Single registry
+        let mut single = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        for row in &rows { single.observe_root("users", make_root(row)); }
+        let schemas_single = single.finalize();
+
+        // Split across two registries, then merge
+        let mut reg_a = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg_b = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        for row in &rows[..2] { reg_a.observe_root("users", make_root(row)); }
+        for row in &rows[2..] { reg_b.observe_root("users", make_root(row)); }
+        reg_a.merge(reg_b);
+        let schemas_merged = reg_a.finalize();
+
+        assert_eq!(schemas_single.len(), schemas_merged.len(), "table count must match");
+        let s = schemas_single.iter().find(|s| s.name == "users").unwrap();
+        let m = schemas_merged.iter().find(|s| s.name == "users").unwrap();
+        assert_eq!(s.columns.len(), m.columns.len(), "column count must match");
+        for col in &s.columns {
+            let mc = m.columns.iter().find(|c| c.name == col.name)
+                .unwrap_or_else(|| panic!("column {} missing from merged schema", col.name));
+            assert_eq!(col.pg_type, mc.pg_type, "pg_type mismatch for {}", col.name);
+            assert_eq!(col.not_null, mc.not_null, "not_null mismatch for {}", col.name);
+        }
+    }
+
+    /// Parity: multi-table schema (nested object) split across two registries.
+    #[test]
+    fn test_registry_merge_parity_nested() {
+        let rows = vec![
+            json!({"id": 1, "address": {"city": "Paris", "zip": "75001"}}),
+            json!({"id": 2, "address": {"city": "Lyon"}}),
+            json!({"id": 3, "address": {"city": "Nice", "zip": "06000", "country": "FR"}}),
+        ];
+
+        let mut single = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        for row in &rows { single.observe_root("users", make_root(row)); }
+        let schemas_single = single.finalize();
+
+        let mut reg_a = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg_b = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        for row in &rows[..2] { reg_a.observe_root("users", make_root(row)); }
+        for row in &rows[2..] { reg_b.observe_root("users", make_root(row)); }
+        reg_a.merge(reg_b);
+        let schemas_merged = reg_a.finalize();
+
+        assert_eq!(
+            schemas_single.len(), schemas_merged.len(),
+            "table count: single={}, merged={}",
+            schemas_single.len(), schemas_merged.len()
+        );
+        for s in &schemas_single {
+            let m = schemas_merged.iter().find(|ms| ms.name == s.name)
+                .unwrap_or_else(|| panic!("table {} missing from merged schema", s.name));
+            assert_eq!(s.columns.len(), m.columns.len(),
+                "column count mismatch for table {}", s.name);
+        }
     }
 }

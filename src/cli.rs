@@ -122,6 +122,11 @@ pub struct Cli {
     /// Keys appearing in fewer rows than this fraction are excluded from all schemas and data.
     #[arg(long, default_value_t = 0.001, value_name = "F")]
     pub rare_threshold: f64,
+
+    /// Number of worker threads for parallel Pass 1 schema inference (default: 1, sequential).
+    /// Values > 1 distribute schema inference across N threads; useful for large files on multi-core machines.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub workers: usize,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
