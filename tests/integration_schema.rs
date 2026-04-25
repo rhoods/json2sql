@@ -117,6 +117,59 @@ fn test_schema_inference_no_db() {
 }
 
 // ---------------------------------------------------------------------------
+// Pass 1 parallèle doit produire le même schéma que séquentiel — NDJSON.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_schema_inference_parallel_parity_ndjson() {
+    let path = common::fixture("users.jsonl");
+
+    let seq = pass1::runner::run(
+        &path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None,
+    ).unwrap();
+
+    let par = pass1::runner::run_parallel(
+        &path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None, 2,
+    ).unwrap();
+
+    assert_eq!(seq.total_rows, par.total_rows, "row count must match");
+    assert_eq!(seq.schemas.len(), par.schemas.len(), "table count must match");
+
+    for s in &seq.schemas {
+        let p = par.schemas.iter().find(|ps| ps.name == s.name)
+            .unwrap_or_else(|| panic!("table {} missing from parallel result", s.name));
+        assert_eq!(s.columns.len(), p.columns.len(),
+            "column count mismatch for table {}", s.name);
+        for col in &s.columns {
+            let pc = p.columns.iter().find(|c| c.name == col.name)
+                .unwrap_or_else(|| panic!("column {}.{} missing from parallel result", s.name, col.name));
+            assert_eq!(col.pg_type, pc.pg_type,
+                "pg_type mismatch for {}.{}", s.name, col.name);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// run_parallel doit retourner une erreur si un élément racine n'est pas un objet.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_parallel_non_object_root_returns_error() {
+    use std::io::Write;
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    // JSON array whose second element is a number, not an object.
+    f.write_all(b"[{\"a\": 1}, 42, {\"b\": 2}]").unwrap();
+    f.flush().unwrap();
+
+    let result = pass1::runner::run_parallel(
+        f.path(), "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None, 2,
+    );
+    match result {
+        Err(e) => assert!(e.to_string().contains("root level"),
+            "error message should mention root level: {}", e),
+        Ok(_) => panic!("expected Err for non-object root element, got Ok"),
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Pass 1 parallèle doit produire le même schéma que séquentiel.
 // ---------------------------------------------------------------------------
 #[test]

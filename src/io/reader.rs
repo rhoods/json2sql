@@ -73,6 +73,26 @@ impl JsonLinesReader {
     }
 }
 
+impl JsonLinesReader {
+    /// Return the raw bytes of the next JSON object without parsing.
+    pub fn next_raw(&mut self) -> Option<Result<Vec<u8>>> {
+        loop {
+            self.line_buf.clear();
+            match self.reader.read_until(b'\n', &mut self.line_buf) {
+                Ok(0) => return None,
+                Ok(n) => {
+                    self.bytes_read += n as u64;
+                    let start = self.line_buf.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(self.line_buf.len());
+                    let end = self.line_buf.iter().rposition(|b| !b.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(0);
+                    if start >= end { continue; }
+                    return Some(Ok(self.line_buf[start..end].to_vec()));
+                }
+                Err(e) => return Some(Err(J2sError::Io(e))),
+            }
+        }
+    }
+}
+
 impl Iterator for JsonLinesReader {
     type Item = Result<Value>;
 
@@ -266,6 +286,35 @@ impl JsonArrayReader {
     }
 }
 
+impl JsonArrayReader {
+    /// Return the raw bytes of the next JSON object without parsing.
+    pub fn next_raw(&mut self) -> Option<Result<Vec<u8>>> {
+        if self.done { return None; }
+
+        if !self.opened {
+            loop {
+                match self.read_byte()? {
+                    Err(e) => return Some(Err(J2sError::Io(e))),
+                    Ok(b'[') => { self.opened = true; break; }
+                    Ok(b) if b.is_ascii_whitespace() => continue,
+                    Ok(b) => return Some(Err(J2sError::InvalidInput(format!("Expected '[', found '{}'", b as char)))),
+                }
+            }
+        }
+
+        let first_byte = match self.skip_to_next_value()? {
+            Err(e) => return Some(Err(e)),
+            Ok(b) => b,
+        };
+
+        if let Err(e) = self.collect_value(first_byte) {
+            return Some(Err(e));
+        }
+
+        Some(Ok(self.buf.clone()))
+    }
+}
+
 impl Iterator for JsonArrayReader {
     type Item = Result<Value>;
 
@@ -320,6 +369,15 @@ pub enum JsonReader {
 }
 
 impl JsonReader {
+    /// Return the raw bytes of the next JSON object without parsing.
+    /// Used by `run_parallel` to distribute parsing work to worker threads.
+    pub fn next_raw(&mut self) -> Option<Result<Vec<u8>>> {
+        match self {
+            JsonReader::Lines(r) => r.next_raw(),
+            JsonReader::Array(r) => r.next_raw(),
+        }
+    }
+
     pub fn open(path: &Path) -> Result<(Self, JsonFormat)> {
         let format = detect_format(path)?;
         let reader = match format {
@@ -345,5 +403,86 @@ impl Iterator for JsonReader {
             JsonReader::Lines(r) => r.next(),
             JsonReader::Array(r) => r.next(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn tmp_file(content: &[u8]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    /// next_raw() on a JSON array must return the same bytes that parse to the same value as next().
+    #[test]
+    fn test_next_raw_array_parity() {
+        let json = br#"[{"a": 1}, {"b": 2}]"#;
+        let f = tmp_file(json);
+
+        let mut r1 = JsonArrayReader::open(f.path()).unwrap();
+        let parsed: Vec<serde_json::Value> = std::iter::from_fn(|| r1.next()).collect::<Result<_>>().unwrap();
+
+        let mut r2 = JsonArrayReader::open(f.path()).unwrap();
+        let raw_parsed: Vec<serde_json::Value> = std::iter::from_fn(|| r2.next_raw())
+            .collect::<Result<Vec<Vec<u8>>>>().unwrap()
+            .into_iter()
+            .map(|mut b| simd_json::from_slice(&mut b).unwrap())
+            .collect();
+
+        assert_eq!(parsed, raw_parsed);
+    }
+
+    /// Strings containing { } must not confuse the boundary detector.
+    #[test]
+    fn test_next_raw_curly_in_string() {
+        let json = br#"[{"key": "value {nested} here", "n": 42}, {"x": "{second}"}]"#;
+        let f = tmp_file(json);
+
+        let mut r = JsonArrayReader::open(f.path()).unwrap();
+        let raws: Vec<Vec<u8>> = std::iter::from_fn(|| r.next_raw())
+            .collect::<Result<_>>().unwrap();
+
+        assert_eq!(raws.len(), 2);
+        let v0: serde_json::Value = simd_json::from_slice(&mut raws[0].clone()).unwrap();
+        assert_eq!(v0["key"], "value {nested} here");
+        assert_eq!(v0["n"], 42);
+        let v1: serde_json::Value = simd_json::from_slice(&mut raws[1].clone()).unwrap();
+        assert_eq!(v1["x"], "{second}");
+    }
+
+    /// Escaped quote inside a string must not end the string prematurely.
+    #[test]
+    fn test_next_raw_escaped_quote_in_string() {
+        let json = br#"[{"q": "say \"hello\""}]"#;
+        let f = tmp_file(json);
+
+        let mut r = JsonArrayReader::open(f.path()).unwrap();
+        let mut raw = r.next_raw().unwrap().unwrap();
+        let v: serde_json::Value = simd_json::from_slice(&mut raw).unwrap();
+        assert_eq!(v["q"], r#"say "hello""#);
+    }
+
+    /// next_raw() on NDJSON returns one raw line per object.
+    #[test]
+    fn test_next_raw_ndjson_parity() {
+        let json = b"{\"a\":1}\n{\"b\":2}\n";
+        let f = tmp_file(json);
+
+        let mut r = JsonLinesReader::open(f.path()).unwrap();
+        let raws: Vec<Vec<u8>> = std::iter::from_fn(|| r.next_raw())
+            .collect::<Result<_>>().unwrap();
+
+        assert_eq!(raws.len(), 2);
+        let v0: serde_json::Value = simd_json::from_slice(&mut raws[0].clone()).unwrap();
+        assert_eq!(v0["a"], 1);
     }
 }

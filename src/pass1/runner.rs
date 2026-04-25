@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
+use simd_json;
 
 use crate::error::Result;
 use crate::io::progress::ProgressTracker;
@@ -149,12 +150,13 @@ pub fn run_parallel(
     };
 
     // Bounded channel — backpressure prevents unbounded RAM growth on fast readers.
-    let (tx, rx) = std::sync::mpsc::sync_channel::<serde_json::Map<String, Value>>(num_workers * 4);
+    // Sends raw JSON bytes; workers parse in parallel (no single-threaded serde bottleneck).
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(num_workers * 4);
     let rx = Arc::new(Mutex::new(rx));
 
     // Spawn worker threads, each with its own SchemaRegistry.
     let root_table_owned = root_table.to_string();
-    let worker_handles: Vec<std::thread::JoinHandle<SchemaRegistry>> = (0..num_workers)
+    let worker_handles: Vec<std::thread::JoinHandle<crate::error::Result<SchemaRegistry>>> = (0..num_workers)
         .map(|_| {
             let rx = Arc::clone(&rx);
             let root = root_table_owned.clone();
@@ -164,37 +166,39 @@ pub fn run_parallel(
             );
             std::thread::spawn(move || {
                 loop {
-                    let msg = rx.lock().unwrap().recv();
-                    match msg {
-                        Ok(obj) => reg.observe_root(&root, &obj),
+                    let mut bytes = match rx.lock().unwrap().recv() {
+                        Ok(b) => b,
                         Err(_) => break, // channel closed — reader finished
+                    };
+                    match simd_json::from_slice::<serde_json::Value>(&mut bytes) {
+                        Ok(serde_json::Value::Object(obj)) => reg.observe_root(&root, &obj),
+                        Ok(other) => return Err(crate::error::J2sError::InvalidInput(format!(
+                            "Expected JSON object at root level, found: {}", other
+                        ))),
+                        Err(e) => return Err(crate::error::J2sError::InvalidInput(format!(
+                            "JSON parse error in worker: {}", e
+                        ))),
                     }
                 }
-                reg
+                Ok(reg)
             })
         })
         .collect();
 
-    // Reader: current thread streams the file and sends objects to workers.
+    // Reader: current thread finds object boundaries and sends raw bytes to workers.
     let mut total_rows = 0u64;
     let (mut reader, _format) = JsonReader::open(path)?;
     let mut reader_err: Option<crate::error::J2sError> = None;
     const PROGRESS_INTERVAL: u64 = 1_000;
 
-    while let Some(item) = reader.next() {
+    while let Some(item) = reader.next_raw() {
         match item {
-            Ok(Value::Object(obj)) => {
+            Ok(bytes) => {
                 // sync_channel::send blocks when the channel is full (backpressure).
-                if tx.send(obj).is_err() {
+                if tx.send(bytes).is_err() {
                     break; // all workers died — stop reading
                 }
                 total_rows += 1;
-            }
-            Ok(other) => {
-                reader_err = Some(crate::error::J2sError::InvalidInput(format!(
-                    "Expected JSON object at root level, found: {}", other
-                )));
-                break;
             }
             Err(e) => {
                 reader_err = Some(e);
@@ -220,23 +224,25 @@ pub fn run_parallel(
     // Signal workers that reading is done.
     drop(tx);
 
-    // Collect and merge all worker registries.
+    // Collect and merge all worker registries — propagate the first worker error if any.
     let mut merged = SchemaRegistry::new(
         text_threshold, array_as_pg_array, wide_column_threshold,
         sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold,
     );
+    let mut worker_err: Option<crate::error::J2sError> = None;
     for handle in worker_handles {
-        let reg = handle.join().expect("Pass 1 worker thread panicked");
-        merged.merge(reg);
+        match handle.join().expect("Pass 1 worker thread panicked") {
+            Ok(reg) => { if worker_err.is_none() { merged.merge(reg); } }
+            Err(e)  => { if worker_err.is_none() { worker_err = Some(e); } }
+        }
     }
 
     if let Some(ref bar) = progress {
         bar.finish();
     }
 
-    if let Some(e) = reader_err {
-        return Err(e);
-    }
+    if let Some(e) = reader_err { return Err(e); }
+    if let Some(e) = worker_err { return Err(e); }
 
     if let Some(ref tx_prog) = progress_tx {
         if total_rows > 0 && total_rows % PROGRESS_INTERVAL != 0 {
