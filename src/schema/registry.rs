@@ -138,11 +138,15 @@ impl SchemaRegistry {
 
                         if first_is_object {
                             self.ensure_table_key(&child_key, &path_key, Some(ChildKind::ObjectArray));
-                            for item in arr {
-                                if let Value::Object(nested_obj) = item {
-                                    stack.push((child_key.clone(), nested_obj));
+                            let mut objs: Vec<&serde_json::Map<String, Value>> = arr
+                                .iter()
+                                .filter_map(|v| if let Value::Object(o) = v { Some(o) } else { None })
+                                .collect();
+                            if let Some(last) = objs.pop() {
+                                for obj in objs {
+                                    stack.push((child_key.clone(), obj));
                                 }
-                                // Non-object items in an array-of-objects → skip (anomaly)
+                                stack.push((child_key, last));
                             }
                         } else if self.array_as_pg_array {
                             let threshold = self.text_threshold;
@@ -186,13 +190,10 @@ impl SchemaRegistry {
 
     /// Register a table by its pre-joined dot-key. Only allocates when the table is new.
     fn ensure_table_key(&mut self, key: &str, parent_key: &str, child_kind: Option<ChildKind>) {
-        if !self.tables.contains_key(key) {
+        self.tables.entry(key.to_string()).or_insert_with(|| {
             let path: Vec<String> = key.split('.').map(|s| s.to_string()).collect();
-            self.tables.insert(
-                key.to_string(),
-                TableEntry::new(path, parent_key.to_string(), child_kind),
-            );
-        }
+            TableEntry::new(path, parent_key.to_string(), child_kind)
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -904,7 +905,7 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
             original_name: collapse.data_col_name,
             pg_type: PgType::Jsonb,
             not_null: false,
-            is_generated: false,
+            is_generated: true,
             is_parent_fk: false,
         });
         parent.wide_strategy = WideStrategy::KeyedPivot(sibling_schema);
@@ -928,16 +929,17 @@ fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
         return 1.0;
     }
 
+    // Fast path 1: pure containers — every sibling has no data columns.
+    // Check before allocating col_sets to skip HashSet construction entirely.
+    if indices.iter().all(|&i| schemas[i].data_columns().next().is_none()) {
+        return 1.0;
+    }
+
     // Build one HashSet per sibling — O(n·m).
     let col_sets: Vec<std::collections::HashSet<&str>> = indices
         .iter()
         .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
         .collect();
-
-    // Fast path 1: pure containers — every sibling has no data columns.
-    if col_sets.iter().all(|s| s.is_empty()) {
-        return 1.0;
-    }
 
     // Fast path 2: large groups — compare each sibling against sibling[0] in O(n·m).
     const PAIRWISE_LIMIT: usize = 200;
@@ -1519,6 +1521,81 @@ mod tests {
                 WideStrategy::KeyedPivot(_)
             ),
             "group with outlier (0 column overlap) must not collapse into KeyedPivot"
+        );
+    }
+
+    /// Pure-container check must short-circuit BEFORE HashSet construction.
+    /// Verified via direct call to pairwise_jaccard_min with schemas that have
+    /// only generated columns (data_columns() yields nothing).
+    #[test]
+    fn test_jaccard_pure_containers_early_exit() {
+        use crate::schema::table_schema::ColumnSchema;
+
+        // All siblings are pure containers → must return 1.0.
+        let schemas: Vec<TableSchema> = (0..5)
+            .map(|i| {
+                let mut s = TableSchema::new(
+                    format!("s{}", i),
+                    vec![format!("s{}", i)],
+                    1,
+                );
+                s.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+                s
+            })
+            .collect();
+        let indices: Vec<usize> = (0..5).collect();
+        assert_eq!(
+            pairwise_jaccard_min(&schemas, &indices),
+            1.0,
+            "all pure-container siblings must return 1.0"
+        );
+
+        // Mixed: 4 pure containers + 1 with a real data column → must NOT return 1.0
+        // (Jaccard between the data sibling and each pure container = 0).
+        let mut schemas_mixed = schemas.clone();
+        schemas_mixed[2].columns.push(ColumnSchema {
+            name: "val".to_string(),
+            original_name: "val".to_string(),
+            pg_type: PgType::Text,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
+        });
+        assert_eq!(
+            pairwise_jaccard_min(&schemas_mixed, &indices),
+            0.0,
+            "one data sibling among pure containers must give Jaccard 0.0"
+        );
+    }
+
+    /// j2s_data must be marked is_generated so it does not appear in data_columns().
+    /// If is_generated is false, data_columns() leaks j2s_data into type overrides,
+    /// stats collection, and Jaccard comparisons on already-finalized schemas.
+    #[test]
+    fn test_keyed_pivot_j2s_data_is_generated() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001);
+
+        let mut langs = serde_json::Map::new();
+        for i in 0..5usize {
+            langs.insert(format!("lang_{}", i), json!({ "name": "foo", "value": 42 }));
+        }
+        let root = json!({ "id": 1, "translations": Value::Object(langs) });
+        reg.observe_root("root", make_root(&root));
+
+        let schemas = reg.finalize();
+        let translations = schemas.iter().find(|s| s.name == "root_translations").unwrap();
+
+        assert!(
+            matches!(translations.wide_strategy, WideStrategy::KeyedPivot(_)),
+            "expected KeyedPivot strategy"
+        );
+
+        let data_col_names: Vec<&str> =
+            translations.data_columns().map(|c| c.name.as_str()).collect();
+        assert!(
+            !data_col_names.contains(&"j2s_data"),
+            "j2s_data must not appear in data_columns() — got: {:?}",
+            data_col_names
         );
     }
 }

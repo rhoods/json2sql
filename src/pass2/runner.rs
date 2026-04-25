@@ -785,6 +785,17 @@ fn insert_keyed_pivot_object(
         let mut builder = RowBuilder::new();
 
         for col in &schema.columns {
+            // data JSONB: is_generated but requires actual serialization — check before the
+            // generated dispatch block which would otherwise emit NULL for unknown names.
+            if col.name == sibling_schema.data_col_name {
+                let json_str = serde_json::to_string(child_obj).unwrap_or_default();
+                match escape_copy_text(&json_str) {
+                    Some(escaped) => builder.push_value(&escaped),
+                    None => builder.push_null(),
+                }
+                continue;
+            }
+
             if col.is_generated {
                 if col.is_parent_fk {
                     builder.push_uuid(parent_id);
@@ -800,17 +811,6 @@ fn insert_keyed_pivot_object(
             // Key column: the original JSON key of this sibling (may contain COPY-unsafe chars)
             if col.original_name == sibling_schema.key_col_name {
                 match escape_copy_text(key) {
-                    Some(escaped) => builder.push_value(&escaped),
-                    None => builder.push_null(),
-                }
-                continue;
-            }
-
-            // data JSONB column: serialize the raw child object
-            if col.name == sibling_schema.data_col_name {
-                let json_str = serde_json::to_string(&Value::Object(child_obj.clone()))
-                    .unwrap_or_default();
-                match escape_copy_text(&json_str) {
                     Some(escaped) => builder.push_value(&escaped),
                     None => builder.push_null(),
                 }
@@ -878,6 +878,17 @@ fn insert_keyed_pivot_array_of_objects(
             let mut builder = RowBuilder::new();
 
             for col in &schema.columns {
+                // data JSONB: is_generated but requires actual serialization — check before the
+                // generated dispatch block which would otherwise emit NULL for unknown names.
+                if col.name == sibling_schema.data_col_name {
+                    let json_str = serde_json::to_string(item_obj).unwrap_or_default();
+                    match escape_copy_text(&json_str) {
+                        Some(escaped) => builder.push_value(&escaped),
+                        None => builder.push_null(),
+                    }
+                    continue;
+                }
+
                 if col.is_generated {
                     if col.is_parent_fk {
                         builder.push_uuid(parent_id);
@@ -896,17 +907,6 @@ fn insert_keyed_pivot_array_of_objects(
                 // Key column: the original JSON key (genome name, etc.)
                 if col.original_name == sibling_schema.key_col_name {
                     match escape_copy_text(key) {
-                        Some(escaped) => builder.push_value(&escaped),
-                        None => builder.push_null(),
-                    }
-                    continue;
-                }
-
-                // data JSONB column: serialize the raw array element object
-                if col.name == sibling_schema.data_col_name {
-                    let json_str = serde_json::to_string(&Value::Object(item_obj.clone()))
-                        .unwrap_or_default();
-                    match escape_copy_text(&json_str) {
                         Some(escaped) => builder.push_value(&escaped),
                         None => builder.push_null(),
                     }
