@@ -196,7 +196,7 @@ Orchestre la Pass 2. Relit le fichier et insère les données.
   - `Pivot` : une ligne `(parent_id, key, value)` par champ
   - `Jsonb` : l'objet entier sérialisé en JSONB
   - `StructuredPivot` : une ligne par `(parent_id, base, val_suffixe1, val_suffixe2...)`
-  - `KeyedPivot` : dispatche les sous-objets clé/valeur en lignes (fusion de tables sœurs)
+  - `KeyedPivot` : dispatche les sous-objets clé/valeur en lignes (fusion de tables sœurs) ; sérialise l'objet enfant dans `j2s_data JSONB` ; pour ObjectArray, une ligne par élément avec `j2s_order`
   - `AutoSplit` : colonnes stables → table principale, colonnes médiums → table `_wide` (EAV)
   - `Ignore` : clé supprimée
 - **`insert_array()`** : gère les tableaux JSON. Si tableau d'objets → `insert_object()` récursif. Si tableau de scalaires → ligne de junction `(parent_id, order, value)`
@@ -225,7 +225,7 @@ Définit les types de données fondamentaux du schéma :
 - **`TableSchema`** : définition complète d'une table (nom, chemin JSON, colonnes, parent, profondeur, stratégie)
 - **`ChildKind`** : `Object`, `ObjectArray`, `ScalarArray`
 - **`KeyShape`** : forme des clés détectées (Numeric, IsoLang, Slug, Mixed)
-- **`SuffixSchema`** / **`SiblingSchema`** : métadonnées pour StructuredPivot et KeyedPivot
+- **`SuffixSchema`** / **`SiblingSchema`** : métadonnées pour StructuredPivot et KeyedPivot. `SiblingSchema` contient le nom de la colonne clé, la forme des clés (`KeyShape`), le flag `array_children` (ObjectArray vs Object) et `data_col_name` (nom de la colonne JSONB brute, toujours `j2s_data`)
 
 ### `type_tracker.rs`
 

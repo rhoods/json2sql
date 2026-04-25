@@ -787,6 +787,7 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
         key_shape: KeyShape,
         union_cols: Vec<ColumnSchema>,
         array_children: bool,
+        data_col_name: String,
         log_msg: String,
     }
 
@@ -843,6 +844,8 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
             let children: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
             let union_cols = build_union_columns(&children);
 
+            let data_col_name = "j2s_data".to_string();
+
             let key_examples = keys.iter().take(5).map(|s| s.as_str()).collect::<Vec<_>>().join("\", \"");
             let more = if keys.len() > 5 {
                 format!("\" (+{} more)", keys.len() - 5)
@@ -862,6 +865,7 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
                 key_shape,
                 union_cols,
                 array_children,
+                data_col_name,
                 log_msg,
             });
         }
@@ -875,6 +879,7 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
             key_col_name: collapse.key_col_name.clone(),
             key_shape: collapse.key_shape,
             array_children: collapse.array_children,
+            data_col_name: collapse.data_col_name.clone(),
         };
         let parent = &mut schemas[collapse.parent_idx];
         parent.columns.retain(|c| c.is_generated);
@@ -893,6 +898,15 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
         for col in collapse.union_cols {
             parent.columns.push(col);
         }
+        // Always add a data JSONB column to capture the raw child object/array.
+        parent.columns.push(ColumnSchema {
+            name: collapse.data_col_name.clone(),
+            original_name: collapse.data_col_name,
+            pg_type: PgType::Jsonb,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
+        });
         parent.wide_strategy = WideStrategy::KeyedPivot(sibling_schema);
     }
 }

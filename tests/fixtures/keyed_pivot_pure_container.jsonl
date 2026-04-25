@@ -1,0 +1,2 @@
+{"id": 1, "genomes": {"gcf_001": {"NC_001": {"is_circular": false}}, "gcf_002": {"NC_002": {"is_circular": true}}, "gcf_003": {"NC_003": {"is_circular": false}}}}
+{"id": 2, "genomes": {"gcf_001": {"NC_001": {"is_circular": true}}, "gcf_002": {"NC_002": {"is_circular": false}}, "gcf_003": {"NC_003": {"is_circular": true}}}}

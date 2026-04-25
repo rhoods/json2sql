@@ -806,6 +806,17 @@ fn insert_keyed_pivot_object(
                 continue;
             }
 
+            // data JSONB column: serialize the raw child object
+            if col.name == sibling_schema.data_col_name {
+                let json_str = serde_json::to_string(&Value::Object(child_obj.clone()))
+                    .unwrap_or_default();
+                match escape_copy_text(&json_str) {
+                    Some(escaped) => builder.push_value(&escaped),
+                    None => builder.push_null(),
+                }
+                continue;
+            }
+
             // Data column: look up in child object by original field name
             let json_val = child_obj.get(&col.original_name).unwrap_or(&Value::Null);
 
@@ -885,6 +896,17 @@ fn insert_keyed_pivot_array_of_objects(
                 // Key column: the original JSON key (genome name, etc.)
                 if col.original_name == sibling_schema.key_col_name {
                     match escape_copy_text(key) {
+                        Some(escaped) => builder.push_value(&escaped),
+                        None => builder.push_null(),
+                    }
+                    continue;
+                }
+
+                // data JSONB column: serialize the raw array element object
+                if col.name == sibling_schema.data_col_name {
+                    let json_str = serde_json::to_string(&Value::Object(item_obj.clone()))
+                        .unwrap_or_default();
+                    match escape_copy_text(&json_str) {
                         Some(escaped) => builder.push_value(&escaped),
                         None => builder.push_null(),
                     }

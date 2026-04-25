@@ -115,16 +115,28 @@ Ce comportement peut être forcé manuellement dans le fichier de config TOML vi
 **Fichier :** `src/schema/registry.rs` — `finalize_siblings()`
 **Paramètres CLI :** `--sibling-threshold` (défaut : 3), `--sibling-jaccard` (défaut : 0.5)
 
-Quand une table parent a ≥ `sibling_threshold` tables enfants directes de type Object avec des colonnes similaires (similarité de Jaccard ≥ `sibling_jaccard`), ces tables sœurs sont fusionnées.
+Quand une table parent a ≥ `sibling_threshold` tables enfants directes avec des colonnes similaires (similarité de Jaccard ≥ `sibling_jaccard`), ces tables sœurs sont fusionnées. Deux types d'enfants sont détectés :
+
+- **Object** : chaque clé JSON est un objet (`"fr": {...}, "en": {...}`)
+- **ObjectArray** : chaque clé JSON est un tableau d'objets (`"fr": [{...}, {...}], "en": [{...}]`)
 
 ### Conditions d'éligibilité
 
 - La table parent est un **conteneur pur** : elle n'a aucune colonne de données propre (toutes ses données sont dans les enfants)
-- Les tables enfants ont des structures suffisamment proches (union des colonnes Jaccard ≥ seuil)
+- Les tables enfants ont des structures suffisamment proches (similarité de Jaccard ≥ seuil)
 
 ### Résultat
 
-Les tables sœurs sont supprimées. La table parent devient une table **KeyedPivot** : on lui ajoute une colonne clé (`key`, `lang_code`, ou `key_id` selon la forme des clés) plus l'union des colonnes des sœurs.
+Les tables sœurs sont supprimées. La table parent devient une table **KeyedPivot** avec :
+
+- Une colonne clé (`key`, `lang_code`, ou `key_id` selon la forme des clés)
+- L'union des colonnes de données des sœurs (peut être vide si les sœurs sont des conteneurs purs)
+- Une colonne **`j2s_data JSONB`** contenant l'objet enfant brut (ou l'élément du tableau pour ObjectArray). Cette colonne est toujours présente et préserve la structure complète, y compris les données imbriquées qui ne seraient pas représentables en colonnes plates.
+- Pour les ObjectArray : une colonne `j2s_order BIGINT` pour conserver l'ordre des éléments
+
+### Conteneurs purs
+
+Quand les tables sœurs sont elles-mêmes des conteneurs purs (ex. `genome → contig → is_circular`, où `contig` n'a pas de champ scalaire direct), l'union des colonnes est vide. La colonne `j2s_data` capture alors la totalité de la structure imbriquée sous forme JSONB.
 
 ### Types de clés détectés (`KeyShape`)
 

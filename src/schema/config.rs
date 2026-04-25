@@ -292,6 +292,7 @@ fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, mem
         key_col_name: "key_id".to_string(),
         key_shape: KeyShape::Mixed,
         array_children: false,
+        data_col_name: "j2s_data".to_string(),
     });
 
     // Retirer les membres du plus grand index au plus petit pour éviter le décalage
