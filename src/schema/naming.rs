@@ -143,8 +143,6 @@ impl NamingRegistry {
         if let Some(cached) = self.cache.get(dot_key) {
             return cached.clone();
         }
-        // Replace '.' with '_' directly — equivalent to path.join("_") for dot-joined keys
-        // since JSON field names never contain '.' (it is used exclusively as the path separator).
         let joined = dot_key.replace('.', "_");
         let sanitized = sanitize_identifier(&joined);
         let result = self.ensure_unique(sanitized, dot_key);

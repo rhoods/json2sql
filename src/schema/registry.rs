@@ -125,7 +125,8 @@ impl SchemaRegistry {
             for (field, value) in map {
                 match value {
                     Value::Object(nested) => {
-                        let child_key = format!("{}.{}", path_key, field);
+                        let safe_field = if field.contains('.') { field.replace('.', "_") } else { field.to_string() };
+                        let child_key = format!("{}.{}", path_key, safe_field);
                         self.ensure_table_key(&child_key, &path_key, Some(ChildKind::Object));
                         stack.push((child_key, nested));
                     }
@@ -133,7 +134,8 @@ impl SchemaRegistry {
                         if arr.is_empty() {
                             continue;
                         }
-                        let child_key = format!("{}.{}", path_key, field);
+                        let safe_field = if field.contains('.') { field.replace('.', "_") } else { field.to_string() };
+                        let child_key = format!("{}.{}", path_key, safe_field);
                         let first_is_object = arr.iter().any(|v| matches!(v, Value::Object(_)));
 
                         if first_is_object {
@@ -1596,6 +1598,47 @@ mod tests {
             !data_col_names.contains(&"j2s_data"),
             "j2s_data must not appear in data_columns() — got: {:?}",
             data_col_names
+        );
+    }
+
+    /// A JSON field name containing '.' must produce a child table at depth 1, not depth 2.
+    /// Without normalization, "root.v1.0" splits into path ["root","v1","0"] → depth 2,
+    /// breaking topological sort and Pass 2 flush order.
+    #[test]
+    fn test_dotted_field_name_correct_depth() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        // "v1.0" is a direct child of root — should produce depth 1
+        let obj = json!({ "v1.0": { "count": 42 } });
+        reg.observe_root("root", make_root(&obj));
+        let schemas = reg.finalize();
+
+        let child = schemas.iter().find(|s| s.name.contains("v1_0")).unwrap_or_else(|| {
+            panic!("table with v1_0 not found — got: {:?}", schemas.iter().map(|s| &s.name).collect::<Vec<_>>())
+        });
+        assert_eq!(
+            child.depth, 1,
+            "direct child with dotted name must be at depth 1, got depth {}", child.depth
+        );
+        assert_eq!(
+            child.parent_table.as_deref(), Some("root"),
+            "parent must be root, got {:?}", child.parent_table
+        );
+    }
+
+    /// ObjectArray field with '.' in name must also produce correct depth.
+    #[test]
+    fn test_dotted_field_name_array_correct_depth() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let obj = json!({ "v1.0": [{"x": 1}, {"x": 2}] });
+        reg.observe_root("root", make_root(&obj));
+        let schemas = reg.finalize();
+
+        let child = schemas.iter().find(|s| s.name.contains("v1_0")).unwrap_or_else(|| {
+            panic!("table with v1_0 not found — got: {:?}", schemas.iter().map(|s| &s.name).collect::<Vec<_>>())
+        });
+        assert_eq!(
+            child.depth, 1,
+            "direct array child with dotted name must be at depth 1, got depth {}", child.depth
         );
     }
 }
