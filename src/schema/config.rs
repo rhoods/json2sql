@@ -328,7 +328,7 @@ fn prime_tracker_from_pg_type(
             InferredType::Varchar
         }
     };
-    *tracker.type_counts.entry(inferred).or_insert(0) += 1;
+    tracker.type_counts[inferred as usize] += 1;
     tracker.total_count += 1;
 }
 

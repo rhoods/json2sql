@@ -913,18 +913,52 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
 
 /// Compute the minimum pairwise Jaccard similarity of data-column names across all pairs.
 ///
-/// Pre-builds one `HashSet` per sibling (O(n·m)) so the O(n²) pair loop only does
-/// set intersection queries rather than rebuilding sets from scratch each time.
+/// Two fast paths avoid the O(n²) full pairwise loop for large sibling groups:
+///
+/// 1. **Pure-container fast path** — if every sibling has zero data columns (they are pure
+///    containers whose data lives in their own children), the Jaccard is 1.0 by convention
+///    (union = 0 for all pairs). This covers the common pangenomegraph/genome-key pattern.
+///
+/// 2. **Large-group fast path** — when N > PAIRWISE_LIMIT, compare each sibling against
+///    sibling[0] instead of all N*(N-1)/2 pairs. Semantically equivalent for the homogeneous
+///    schemas typical of KeyedPivot detection (language codes, numeric IDs, genome keys).
+///    Outliers are still detected: any sibling with 0 column overlap with sibling[0] returns 0.
 fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
     if indices.len() < 2 {
         return 1.0;
     }
-    // Build one HashSet per sibling — reused across all pairs.
+
+    // Build one HashSet per sibling — O(n·m).
     let col_sets: Vec<std::collections::HashSet<&str>> = indices
         .iter()
         .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
         .collect();
 
+    // Fast path 1: pure containers — every sibling has no data columns.
+    if col_sets.iter().all(|s| s.is_empty()) {
+        return 1.0;
+    }
+
+    // Fast path 2: large groups — compare each sibling against sibling[0] in O(n·m).
+    const PAIRWISE_LIMIT: usize = 200;
+    if col_sets.len() > PAIRWISE_LIMIT {
+        let reference = &col_sets[0];
+        let mut min_j = 1.0_f64;
+        for other in col_sets.iter().skip(1) {
+            let intersection = reference.iter().filter(|&&c| other.contains(c)).count();
+            let union = reference.len() + other.len() - intersection;
+            let j_val = if union == 0 { 1.0 } else { intersection as f64 / union as f64 };
+            if j_val < min_j {
+                min_j = j_val;
+                if min_j == 0.0 {
+                    return 0.0;
+                }
+            }
+        }
+        return min_j;
+    }
+
+    // Full pairwise for small groups — exact result.
     let mut min_j = 1.0_f64;
     for i in 0..col_sets.len() {
         for j in (i + 1)..col_sets.len() {
@@ -1220,10 +1254,9 @@ pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &st
 
 fn type_histogram(tracker: &TypeTracker) -> Vec<(String, u64)> {
     let mut hist: Vec<(String, u64)> = tracker
-        .type_counts
-        .iter()
+        .iter_types()
         .filter(|(t, _)| !matches!(t, InferredType::Object | InferredType::Array))
-        .map(|(t, &n)| (format!("{:?}", t), n))
+        .map(|(t, n)| (format!("{:?}", t), n))
         .collect();
     hist.sort_by(|a, b| b.1.cmp(&a.1)); // most frequent first
     hist
@@ -1382,5 +1415,110 @@ mod tests {
             .filter(|s| s.parent_table.as_deref() == Some("ingredient_nutrients"))
             .collect();
         assert!(orphans.is_empty(), "no orphan children of pivot table");
+    }
+
+    // -----------------------------------------------------------------------
+    // pairwise_jaccard_min performance + correctness
+    // -----------------------------------------------------------------------
+
+    /// 10 000 pure-container siblings (no data columns) must short-circuit immediately.
+    /// With O(N²) pairwise this would be ~50M iterations (~2s in debug) — must finish <500ms.
+    #[test]
+    fn test_jaccard_large_pure_containers_fast() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001);
+
+        // Build a single JSON root where "genomes" contains 10 000 pure-container children.
+        // Each genome child has one contig sub-object (making the genome a pure container).
+        let mut genomes = serde_json::Map::new();
+        for i in 0..10_000usize {
+            let mut genome = serde_json::Map::new();
+            genome.insert(
+                format!("nc_{:05}", i),
+                json!({ "is_circular": false }),
+            );
+            genomes.insert(format!("gcf_{:05}", i), Value::Object(genome));
+        }
+        let root = json!({ "id": 1, "genomes": Value::Object(genomes) });
+
+        reg.observe_root("root", make_root(&root));
+
+        let start = std::time::Instant::now();
+        let schemas = reg.finalize();
+        let elapsed = start.elapsed();
+
+        // Must finish well under 500ms (O(N²) on 10k items = ~50M iterations ≈ 2s in debug)
+        assert!(
+            elapsed.as_millis() < 500,
+            "finalize() with 10k pure-container siblings took {}ms — likely O(N²)",
+            elapsed.as_millis()
+        );
+
+        // The genomes table must have become a KeyedPivot
+        let genomes_schema = schemas.iter().find(|s| s.name == "root_genomes");
+        assert!(genomes_schema.is_some(), "root_genomes table must exist");
+        assert!(
+            matches!(
+                genomes_schema.unwrap().wide_strategy,
+                WideStrategy::KeyedPivot(_)
+            ),
+            "root_genomes must be KeyedPivot"
+        );
+    }
+
+    /// 500 homogeneous siblings (identical schemas) → all similar → collapsed into KeyedPivot.
+    #[test]
+    fn test_jaccard_large_homogeneous_collapses() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001);
+
+        let mut langs = serde_json::Map::new();
+        for i in 0..500usize {
+            langs.insert(
+                format!("lang_{:03}", i),
+                json!({ "name": "foo", "value": 42 }),
+            );
+        }
+        let root = json!({ "id": 1, "translations": Value::Object(langs) });
+        reg.observe_root("root", make_root(&root));
+
+        let schemas = reg.finalize();
+        let translations = schemas.iter().find(|s| s.name == "root_translations");
+        assert!(
+            matches!(
+                translations.unwrap().wide_strategy,
+                WideStrategy::KeyedPivot(_)
+            ),
+            "500 identical siblings must collapse into KeyedPivot"
+        );
+    }
+
+    /// Large group where one sibling has a completely different schema → must NOT collapse.
+    #[test]
+    fn test_jaccard_outlier_in_large_group_rejected() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+
+        let mut items = serde_json::Map::new();
+        // 299 siblings with {a, b, c}
+        for i in 0..299usize {
+            items.insert(format!("item_{:03}", i), json!({ "a": 1, "b": 2, "c": 3 }));
+        }
+        // 1 outlier with completely different columns {x, y, z}
+        items.insert("item_outlier".to_string(), json!({ "x": 10, "y": 20, "z": 30 }));
+
+        let root = json!({ "id": 1, "items": Value::Object(items) });
+        reg.observe_root("root", make_root(&root));
+
+        let schemas = reg.finalize();
+        let items_schema = schemas.iter().find(|s| s.name == "root_items");
+        assert!(
+            items_schema.is_some(),
+            "root_items table must exist"
+        );
+        assert!(
+            !matches!(
+                items_schema.unwrap().wide_strategy,
+                WideStrategy::KeyedPivot(_)
+            ),
+            "group with outlier (0 column overlap) must not collapse into KeyedPivot"
+        );
     }
 }

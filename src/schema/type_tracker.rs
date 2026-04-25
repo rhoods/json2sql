@@ -1,24 +1,45 @@
-use indexmap::IndexMap;
 use serde_json::Value;
 
 /// All types that can be inferred from a JSON value.
-/// Ordering matters: used to determine the "widest" type when merging.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// `repr(usize)` + `Copy` allow use as a direct array index — no heap allocation needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(usize)]
 pub enum InferredType {
-    Null,
-    Boolean,
-    Integer,   // fits in i32
-    BigInt,    // requires i64
-    Float,     // f64
-    Uuid,
-    Date,
-    Timestamp,
-    Varchar,   // string, max_len <= text_threshold
-    Text,      // string, max_len > text_threshold
+    Null      = 0,
+    Boolean   = 1,
+    Integer   = 2,  // fits in i32
+    BigInt    = 3,  // requires i64
+    Float     = 4,  // f64
+    Uuid      = 5,
+    Date      = 6,
+    Timestamp = 7,
+    Varchar   = 8,  // string, max_len <= text_threshold
+    Text      = 9,  // string, max_len > text_threshold
     /// Nested object → becomes a child table (not stored as a column)
-    Object,
+    Object    = 10,
     /// Array → becomes a child table or junction table
-    Array,
+    Array     = 11,
+}
+
+impl InferredType {
+    /// Total number of variants — size of the counts array.
+    pub const COUNT: usize = 12;
+
+    /// All variants in index order, for iteration.
+    pub const ALL: [InferredType; Self::COUNT] = [
+        InferredType::Null,
+        InferredType::Boolean,
+        InferredType::Integer,
+        InferredType::BigInt,
+        InferredType::Float,
+        InferredType::Uuid,
+        InferredType::Date,
+        InferredType::Timestamp,
+        InferredType::Varchar,
+        InferredType::Text,
+        InferredType::Object,
+        InferredType::Array,
+    ];
 }
 
 /// The resolved PostgreSQL type for a column.
@@ -58,12 +79,18 @@ impl PgType {
 }
 
 /// Tracks all observed types and metadata for a single JSON field (future column).
+///
+/// `type_counts` is a fixed-size array indexed by `InferredType as usize`, replacing the
+/// former `IndexMap<InferredType, u64>`. This eliminates heap allocation entirely from the
+/// observation hot path — `observe()` is called billions of times on large files.
+///
+/// Null observations are tracked separately via `null_count` and never appear in `type_counts`.
 #[derive(Debug, Clone)]
 pub struct TypeTracker {
     pub total_count: u64,
     pub null_count: u64,
-    /// Histogram of non-null types observed
-    pub type_counts: IndexMap<InferredType, u64>,
+    /// Histogram of non-null types observed, indexed by `InferredType as usize`.
+    pub type_counts: [u64; InferredType::COUNT],
     /// Maximum string length observed (for VARCHAR sizing)
     pub max_len: u32,
     /// The threshold above which we use TEXT instead of VARCHAR
@@ -75,13 +102,14 @@ impl TypeTracker {
         Self {
             total_count: 0,
             null_count: 0,
-            type_counts: IndexMap::new(),
+            type_counts: [0; InferredType::COUNT],
             max_len: 0,
             text_threshold,
         }
     }
 
     /// Observe a single JSON value for this field.
+    #[inline]
     pub fn observe(&mut self, value: &Value) {
         self.total_count += 1;
         match value {
@@ -89,11 +117,10 @@ impl TypeTracker {
                 self.null_count += 1;
             }
             Value::Bool(_) => {
-                *self.type_counts.entry(InferredType::Boolean).or_insert(0) += 1;
+                self.type_counts[InferredType::Boolean as usize] += 1;
             }
             Value::Number(n) => {
-                let t = infer_number_type(n);
-                *self.type_counts.entry(t).or_insert(0) += 1;
+                self.type_counts[infer_number_type(n) as usize] += 1;
             }
             Value::String(s) => {
                 let t = infer_string_type(s);
@@ -101,23 +128,25 @@ impl TypeTracker {
                 if len > self.max_len {
                     self.max_len = len;
                 }
-                *self.type_counts.entry(t).or_insert(0) += 1;
+                self.type_counts[t as usize] += 1;
             }
             Value::Object(_) => {
-                *self.type_counts.entry(InferredType::Object).or_insert(0) += 1;
+                self.type_counts[InferredType::Object as usize] += 1;
             }
             Value::Array(_) => {
-                *self.type_counts.entry(InferredType::Array).or_insert(0) += 1;
+                self.type_counts[InferredType::Array as usize] += 1;
             }
         }
     }
 
     /// The dominant (most frequent) non-null type.
     pub fn dominant_type(&self) -> InferredType {
-        self.type_counts
+        InferredType::ALL
             .iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(t, _)| t.clone())
+            .skip(1) // skip Null — tracked via null_count, never in type_counts
+            .max_by_key(|&&t| self.type_counts[t as usize])
+            .copied()
+            .filter(|&t| self.type_counts[t as usize] > 0)
             .unwrap_or(InferredType::Null)
     }
 
@@ -126,11 +155,11 @@ impl TypeTracker {
         if self.total_count == 0 {
             return 0.0;
         }
-        let dominant_count = self
-            .type_counts
+        let dominant_count = InferredType::ALL
             .iter()
-            .max_by_key(|(_, c)| *c)
-            .map(|(_, c)| *c)
+            .skip(1)
+            .map(|&t| self.type_counts[t as usize])
+            .max()
             .unwrap_or(0);
         let anomalous = self.total_count - self.null_count - dominant_count;
         anomalous as f64 / self.total_count as f64
@@ -143,10 +172,10 @@ impl TypeTracker {
     /// Resolve to the final PostgreSQL type.
     /// Merging rules: the "widest" type wins.
     pub fn to_pg_type(&self) -> PgType {
-        let has = |t: &InferredType| self.type_counts.contains_key(t);
+        let has = |t: InferredType| self.type_counts[t as usize] > 0;
 
         // If any text/string type is dominant, use string types
-        if has(&InferredType::Text) || has(&InferredType::Varchar) {
+        if has(InferredType::Text) || has(InferredType::Varchar) {
             if self.max_len as u32 > self.text_threshold {
                 return PgType::Text;
             } else {
@@ -156,31 +185,26 @@ impl TypeTracker {
         }
 
         // Numeric widening: float > bigint > int
-        let has_float = has(&InferredType::Float);
-        let has_bigint = has(&InferredType::BigInt);
-        let has_int = has(&InferredType::Integer);
-
-        if has_float {
-            // If there's a mix of numeric + string, string wins
+        if has(InferredType::Float) {
             return PgType::DoublePrecision;
         }
-        if has_bigint {
+        if has(InferredType::BigInt) {
             return PgType::BigInt;
         }
-        if has_int {
+        if has(InferredType::Integer) {
             return PgType::Integer;
         }
 
-        if has(&InferredType::Boolean) {
+        if has(InferredType::Boolean) {
             return PgType::Boolean;
         }
-        if has(&InferredType::Timestamp) {
+        if has(InferredType::Timestamp) {
             return PgType::Timestamp;
         }
-        if has(&InferredType::Date) {
+        if has(InferredType::Date) {
             return PgType::Date;
         }
-        if has(&InferredType::Uuid) {
+        if has(InferredType::Uuid) {
             return PgType::Uuid;
         }
 
@@ -190,19 +214,33 @@ impl TypeTracker {
 
     /// True if this field contains only objects (→ child table, not a column).
     pub fn is_object_field(&self) -> bool {
-        self.type_counts.contains_key(&InferredType::Object)
-            && self.type_counts.len() == 1
+        self.type_counts[InferredType::Object as usize] > 0 && self.active_type_count() == 1
     }
 
     /// True if this field contains only arrays (→ child table, not a column).
     pub fn is_array_field(&self) -> bool {
-        self.type_counts.contains_key(&InferredType::Array)
-            && self.type_counts.len() == 1
+        self.type_counts[InferredType::Array as usize] > 0 && self.active_type_count() == 1
     }
 
     /// True if this field has mixed types that constitute an anomaly.
     pub fn has_anomalies(&self) -> bool {
-        self.type_counts.len() > 1
+        self.active_type_count() > 1
+    }
+
+    /// Iterate over (InferredType, count) pairs for non-zero, non-Null types.
+    pub fn iter_types(&self) -> impl Iterator<Item = (InferredType, u64)> + '_ {
+        InferredType::ALL
+            .iter()
+            .skip(1) // skip Null slot — tracked via null_count
+            .filter_map(|&t| {
+                let c = self.type_counts[t as usize];
+                if c > 0 { Some((t, c)) } else { None }
+            })
+    }
+
+    /// Number of distinct non-Null types observed.
+    fn active_type_count(&self) -> usize {
+        self.type_counts[1..].iter().filter(|&&c| c > 0).count()
     }
 }
 
@@ -402,5 +440,45 @@ mod tests {
         assert!(t.is_not_null());
         t.observe(&Value::Null);
         assert!(!t.is_not_null());
+    }
+
+    #[test]
+    fn test_dominant_type_not_null() {
+        let mut t = TypeTracker::new(256);
+        for _ in 0..100 {
+            t.observe(&Value::Null);
+        }
+        t.observe(&json!(42));
+        // Integer should dominate over Null (Null is never in type_counts)
+        assert_eq!(t.dominant_type(), InferredType::Integer);
+    }
+
+    #[test]
+    fn test_iter_types_skips_null() {
+        let mut t = TypeTracker::new(256);
+        t.observe(&Value::Null);
+        t.observe(&json!(1));
+        let types: Vec<_> = t.iter_types().collect();
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0].0, InferredType::Integer);
+        assert_eq!(types[0].1, 1);
+    }
+
+    #[test]
+    fn test_is_object_field() {
+        let mut t = TypeTracker::new(256);
+        t.observe(&json!({"a": 1}));
+        assert!(t.is_object_field());
+        t.observe(&json!(42));
+        assert!(!t.is_object_field());
+    }
+
+    #[test]
+    fn test_has_anomalies() {
+        let mut t = TypeTracker::new(256);
+        t.observe(&json!(1));
+        assert!(!t.has_anomalies());
+        t.observe(&json!("str"));
+        assert!(t.has_anomalies());
     }
 }
