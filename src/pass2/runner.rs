@@ -9,7 +9,7 @@ use tokio_postgres::Client;
 use uuid::Uuid;
 
 use crate::anomaly::collector::AnomalyCollector;
-use crate::db::copy_sink::{RowBuilder, TempFileSink};
+use crate::db::copy_sink::{RowBuilder, TempFileSink, MAX_OPEN_TEMP_FILES};
 use crate::error::{J2sError, Result};
 use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
@@ -93,6 +93,12 @@ pub async fn run(
     let flush_check_interval = if flush_threshold > 0 { (flush_threshold / 100).max(1) } else { 0 };
     let mut flush_check_counter = 0u64;
 
+    // FD guard: independent of flush_threshold. Checked every 10 000 root objects;
+    // if ≥ MAX_OPEN_TEMP_FILES sinks are open, all are flushed in topo order so the
+    // NamedTempFile handles are released (flush_to_db sets writer = None).
+    const FD_CHECK_INTERVAL: u64 = 10_000;
+    let mut fd_check_counter = 0u64;
+
     while let Some(item) = reader.next() {
         let value = item?;
         if let Value::Object(ref obj) = value {
@@ -141,6 +147,31 @@ pub async fn run(
                                         });
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // FD guard: flush all open sinks when approaching the OS fd limit.
+            // Runs every FD_CHECK_INTERVAL root objects regardless of flush_threshold.
+            fd_check_counter += 1;
+            if fd_check_counter >= FD_CHECK_INTERVAL {
+                fd_check_counter = 0;
+                let open_count = sinks.values().filter(|s| s.is_open()).count();
+                if open_count >= MAX_OPEN_TEMP_FILES {
+                    let msg = format!(
+                        "fd guard: {} temp files open — flushing all sinks to stay within limit",
+                        open_count
+                    );
+                    eprintln!("WARNING: {msg}");
+                    if let Some(ref tx) = progress_tx {
+                        let _ = tx.send(ProgressEvent::Pass2Log(msg));
+                    }
+                    for name in &topo_order {
+                        if let Some(sink) = sinks.get_mut(name.as_str()) {
+                            if sink.row_count > 0 {
+                                sink.flush_to_db(client).await?;
                             }
                         }
                     }
@@ -345,7 +376,7 @@ fn insert_object(
                                 insert_pivot_object(sinks, anomalies, child_schema, nested, row_id)?;
                             }
                             WideStrategy::Jsonb => {
-                                insert_jsonb_object(sinks, anomalies, child_schema, value, row_id)?;
+                                insert_jsonb_object(path_map, sinks, anomalies, child_schema, value, row_id)?;
                             }
                             WideStrategy::StructuredPivot(suffix_schema) => {
                                 insert_structured_pivot_object(
@@ -525,7 +556,7 @@ fn insert_object(
                             insert_pivot_object(sinks, anomalies, child_schema, nested, row_id)?;
                         }
                         WideStrategy::Jsonb => {
-                            insert_jsonb_object(sinks, anomalies, child_schema, value, row_id)?;
+                            insert_jsonb_object(path_map, sinks, anomalies, child_schema, value, row_id)?;
                         }
                         WideStrategy::StructuredPivot(suffix_schema) => {
                             insert_structured_pivot_object(
@@ -613,9 +644,11 @@ fn insert_pivot_object(
     Ok(())
 }
 
-/// Insert one row containing the entire object serialized as JSONB.
+/// Insert one row containing the entire object serialized as JSONB, then recurse into
+/// any children of this table so they still receive data.
 /// Columns: j2s_id, j2s_parent_id, data JSONB
 fn insert_jsonb_object(
+    path_map: &HashMap<String, &TableSchema>,
     sinks: &mut HashMap<String, TempFileSink>,
     anomalies: &mut AnomalyCollector,
     schema: &TableSchema,
@@ -635,6 +668,61 @@ fn insert_jsonb_object(
     if let Some(sink) = sinks.get_mut(&schema.name) {
         sink.write_row(builder.finish())?;
     }
+
+    // Recurse into children of this JSONB table so they still receive data.
+    if let Value::Object(obj) = value {
+        let parent_path_key = schema.path.join(".");
+        for (field, child_value) in obj {
+            let child_key = format!("{}.{}", parent_path_key, field);
+            match child_value {
+                Value::Object(nested) => {
+                    if let Some(child_schema) = path_map.get(&child_key) {
+                        match &child_schema.wide_strategy {
+                            WideStrategy::Pivot => {
+                                insert_pivot_object(sinks, anomalies, child_schema, nested, child_id)?;
+                            }
+                            WideStrategy::Jsonb => {
+                                insert_jsonb_object(path_map, sinks, anomalies, child_schema, child_value, child_id)?;
+                            }
+                            WideStrategy::StructuredPivot(suffix_schema) => {
+                                insert_structured_pivot_object(
+                                    sinks, anomalies, child_schema, nested, child_id, suffix_schema,
+                                )?;
+                            }
+                            WideStrategy::KeyedPivot(sibling_schema) => {
+                                insert_keyed_pivot_object(
+                                    sinks, anomalies, child_schema, nested, child_id, sibling_schema,
+                                )?;
+                            }
+                            WideStrategy::NormalizeDynamicKeys { id_column } => {
+                                insert_normalize_dynamic_keys(
+                                    sinks, anomalies, child_schema, nested, child_id, id_column,
+                                )?;
+                            }
+                            WideStrategy::Columns
+                            | WideStrategy::AutoSplit { .. }
+                            | WideStrategy::Ignore
+                            | WideStrategy::Flatten { .. }
+                            | WideStrategy::JsonbFlatten => {
+                                let grandchild_id = Uuid::now_v7();
+                                insert_object(
+                                    path_map, sinks, anomalies, child_schema,
+                                    nested, grandchild_id, Some(child_id), None,
+                                )?;
+                            }
+                        }
+                    }
+                }
+                Value::Array(arr) => {
+                    if let Some(child_schema) = path_map.get(&child_key) {
+                        insert_array(path_map, sinks, anomalies, child_schema, arr, child_id)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     Ok(())
 }
 

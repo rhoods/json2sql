@@ -23,6 +23,10 @@ fn pg_err(context: &str, e: tokio_postgres::Error) -> J2sError {
 pub const COPY_NULL: &str = "\\N";
 /// Column delimiter in COPY text format.
 pub const COPY_DELIMITER: u8 = b'\t';
+/// Maximum number of temp files open simultaneously before the Pass 2 runner
+/// triggers a preventive flush of all active sinks to recycle file descriptors.
+/// Chosen conservatively below the typical ulimit of 1024.
+pub const MAX_OPEN_TEMP_FILES: usize = 950;
 
 // ---------------------------------------------------------------------------
 // Row builder
@@ -92,20 +96,22 @@ impl Default for RowBuilder {
 /// After streaming is done, `copy_to_db` sends the file to PostgreSQL via COPY.
 /// `flush_to_db` can be called periodically to stream data incrementally and
 /// keep temp file sizes bounded.
+///
+/// The temp file is opened lazily on the first `write_row` call so that tables
+/// that receive no rows consume no file descriptors.
 pub struct TempFileSink {
     pub table_name: String,
     /// Rows buffered since the last flush (or since creation).
     pub row_count: u64,
     /// Total rows sent to PG across all periodic flushes (not counting unflushed rows).
     pub total_flushed: u64,
-    writer: BufWriter<NamedTempFile>,
+    /// None until the first write_row — avoids opening O(n_tables) fds upfront.
+    writer: Option<BufWriter<NamedTempFile>>,
     copy_sql: String,
 }
 
 impl TempFileSink {
     pub fn new(schema: &TableSchema, pg_schema: &str) -> Result<Self> {
-        let temp = NamedTempFile::new().map_err(J2sError::Io)?;
-
         let col_names: Vec<String> = schema
             .columns
             .iter()
@@ -123,13 +129,27 @@ impl TempFileSink {
             table_name: schema.name.clone(),
             row_count: 0,
             total_flushed: 0,
-            writer: BufWriter::with_capacity(256 * 1024, temp),
+            writer: None,
             copy_sql,
         })
     }
 
+    /// Returns true if this sink currently has an open temp file (fd in use).
+    pub fn is_open(&self) -> bool {
+        self.writer.is_some()
+    }
+
+    /// Open the temp file on the first write. Subsequent calls are a no-op.
+    fn ensure_writer(&mut self) -> Result<&mut BufWriter<NamedTempFile>> {
+        if self.writer.is_none() {
+            let temp = NamedTempFile::new().map_err(J2sError::Io)?;
+            self.writer = Some(BufWriter::with_capacity(256 * 1024, temp));
+        }
+        Ok(self.writer.as_mut().unwrap())
+    }
+
     pub fn write_row(&mut self, row: Vec<u8>) -> Result<()> {
-        self.writer.write_all(&row).map_err(J2sError::Io)?;
+        self.ensure_writer()?.write_all(&row).map_err(J2sError::Io)?;
         self.row_count += 1;
         Ok(())
     }
@@ -142,10 +162,12 @@ impl TempFileSink {
             return Ok(0);
         }
 
-        // Drain BufWriter's internal buffer to the underlying file.
-        self.writer.flush().map_err(J2sError::Io)?;
+        let writer = self.writer.as_mut().expect("writer must exist when row_count > 0");
 
-        let path = self.writer.get_ref().path().to_path_buf();
+        // Drain BufWriter's internal buffer to the underlying file.
+        writer.flush().map_err(J2sError::Io)?;
+
+        let path = writer.get_ref().path().to_path_buf();
         let data = tokio::fs::read(&path).await.map_err(J2sError::Io)?;
 
         if !data.is_empty() {
@@ -166,13 +188,11 @@ impl TempFileSink {
                 .map_err(|e| pg_err(&format!("COPY close {}", self.table_name), e))?;
         }
 
-        // Truncate the temp file and seek back to the start so it can be reused.
-        {
-            use std::io::Seek;
-            let f = self.writer.get_mut();
-            f.as_file().set_len(0).map_err(J2sError::Io)?;
-            f.seek(std::io::SeekFrom::Start(0)).map_err(J2sError::Io)?;
-        }
+        // Drop the writer so the NamedTempFile is deleted and the fd is released
+        // immediately. The next write_row call will open a fresh temp file via
+        // ensure_writer(), keeping peak fd usage bounded to tables active since
+        // the last flush rather than all tables that have ever received a row.
+        self.writer = None;
 
         let flushed = self.row_count;
         self.total_flushed += flushed;
@@ -186,7 +206,11 @@ impl TempFileSink {
         let remaining = self.row_count;
         let total_flushed = self.total_flushed;
 
-        let mut writer = self.writer;
+        let Some(mut writer) = self.writer else {
+            // No rows ever written — nothing to COPY.
+            return Ok(total_flushed);
+        };
+
         writer.flush().map_err(J2sError::Io)?;
         let temp_file = writer
             .into_inner()
