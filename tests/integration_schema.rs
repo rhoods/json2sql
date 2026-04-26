@@ -3,6 +3,7 @@ mod common;
 // pass2 is used by all async tests in this file; pass1-only test_schema_inference_no_db
 // does not use it but sharing the import avoids per-test redundancy.
 use json2sql::{db, pass1, pass2};
+use std::io::Write;
 
 #[tokio::test]
 async fn test_nested_row_counts_json_array() {
@@ -239,6 +240,67 @@ async fn test_array_as_pg_array() {
         let row = client.query_one(&sql, &[]).await.unwrap();
         let len: i32 = row.get(0);
         assert_eq!(len, 2);
+    }).await;
+}
+
+// ---------------------------------------------------------------------------
+// Table NON-RACINE auto-convertie en JSONB par le column limit guard :
+// - la colonne data doit contenir l'objet sérialisé (pas NULL)
+// - les tables enfants de la table JSONB doivent toujours recevoir leurs lignes
+//
+// Structure : root → middle (converti JSONB) → leaf
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_column_limit_guard_jsonb_non_root_with_children() {
+    common::with_schema(|client, schema| async move {
+        // root → middle (3 champs scalaires + 1 objet enfant leaf)
+        // On force Jsonb sur "root_middle" (non-racine, a un parent) pour tester
+        // le chemin Pass 2 qui était manquant.
+        let json = br#"[
+            {"id": 1, "middle": {"d": 4, "e": 5, "f": 6, "leaf": {"g": 7}}},
+            {"id": 2, "middle": {"d": 8, "e": 9, "f": 10, "leaf": {"g": 11}}}
+        ]"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(json).unwrap();
+        f.flush().unwrap();
+
+        let mut p1 = pass1::runner::run(
+            f.path(), "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None,
+        ).unwrap();
+
+        // Force Jsonb sur "root_middle" (non-racine — a un parent_table = "root").
+        {
+            use json2sql::schema::registry::apply_wide_strategy_columns;
+            use json2sql::schema::table_schema::WideStrategy;
+            if let Some(mid) = p1.schemas.iter_mut().find(|s| s.name == "root_middle") {
+                apply_wide_strategy_columns(mid, WideStrategy::Jsonb);
+            }
+        }
+
+        db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
+        let p2 = pass2::runner::run(
+            f.path(), "root", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None,
+        ).await.unwrap();
+
+        assert_eq!(common::row_count(&client, &schema, "root").await, 2);
+        assert_eq!(common::row_count(&client, &schema, "root_middle").await, 2,
+            "JSONB non-root table must have 2 rows");
+
+        // La colonne data ne doit pas être NULL
+        let sql = format!(
+            "SELECT COUNT(*) FROM \"{}\".\"root_middle\" WHERE \"data\" IS NOT NULL",
+            schema
+        );
+        let row = client.query_one(&sql, &[]).await.unwrap();
+        let non_null: i64 = row.get(0);
+        assert_eq!(non_null, 2, "data column must not be NULL for non-root JSONB table");
+
+        // L'enfant de la table JSONB doit toujours recevoir ses lignes
+        assert_eq!(common::row_count(&client, &schema, "root_middle_leaf").await, 2,
+            "children of JSONB non-root table must still receive their rows");
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+        let _ = p2;
     }).await;
 }
 

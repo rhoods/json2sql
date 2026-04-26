@@ -54,11 +54,19 @@ async fn run(cli: Cli) -> Result<()> {
             stats: snap.stats,
             truncated_names: snap.truncated_names,
             column_collisions: snap.column_collisions,
+            overflow_warnings: Vec::new(), // guard already applied when snapshot was saved
         }
     } else {
         eprintln!("Pass 1: inferring schema from '{}'...", input_path.display());
         if cli.workers > 1 {
-            eprintln!("Using {} parallel workers for schema inference.", cli.workers);
+            let (workers, capped) = pass1::runner::effective_workers(cli.workers);
+            if let Some(cap) = capped {
+                eprintln!(
+                    "WARNING: --workers {} exceeds available CPUs ({}); clamped to {}.",
+                    cli.workers, cap, cap
+                );
+            }
+            eprintln!("Using {} parallel workers for schema inference.", workers);
             pass1::runner::run_parallel(
                 &input_path,
                 &root_table,
@@ -70,7 +78,7 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.stable_threshold,
                 cli.rare_threshold,
                 None,
-                cli.workers,
+                workers,
             )?
         } else {
             pass1::runner::run(
@@ -137,6 +145,23 @@ async fn run(cli: Cli) -> Result<()> {
                 eprintln!("    '{}' → '{}'", orig, resolved);
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Column overflow warning (tables auto-converted to JSONB)
+    // -------------------------------------------------------------------------
+    if !pass1.overflow_warnings.is_empty() {
+        eprintln!(
+            "\nWARNING: {} table(s) exceeded PostgreSQL's 1600-column limit and were converted to JSONB:",
+            pass1.overflow_warnings.len()
+        );
+        for w in &pass1.overflow_warnings {
+            eprintln!(
+                "  {} ({} data columns → single 'data JSONB' column)",
+                w.table_name, w.original_column_count
+            );
+        }
+        eprintln!("  Their child tables are preserved and will still receive data.");
     }
 
     // -------------------------------------------------------------------------

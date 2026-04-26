@@ -9,7 +9,7 @@ use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonReader};
 use crate::schema::naming::{ColumnCollision, TruncatedName};
-use crate::schema::registry::SchemaRegistry;
+use crate::schema::registry::{apply_column_limit_guard, OverflowWarning, SchemaRegistry};
 use crate::schema::stats::ColumnStats;
 use crate::schema::table_schema::TableSchema;
 
@@ -22,6 +22,8 @@ pub struct Pass1Result {
     pub truncated_names: Vec<TruncatedName>,
     /// Column name collisions resolved by hash suffix (multiple JSON fields → same SQL identifier).
     pub column_collisions: Vec<ColumnCollision>,
+    /// Tables auto-converted to JSONB because they exceeded PostgreSQL's 1600-column limit.
+    pub overflow_warnings: Vec<OverflowWarning>,
 }
 
 /// Run Pass 1: stream through the entire file and build the schema.
@@ -102,7 +104,8 @@ pub fn run(
     }
     eprintln!("Pass 1 complete: {} rows, building schema...", total_rows);
 
-    let schemas = registry.finalize();
+    let mut schemas = registry.finalize();
+    let overflow_warnings = apply_column_limit_guard(&mut schemas);
     let stats = registry.collect_stats();
     let truncated_names = registry.truncated_names().to_vec();
     let column_collisions = registry.column_collisions().to_vec();
@@ -115,7 +118,24 @@ pub fn run(
         let _ = tx.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
     }
 
-    Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions })
+    Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings })
+}
+
+/// Clamp `requested` workers to the number of logical CPUs available.
+///
+/// Returns `(effective, Some(cap))` when clamping occurred, `(requested, None)` otherwise.
+/// A `requested` value of 0 is treated as 1 (sequential).
+/// Callers are expected to emit a warning when `Some(cap)` is returned.
+pub fn effective_workers(requested: usize) -> (usize, Option<usize>) {
+    let requested = requested.max(1);
+    let cap = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(usize::MAX); // if detection fails, don't cap
+    if requested > cap {
+        (cap, Some(cap))
+    } else {
+        (requested, None)
+    }
 }
 
 /// Run Pass 1 with `num_workers` parallel schema-inference threads.
@@ -256,7 +276,8 @@ pub fn run_parallel(
 
     eprintln!("Pass 1 complete (parallel, {} workers): {} rows, building schema...", num_workers, total_rows);
 
-    let schemas = merged.finalize();
+    let mut schemas = merged.finalize();
+    let overflow_warnings = apply_column_limit_guard(&mut schemas);
     let stats = merged.collect_stats();
     let truncated_names = merged.truncated_names().to_vec();
     let column_collisions = merged.column_collisions().to_vec();
@@ -269,5 +290,40 @@ pub fn run_parallel(
         let _ = tx_prog.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
     }
 
-    Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions })
+    Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_workers;
+
+    #[test]
+    fn test_effective_workers_zero_becomes_one() {
+        let (n, warn) = effective_workers(0);
+        assert_eq!(n, 1);
+        assert!(warn.is_none());
+    }
+
+    #[test]
+    fn test_effective_workers_one_no_warning() {
+        let (n, warn) = effective_workers(1);
+        assert_eq!(n, 1);
+        assert!(warn.is_none());
+    }
+
+    #[test]
+    fn test_effective_workers_over_cap_is_clamped() {
+        let cap = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let (n, warn) = effective_workers(cap + 1000);
+        assert_eq!(n, cap, "must be clamped to cap");
+        assert_eq!(warn, Some(cap), "must report the cap when clamping");
+    }
+
+    #[test]
+    fn test_effective_workers_exactly_at_cap_no_warning() {
+        let cap = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let (n, warn) = effective_workers(cap);
+        assert_eq!(n, cap);
+        assert!(warn.is_none(), "exactly at cap must not warn");
+    }
 }

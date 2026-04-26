@@ -4,7 +4,7 @@
 //!
 //!   TEST_DATABASE_URL=postgres://user:pass@localhost/testdb cargo test
 //!
-//! Sans cette variable, tous les tests sont silencieusement ignorés.
+//! Sans cette variable, tous les tests sont ignorés avec un message [SKIP] sur stderr.
 //!
 //! ## Schémas de test
 //!
@@ -60,7 +60,8 @@ pub async fn drop_schema(client: &tokio_postgres::Client, schema: &str) {
 
 /// Run a test body with a fresh PostgreSQL schema, guaranteed to be dropped even on panic.
 ///
-/// If `TEST_DATABASE_URL` is not set or the connection fails, the test is silently skipped.
+/// If `TEST_DATABASE_URL` is not set or the connection fails, the test is skipped with a
+/// `[SKIP]` message on stderr (visible via `cargo test -- --nocapture`).
 /// On panic: the schema is dropped via a fresh connection, then the panic is resumed so the
 /// test is reported as FAILED rather than silently swallowed.
 pub async fn with_schema<F, Fut>(f: F)
@@ -70,12 +71,18 @@ where
 {
     let url = match db_url() {
         Some(u) => u,
-        None => return,
+        None => {
+            eprintln!("[SKIP] TEST_DATABASE_URL not set — test requires a PostgreSQL connection.");
+            return;
+        }
     };
 
     let client = match connection::connect(&url).await {
         Ok(c) => c,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("[SKIP] Could not connect to TEST_DATABASE_URL: {e}");
+            return;
+        }
     };
 
     let schema = unique_schema();
@@ -107,12 +114,18 @@ where
 {
     let url = match db_url() {
         Some(u) => u,
-        None => return,
+        None => {
+            eprintln!("[SKIP] TEST_DATABASE_URL not set — test requires a PostgreSQL connection.");
+            return;
+        }
     };
 
     let client = match connection::connect(&url).await {
         Ok(c) => c,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("[SKIP] Could not connect to TEST_DATABASE_URL: {e}");
+            return;
+        }
     };
 
     let schema = unique_schema();

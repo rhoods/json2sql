@@ -14,6 +14,7 @@ const BADGE_TEXT_COLOR: &str = "#0D0D0D";
 
 use dioxus::prelude::*;
 
+use json2sql::schema::registry::OverflowWarning;
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 
 use crate::screens::{strategy_color, strategy_label};
@@ -28,8 +29,13 @@ use crate::theme;
 pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     // Buffer for the id_column name when setting NormalizeDynamicKeys.
     let mut normalize_id_col: Signal<String> = use_signal(|| "id".to_string());
+    let mut banner_dismissed = use_signal(|| false);
 
     let schemas = state.read().schemas.clone();
+    let overflow_warnings = state.read().overflow_warnings.clone();
+    // Set of table names auto-converted to JSONB by the column limit guard.
+    let overflow_table_names: std::collections::HashSet<String> =
+        overflow_warnings.iter().map(|w| w.table_name.clone()).collect();
     let tables_count = schemas.len();
     let columns_count: usize = schemas.iter().map(|s| s.columns.len()).sum();
 
@@ -75,6 +81,31 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                 }
             }
 
+            // ── Overflow warning banner ───────────────────────────────────
+            if !overflow_warnings.is_empty() && !*banner_dismissed.read() {
+                div {
+                    style: "padding:8px 24px;background:#3A2500;border-bottom:1px solid {theme::TERTIARY}44;display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                    span {
+                        style: "color:{theme::TERTIARY};font-size:0.75rem;font-weight:700;flex-shrink:0;",
+                        "⚠ {overflow_warnings.len()} table(s) auto-converted to JSONB (exceeded PostgreSQL 1600-column limit):"
+                    }
+                    for w in overflow_warnings.iter() {
+                        span {
+                            key: "{w.table_name}",
+                            style: "font-family:{theme::FONT_CODE};font-size:0.6875rem;color:{theme::TERTIARY};background:#FFFFFF18;padding:1px 6px;border-radius:2px;",
+                            "{w.table_name} ({w.original_column_count} cols)"
+                        }
+                    }
+                    div { style: "flex:1;" }
+                    button {
+                        style: "background:transparent;border:none;color:{theme::TERTIARY};font-size:1rem;cursor:pointer;padding:0 4px;line-height:1;flex-shrink:0;",
+                        aria_label: "Dismiss",
+                        onclick: move |_| { banner_dismissed.set(true); },
+                        "×"
+                    }
+                }
+            }
+
             // ── Three-panel workspace ─────────────────────────────────────
             div {
                 style: "display:flex;flex:1;overflow:hidden;min-height:0;min-width:0;",
@@ -86,12 +117,18 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                         {
                             let is_selected = i == idx;
                             let indent = table.depth * 12;
+                            let user_overrode = state.read().strategy_overrides.contains_key(&table.name);
                             let effective = state.read().strategy_overrides
                                 .get(&table.name)
                                 .cloned()
                                 .unwrap_or_else(|| table.wide_strategy.clone());
-                            let label = strategy_label(&effective);
-                            let badge_color = strategy_color(&effective);
+                            // Auto-converted JSONB (overflow guard) shows amber badge;
+                            // user-chosen JSONB keeps purple.
+                            let is_overflow_jsonb = !user_overrode
+                                && matches!(effective, WideStrategy::Jsonb)
+                                && overflow_table_names.contains(&table.name);
+                            let label = if is_overflow_jsonb { "JSONB ⚠" } else { strategy_label(&effective) };
+                            let badge_color = if is_overflow_jsonb { theme::BADGE_JSONB_OVERFLOW } else { strategy_color(&effective) };
                             let row_bg = if is_selected {
                                 format!("background:{};", SELECTED_ROW_BG)
                             } else {

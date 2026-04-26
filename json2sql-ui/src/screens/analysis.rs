@@ -73,6 +73,15 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
 
+        // Clamp workers to available CPUs.
+        let (workers, capped) = json2sql::pass1::runner::effective_workers(workers);
+        if let Some(cap) = capped {
+            state.write().pass1_progress.push_log(format!(
+                "WARNING: workers clamped to {} (requested value exceeds available CPUs)",
+                cap
+            ));
+        }
+
         // Run Pass 1 in a blocking thread — it's CPU/IO bound.
         let handle = tokio::task::spawn_blocking(move || {
             if workers > 1 {
@@ -120,6 +129,7 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         match handle.await {
             Ok(Ok(result)) => {
                 state.write().schemas = result.schemas;
+                state.write().overflow_warnings = result.overflow_warnings;
             }
             Ok(Err(e)) => {
                 state

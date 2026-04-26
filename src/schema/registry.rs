@@ -625,6 +625,41 @@ fn build_entry_schema(
 }
 
 /// Remove tables whose parent (or any ancestor) absorbs children into a wide column
+/// PostgreSQL hard limit on columns per table.
+pub const PG_MAX_COLUMNS: usize = 1600;
+
+/// Recorded when a table is auto-converted to JSONB by `apply_column_limit_guard`.
+#[derive(Debug, Clone)]
+pub struct OverflowWarning {
+    pub table_name: String,
+    pub original_column_count: usize,
+}
+
+/// Convert any table with more than [`PG_MAX_COLUMNS`] data columns to `WideStrategy::Jsonb`.
+///
+/// Only the table's own columns are affected; child tables are preserved in the schema
+/// and continue to function normally with their parent FK intact.
+///
+/// Must be called after `finalize()` (schemas in topological order). Each table is
+/// evaluated independently — a child can be converted without its parent being converted.
+pub fn apply_column_limit_guard(schemas: &mut Vec<TableSchema>) -> Vec<OverflowWarning> {
+    let mut warnings = Vec::new();
+    for schema in schemas.iter_mut() {
+        let count = schema.data_columns().count();
+        let generated = schema.columns.iter().filter(|c| c.is_generated).count();
+        // PostgreSQL enforces a hard limit of PG_MAX_COLUMNS total columns per table,
+        // which includes both data and generated columns (j2s_id, j2s_parent_id, j2s_order).
+        if count + generated > PG_MAX_COLUMNS {
+            warnings.push(OverflowWarning {
+                table_name: schema.name.clone(),
+                original_column_count: count,
+            });
+            apply_wide_strategy_columns(schema, WideStrategy::Jsonb);
+        }
+    }
+    warnings
+}
+
 /// (Pivot, Jsonb, StructuredPivot, KeyedPivot). AutoSplit does NOT absorb children.
 ///
 /// The schemas must be topologically sorted (parents before children) for the single-pass
@@ -1746,5 +1781,109 @@ mod tests {
             assert_eq!(s.columns.len(), m.columns.len(),
                 "column count mismatch for table {}", s.name);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // apply_column_limit_guard
+    // -------------------------------------------------------------------------
+
+    fn make_wide_schema(name: &str, parent: Option<&str>, data_col_count: usize) -> TableSchema {
+        let mut s = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
+        s.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        if let Some(p) = parent {
+            s.columns.push(ColumnSchema::parent_fk(p));
+            s.parent_table = Some(p.to_string());
+        }
+        for i in 0..data_col_count {
+            s.columns.push(ColumnSchema {
+                name: format!("col_{}", i),
+                original_name: format!("col_{}", i),
+                pg_type: PgType::Text,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
+            });
+        }
+        s
+    }
+
+    #[test]
+    fn test_column_limit_guard_converts_overflow() {
+        let mut schemas = vec![make_wide_schema("t", None, 1601)];
+        let warnings = apply_column_limit_guard(&mut schemas);
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].table_name, "t");
+        assert_eq!(warnings[0].original_column_count, 1601);
+
+        // Only generated columns + one JSONB data column remain
+        let data: Vec<_> = schemas[0].data_columns().collect();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].name, "data");
+        assert!(matches!(data[0].pg_type, PgType::Jsonb));
+        assert!(matches!(schemas[0].wide_strategy, WideStrategy::Jsonb));
+    }
+
+    #[test]
+    fn test_column_limit_guard_boundary() {
+        // Root table has 1 generated col (j2s_id).
+        // Max safe data cols = PG_MAX_COLUMNS - 1 = 1599.
+        // 1599 data + 1 generated = 1600 total → must NOT be converted.
+        let mut schemas = vec![make_wide_schema("t", None, PG_MAX_COLUMNS - 1)];
+        let warnings = apply_column_limit_guard(&mut schemas);
+        assert!(warnings.is_empty(), "{} data cols (root) must not trigger the guard", PG_MAX_COLUMNS - 1);
+        assert_eq!(schemas[0].data_columns().count(), PG_MAX_COLUMNS - 1);
+
+        // 1600 data + 1 generated = 1601 total → must be converted.
+        let mut schemas2 = vec![make_wide_schema("t", None, PG_MAX_COLUMNS)];
+        let warnings2 = apply_column_limit_guard(&mut schemas2);
+        assert_eq!(warnings2.len(), 1, "{} data cols (root) must trigger the guard", PG_MAX_COLUMNS);
+
+        // Child table has 2 generated cols (j2s_id + j2s_parent_id).
+        // Max safe data cols = PG_MAX_COLUMNS - 2 = 1598.
+        let mut schemas3 = vec![
+            make_wide_schema("parent", None, 5),
+            make_wide_schema("child", Some("parent"), PG_MAX_COLUMNS - 2),
+        ];
+        let warnings3 = apply_column_limit_guard(&mut schemas3);
+        assert!(warnings3.is_empty(), "{} data cols (child) must not trigger the guard", PG_MAX_COLUMNS - 2);
+
+        let mut schemas4 = vec![
+            make_wide_schema("parent", None, 5),
+            make_wide_schema("child", Some("parent"), PG_MAX_COLUMNS - 1),
+        ];
+        let warnings4 = apply_column_limit_guard(&mut schemas4);
+        assert_eq!(warnings4.len(), 1, "{} data cols (child) must trigger the guard", PG_MAX_COLUMNS - 1);
+    }
+
+    #[test]
+    fn test_column_limit_guard_preserves_children() {
+        let parent = make_wide_schema("parent", None, 1601);
+        let child  = make_wide_schema("child", Some("parent"), 10);
+        let mut schemas = vec![parent, child];
+
+        let warnings = apply_column_limit_guard(&mut schemas);
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(schemas.len(), 2, "child table must not be removed");
+        assert_eq!(schemas[1].name, "child");
+        assert_eq!(schemas[1].data_columns().count(), 10, "child columns must be untouched");
+    }
+
+    #[test]
+    fn test_column_limit_guard_converts_child_independently() {
+        let parent = make_wide_schema("parent", None, 10);
+        let child  = make_wide_schema("child", Some("parent"), 1601);
+        let mut schemas = vec![parent, child];
+
+        let warnings = apply_column_limit_guard(&mut schemas);
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].table_name, "child");
+        // Parent unchanged
+        assert_eq!(schemas[0].data_columns().count(), 10);
+        // Child converted
+        assert_eq!(schemas[1].data_columns().count(), 1);
+        assert!(matches!(schemas[1].wide_strategy, WideStrategy::Jsonb));
     }
 }

@@ -74,8 +74,9 @@ impl JsonLinesReader {
 }
 
 impl JsonLinesReader {
-    /// Return the raw bytes of the next JSON object without parsing.
-    pub fn next_raw(&mut self) -> Option<Result<Vec<u8>>> {
+    /// Read the next non-blank line into `self.line_buf`, returning `(start, end)` of the
+    /// trimmed content. Skips blank lines. Returns `None` on EOF, `Err` on I/O error.
+    fn fill_next_line(&mut self) -> Option<Result<(usize, usize)>> {
         loop {
             self.line_buf.clear();
             match self.reader.read_until(b'\n', &mut self.line_buf) {
@@ -85,10 +86,18 @@ impl JsonLinesReader {
                     let start = self.line_buf.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(self.line_buf.len());
                     let end = self.line_buf.iter().rposition(|b| !b.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(0);
                     if start >= end { continue; }
-                    return Some(Ok(self.line_buf[start..end].to_vec()));
+                    return Some(Ok((start, end)));
                 }
                 Err(e) => return Some(Err(J2sError::Io(e))),
             }
+        }
+    }
+
+    /// Return the raw bytes of the next JSON object without parsing.
+    pub fn next_raw(&mut self) -> Option<Result<Vec<u8>>> {
+        match self.fill_next_line()? {
+            Ok((start, end)) => Some(Ok(self.line_buf[start..end].to_vec())),
+            Err(e) => Some(Err(e)),
         }
     }
 }
@@ -97,23 +106,12 @@ impl Iterator for JsonLinesReader {
     type Item = Result<Value>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            self.line_buf.clear();
-            match self.reader.read_until(b'\n', &mut self.line_buf) {
-                Ok(0) => return None,
-                Ok(n) => {
-                    self.bytes_read += n as u64;
-                    // Trim ASCII whitespace without allocation
-                    let start = self.line_buf.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(self.line_buf.len());
-                    let end = self.line_buf.iter().rposition(|b| !b.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(0);
-                    if start >= end {
-                        continue;
-                    }
-                    let slice = &mut self.line_buf[start..end];
-                    return Some(simd_json::from_slice(slice).map_err(simd_err));
-                }
-                Err(e) => return Some(Err(J2sError::Io(e))),
+        match self.fill_next_line()? {
+            Ok((start, end)) => {
+                let slice = &mut self.line_buf[start..end];
+                Some(simd_json::from_slice(slice).map_err(simd_err))
             }
+            Err(e) => Some(Err(e)),
         }
     }
 }

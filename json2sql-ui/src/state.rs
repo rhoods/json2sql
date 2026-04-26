@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use urlencoding::encode;
 use zeroize::{Zeroize, Zeroizing};
 use json2sql::io::progress_event::ProgressEvent;
+use json2sql::schema::registry::OverflowWarning;
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 
 // ---------------------------------------------------------------------------
@@ -176,6 +177,8 @@ pub struct AppState {
     // — Screen 3 / 4 —
     /// Original schemas from pass1 — never mutated after being set.
     pub schemas: Vec<TableSchema>,
+    /// Tables that were auto-converted to JSONB because they exceeded the 1600-column PG limit.
+    pub overflow_warnings: Vec<OverflowWarning>,
     /// User-chosen strategy overrides: table_name → WideStrategy.
     /// Applied on top of `schemas` at DDL generation and import time.
     pub strategy_overrides: HashMap<String, WideStrategy>,
@@ -208,6 +211,7 @@ impl Default for AppState {
             pg_error: None,
             pass1_progress: Pass1Progress::default(),
             schemas: Vec::new(),
+            overflow_warnings: Vec::new(),
             strategy_overrides: HashMap::new(),
             selected_table_idx: 0,
             pass2_progress: Pass2Progress::default(),
@@ -297,6 +301,7 @@ impl AppState {
         self.pass1_progress = Pass1Progress::default();
         self.pass2_progress = Pass2Progress::default();
         self.schemas = Vec::new();
+        self.overflow_warnings = Vec::new();
         self.strategy_overrides = HashMap::new();
         self.pg_testing = false;
         self.pg_ok = None;
