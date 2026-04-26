@@ -195,6 +195,8 @@ pub struct AppState {
 
     /// Number of worker threads for Pass 1 schema inference (1 = sequential).
     pub workers: usize,
+    /// Number of parallel PostgreSQL connections for Pass 2 COPY (default: min(cpus, 8)).
+    pub pass2_parallel: usize,
 }
 
 impl Default for AppState {
@@ -217,6 +219,10 @@ impl Default for AppState {
             pass2_progress: Pass2Progress::default(),
             abort_handle: None,
             workers: 1,
+            pass2_parallel: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(8),
         }
     }
 }
@@ -360,5 +366,26 @@ impl AppState {
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pass2_parallel_default_is_in_valid_range() {
+        let s = AppState::default();
+        assert!(s.pass2_parallel >= 1, "pass2_parallel must be at least 1");
+        assert!(s.pass2_parallel <= 32, "pass2_parallel should not exceed 32");
+    }
+
+    #[test]
+    fn pass2_parallel_matches_available_cpus_capped_at_8() {
+        let s = AppState::default();
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        assert_eq!(s.pass2_parallel, cpus.min(8));
     }
 }

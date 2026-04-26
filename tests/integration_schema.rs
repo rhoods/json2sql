@@ -118,6 +118,61 @@ fn test_schema_inference_no_db() {
 }
 
 // ---------------------------------------------------------------------------
+// Keyed_pivot avec clés de formes mixtes (numériques + textuelles).
+// Fixture : 2 produits avec un objet `images` qui a 3 clés numériques (schema
+// {imgid, uploader}) et 3 clés textuelles (schema {imgid, rev}).
+//
+// Sans le fix : Jaccard global = 1/3 ≈ 0.33 < 0.5 → pas de pivot → 12 tables.
+// Avec le fix  : meilleur Jaccard sous-groupe = 1.0 ≥ 0.5 → pivot → 2 tables.
+// ---------------------------------------------------------------------------
+// Keyed_pivot avec clés de formes mixtes (numériques + textuelles).
+// Fixture : 2 produits avec un objet `images` qui a 3 clés numériques (schema
+// {imgid, uploader}) et 3 clés textuelles (schema {imgid, rev}).
+//
+// Résultat attendu : MultiKeyedPivot — deux tables pivots distinctes.
+//   products_images_num  ← absorbe les clés numériques (imgid, uploader)
+//   products_images_key  ← absorbe les clés textuelles (imgid, rev)
+// Les 12 enfants originaux sont exclus du schéma.
+#[test]
+fn test_keyed_pivot_mixed_key_shapes() {
+    use json2sql::schema::table_schema::WideStrategy;
+
+    let path = common::fixture("keyed_pivot_mixed_shape.jsonl");
+    let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
+
+    // products + products_images (parent MultiKeyedPivot) + 2 tables pivots synthétiques.
+    assert_eq!(p1.schemas.len(), 4, "attendu 4 schemas, obtenu: {:?}", names);
+    assert!(names.contains(&"products"),              "products manquant");
+    assert!(names.contains(&"products_images"),       "products_images (parent) manquant");
+    assert!(names.contains(&"products_images_num"),   "products_images_num (pivot numérique) manquant");
+    assert!(names.contains(&"products_images_key"),   "products_images_key (pivot textuel) manquant");
+
+    let images = p1.schemas.iter().find(|s| s.name == "products_images").unwrap();
+    assert!(
+        matches!(images.wide_strategy, WideStrategy::MultiKeyedPivot(_)),
+        "products_images doit avoir MultiKeyedPivot"
+    );
+
+    // Table pivot numérique : key_id + imgid + uploader
+    let num_pivot = p1.schemas.iter().find(|s| s.name == "products_images_num").unwrap();
+    assert!(matches!(num_pivot.wide_strategy, WideStrategy::KeyedPivot(_)));
+    let num_cols: Vec<&str> = num_pivot.data_columns().map(|c| c.name.as_str()).collect();
+    assert!(num_cols.contains(&"imgid"),    "pivot numérique : imgid manquant");
+    assert!(num_cols.contains(&"uploader"), "pivot numérique : uploader manquant");
+    assert!(!num_cols.contains(&"rev"),     "pivot numérique ne doit pas avoir rev");
+
+    // Table pivot textuelle : key + imgid + rev
+    let key_pivot = p1.schemas.iter().find(|s| s.name == "products_images_key").unwrap();
+    assert!(matches!(key_pivot.wide_strategy, WideStrategy::KeyedPivot(_)));
+    let key_cols: Vec<&str> = key_pivot.data_columns().map(|c| c.name.as_str()).collect();
+    assert!(key_cols.contains(&"imgid"),     "pivot textuel : imgid manquant");
+    assert!(key_cols.contains(&"rev"),       "pivot textuel : rev manquant");
+    assert!(!key_cols.contains(&"uploader"), "pivot textuel ne doit pas avoir uploader");
+}
+
+// ---------------------------------------------------------------------------
 // Pass 1 parallèle doit produire le même schéma que séquentiel — NDJSON.
 // ---------------------------------------------------------------------------
 #[test]

@@ -56,6 +56,21 @@ pub struct SiblingSchema {
     pub data_col_name: String,
 }
 
+/// One key-shape subgroup within a MultiKeyedPivot parent.
+/// Each group produces its own synthetic pivot table in the schema.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SiblingGroup {
+    /// Name of the synthetic pivot table (e.g. "products_images_num").
+    pub pivot_table: String,
+    /// If true, this group handles numeric-keyed children; false = non-numeric.
+    pub key_is_numeric: bool,
+    /// Pivot column metadata (key column name, key shape, etc.).
+    pub sibling_schema: SiblingSchema,
+    /// Names of the original child tables absorbed into this group.
+    /// Used by `exclude_absorbed_children` to remove them from the schema.
+    pub absorbed_names: Vec<String>,
+}
+
 /// Strategy for handling "wide" tables — tables with many dynamic keys.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum WideStrategy {
@@ -75,6 +90,10 @@ pub enum WideStrategy {
     /// The child key becomes a column; each child object's fields become columns (union).
     /// e.g. products_images_1, products_images_2 → products_images with key_id + union cols.
     KeyedPivot(SiblingSchema),
+    /// Multi-group sibling collapse: children have two distinct key shapes (e.g. numeric "1","2"
+    /// and text "front_en","rev_fr"). Each shape group produces its own synthetic pivot table.
+    /// The parent itself stores no rows — it is a pure routing table in Pass 2.
+    MultiKeyedPivot(Vec<SiblingGroup>),
     /// Root table split: stable keys (freq >= stable_threshold) stay as columns in the main
     /// table; medium keys (rare_threshold <= freq < stable_threshold) go to a companion
     /// `{name}_wide` Pivot table linked by the same anchor UUID.
@@ -250,6 +269,18 @@ impl WideStrategy {
         !matches!(self, WideStrategy::Columns)
     }
 
+    /// Returns the names of all child tables directly absorbed by this strategy.
+    /// For MultiKeyedPivot, this is the union of all groups' absorbed_names.
+    pub fn absorbed_names(&self) -> Vec<&str> {
+        match self {
+            WideStrategy::MultiKeyedPivot(groups) => groups
+                .iter()
+                .flat_map(|g| g.absorbed_names.iter().map(|s| s.as_str()))
+                .collect(),
+            _ => vec![],
+        }
+    }
+
     /// Returns true if child tables should be excluded from the schema because their
     /// data is absorbed into this table's wide column (Pivot / Jsonb / etc.).
     /// AutoSplit does NOT absorb children — they remain as separate tables.
@@ -265,6 +296,8 @@ impl WideStrategy {
                 | WideStrategy::Flatten { .. }
                 | WideStrategy::JsonbFlatten
         )
+        // MultiKeyedPivot: absorption handled via SiblingGroup.absorbed_names,
+        // not through this flag — the parent itself absorbs nothing directly.
     }
 }
 

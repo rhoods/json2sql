@@ -16,7 +16,7 @@ use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonReader};
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::pass2::coercer::{coerce, CoerceResult};
-use crate::schema::table_schema::{ChildKind, SiblingSchema, SuffixSchema, TableSchema, WideStrategy};
+use crate::schema::table_schema::{ChildKind, SiblingGroup, SiblingSchema, SuffixSchema, TableSchema, WideStrategy};
 // NormalizeDynamicKeys and Flatten are handled via dedicated insert functions below.
 
 /// Pass 2 result summary.
@@ -388,6 +388,11 @@ fn insert_object(
                                     sinks, anomalies, child_schema, nested, row_id, sibling_schema,
                                 )?;
                             }
+                            WideStrategy::MultiKeyedPivot(groups) => {
+                                insert_multi_keyed_pivot(
+                                    path_map, sinks, anomalies, child_schema, nested, row_id, groups,
+                                )?;
+                            }
                             WideStrategy::NormalizeDynamicKeys { id_column } => {
                                 insert_normalize_dynamic_keys(
                                     sinks, anomalies, child_schema, nested, row_id, id_column,
@@ -568,6 +573,11 @@ fn insert_object(
                                 sinks, anomalies, child_schema, nested, row_id, sibling_schema,
                             )?;
                         }
+                        WideStrategy::MultiKeyedPivot(groups) => {
+                            insert_multi_keyed_pivot(
+                                path_map, sinks, anomalies, child_schema, nested, row_id, groups,
+                            )?;
+                        }
                         WideStrategy::NormalizeDynamicKeys { id_column } => {
                             insert_normalize_dynamic_keys(
                                 sinks, anomalies, child_schema, nested, row_id, id_column,
@@ -692,6 +702,11 @@ fn insert_jsonb_object(
                             WideStrategy::KeyedPivot(sibling_schema) => {
                                 insert_keyed_pivot_object(
                                     sinks, anomalies, child_schema, nested, child_id, sibling_schema,
+                                )?;
+                            }
+                            WideStrategy::MultiKeyedPivot(groups) => {
+                                insert_multi_keyed_pivot(
+                                    path_map, sinks, anomalies, child_schema, nested, child_id, groups,
                                 )?;
                             }
                             WideStrategy::NormalizeDynamicKeys { id_column } => {
@@ -1107,6 +1122,62 @@ fn insert_normalize_dynamic_keys(
             sink.write_row(builder.finish())?;
         }
     }
+    Ok(())
+}
+
+/// Dispatch each key in a MultiKeyedPivot object to the matching synthetic pivot table.
+///
+/// The routing table (`schema`) is a MultiKeyedPivot parent with only generated columns.
+/// One routing row is emitted per call; children FK to it by routing_id.
+/// Keys that are all-digits go to the `_num` group; all others go to `_key`.
+fn insert_multi_keyed_pivot(
+    path_map: &HashMap<String, &TableSchema>,
+    sinks: &mut HashMap<String, TempFileSink>,
+    anomalies: &mut AnomalyCollector,
+    schema: &TableSchema,
+    obj: &serde_json::Map<String, Value>,
+    parent_id: Uuid,
+    groups: &[SiblingGroup],
+) -> Result<()> {
+    // Emit one routing row (only generated columns: j2s_id + FK to grandparent).
+    let routing_id = Uuid::now_v7();
+    let mut rb = RowBuilder::new();
+    for col in &schema.columns {
+        if col.name == "j2s_id" {
+            rb.push_uuid(routing_id);
+        } else if col.is_parent_fk {
+            rb.push_uuid(parent_id);
+        } else {
+            rb.push_null();
+        }
+    }
+    anomalies.inc_total(&schema.name);
+    if let Some(sink) = sinks.get_mut(&schema.name) {
+        sink.write_row(rb.finish())?;
+    }
+
+    let routing_path = schema.path.join(".");
+
+    // Route each child key to the correct group's pivot table.
+    for group in groups {
+        let submap: serde_json::Map<String, Value> = obj
+            .iter()
+            .filter(|(k, _)| k.chars().all(|c| c.is_ascii_digit()) == group.key_is_numeric)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        if submap.is_empty() {
+            continue;
+        }
+
+        let suffix = if group.key_is_numeric { "num" } else { "key" };
+        let pivot_path_key = format!("{}.{}", routing_path, suffix);
+
+        if let Some(pivot_schema) = path_map.get(&pivot_path_key) {
+            insert_keyed_pivot_object(sinks, anomalies, pivot_schema, &submap, routing_id, &group.sibling_schema)?;
+        }
+    }
+
     Ok(())
 }
 

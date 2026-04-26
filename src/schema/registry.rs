@@ -665,20 +665,30 @@ pub fn apply_column_limit_guard(schemas: &mut Vec<TableSchema>) -> Vec<OverflowW
 /// The schemas must be topologically sorted (parents before children) for the single-pass
 /// transitive exclusion to work correctly. Safe to call multiple times (idempotent).
 pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
-    // O(n): pre-build set of table names whose wide_strategy absorbs children.
+    // O(n): pre-build set of table names whose wide_strategy absorbs ALL children.
     let absorbers: std::collections::HashSet<&str> = schemas
         .iter()
         .filter(|s| s.wide_strategy.absorbs_children())
         .map(|s| s.name.as_str())
         .collect();
 
-    if absorbers.is_empty() {
+    // MultiKeyedPivot absorbs specific children by name (not all children of the parent).
+    let partial_absorbed: std::collections::HashSet<&str> = schemas
+        .iter()
+        .flat_map(|s| s.wide_strategy.absorbed_names())
+        .collect();
+
+    if absorbers.is_empty() && partial_absorbed.is_empty() {
         return;
     }
 
     // Single forward pass exploiting topological order: if a parent is an absorber
     // or already excluded, so are its children (transitive).
-    let mut excluded: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut excluded: std::collections::HashSet<String> = partial_absorbed
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+
     for schema in schemas.iter() {
         if let Some(ref parent) = schema.parent_table {
             if absorbers.contains(parent.as_str()) || excluded.contains(parent) {
@@ -786,6 +796,11 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: WideStrat
             // These strategies require the full schemas slice.
             // Use apply_normalize_dynamic_keys(), apply_flatten(), or apply_jsonb_flatten() instead.
         }
+        WideStrategy::MultiKeyedPivot(_) => {
+            // MultiKeyedPivot: parent keeps only its generated columns (no data columns).
+            // The synthetic child pivot tables are created by finalize_siblings().
+            schema.columns.retain(|c| c.is_generated);
+        }
     }
 }
 
@@ -856,14 +871,32 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
     }
 
     // Collect collapse operations (to avoid borrow conflicts when modifying schemas)
-    struct Collapse {
-        parent_idx: usize,
+    struct SubgroupData {
+        pivot_table_name: String,
+        key_is_numeric: bool,
         key_col_name: String,
         key_shape: KeyShape,
         union_cols: Vec<ColumnSchema>,
+        absorbed_names: Vec<String>,
+    }
+
+    enum CollapseKind {
+        /// All children merged into the parent table (existing behaviour).
+        Single {
+            key_col_name: String,
+            key_shape: KeyShape,
+            union_cols: Vec<ColumnSchema>,
+            data_col_name: String,
+        },
+        /// Mixed key shapes: each qualifying subgroup gets its own synthetic pivot table.
+        Multi { groups: Vec<SubgroupData> },
+    }
+
+    struct Collapse {
+        parent_idx: usize,
         array_children: bool,
-        data_col_name: String,
         log_msg: String,
+        kind: CollapseKind,
     }
 
     let mut collapses: Vec<Collapse> = Vec::new();
@@ -897,93 +930,271 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
                 continue;
             }
 
-            // All children must have good pairwise Jaccard similarity
-            let actual_jaccard = pairwise_jaccard_min(schemas, child_indices);
-            if actual_jaccard < min_jaccard {
-                continue;
-            }
+            // Partition children by numeric vs non-numeric key shape.
+            let (numeric_idx, non_numeric_idx): (Vec<usize>, Vec<usize>) =
+                child_indices.iter().partition(|&&i| {
+                    schemas[i]
+                        .path
+                        .last()
+                        .map(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()))
+                        .unwrap_or(false)
+                });
 
-            let keys: Vec<String> = child_indices
-                .iter()
-                .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
-                .collect();
+            let is_mixed = !numeric_idx.is_empty() && !non_numeric_idx.is_empty();
 
-            let key_shape = classify_key_shape(&keys.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+            if is_mixed {
+                // Evaluate each subgroup independently.
+                let num_ok = numeric_idx.len() >= threshold
+                    && pairwise_jaccard_min(schemas, &numeric_idx) >= min_jaccard;
+                let non_ok = non_numeric_idx.len() >= threshold
+                    && pairwise_jaccard_min(schemas, &non_numeric_idx) >= min_jaccard;
 
-            let key_col_name = match &key_shape {
-                KeyShape::Numeric => "key_id".to_string(),
-                KeyShape::IsoLang => "lang_code".to_string(),
-                _ => "key".to_string(),
-            };
+                if !num_ok && !non_ok {
+                    continue;
+                }
 
-            let children: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
-            let union_cols = build_union_columns(&children);
+                let make_subgroup = |indices: &[usize], key_is_numeric: bool, suffix: &str| {
+                    let pivot_name = format!("{}_{}", parent_name, suffix);
+                    let sub_keys: Vec<String> = indices
+                        .iter()
+                        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
+                        .collect();
+                    let shape = classify_key_shape(
+                        &sub_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    );
+                    let key_col = if key_is_numeric {
+                        "key_id".to_string()
+                    } else {
+                        match shape {
+                            KeyShape::IsoLang => "lang_code".to_string(),
+                            _ => "key".to_string(),
+                        }
+                    };
+                    let children: Vec<&TableSchema> =
+                        indices.iter().map(|&i| &schemas[i]).collect();
+                    let union_cols = build_union_columns(&children);
+                    let absorbed = indices.iter().map(|&i| schemas[i].name.clone()).collect();
+                    SubgroupData {
+                        pivot_table_name: pivot_name,
+                        key_is_numeric,
+                        key_col_name: key_col,
+                        key_shape: shape,
+                        union_cols,
+                        absorbed_names: absorbed,
+                    }
+                };
 
-            let data_col_name = "j2s_data".to_string();
+                let mut groups = Vec::new();
+                if num_ok {
+                    groups.push(make_subgroup(&numeric_idx, true, "num"));
+                }
+                if non_ok {
+                    groups.push(make_subgroup(&non_numeric_idx, false, "key"));
+                }
 
-            let key_examples = keys.iter().take(5).map(|s| s.as_str()).collect::<Vec<_>>().join("\", \"");
-            let more = if keys.len() > 5 {
-                format!("\" (+{} more)", keys.len() - 5)
+                let kind_label = if array_children { "ObjectArray" } else { "Object" };
+                let log_msg = format!(
+                    "  MultiKeyedPivot {} tables detected: {} ({} tables → {} pivot tables)",
+                    kind_label,
+                    parent_name,
+                    child_indices.len(),
+                    groups.len(),
+                );
+                collapses.push(Collapse {
+                    parent_idx,
+                    array_children,
+                    log_msg,
+                    kind: CollapseKind::Multi { groups },
+                });
             } else {
-                "\"".to_string()
-            };
-            let kind_label = if array_children { "ObjectArray" } else { "Object" };
-            let log_msg = format!(
-                "  Sibling {} tables detected: {} ({} tables → 1)\n  Keys: \"{}{}\n  Jaccard min: {:.2} → strategy: KeyedPivot (col: {} {})",
-                kind_label, parent_name, child_indices.len(), key_examples, more,
-                min_jaccard, key_col_name, key_shape,
-            );
+                // Homogeneous key shape — existing single-group logic.
+                let actual_jaccard = pairwise_jaccard_min(schemas, child_indices);
+                if actual_jaccard < min_jaccard {
+                    continue;
+                }
 
-            collapses.push(Collapse {
-                parent_idx,
-                key_col_name,
-                key_shape,
-                union_cols,
-                array_children,
-                data_col_name,
-                log_msg,
-            });
+                let keys: Vec<String> = child_indices
+                    .iter()
+                    .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
+                    .collect();
+
+                let key_shape =
+                    classify_key_shape(&keys.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+                let key_col_name = match &key_shape {
+                    KeyShape::Numeric => "key_id".to_string(),
+                    KeyShape::IsoLang => "lang_code".to_string(),
+                    _ => "key".to_string(),
+                };
+                let children: Vec<&TableSchema> =
+                    child_indices.iter().map(|&i| &schemas[i]).collect();
+                let union_cols = build_union_columns(&children);
+
+                let key_examples = keys
+                    .iter()
+                    .take(5)
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\", \"");
+                let more = if keys.len() > 5 {
+                    format!("\" (+{} more)", keys.len() - 5)
+                } else {
+                    "\"".to_string()
+                };
+                let kind_label = if array_children { "ObjectArray" } else { "Object" };
+                let log_msg = format!(
+                    "  Sibling {} tables detected: {} ({} tables → 1)\n  Keys: \"{}{}\n  Jaccard min: {:.2} → strategy: KeyedPivot (col: {} {})",
+                    kind_label,
+                    parent_name,
+                    child_indices.len(),
+                    key_examples,
+                    more,
+                    min_jaccard,
+                    key_col_name,
+                    key_shape,
+                );
+                collapses.push(Collapse {
+                    parent_idx,
+                    array_children,
+                    log_msg,
+                    kind: CollapseKind::Single {
+                        key_col_name,
+                        key_shape,
+                        union_cols,
+                        data_col_name: "j2s_data".to_string(),
+                    },
+                });
+            }
         }
     }
 
-    // Apply collapses
+    // Apply collapses — single pass over collapses, then push synthetic tables.
+    let mut new_schemas: Vec<TableSchema> = Vec::new();
+
     for collapse in collapses {
         eprintln!("{}", collapse.log_msg);
 
-        let sibling_schema = SiblingSchema {
-            key_col_name: collapse.key_col_name.clone(),
-            key_shape: collapse.key_shape,
-            array_children: collapse.array_children,
-            data_col_name: collapse.data_col_name.clone(),
-        };
-        let parent = &mut schemas[collapse.parent_idx];
-        parent.columns.retain(|c| c.is_generated);
-        // ObjectArray siblings need j2s_order to track position within each array.
-        if collapse.array_children {
-            parent.columns.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
+        match collapse.kind {
+            CollapseKind::Single { key_col_name, key_shape, union_cols, data_col_name } => {
+                let sibling_schema = SiblingSchema {
+                    key_col_name: key_col_name.clone(),
+                    key_shape,
+                    array_children: collapse.array_children,
+                    data_col_name: data_col_name.clone(),
+                };
+                let parent = &mut schemas[collapse.parent_idx];
+                parent.columns.retain(|c| c.is_generated);
+                if collapse.array_children {
+                    parent.columns.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
+                }
+                parent.columns.push(ColumnSchema {
+                    name: key_col_name.clone(),
+                    original_name: key_col_name,
+                    pg_type: PgType::Text,
+                    not_null: true,
+                    is_generated: false,
+                    is_parent_fk: false,
+                });
+                for col in union_cols {
+                    parent.columns.push(col);
+                }
+                parent.columns.push(ColumnSchema {
+                    name: data_col_name.clone(),
+                    original_name: data_col_name,
+                    pg_type: PgType::Jsonb,
+                    not_null: false,
+                    is_generated: true,
+                    is_parent_fk: false,
+                });
+                parent.wide_strategy = WideStrategy::KeyedPivot(sibling_schema);
+            }
+
+            CollapseKind::Multi { groups } => {
+                // Build the SiblingGroup vec for the MultiKeyedPivot strategy.
+                let sibling_groups: Vec<crate::schema::table_schema::SiblingGroup> = groups
+                    .iter()
+                    .map(|g| crate::schema::table_schema::SiblingGroup {
+                        pivot_table: g.pivot_table_name.clone(),
+                        key_is_numeric: g.key_is_numeric,
+                        sibling_schema: SiblingSchema {
+                            key_col_name: g.key_col_name.clone(),
+                            key_shape: g.key_shape.clone(),
+                            array_children: collapse.array_children,
+                            data_col_name: "j2s_data".to_string(),
+                        },
+                        absorbed_names: g.absorbed_names.clone(),
+                    })
+                    .collect();
+
+                // Parent keeps its generated columns; no data columns added.
+                schemas[collapse.parent_idx].wide_strategy =
+                    WideStrategy::MultiKeyedPivot(sibling_groups);
+
+                // Create one synthetic KeyedPivot table per subgroup.
+                let parent_name = schemas[collapse.parent_idx].name.clone();
+                let parent_path = schemas[collapse.parent_idx].path.clone();
+                let parent_depth = schemas[collapse.parent_idx].depth;
+
+                for g in groups {
+                    let fk_col = format!("j2s_{}_id", parent_name);
+                    let mut cols: Vec<ColumnSchema> = vec![
+                        ColumnSchema::generated("j2s_id", PgType::Uuid),
+                        ColumnSchema {
+                            name: fk_col.clone(),
+                            original_name: fk_col,
+                            pg_type: PgType::Uuid,
+                            not_null: true,
+                            is_generated: true,
+                            is_parent_fk: true,
+                        },
+                    ];
+                    if collapse.array_children {
+                        cols.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
+                    }
+                    cols.push(ColumnSchema {
+                        name: g.key_col_name.clone(),
+                        original_name: g.key_col_name.clone(),
+                        pg_type: PgType::Text,
+                        not_null: true,
+                        is_generated: false,
+                        is_parent_fk: false,
+                    });
+                    for col in g.union_cols {
+                        cols.push(col);
+                    }
+                    cols.push(ColumnSchema {
+                        name: "j2s_data".to_string(),
+                        original_name: "j2s_data".to_string(),
+                        pg_type: PgType::Jsonb,
+                        not_null: false,
+                        is_generated: true,
+                        is_parent_fk: false,
+                    });
+
+                    let mut path = parent_path.clone();
+                    path.push(if g.key_is_numeric { "num" } else { "key" }.to_string());
+
+                    let sibling_schema = SiblingSchema {
+                        key_col_name: g.key_col_name,
+                        key_shape: g.key_shape,
+                        array_children: collapse.array_children,
+                        data_col_name: "j2s_data".to_string(),
+                    };
+                    new_schemas.push(TableSchema {
+                        name: g.pivot_table_name,
+                        path,
+                        parent_table: Some(parent_name.clone()),
+                        depth: parent_depth + 1,
+                        columns: cols,
+                        child_kind: Some(ChildKind::Object),
+                        wide_strategy: WideStrategy::KeyedPivot(sibling_schema),
+                        flatten_sources: std::collections::HashMap::new(),
+                    });
+                }
+            }
         }
-        parent.columns.push(ColumnSchema {
-            name: collapse.key_col_name.clone(),
-            original_name: collapse.key_col_name,
-            pg_type: PgType::Text,
-            not_null: true,
-            is_generated: false,
-            is_parent_fk: false,
-        });
-        for col in collapse.union_cols {
-            parent.columns.push(col);
-        }
-        // Always add a data JSONB column to capture the raw child object/array.
-        parent.columns.push(ColumnSchema {
-            name: collapse.data_col_name.clone(),
-            original_name: collapse.data_col_name,
-            pg_type: PgType::Jsonb,
-            not_null: false,
-            is_generated: true,
-            is_parent_fk: false,
-        });
-        parent.wide_strategy = WideStrategy::KeyedPivot(sibling_schema);
     }
+
+    schemas.append(&mut new_schemas);
 }
 
 /// Compute the minimum pairwise Jaccard similarity of data-column names across all pairs.
@@ -1051,6 +1262,8 @@ fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
     }
     min_j
 }
+
+
 
 /// Build the union of data columns from all sibling children.
 /// Types are widened across children; all columns are nullable (different siblings

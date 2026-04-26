@@ -49,7 +49,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         // Reset progress only after confirming no runner is active.
         state.write().pass2_progress = crate::state::Pass2Progress::default();
 
-        let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, pg_schema) = {
+        let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, pg_schema, pass2_parallel) = {
             let source_file_opt = state.read().source_file.clone();
             let Some(path) = source_file_opt else {
                 state.write().cancel();
@@ -61,7 +61,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 .and_then(|s| s.to_str())
                 .unwrap_or("root")
                 .to_string();
-            (path, root, s.pg.to_url(), s.build_effective_schemas(), s.drop_existing, s.anomaly_dir.clone(), s.pg_schema.clone())
+            (path, root, s.pg.to_url(), s.build_effective_schemas(), s.drop_existing, s.anomaly_dir.clone(), s.pg_schema.clone(), s.pass2_parallel)
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
@@ -84,17 +84,18 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             // 2. Create tables (behaviour driven by user's drop_existing choice)
             ddl::create_tables(&client, &schemas, &pg_schema, drop_existing).await?;
 
-            // 3. Run Pass 2
+            // 3. Run Pass 2 — parallel COPY sessions per topo level when pass2_parallel > 1.
+            let db_url_str = if pass2_parallel > 1 { Some(pg_url.as_str()) } else { None };
             json2sql::pass2::runner::run(
                 &source_file,
                 &root_table,
                 &schemas,
                 &client,
                 &pg_schema,
-                100_000,    // flush_threshold
-                false,      // use_transaction
-                None,       // db_url (parallel > 1 only)
-                1,          // parallel
+                100_000,        // flush_threshold
+                false,          // use_transaction
+                db_url_str,
+                pass2_parallel,
                 anomaly_dir,
                 Some(tx),
             )
