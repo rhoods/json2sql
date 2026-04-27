@@ -173,6 +173,55 @@ fn test_keyed_pivot_mixed_key_shapes() {
 }
 
 // ---------------------------------------------------------------------------
+// T1: significant container in non-numeric group must not dilute Jaccard.
+// T2: parent with data columns gets a synthetic pivot child.
+//
+// Fixture: images has 3 numeric-keyed tables (front_*, ingredients_*, nutrition_*)
+// AND an "uploaded" sub-object that is itself a pure container with 3 numeric children.
+// Expected:
+//   - images → MultiKeyedPivot (text group = front/ingredients/nutrition, NOT uploaded)
+//   - images_key → KeyedPivot for text children
+//   - images_uploaded → remains as independent table (significant container)
+//   - images_uploaded_num → KeyedPivot for the numeric uploaded children
+// ---------------------------------------------------------------------------
+#[test]
+fn test_sibling_significant_container_not_diluting_jaccard() {
+    use json2sql::schema::table_schema::WideStrategy;
+
+    let path = common::fixture("sibling_significant_container.jsonl");
+    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
+
+    // T1: images_uploaded must NOT have been absorbed into the text pivot.
+    // It is a significant container (pure container with many children) — left independent.
+    assert!(names.contains(&"root_images_uploaded"),
+        "images_uploaded doit rester indépendant (significant container); schemas: {:?}", names);
+
+    // T1: text pivot must exist (front/ingredients/nutrition collapsed, uploaded excluded).
+    assert!(names.contains(&"root_images_key"),
+        "root_images_key (pivot textuel) doit exister; schemas: {:?}", names);
+
+    // T1: images parent — all text children → synthetic pivot → MultiKeyedPivot with one group.
+    let images = p1.schemas.iter().find(|s| s.name == "root_images").unwrap();
+    assert!(matches!(images.wide_strategy, WideStrategy::MultiKeyedPivot(_)),
+        "root_images doit avoir MultiKeyedPivot; actual: {:?}", images.wide_strategy);
+
+    // Pure container detection: images_uploaded is itself a pure container → classic KeyedPivot.
+    // Its numeric children (100..108) are collapsed into it directly.
+    let uploaded = p1.schemas.iter().find(|s| s.name == "root_images_uploaded").unwrap();
+    assert!(matches!(uploaded.wide_strategy, WideStrategy::KeyedPivot(_)),
+        "root_images_uploaded doit avoir KeyedPivot (pure container); actual: {:?}", uploaded.wide_strategy);
+    let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
+    assert!(cols.contains(&"uploaded_t"), "KeyedPivot uploaded : uploaded_t manquant; cols: {:?}", cols);
+    assert!(cols.contains(&"uploader"),   "KeyedPivot uploaded : uploader manquant; cols: {:?}", cols);
+
+    // The individual numeric children must have been absorbed (excluded from schema).
+    assert!(!names.iter().any(|n| n.starts_with("root_images_uploaded_1")),
+        "root_images_uploaded_1xx doivent être absorbés; schemas: {:?}", names);
+}
+
+// ---------------------------------------------------------------------------
 // Pass 1 parallèle doit produire le même schéma que séquentiel — NDJSON.
 // ---------------------------------------------------------------------------
 #[test]

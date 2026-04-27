@@ -925,10 +925,16 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
                 None => continue,
             };
 
-            // Only pure containers (parent has 0 data columns — all fields are child objects)
-            if schemas[parent_idx].data_columns().count() > 0 {
+            // Skip parents that already have a non-default wide strategy.
+            // (Pivot, Jsonb, AutoSplit, etc. handle their children themselves.)
+            if !matches!(schemas[parent_idx].wide_strategy, WideStrategy::Columns) {
                 continue;
             }
+
+            // True when the parent has scalar data columns alongside its object children.
+            // (T2) In this case we create a synthetic pivot child instead of converting
+            // the parent itself, to avoid destroying the parent's existing data columns.
+            let parent_has_data = schemas[parent_idx].data_columns().next().is_some();
 
             // Partition children by numeric vs non-numeric key shape.
             let (numeric_idx, non_numeric_idx): (Vec<usize>, Vec<usize>) =
@@ -942,54 +948,77 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
 
             let is_mixed = !numeric_idx.is_empty() && !non_numeric_idx.is_empty();
 
+            // Shared helper: build a SubgroupData from a slice of child indices.
+            let make_subgroup = |indices: &[usize], key_is_numeric: bool, suffix: &str| {
+                let pivot_name = format!("{}_{}", parent_name, suffix);
+                let sub_keys: Vec<String> = indices
+                    .iter()
+                    .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
+                    .collect();
+                let shape = classify_key_shape(
+                    &sub_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                );
+                let key_col = if key_is_numeric {
+                    "key_id".to_string()
+                } else {
+                    match shape {
+                        KeyShape::IsoLang => "lang_code".to_string(),
+                        _ => "key".to_string(),
+                    }
+                };
+                let children: Vec<&TableSchema> =
+                    indices.iter().map(|&i| &schemas[i]).collect();
+                let union_cols = build_union_columns(&children);
+                let absorbed = indices.iter().map(|&i| schemas[i].name.clone()).collect();
+                SubgroupData {
+                    pivot_table_name: pivot_name,
+                    key_is_numeric,
+                    key_col_name: key_col,
+                    key_shape: shape,
+                    union_cols,
+                    absorbed_names: absorbed,
+                }
+            };
+
             if is_mixed {
-                // Evaluate each subgroup independently.
+                // T1: Filter "significant containers" from the non-numeric group before
+                // computing Jaccard. A significant container is a pure-container table
+                // (0 data cols) that is itself a parent of >= threshold children.
+                // Including them in the Jaccard calculation would drag the score to 0
+                // (intersection with any non-empty col-set is empty), preventing the
+                // text group from qualifying even when its actual members are similar.
+                // Significant containers are left as independent tables so their own
+                // children can be detected in a subsequent sibling pass.
+                let non_num_regular: Vec<usize> = non_numeric_idx
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        let name = &schemas[i].name;
+                        let is_pure = schemas[i].data_columns().next().is_none();
+                        let child_count =
+                            parent_to_object_children.get(name).map_or(0, |v| v.len())
+                                + parent_to_array_children.get(name).map_or(0, |v| v.len());
+                        !(is_pure && child_count >= threshold)
+                    })
+                    .collect();
+
                 let num_ok = numeric_idx.len() >= threshold
                     && pairwise_jaccard_min(schemas, &numeric_idx) >= min_jaccard;
-                let non_ok = non_numeric_idx.len() >= threshold
-                    && pairwise_jaccard_min(schemas, &non_numeric_idx) >= min_jaccard;
+                // T1: evaluate text group without significant containers.
+                let non_ok = non_num_regular.len() >= threshold
+                    && pairwise_jaccard_min(schemas, &non_num_regular) >= min_jaccard;
 
                 if !num_ok && !non_ok {
                     continue;
                 }
-
-                let make_subgroup = |indices: &[usize], key_is_numeric: bool, suffix: &str| {
-                    let pivot_name = format!("{}_{}", parent_name, suffix);
-                    let sub_keys: Vec<String> = indices
-                        .iter()
-                        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
-                        .collect();
-                    let shape = classify_key_shape(
-                        &sub_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    );
-                    let key_col = if key_is_numeric {
-                        "key_id".to_string()
-                    } else {
-                        match shape {
-                            KeyShape::IsoLang => "lang_code".to_string(),
-                            _ => "key".to_string(),
-                        }
-                    };
-                    let children: Vec<&TableSchema> =
-                        indices.iter().map(|&i| &schemas[i]).collect();
-                    let union_cols = build_union_columns(&children);
-                    let absorbed = indices.iter().map(|&i| schemas[i].name.clone()).collect();
-                    SubgroupData {
-                        pivot_table_name: pivot_name,
-                        key_is_numeric,
-                        key_col_name: key_col,
-                        key_shape: shape,
-                        union_cols,
-                        absorbed_names: absorbed,
-                    }
-                };
 
                 let mut groups = Vec::new();
                 if num_ok {
                     groups.push(make_subgroup(&numeric_idx, true, "num"));
                 }
                 if non_ok {
-                    groups.push(make_subgroup(&non_numeric_idx, false, "key"));
+                    // T1: absorb only the filtered subset (significant containers stay separate).
+                    groups.push(make_subgroup(&non_num_regular, false, "key"));
                 }
 
                 let kind_label = if array_children { "ObjectArray" } else { "Object" };
@@ -1007,62 +1036,108 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
                     kind: CollapseKind::Multi { groups },
                 });
             } else {
-                // Homogeneous key shape — existing single-group logic.
-                let actual_jaccard = pairwise_jaccard_min(schemas, child_indices);
+                // Homogeneous key shape (all numeric or all non-numeric).
+                // T1 (single-group extension): filter significant containers before Jaccard.
+                let regular: Vec<usize> = child_indices
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        let name = &schemas[i].name;
+                        let is_pure = schemas[i].data_columns().next().is_none();
+                        let child_count =
+                            parent_to_object_children.get(name).map_or(0, |v| v.len())
+                                + parent_to_array_children.get(name).map_or(0, |v| v.len());
+                        !(is_pure && child_count >= threshold)
+                    })
+                    .collect();
+
+                if regular.len() < threshold {
+                    continue;
+                }
+
+                let actual_jaccard = pairwise_jaccard_min(schemas, &regular);
                 if actual_jaccard < min_jaccard {
                     continue;
                 }
 
-                let keys: Vec<String> = child_indices
-                    .iter()
-                    .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
-                    .collect();
+                let has_sig_containers = regular.len() < child_indices.len();
 
-                let key_shape =
-                    classify_key_shape(&keys.iter().map(|s| s.as_str()).collect::<Vec<_>>());
-                let key_col_name = match &key_shape {
-                    KeyShape::Numeric => "key_id".to_string(),
-                    KeyShape::IsoLang => "lang_code".to_string(),
-                    _ => "key".to_string(),
-                };
-                let children: Vec<&TableSchema> =
-                    child_indices.iter().map(|&i| &schemas[i]).collect();
-                let union_cols = build_union_columns(&children);
-
-                let key_examples = keys
-                    .iter()
-                    .take(5)
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\", \"");
-                let more = if keys.len() > 5 {
-                    format!("\" (+{} more)", keys.len() - 5)
+                if parent_has_data || has_sig_containers {
+                    // T2 (parent has data cols) or T1-single (sig containers excluded):
+                    // create a synthetic pivot child so children collapse without
+                    // converting the parent itself.
+                    // For T2: numeric only (non-numeric + data-col parent is unusual, skip).
+                    let key_is_numeric = !numeric_idx.is_empty();
+                    if parent_has_data && !key_is_numeric {
+                        continue;
+                    }
+                    let suffix = if key_is_numeric { "num" } else { "key" };
+                    let groups = vec![make_subgroup(&regular, key_is_numeric, suffix)];
+                    let kind_label = if array_children { "ObjectArray" } else { "Object" };
+                    let log_msg = format!(
+                        "  Synthetic pivot for parent with data/sig-containers: {} ({} tables → 1)",
+                        parent_name,
+                        regular.len(),
+                    );
+                    collapses.push(Collapse {
+                        parent_idx,
+                        array_children,
+                        log_msg,
+                        kind: CollapseKind::Multi { groups },
+                    });
                 } else {
-                    "\"".to_string()
-                };
-                let kind_label = if array_children { "ObjectArray" } else { "Object" };
-                let log_msg = format!(
-                    "  Sibling {} tables detected: {} ({} tables → 1)\n  Keys: \"{}{}\n  Jaccard min: {:.2} → strategy: KeyedPivot (col: {} {})",
-                    kind_label,
-                    parent_name,
-                    child_indices.len(),
-                    key_examples,
-                    more,
-                    min_jaccard,
-                    key_col_name,
-                    key_shape,
-                );
-                collapses.push(Collapse {
-                    parent_idx,
-                    array_children,
-                    log_msg,
-                    kind: CollapseKind::Single {
+                    // Classic: pure container parent becomes the pivot table (KeyedPivot).
+                    let keys: Vec<String> = regular
+                        .iter()
+                        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
+                        .collect();
+
+                    let key_shape =
+                        classify_key_shape(&keys.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+                    let key_col_name = match &key_shape {
+                        KeyShape::Numeric => "key_id".to_string(),
+                        KeyShape::IsoLang => "lang_code".to_string(),
+                        _ => "key".to_string(),
+                    };
+                    let children: Vec<&TableSchema> =
+                        regular.iter().map(|&i| &schemas[i]).collect();
+                    let union_cols = build_union_columns(&children);
+
+                    let key_examples = keys
+                        .iter()
+                        .take(5)
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\", \"");
+                    let more = if keys.len() > 5 {
+                        format!("\" (+{} more)", keys.len() - 5)
+                    } else {
+                        "\"".to_string()
+                    };
+                    let kind_label = if array_children { "ObjectArray" } else { "Object" };
+                    let log_msg = format!(
+                        "  Sibling {} tables detected: {} ({} tables → 1)\n  Keys: \"{}{}\n  Jaccard min: {:.2} → strategy: KeyedPivot (col: {} {})",
+                        kind_label,
+                        parent_name,
+                        regular.len(),
+                        key_examples,
+                        more,
+                        min_jaccard,
                         key_col_name,
                         key_shape,
-                        union_cols,
-                        data_col_name: "j2s_data".to_string(),
-                    },
-                });
+                    );
+                    collapses.push(Collapse {
+                        parent_idx,
+                        array_children,
+                        log_msg,
+                        kind: CollapseKind::Single {
+                            key_col_name,
+                            key_shape,
+                            union_cols,
+                            data_col_name: "j2s_data".to_string(),
+                        },
+                    });
+                }
             }
         }
     }

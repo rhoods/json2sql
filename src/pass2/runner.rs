@@ -1158,23 +1158,61 @@ fn insert_multi_keyed_pivot(
 
     let routing_path = schema.path.join(".");
 
-    // Route each child key to the correct group's pivot table.
-    for group in groups {
-        let submap: serde_json::Map<String, Value> = obj
-            .iter()
-            .filter(|(k, _)| k.chars().all(|c| c.is_ascii_digit()) == group.key_is_numeric)
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+    // Build per-group submaps. Keys that have a dedicated child schema (significant
+    // container left independent by finalize_siblings) are delegated directly rather
+    // than being absorbed as JSONB into the group's synthetic table.
+    let mut group_submaps: Vec<serde_json::Map<String, Value>> =
+        vec![serde_json::Map::new(); groups.len()];
 
+    for (key, value) in obj {
+        // Check for a dedicated child schema surviving independently in path_map.
+        let child_path_key = format!("{}.{}", routing_path, key);
+        if let Some(child_schema) = path_map.get(&child_path_key) {
+            if child_schema.parent_table.as_deref() == Some(schema.name.as_str()) {
+                if let Value::Object(nested) = value {
+                    match &child_schema.wide_strategy {
+                        WideStrategy::KeyedPivot(ss) => {
+                            insert_keyed_pivot_object(
+                                sinks, anomalies, child_schema, nested, routing_id, ss,
+                            )?;
+                        }
+                        WideStrategy::MultiKeyedPivot(child_groups) => {
+                            insert_multi_keyed_pivot(
+                                path_map, sinks, anomalies, child_schema,
+                                nested, routing_id, child_groups,
+                            )?;
+                        }
+                        _ => {
+                            let child_id = Uuid::now_v7();
+                            insert_object(
+                                path_map, sinks, anomalies, child_schema,
+                                nested, child_id, Some(routing_id), None,
+                            )?;
+                        }
+                    }
+                }
+                continue; // handled — do not route to group's synthetic table
+            }
+        }
+
+        // Route to the matching group's submap.
+        let key_is_numeric = key.chars().all(|c| c.is_ascii_digit());
+        if let Some(idx) = groups.iter().position(|g| g.key_is_numeric == key_is_numeric) {
+            group_submaps[idx].insert(key.clone(), value.clone());
+        }
+    }
+
+    // Flush each group's submap into its synthetic pivot table.
+    for (group, submap) in groups.iter().zip(group_submaps.iter()) {
         if submap.is_empty() {
             continue;
         }
-
         let suffix = if group.key_is_numeric { "num" } else { "key" };
         let pivot_path_key = format!("{}.{}", routing_path, suffix);
-
         if let Some(pivot_schema) = path_map.get(&pivot_path_key) {
-            insert_keyed_pivot_object(sinks, anomalies, pivot_schema, &submap, routing_id, &group.sibling_schema)?;
+            insert_keyed_pivot_object(
+                sinks, anomalies, pivot_schema, submap, routing_id, &group.sibling_schema,
+            )?;
         }
     }
 
