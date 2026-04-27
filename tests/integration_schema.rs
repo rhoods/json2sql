@@ -222,6 +222,157 @@ fn test_sibling_significant_container_not_diluting_jaccard() {
 }
 
 // ---------------------------------------------------------------------------
+// Noise-filtered Jaccard : des colonnes rares dans quelques schemas siblings
+// ne doivent pas empêcher le collapse du groupe.
+//
+// Fixture : 5 produits avec images.uploaded.{1,2,3} → {uploaded_t, uploader}
+//           + 1 produit où uploaded.4 a en plus 10 colonnes parasites rares
+//             (imgid, rev, angle, geometry, x1, x2, y1, y2, white_magic, normalize).
+//
+// Sans filtre : Jaccard(uploaded.1, uploaded.4) = 2/12 ≈ 0.17 < 0.5 → pas de collapse.
+// Avec filtre : colonnes rares exclues → Jaccard = 1.0 → images_uploaded = KeyedPivot.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_sibling_noisy_schema_jaccard_filter() {
+    use json2sql::schema::table_schema::WideStrategy;
+
+    let path = common::fixture("sibling_noisy_schema.jsonl");
+    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
+
+    // Le groupe {uploaded.1, uploaded.2, uploaded.3, uploaded.4} doit avoir collapser
+    // malgré les colonnes parasites dans uploaded.4.
+    let uploaded = p1.schemas.iter().find(|s| s.name == "root_images_uploaded");
+    assert!(uploaded.is_some(),
+        "root_images_uploaded doit exister; schemas: {:?}", names);
+    let uploaded = uploaded.unwrap();
+    assert!(matches!(uploaded.wide_strategy, WideStrategy::KeyedPivot(_)),
+        "root_images_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.wide_strategy);
+
+    // Les colonnes stables (uploaded_t, uploader) doivent être présentes.
+    let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
+    assert!(cols.contains(&"uploaded_t"), "uploaded_t manquant; cols: {:?}", cols);
+    assert!(cols.contains(&"uploader"),   "uploader manquant; cols: {:?}", cols);
+
+    // Les tables individuelles uploaded.N doivent être absorbées.
+    assert!(!names.iter().any(|n| n.starts_with("root_images_uploaded_")),
+        "root_images_uploaded_N doivent être absorbés; schemas: {:?}", names);
+}
+
+// ---------------------------------------------------------------------------
+// T2a: Siblings qui sont TOUS des pure containers avec >= threshold enfants
+// (significant containers) doivent quand même collapser.
+//
+// Fixture : uploaded.{1,2,3} sont des pure containers, chacun avec 3 enfants
+// (sizes, imgid, selected) → child_count = 3 >= threshold = 3 → sans fix :
+// le filtre significant-container les élimine tous → regular vide → pas de collapse.
+//
+// Avec fix : all_pure → bypass du filtre → Jaccard = 1.0 → KeyedPivot.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_sibling_all_pure_container_collapse() {
+    use json2sql::schema::table_schema::WideStrategy;
+
+    let path = common::fixture("sibling_all_pure_containers.jsonl");
+    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
+
+    // root_uploaded doit exister et avoir KeyedPivot.
+    let uploaded = p1.schemas.iter().find(|s| s.name == "root_uploaded");
+    assert!(uploaded.is_some(),
+        "root_uploaded doit exister; schemas: {:?}", names);
+    assert!(matches!(uploaded.unwrap().wide_strategy, WideStrategy::KeyedPivot(_)),
+        "root_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.unwrap().wide_strategy);
+
+    // Les tables individuelles uploaded.N doivent être absorbées.
+    assert!(!names.iter().any(|n| n.starts_with("root_uploaded_")),
+        "root_uploaded_N doivent être absorbés; schemas: {:?}", names);
+
+    // Seuls root et root_uploaded doivent rester (petits-enfants exclus).
+    assert_eq!(p1.schemas.len(), 2,
+        "attendu 2 schemas (root + root_uploaded), obtenu: {:?}", names);
+}
+
+// ---------------------------------------------------------------------------
+// T2a: Un pure container non-significatif dans un groupe data-bearing ne doit
+// pas faire tomber le Jaccard à 0 et bloquer le collapse.
+//
+// Fixture : uploaded.{1,2,3} data-bearing (x, y) + uploaded.4 pure container
+// avec 1 seul enfant (inner → non-significant). Sans fix : Jaccard = 0 car 4
+// est pur → pas de collapse. Avec fix : Jaccard calculé sur data_bearing
+// uniquement → 1.0 → collapse de tous (1, 2, 3, 4).
+// ---------------------------------------------------------------------------
+#[test]
+fn test_sibling_pure_diluter_absorbed() {
+    use json2sql::schema::table_schema::WideStrategy;
+
+    let path = common::fixture("sibling_pure_diluter.jsonl");
+    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
+
+    // root_uploaded doit avoir KeyedPivot.
+    let uploaded = p1.schemas.iter().find(|s| s.name == "root_uploaded");
+    assert!(uploaded.is_some(),
+        "root_uploaded doit exister; schemas: {:?}", names);
+    let uploaded = uploaded.unwrap();
+    assert!(matches!(uploaded.wide_strategy, WideStrategy::KeyedPivot(_)),
+        "root_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.wide_strategy);
+
+    // Les colonnes data-bearing (x, y) doivent être présentes.
+    let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
+    assert!(cols.contains(&"x"), "x manquant dans root_uploaded; cols: {:?}", cols);
+    assert!(cols.contains(&"y"), "y manquant dans root_uploaded; cols: {:?}", cols);
+
+    // Tous les enfants (1, 2, 3, 4) doivent être absorbés.
+    assert!(!names.iter().any(|n| n.starts_with("root_uploaded_")),
+        "root_uploaded_N doivent être absorbés; schemas: {:?}", names);
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// T3: is_mixed fallback unifié — quand ni le sous-groupe numérique (< threshold)
+// ni le sous-groupe texte (< threshold) n'est suffisant, mais que le groupe
+// combiné l'est, collapser en un seul KeyedPivot avec key TEXT.
+//
+// Fixture : sizes.{100, 400} (numériques, 2 < threshold=3) + sizes.{full}
+// (texte, 1 < threshold). Séparément : ni num_ok ni non_ok. Combiné : 3
+// tables, toutes avec {w, h} → Jaccard = 1.0 → KeyedPivot unifié.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_sibling_mixed_unified_fallback() {
+    use json2sql::schema::table_schema::WideStrategy;
+
+    let path = common::fixture("sibling_mixed_unified_fallback.jsonl");
+    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
+
+    // root_sizes doit exister et avoir KeyedPivot (pas MultiKeyedPivot).
+    let sizes = p1.schemas.iter().find(|s| s.name == "root_sizes");
+    assert!(sizes.is_some(),
+        "root_sizes doit exister; schemas: {:?}", names);
+    let sizes = sizes.unwrap();
+    assert!(matches!(sizes.wide_strategy, WideStrategy::KeyedPivot(_)),
+        "root_sizes doit avoir KeyedPivot (fallback unifié); actual: {:?}", sizes.wide_strategy);
+
+    // Les colonnes w et h doivent être présentes.
+    let cols: Vec<&str> = sizes.data_columns().map(|c| c.name.as_str()).collect();
+    assert!(cols.contains(&"w"), "w manquant dans root_sizes; cols: {:?}", cols);
+    assert!(cols.contains(&"h"), "h manquant dans root_sizes; cols: {:?}", cols);
+
+    // Toutes les tables enfants (100, 400, full) doivent être absorbées.
+    assert!(!names.iter().any(|n| n.starts_with("root_sizes_")),
+        "root_sizes_N doivent être absorbés; schemas: {:?}", names);
+
+    // Seuls root et root_sizes doivent rester.
+    assert_eq!(p1.schemas.len(), 2,
+        "attendu 2 schemas (root + root_sizes), obtenu: {:?}", names);
+}
+
+// ---------------------------------------------------------------------------
 // Pass 1 parallèle doit produire le même schéma que séquentiel — NDJSON.
 // ---------------------------------------------------------------------------
 #[test]

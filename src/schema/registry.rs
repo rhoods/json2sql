@@ -1009,6 +1009,60 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
                     && pairwise_jaccard_min(schemas, &non_num_regular) >= min_jaccard;
 
                 if !num_ok && !non_ok {
+                    // T3: Unified fallback — when neither subgroup reaches threshold on its own
+                    // but the combined group does (e.g. sizes = {100, 400, full}: 2 numeric +
+                    // 1 text, each subgroup below threshold=3 but total = 3 qualifies).
+                    // All children are collapsed into one KeyedPivot with a TEXT key column.
+                    // Only applies to pure-container parents; skip if parent has data columns
+                    // (the Mixed+data case is uncommon and creates ambiguous schema semantics).
+                    if parent_has_data {
+                        continue;
+                    }
+                    let all_mixed_len = child_indices.len();
+                    if all_mixed_len < threshold {
+                        continue;
+                    }
+                    let unified_jaccard = {
+                        let data_bearing: Vec<usize> = child_indices
+                            .iter()
+                            .copied()
+                            .filter(|&i| schemas[i].data_columns().next().is_some())
+                            .collect();
+                        if data_bearing.len() >= threshold {
+                            pairwise_jaccard_min(schemas, &data_bearing)
+                        } else {
+                            pairwise_jaccard_min(schemas, child_indices)
+                        }
+                    };
+                    if unified_jaccard < min_jaccard {
+                        continue;
+                    }
+                    let keys: Vec<String> = child_indices
+                        .iter()
+                        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
+                        .collect();
+                    let key_shape = classify_key_shape(
+                        &keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    );
+                    let children: Vec<&TableSchema> =
+                        child_indices.iter().map(|&i| &schemas[i]).collect();
+                    let union_cols = build_union_columns(&children);
+                    let kind_label = if array_children { "ObjectArray" } else { "Object" };
+                    let log_msg = format!(
+                        "  Unified-fallback KeyedPivot {}: {} ({} tables → 1, Jaccard {:.2})",
+                        kind_label, parent_name, all_mixed_len, unified_jaccard,
+                    );
+                    collapses.push(Collapse {
+                        parent_idx,
+                        array_children,
+                        log_msg,
+                        kind: CollapseKind::Single {
+                            key_col_name: "key".to_string(),
+                            key_shape,
+                            union_cols,
+                            data_col_name: "j2s_data".to_string(),
+                        },
+                    });
                     continue;
                 }
 
@@ -1037,25 +1091,57 @@ fn finalize_siblings(schemas: &mut Vec<TableSchema>, threshold: usize, min_jacca
                 });
             } else {
                 // Homogeneous key shape (all numeric or all non-numeric).
-                // T1 (single-group extension): filter significant containers before Jaccard.
-                let regular: Vec<usize> = child_indices
-                    .iter()
-                    .copied()
-                    .filter(|&i| {
-                        let name = &schemas[i].name;
-                        let is_pure = schemas[i].data_columns().next().is_none();
-                        let child_count =
-                            parent_to_object_children.get(name).map_or(0, |v| v.len())
-                                + parent_to_array_children.get(name).map_or(0, |v| v.len());
-                        !(is_pure && child_count >= threshold)
-                    })
-                    .collect();
+                //
+                // T2a: When ALL children are pure containers (no data columns), bypass the
+                // significant-container filter entirely. Pure-container fast path in
+                // pairwise_jaccard_min returns 1.0, so all-pure groups always qualify.
+                // This fixes the case where every sibling is a pure container with >= threshold
+                // children of its own — they were being filtered out as "significant containers"
+                // even though they are perfectly similar siblings.
+                //
+                // T1 (single-group extension): when data-bearing members exist, filter
+                // significant containers (pure containers with >= threshold children) before
+                // Jaccard to prevent them from diluting the score.
+                let all_pure =
+                    child_indices.iter().all(|&i| schemas[i].data_columns().next().is_none());
+                let regular: Vec<usize> = if all_pure {
+                    child_indices.to_vec()
+                } else {
+                    child_indices
+                        .iter()
+                        .copied()
+                        .filter(|&i| {
+                            let name = &schemas[i].name;
+                            let is_pure = schemas[i].data_columns().next().is_none();
+                            let child_count =
+                                parent_to_object_children.get(name).map_or(0, |v| v.len())
+                                    + parent_to_array_children.get(name).map_or(0, |v| v.len());
+                            !(is_pure && child_count >= threshold)
+                        })
+                        .collect()
+                };
 
                 if regular.len() < threshold {
                     continue;
                 }
 
-                let actual_jaccard = pairwise_jaccard_min(schemas, &regular);
+                // T2a: compute Jaccard on the data-bearing subset when it reaches threshold.
+                // A non-significant pure container in a data-bearing group has an empty column
+                // set, which drives the minimum Jaccard to 0 even when the data-bearing siblings
+                // are highly similar. Computing only on data-bearing members avoids this false
+                // negative while still absorbing the pure-container siblings in the collapse.
+                let actual_jaccard = {
+                    let data_bearing: Vec<usize> = regular
+                        .iter()
+                        .copied()
+                        .filter(|&i| schemas[i].data_columns().next().is_some())
+                        .collect();
+                    if data_bearing.len() >= threshold {
+                        pairwise_jaccard_min(schemas, &data_bearing)
+                    } else {
+                        pairwise_jaccard_min(schemas, &regular)
+                    }
+                };
                 if actual_jaccard < min_jaccard {
                     continue;
                 }
@@ -1295,11 +1381,50 @@ fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
         return 1.0;
     }
 
-    // Build one HashSet per sibling — O(n·m).
-    let col_sets: Vec<std::collections::HashSet<&str>> = indices
-        .iter()
-        .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
-        .collect();
+    // Noise filter: when ALL siblings have data columns, filter out columns present
+    // in fewer than max(2, len/20) schemas. These are data-quality artefacts (e.g.
+    // a handful of records with extra fields from a different data pattern) whose
+    // presence in a minority of schemas would drag pairwise Jaccard near zero and
+    // block an otherwise valid sibling group from being detected.
+    //
+    // The filter is intentionally disabled when ANY sibling is a pure container
+    // (0 data cols): in that case the Jaccard correctly returns 0, signalling that
+    // the group is heterogeneous. T1 in finalize_siblings then handles exclusion
+    // of significant containers; the Jaccard must not mask that signal.
+    let all_data_bearing = indices.iter().all(|&i| schemas[i].data_columns().next().is_some());
+
+    let col_sets: Vec<std::collections::HashSet<&str>> = if all_data_bearing {
+        let min_presence = (indices.len() / 20).max(2);
+        let mut col_freq: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for &i in indices {
+            for col in schemas[i].data_columns() {
+                *col_freq.entry(col.original_name.as_str()).or_default() += 1;
+            }
+        }
+        indices
+            .iter()
+            .map(|&i| {
+                schemas[i]
+                    .data_columns()
+                    .filter(|c| {
+                        col_freq
+                            .get(c.original_name.as_str())
+                            .copied()
+                            .unwrap_or(0)
+                            >= min_presence
+                    })
+                    .map(|c| c.original_name.as_str())
+                    .collect()
+            })
+            .collect()
+    } else {
+        // Build one HashSet per sibling — O(n·m).
+        indices
+            .iter()
+            .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
+            .collect()
+    };
 
     // Fast path 2: large groups — compare each sibling against sibling[0] in O(n·m).
     const PAIRWISE_LIMIT: usize = 200;
