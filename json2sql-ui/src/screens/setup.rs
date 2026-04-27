@@ -83,6 +83,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let pg_error = state.read().pg_error.clone();
     let drop_existing = state.read().drop_existing;
     let workers = state.read().workers;
+    let pass2_parallel = state.read().pass2_parallel;
     let available_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let pg_schema = state.read().pg_schema.clone();
     let anomaly_label = state
@@ -391,6 +392,31 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                         span {
                             style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;",
                             "({available_cores} cores — 1 = sequential)"
+                        }
+                    }
+
+                    div {
+                        style: "display:flex;align-items:center;gap:8px;",
+                        label {
+                            style: "color:{theme::ON_SURFACE_DIM};font-size:0.8125rem;white-space:nowrap;",
+                            "Pass 2 workers:"
+                        }
+                        input {
+                            class: "input-field",
+                            style: "width:64px;",
+                            r#type: "number",
+                            min: "1",
+                            max: "{available_cores}",
+                            value: "{pass2_parallel}",
+                            oninput: move |e| {
+                                if let Ok(n) = e.value().parse::<usize>() {
+                                    if n >= 1 { state.write().pass2_parallel = n; }
+                                }
+                            },
+                        }
+                        span {
+                            style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;",
+                            "(connexions PostgreSQL parallèles)"
                         }
                     }
 
