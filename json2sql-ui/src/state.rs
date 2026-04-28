@@ -261,7 +261,9 @@ impl AppState {
             .collect();
 
         for (table_name, id_column) in normalize_targets {
-            apply_normalize_dynamic_keys(&mut schemas, &table_name, id_column);
+            if let Err(e) = apply_normalize_dynamic_keys(&mut schemas, &table_name, id_column) {
+                eprintln!("WARNING: {e}");
+            }
         }
 
         // Pass 3: apply JsonbFlatten (needs full schemas vec + removes child table).
@@ -277,7 +279,9 @@ impl AppState {
             .collect();
 
         for table_name in jsonb_flatten_targets {
-            apply_jsonb_flatten(&mut schemas, &table_name);
+            if let Err(e) = apply_jsonb_flatten(&mut schemas, &table_name) {
+                eprintln!("WARNING: {e}");
+            }
         }
 
         // Remove tables explicitly skipped by the user.

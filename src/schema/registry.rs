@@ -2,6 +2,7 @@ use indexmap::IndexMap;
 use rayon::prelude::*;
 use serde_json::Value;
 
+use crate::error::{J2sError, Result};
 use super::naming::{ColumnCollision, ColumnNameRegistry, NamingRegistry, TruncatedName};
 use super::stats::ColumnStats;
 use super::suffix_detector::detect_suffix_schema;
@@ -175,7 +176,7 @@ impl SchemaRegistry {
                             }
                         } else if self.array_as_pg_array {
                             let threshold = self.text_threshold;
-                            let entry = self.tables.get_mut(&path_key).unwrap();
+                            let entry = self.tables.get_mut(&path_key).expect("invariant: path_key was popped from stack, must exist in tables");
                             if let Some(tracker) = entry.array_columns.get_mut(field.as_str()) {
                                 for item in arr {
                                     tracker.observe(item);
@@ -192,7 +193,7 @@ impl SchemaRegistry {
                         } else {
                             self.ensure_table_key(&child_key, &path_key, Some(ChildKind::ScalarArray));
                             let threshold = self.text_threshold;
-                            let entry = self.tables.get_mut(&child_key).unwrap();
+                            let entry = self.tables.get_mut(&child_key).expect("invariant: child_key just inserted by ensure_table_key");
                             let tracker = entry
                                 .scalar_tracker
                                 .get_or_insert_with(|| TypeTracker::new(threshold));
@@ -205,7 +206,7 @@ impl SchemaRegistry {
                         let threshold = self.text_threshold;
                         self.tables
                             .get_mut(&path_key)
-                            .unwrap()
+                            .expect("invariant: path_key was popped from stack, must exist in tables")
                             .observe_field(field, scalar, threshold);
                     }
                 }
@@ -500,7 +501,7 @@ fn build_entry_schema(
                 .count();
             let ratio_stable = stable_count as f64 / data_col_count as f64;
 
-            if ratio_stable > 0.5 && entry.row_count >= 10 {
+            if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && entry.row_count >= 10 {
                 eprintln!(
                     "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: Columns \
                     (high stable ratio — legitimate schema, not key explosion)",
@@ -602,7 +603,7 @@ fn build_entry_schema(
                 };
             } else {
                 if let Some(suffix_schema) =
-                    detect_suffix_schema(&entry.columns, 0.3, text_threshold)
+                    detect_suffix_schema(&entry.columns, SUFFIX_MIN_COVERAGE, text_threshold)
                 {
                     eprintln!(
                         "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: StructuredPivot ({} suffixes)",
@@ -624,9 +625,19 @@ fn build_entry_schema(
     (schema, extra_schema, local_collisions)
 }
 
-/// Remove tables whose parent (or any ancestor) absorbs children into a wide column
 /// PostgreSQL hard limit on columns per table.
 pub const PG_MAX_COLUMNS: usize = 1600;
+
+/// A wide table with this fraction or more of stable columns is kept as-is (Columns strategy).
+/// Below this, the table is split or pivoted.
+const WIDE_TABLE_HIGH_STABLE_RATIO: f64 = 0.5;
+
+/// Minimum fraction of columns that must share a common suffix pattern to trigger StructuredPivot.
+const SUFFIX_MIN_COVERAGE: f64 = 0.3;
+
+/// Fraction of keys that must be numeric (or ISO-language codes) to classify a key shape as
+/// KeyShape::Numeric / KeyShape::IsoLang rather than Slug or Mixed.
+const KEY_SHAPE_DOMINANT_RATIO: f64 = 0.8;
 
 /// Recorded when a table is auto-converted to JSONB by `apply_column_limit_guard`.
 #[derive(Debug, Clone)]
@@ -1511,9 +1522,9 @@ pub fn classify_key_shape(keys: &[&str]) -> KeyShape {
     let numeric_ratio = numeric as f64 / total as f64;
     let isolang_ratio = isolang as f64 / total as f64;
 
-    if numeric_ratio >= 0.8 {
+    if numeric_ratio >= KEY_SHAPE_DOMINANT_RATIO {
         KeyShape::Numeric
-    } else if isolang_ratio >= 0.8 {
+    } else if isolang_ratio >= KEY_SHAPE_DOMINANT_RATIO {
         KeyShape::IsoLang
     } else if numeric > 0 && isolang > 0 {
         KeyShape::Mixed
@@ -1531,14 +1542,9 @@ pub fn apply_normalize_dynamic_keys(
     schemas: &mut Vec<TableSchema>,
     table_name: &str,
     id_column: String,
-) {
-    let target_idx = match schemas.iter().position(|s| s.name == table_name) {
-        Some(i) => i,
-        None => {
-            eprintln!("WARNING: apply_normalize_dynamic_keys: table '{}' not found", table_name);
-            return;
-        }
-    };
+) -> Result<()> {
+    let target_idx = schemas.iter().position(|s| s.name == table_name)
+        .ok_or_else(|| J2sError::Schema(format!("apply_normalize_dynamic_keys: table '{}' not found", table_name)))?;
 
     let child_indices: Vec<usize> = schemas
         .iter()
@@ -1551,11 +1557,10 @@ pub fn apply_normalize_dynamic_keys(
         .collect();
 
     if child_indices.is_empty() {
-        eprintln!(
-            "WARNING: apply_normalize_dynamic_keys: no Object children found for '{}'; strategy not applied",
+        return Err(J2sError::Schema(format!(
+            "apply_normalize_dynamic_keys: no Object children found for '{}'; strategy not applied",
             table_name
-        );
-        return;
+        )));
     }
 
     let children: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
@@ -1590,6 +1595,7 @@ pub fn apply_normalize_dynamic_keys(
     target.wide_strategy = WideStrategy::NormalizeDynamicKeys { id_column };
 
     exclude_absorbed_children(schemas);
+    Ok(())
 }
 
 /// Apply Flatten strategy to a child table: inline its scalar columns into the parent table
@@ -1602,27 +1608,17 @@ pub fn apply_flatten(
     child_table_name: &str,
     prefix: &str,
     max_depth: u8,
-) {
+) -> Result<()> {
     // Collect info before any mutations (avoids borrow conflicts)
     let (parent_name, field_name, new_cols) = {
-        let child = match schemas.iter().find(|s| s.name == child_table_name) {
-            Some(c) => c,
-            None => {
-                eprintln!("WARNING: apply_flatten: table '{}' not found", child_table_name);
-                return;
-            }
-        };
+        let child = schemas.iter().find(|s| s.name == child_table_name)
+            .ok_or_else(|| J2sError::Schema(format!("apply_flatten: table '{}' not found", child_table_name)))?;
 
-        let parent_name = match child.parent_table.clone() {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "WARNING: apply_flatten: '{}' is a root table, cannot flatten into parent",
-                    child_table_name
-                );
-                return;
-            }
-        };
+        let parent_name = child.parent_table.clone()
+            .ok_or_else(|| J2sError::Schema(format!(
+                "apply_flatten: '{}' is a root table, cannot flatten into parent",
+                child_table_name
+            )))?;
 
         // The JSON field name is the last path segment of the child table
         let field_name = child.path.last()
@@ -1670,38 +1666,29 @@ pub fn apply_flatten(
             prefix,
         );
     } else {
-        eprintln!(
-            "WARNING: apply_flatten: parent table '{}' not found for '{}'",
+        return Err(J2sError::Schema(format!(
+            "apply_flatten: parent table '{}' not found for '{}'",
             parent_name, child_table_name
-        );
+        )));
     }
 
     // Remove the flattened child table from the schema
     schemas.retain(|s| !matches!(s.wide_strategy, WideStrategy::Flatten { .. }));
+    Ok(())
 }
 
 /// Inline a child table as a single JSONB column on the parent table.
 /// The child table is removed from the schema; the parent gains `{child_table_name} JSONB`.
 /// Used for WideStrategy::JsonbFlatten (IHM override "JSONB inline").
-pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &str) {
+pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &str) -> Result<()> {
     let (parent_name, field_name) = {
-        let child = match schemas.iter().find(|s| s.name == child_table_name) {
-            Some(c) => c,
-            None => {
-                eprintln!("WARNING: apply_jsonb_flatten: table '{}' not found", child_table_name);
-                return;
-            }
-        };
-        let parent = match child.parent_table.clone() {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "WARNING: apply_jsonb_flatten: '{}' is a root table, cannot inline into parent",
-                    child_table_name
-                );
-                return;
-            }
-        };
+        let child = schemas.iter().find(|s| s.name == child_table_name)
+            .ok_or_else(|| J2sError::Schema(format!("apply_jsonb_flatten: table '{}' not found", child_table_name)))?;
+        let parent = child.parent_table.clone()
+            .ok_or_else(|| J2sError::Schema(format!(
+                "apply_jsonb_flatten: '{}' is a root table, cannot inline into parent",
+                child_table_name
+            )))?;
         // The JSON field name is the last path segment of the child table.
         let field = child.path.last()
             .cloned()
@@ -1730,15 +1717,15 @@ pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &st
             });
         }
     } else {
-        eprintln!(
-            "WARNING: apply_jsonb_flatten: parent table '{}' not found for '{}'",
+        return Err(J2sError::Schema(format!(
+            "apply_jsonb_flatten: parent table '{}' not found for '{}'",
             parent_name, child_table_name
-        );
-        return;
+        )));
     }
 
     // Remove the child table and its absorbed descendants
     schemas.retain(|s| !matches!(s.wide_strategy, WideStrategy::JsonbFlatten));
+    Ok(())
 }
 
 fn type_histogram(tracker: &TypeTracker) -> Vec<(String, u64)> {
@@ -2194,6 +2181,99 @@ mod tests {
             assert_eq!(s.columns.len(), m.columns.len(),
                 "column count mismatch for table {}", s.name);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // apply_normalize_dynamic_keys / apply_flatten / apply_jsonb_flatten
+    // -------------------------------------------------------------------------
+
+    fn make_parent_child(parent_name: &str, child_name: &str) -> Vec<TableSchema> {
+        let mut parent = TableSchema::new(parent_name.to_string(), vec![parent_name.to_string()], 0);
+        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        parent.columns.push(ColumnSchema {
+            name: "name".to_string(), original_name: "name".to_string(),
+            pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+        });
+
+        let mut child = TableSchema::new(child_name.to_string(), vec![parent_name.to_string(), child_name.to_string()], 1);
+        child.parent_table = Some(parent_name.to_string());
+        child.child_kind = Some(ChildKind::Object);
+        child.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        child.columns.push(ColumnSchema::parent_fk(parent_name));
+        child.columns.push(ColumnSchema {
+            name: "val".to_string(), original_name: "val".to_string(),
+            pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+        });
+
+        vec![parent, child]
+    }
+
+    #[test]
+    fn test_apply_normalize_table_not_found_returns_err() {
+        let mut schemas = make_parent_child("users", "en");
+        let result = apply_normalize_dynamic_keys(&mut schemas, "nonexistent", "lang".to_string());
+        assert!(result.is_err(), "should return Err when table not found");
+    }
+
+    #[test]
+    fn test_apply_normalize_no_children_returns_err() {
+        let mut schemas = make_parent_child("users", "en");
+        // Remove the child — users has no Object children
+        schemas.retain(|s| s.name != "en");
+        let result = apply_normalize_dynamic_keys(&mut schemas, "users", "lang".to_string());
+        assert!(result.is_err(), "should return Err when no Object children found");
+    }
+
+    #[test]
+    fn test_apply_normalize_success() {
+        let mut schemas = make_parent_child("users", "en");
+        let result = apply_normalize_dynamic_keys(&mut schemas, "users", "lang".to_string());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_apply_flatten_table_not_found_returns_err() {
+        let mut schemas = make_parent_child("users", "addr");
+        let result = apply_flatten(&mut schemas, "nonexistent", "", 1);
+        assert!(result.is_err(), "should return Err when child table not found");
+    }
+
+    #[test]
+    fn test_apply_flatten_root_table_returns_err() {
+        let mut schemas = make_parent_child("users", "addr");
+        // Try to flatten a root table (no parent)
+        let result = apply_flatten(&mut schemas, "users", "", 1);
+        assert!(result.is_err(), "should return Err when flattening a root table");
+    }
+
+    #[test]
+    fn test_apply_flatten_success() {
+        let mut schemas = make_parent_child("users", "addr");
+        let result = apply_flatten(&mut schemas, "addr", "", 1);
+        assert!(result.is_ok());
+        assert!(!schemas.iter().any(|s| s.name == "addr"), "child should be removed after flatten");
+    }
+
+    #[test]
+    fn test_apply_jsonb_flatten_table_not_found_returns_err() {
+        let mut schemas = make_parent_child("users", "meta");
+        let result = apply_jsonb_flatten(&mut schemas, "nonexistent");
+        assert!(result.is_err(), "should return Err when child table not found");
+    }
+
+    #[test]
+    fn test_apply_jsonb_flatten_root_table_returns_err() {
+        let mut schemas = make_parent_child("users", "meta");
+        let result = apply_jsonb_flatten(&mut schemas, "users");
+        assert!(result.is_err(), "should return Err when inlining a root table");
+    }
+
+    #[test]
+    fn test_apply_jsonb_flatten_success() {
+        let mut schemas = make_parent_child("users", "meta");
+        let result = apply_jsonb_flatten(&mut schemas, "meta");
+        assert!(result.is_ok());
+        assert!(!schemas.iter().any(|s| s.name == "meta"), "child should be removed after jsonb flatten");
     }
 
     // -------------------------------------------------------------------------

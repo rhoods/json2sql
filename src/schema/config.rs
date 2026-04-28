@@ -62,7 +62,7 @@ impl SchemaConfig {
 /// Apply type overrides from `config` to the finalized schemas.
 /// Matches by table name and column name (both sanitized PostgreSQL identifiers).
 /// Unknown tables or columns are silently ignored but reported via eprintln.
-pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) {
+pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) -> crate::error::Result<()> {
     // Collect deferred operations that require the full schemas slice.
     // These cannot be applied inside the single-schema iteration below.
     struct DeferredNormalize { table_name: String, id_column: String }
@@ -223,11 +223,12 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) {
 
     // Apply deferred operations that need the full schemas slice.
     for op in deferred_normalize {
-        apply_normalize_dynamic_keys(schemas, &op.table_name, op.id_column);
+        apply_normalize_dynamic_keys(schemas, &op.table_name, op.id_column)?;
     }
     for op in deferred_flatten {
-        apply_flatten(schemas, &op.table_name, &op.prefix, op.max_depth);
+        apply_flatten(schemas, &op.table_name, &op.prefix, op.max_depth)?;
     }
+    Ok(())
 }
 
 /// Appliquer les groupes de fusion définis dans la config.
