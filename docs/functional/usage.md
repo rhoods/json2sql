@@ -38,6 +38,9 @@ json2sql inspect mon_fichier.json --limit 100
 # Spécifier un nom de table racine
 json2sql inspect mon_fichier.json --limit 200 --table commandes
 
+# Extraire l'échantillon dans un fichier NDJSON
+json2sql inspect mon_fichier.json --limit 200 --sample-output extrait.ndjson
+
 # Ajuster le seuil TEXT/VARCHAR
 json2sql inspect mon_fichier.json --limit 500 --text-threshold 512
 ```
@@ -50,6 +53,7 @@ json2sql inspect mon_fichier.json --limit 500 --text-threshold 512
 | `--limit` | 500 | Nombre maximum d'objets racines à scanner |
 | `--table` | dérivé du nom de fichier | Nom de la table racine |
 | `--text-threshold` | 256 | Longueur max avant TEXT (sinon VARCHAR) |
+| `--sample-output` | aucun | Écrit les objets scannés en NDJSON dans ce fichier |
 
 ### Exemple de sortie
 
@@ -80,11 +84,13 @@ Scanned 200 object(s) → 4 table(s) detected
 # 1. Explorer la structure générale
 json2sql inspect fichier.json --limit 50
 
-# 2. Élargir si la structure semble cohérente
-json2sql inspect fichier.json --limit 2000
+# 2. Élargir et extraire un échantillon réutilisable
+json2sql inspect fichier.json --limit 2000 --sample-output sample.ndjson
 
-# 3. Lancer l'import complet une fois le schéma validé
-json2sql --input fichier.json --db-url $DATABASE_URL --dry-run
+# 3. Tester l'import sur l'échantillon avant de lancer sur le fichier complet
+json2sql --input sample.ndjson --db-url $DATABASE_URL --dry-run
+
+# 4. Lancer l'import complet
 json2sql --input fichier.json --db-url $DATABASE_URL
 ```
 
