@@ -15,11 +15,11 @@ use error::Result;
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Some(Commands::Inspect { ref input, limit, ref table, text_threshold, ref sample_output }) => {
+        Some(Commands::Inspect { ref input, limit, ref table, text_threshold, ref sample_output, ref output }) => {
             let root = table.clone().unwrap_or_else(|| {
                 input.file_stem().and_then(|s| s.to_str()).unwrap_or("root").to_string()
             });
-            run_inspect(input, &root, text_threshold, limit, sample_output.as_deref())
+            run_inspect(input, &root, text_threshold, limit, sample_output.as_deref(), output.as_deref())
                 .map_err(|e| anyhow::anyhow!("{}", e))
         }
         None => run(cli).await.map_err(|e| anyhow::anyhow!("{}", e)),
@@ -32,7 +32,10 @@ fn run_inspect(
     text_threshold: u32,
     limit: usize,
     sample_output: Option<&std::path::Path>,
+    output: Option<&std::path::Path>,
 ) -> Result<()> {
+    use std::io::Write;
+
     eprintln!("Inspecting '{}' (limit: {} objects)...", path.display(), limit);
     let result = pass1::runner::run_inspect(path, root_table, text_threshold, limit)?;
 
@@ -42,16 +45,30 @@ fn run_inspect(
         result.schemas.len()
     );
 
+    // Schema output: file if --output provided, stdout otherwise.
+    let mut schema_out: Box<dyn Write> = match output {
+        Some(p) => Box::new(std::io::BufWriter::new(
+            std::fs::File::create(p).map_err(error::J2sError::Io)?
+        )),
+        None => Box::new(std::io::stdout()),
+    };
+
     for schema in &result.schemas {
         let data_cols: Vec<_> = schema.data_columns().collect();
-        println!("┌─ {} ({} columns)", schema.name, data_cols.len());
+        writeln!(schema_out, "┌─ {} ({} columns)", schema.name, data_cols.len())
+            .map_err(error::J2sError::Io)?;
         if let Some(ref parent) = schema.parent_table {
-            println!("│  parent: {}", parent);
+            writeln!(schema_out, "│  parent: {}", parent).map_err(error::J2sError::Io)?;
         }
         for col in &data_cols {
-            println!("│  {:30} {}", col.name, col.pg_type.as_sql());
+            writeln!(schema_out, "│  {:30} {}", col.name, col.pg_type.as_sql())
+                .map_err(error::J2sError::Io)?;
         }
-        println!();
+        writeln!(schema_out).map_err(error::J2sError::Io)?;
+    }
+
+    if let Some(p) = output {
+        eprintln!("Schema written → {}", p.display());
     }
 
     if result.anomaly_count > 0 {
@@ -61,7 +78,6 @@ fn run_inspect(
     }
 
     if let Some(out_path) = sample_output {
-        use std::io::Write;
         let file = std::fs::File::create(out_path).map_err(error::J2sError::Io)?;
         let mut writer = std::io::BufWriter::new(file);
         for obj in &result.sampled_objects {

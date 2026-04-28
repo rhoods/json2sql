@@ -27,6 +27,10 @@ pub enum Commands {
         /// Write the scanned objects as NDJSON to this file
         #[arg(long, value_name = "FILE")]
         sample_output: Option<std::path::PathBuf>,
+
+        /// Write the inferred schema to this file instead of stdout
+        #[arg(long, value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
     },
 }
 

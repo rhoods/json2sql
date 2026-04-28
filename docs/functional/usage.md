@@ -35,11 +35,17 @@ json2sql inspect mon_fichier.json
 # Limiter à 100 objets pour un aperçu immédiat
 json2sql inspect mon_fichier.json --limit 100
 
+# Écrire le schéma dans un fichier (stderr garde les messages de progression)
+json2sql inspect mon_fichier.json --limit 200 --output schema.txt
+
+# Extraire l'échantillon JSON dans un fichier NDJSON
+json2sql inspect mon_fichier.json --limit 200 --sample-output extrait.ndjson
+
+# Les deux en même temps
+json2sql inspect mon_fichier.json --limit 200 --output schema.txt --sample-output extrait.ndjson
+
 # Spécifier un nom de table racine
 json2sql inspect mon_fichier.json --limit 200 --table commandes
-
-# Extraire l'échantillon dans un fichier NDJSON
-json2sql inspect mon_fichier.json --limit 200 --sample-output extrait.ndjson
 
 # Ajuster le seuil TEXT/VARCHAR
 json2sql inspect mon_fichier.json --limit 500 --text-threshold 512
@@ -53,6 +59,7 @@ json2sql inspect mon_fichier.json --limit 500 --text-threshold 512
 | `--limit` | 500 | Nombre maximum d'objets racines à scanner |
 | `--table` | dérivé du nom de fichier | Nom de la table racine |
 | `--text-threshold` | 256 | Longueur max avant TEXT (sinon VARCHAR) |
+| `--output` | stdout | Écrit le schéma inféré dans ce fichier |
 | `--sample-output` | aucun | Écrit les objets scannés en NDJSON dans ce fichier |
 
 ### Exemple de sortie
