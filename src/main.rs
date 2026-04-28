@@ -8,13 +8,75 @@ mod pass2;
 mod schema;
 
 use clap::Parser;
-use cli::Cli;
+use cli::{Cli, Commands};
 use error::Result;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    run(cli).await.map_err(|e| anyhow::anyhow!("{}", e))
+    match cli.command {
+        Some(Commands::Inspect { ref input, limit, ref table, text_threshold, ref sample_output }) => {
+            let root = table.clone().unwrap_or_else(|| {
+                input.file_stem().and_then(|s| s.to_str()).unwrap_or("root").to_string()
+            });
+            run_inspect(input, &root, text_threshold, limit, sample_output.as_deref())
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        }
+        None => run(cli).await.map_err(|e| anyhow::anyhow!("{}", e)),
+    }
+}
+
+fn run_inspect(
+    path: &std::path::Path,
+    root_table: &str,
+    text_threshold: u32,
+    limit: usize,
+    sample_output: Option<&std::path::Path>,
+) -> Result<()> {
+    eprintln!("Inspecting '{}' (limit: {} objects)...", path.display(), limit);
+    let result = pass1::runner::run_inspect(path, root_table, text_threshold, limit)?;
+
+    eprintln!(
+        "\nScanned {} object(s) → {} table(s) detected\n",
+        result.rows_scanned,
+        result.schemas.len()
+    );
+
+    for schema in &result.schemas {
+        let data_cols: Vec<_> = schema.data_columns().collect();
+        println!("┌─ {} ({} columns)", schema.name, data_cols.len());
+        if let Some(ref parent) = schema.parent_table {
+            println!("│  parent: {}", parent);
+        }
+        for col in &data_cols {
+            println!("│  {:30} {}", col.name, col.pg_type.as_sql());
+        }
+        println!();
+    }
+
+    if result.anomaly_count > 0 {
+        eprintln!("⚠ {} column(s) with mixed types detected (re-run with --schema-report for details)", result.anomaly_count);
+    } else {
+        eprintln!("✓ No type anomalies detected");
+    }
+
+    if let Some(out_path) = sample_output {
+        use std::io::Write;
+        let file = std::fs::File::create(out_path).map_err(error::J2sError::Io)?;
+        let mut writer = std::io::BufWriter::new(file);
+        for obj in &result.sampled_objects {
+            serde_json::to_writer(&mut writer, obj)
+                .map_err(|e| error::J2sError::Json { source: e, position: 0 })?;
+            writeln!(writer).map_err(error::J2sError::Io)?;
+        }
+        eprintln!(
+            "Sample written: {} objects → {}",
+            result.sampled_objects.len(),
+            out_path.display()
+        );
+    }
+
+    Ok(())
 }
 
 async fn run(cli: Cli) -> Result<()> {
@@ -191,7 +253,7 @@ async fn run(cli: Cli) -> Result<()> {
     if let Some(ref config_path) = cli.schema_config {
         eprintln!("\nApplying schema overrides from '{}'...", config_path.display());
         let config = schema::config::SchemaConfig::from_file(config_path)?;
-        schema::config::apply_overrides(&mut pass1.schemas, &config);
+        schema::config::apply_overrides(&mut pass1.schemas, &config)?;
         schema::config::apply_group_overrides(&mut pass1.schemas, &config);
         // Re-run exclusion: strategy overrides may have changed Columns → Jsonb/Pivot on a parent,
         // which should now suppress all its child tables (they'd receive no data anyway).

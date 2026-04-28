@@ -11,7 +11,86 @@ Variable d'environnement : `DATABASE_URL` est lue automatiquement si `--db-url` 
 
 ---
 
-## Exemples rapides
+## Sous-commandes
+
+json2sql propose deux modes :
+
+| Commande | Usage |
+|---|---|
+| *(défaut)* | Import complet : inférence de schéma + chargement dans PostgreSQL |
+| `inspect` | Exploration rapide : inférence brute sur un échantillon, sans base de données |
+
+---
+
+## Sous-commande `inspect`
+
+Inspecte les N premiers objets d'un fichier JSON/NDJSON et affiche le schéma inféré brut — sans stratégies de fusion, sans garde-fous de colonnes, sans connexion à une base de données.
+
+**Utilité :** comprendre la structure d'un fichier trop volumineux pour être ouvert, ou diagnostiquer pourquoi json2sql ne détecte pas une architecture particulière.
+
+```bash
+# Inspecter les 500 premiers objets (défaut)
+json2sql inspect mon_fichier.json
+
+# Limiter à 100 objets pour un aperçu immédiat
+json2sql inspect mon_fichier.json --limit 100
+
+# Spécifier un nom de table racine
+json2sql inspect mon_fichier.json --limit 200 --table commandes
+
+# Ajuster le seuil TEXT/VARCHAR
+json2sql inspect mon_fichier.json --limit 500 --text-threshold 512
+```
+
+### Paramètres de `inspect`
+
+| Paramètre | Défaut | Description |
+|---|---|---|
+| `FILE` | *(requis)* | Fichier JSON ou NDJSON à inspecter |
+| `--limit` | 500 | Nombre maximum d'objets racines à scanner |
+| `--table` | dérivé du nom de fichier | Nom de la table racine |
+| `--text-threshold` | 256 | Longueur max avant TEXT (sinon VARCHAR) |
+
+### Exemple de sortie
+
+```
+Inspecting 'products.jsonl' (limit: 200 objects)...
+
+Scanned 200 object(s) → 4 table(s) detected
+
+┌─ products (5 columns)
+│  id                             INTEGER
+│  name                           VARCHAR(64)
+│  price                          DOUBLE PRECISION
+│  available                      BOOLEAN
+│  category                       VARCHAR(32)
+
+┌─ products_tags (1 columns)
+│  parent: products
+│  value                          VARCHAR(16)
+
+...
+
+⚠ 1 column(s) with mixed types detected (re-run with --schema-report for details)
+```
+
+### Workflow typique
+
+```bash
+# 1. Explorer la structure générale
+json2sql inspect fichier.json --limit 50
+
+# 2. Élargir si la structure semble cohérente
+json2sql inspect fichier.json --limit 2000
+
+# 3. Lancer l'import complet une fois le schéma validé
+json2sql --input fichier.json --db-url $DATABASE_URL --dry-run
+json2sql --input fichier.json --db-url $DATABASE_URL
+```
+
+---
+
+## Exemples rapides (mode import)
 
 ```bash
 # Import basique
@@ -168,7 +247,13 @@ Résultat : 125 colonnes stables dans la table principale, 184 clés médium dan
 TMPDIR=/path/to/large/disk json2sql --input big.jsonl --db-url $DATABASE_URL
 ```
 
-**Exploration du schéma avant import** : utiliser `--dry-run --schema-report` pour valider le schéma inféré sans connexion à la base :
+**Explorer un fichier inconnu** : utiliser `inspect` pour comprendre la structure d'un fichier trop grand à ouvrir, avant tout import :
+
+```bash
+json2sql inspect data.json --limit 200
+```
+
+**Exploration du schéma avant import** : utiliser `--dry-run --schema-report` pour valider le schéma inféré complet sans connexion à la base :
 
 ```bash
 json2sql --input data.json --dry-run --schema-report-output schema_report.txt

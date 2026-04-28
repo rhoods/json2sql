@@ -121,6 +121,70 @@ pub fn run(
     Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings })
 }
 
+/// Result of an inspect run (raw schema, no strategies or guards applied).
+pub struct InspectResult {
+    pub schemas: Vec<TableSchema>,
+    pub rows_scanned: u64,
+    pub anomaly_count: usize,
+    /// The raw JSON objects that were scanned (up to `limit`), in order.
+    pub sampled_objects: Vec<Value>,
+}
+
+/// Run a lightweight schema inspection on the first `limit` objects of a JSON file.
+///
+/// Unlike `run`, this function:
+/// - Stops after `limit` root objects (no full-file scan required)
+/// - Does NOT apply `apply_column_limit_guard`
+/// - Does NOT apply wide-table strategies, sibling merging, or any overrides
+/// - Disables sibling detection and wide-table heuristics (thresholds set to usize::MAX / 0)
+///
+/// Useful for quickly understanding the structure of a large file before a full import.
+pub fn run_inspect(
+    path: &std::path::Path,
+    root_table: &str,
+    text_threshold: u32,
+    limit: usize,
+) -> Result<InspectResult> {
+    let mut registry = SchemaRegistry::new(
+        text_threshold,
+        false,        // array_as_pg_array
+        usize::MAX,   // wide_column_threshold: disable wide detection
+        usize::MAX,   // sibling_threshold: disable sibling merging
+        1.0,          // sibling_jaccard: disable sibling merging
+        0.0,          // stable_threshold: irrelevant (wide detection disabled)
+        0.0,          // rare_threshold: irrelevant (wide detection disabled)
+    );
+
+    let (mut reader, _format) = JsonReader::open(path)?;
+    let mut rows_scanned = 0u64;
+    let mut sampled_objects: Vec<Value> = Vec::new();
+
+    while let Some(item) = reader.next() {
+        if rows_scanned >= limit as u64 {
+            break;
+        }
+        let value = item?;
+        match value {
+            Value::Object(ref obj) => {
+                registry.observe_root(root_table, obj);
+                rows_scanned += 1;
+                sampled_objects.push(Value::Object(obj.clone()));
+            }
+            other => {
+                return Err(crate::error::J2sError::InvalidInput(format!(
+                    "Expected JSON object at root level, found: {}",
+                    other
+                )));
+            }
+        }
+    }
+
+    let anomaly_count = registry.anomaly_iter().count();
+    let schemas = registry.finalize();
+
+    Ok(InspectResult { schemas, rows_scanned, anomaly_count, sampled_objects })
+}
+
 /// Clamp `requested` workers to the number of logical CPUs available.
 ///
 /// Returns `(effective, Some(cap))` when clamping occurred, `(requested, None)` otherwise.
@@ -295,6 +359,70 @@ pub fn run_parallel(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+    }
+
+    #[test]
+    fn test_inspect_respects_limit() {
+        let path = fixture("users.jsonl"); // 3 rows
+        let result = run_inspect(&path, "users", 256, 2).unwrap();
+        assert_eq!(result.rows_scanned, 2, "should stop at limit");
+    }
+
+    #[test]
+    fn test_inspect_reads_all_when_limit_exceeds_file() {
+        let path = fixture("users.jsonl"); // 3 rows
+        let result = run_inspect(&path, "users", 256, 1000).unwrap();
+        assert_eq!(result.rows_scanned, 3, "should read all rows when limit > file size");
+    }
+
+    #[test]
+    fn test_inspect_returns_schemas() {
+        let path = fixture("users.jsonl");
+        let result = run_inspect(&path, "users", 256, 10).unwrap();
+        assert!(!result.schemas.is_empty(), "should infer at least one table");
+        assert!(result.schemas.iter().any(|s| s.name == "users"), "root table must be present");
+    }
+
+    #[test]
+    fn test_inspect_no_column_limit_guard() {
+        let path = fixture("users.jsonl");
+        let result = run_inspect(&path, "users", 256, 10).unwrap();
+        use crate::schema::table_schema::WideStrategy;
+        assert!(
+            result.schemas.iter().all(|s| !matches!(s.wide_strategy, WideStrategy::Jsonb)),
+            "column limit guard must not be applied in inspect mode"
+        );
+    }
+
+    #[test]
+    fn test_inspect_sampled_objects_count_matches_rows_scanned() {
+        let path = fixture("users.jsonl"); // 3 rows
+        let result = run_inspect(&path, "users", 256, 2).unwrap();
+        assert_eq!(result.sampled_objects.len(), result.rows_scanned as usize);
+        assert_eq!(result.sampled_objects.len(), 2);
+    }
+
+    #[test]
+    fn test_inspect_sampled_objects_are_json_objects() {
+        let path = fixture("users.jsonl");
+        let result = run_inspect(&path, "users", 256, 3).unwrap();
+        for obj in &result.sampled_objects {
+            assert!(obj.is_object(), "each sampled item must be a JSON object");
+        }
+    }
+
+    #[test]
+    fn test_inspect_sampled_objects_all_when_limit_exceeds_file() {
+        let path = fixture("users.jsonl"); // 3 rows
+        let result = run_inspect(&path, "users", 256, 1000).unwrap();
+        assert_eq!(result.sampled_objects.len(), 3);
+    }
+
     use super::effective_workers;
 
     #[test]

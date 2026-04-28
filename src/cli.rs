@@ -1,5 +1,34 @@
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+/// Subcommands (optional — omit for the default import mode).
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Inspect a JSON file: infer raw schema on the first N objects without applying
+    /// merge strategies, wide-table heuristics, or any overrides.
+    /// Useful for diagnosing the structure of large files before a full import.
+    Inspect {
+        /// Input JSON file to inspect (JSON array or JSON-Lines format)
+        #[arg(value_name = "FILE")]
+        input: std::path::PathBuf,
+
+        /// Maximum number of root objects to scan (default: 500)
+        #[arg(long, default_value_t = 500, value_name = "N")]
+        limit: usize,
+
+        /// Root table name (defaults to filename without extension)
+        #[arg(long, value_name = "NAME")]
+        table: Option<String>,
+
+        /// Minimum string length to use TEXT instead of VARCHAR (default: 256)
+        #[arg(long, default_value_t = 256, value_name = "N")]
+        text_threshold: u32,
+
+        /// Write the scanned objects as NDJSON to this file
+        #[arg(long, value_name = "FILE")]
+        sample_output: Option<std::path::PathBuf>,
+    },
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -8,6 +37,10 @@ use std::path::PathBuf;
     version
 )]
 pub struct Cli {
+    /// Subcommand (omit for default import mode)
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
     /// Input JSON file (JSON array or JSON-Lines format); reads from stdin if omitted
     #[arg(short, long, value_name = "FILE")]
     pub input: Option<PathBuf>,
@@ -147,5 +180,42 @@ impl Cli {
             .and_then(|s| s.to_str())
             .unwrap_or("root")
             .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inspect_subcommand_parses() {
+        let cli = Cli::try_parse_from(["json2sql", "inspect", "data.json"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Inspect { .. })));
+    }
+
+    #[test]
+    fn test_inspect_limit_default() {
+        let cli = Cli::try_parse_from(["json2sql", "inspect", "data.json"]).unwrap();
+        if let Some(Commands::Inspect { limit, .. }) = cli.command {
+            assert_eq!(limit, 500);
+        } else {
+            panic!("expected Inspect subcommand");
+        }
+    }
+
+    #[test]
+    fn test_inspect_limit_custom() {
+        let cli = Cli::try_parse_from(["json2sql", "inspect", "data.json", "--limit", "200"]).unwrap();
+        if let Some(Commands::Inspect { limit, .. }) = cli.command {
+            assert_eq!(limit, 200);
+        } else {
+            panic!("expected Inspect subcommand");
+        }
+    }
+
+    #[test]
+    fn test_no_subcommand_is_import_mode() {
+        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
+        assert!(cli.command.is_none());
     }
 }

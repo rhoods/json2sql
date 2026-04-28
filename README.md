@@ -17,6 +17,9 @@ cargo build --release
 ## Utilisation rapide
 
 ```bash
+# Explorer la structure d'un fichier inconnu (sans base de données)
+json2sql inspect data.json --limit 200
+
 # Import basique
 json2sql --input data.json --db-url postgres://user:pass@localhost/mydb
 
