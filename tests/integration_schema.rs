@@ -593,3 +593,56 @@ async fn test_parallel_copy() {
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
     }).await;
 }
+
+#[tokio::test]
+async fn test_pass2_timing_fields_populated() {
+    common::with_schema(|client, schema| async move {
+        let path = common::fixture("users.json");
+        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
+        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
+            .await.unwrap();
+
+        assert_eq!(p2.timing.total_ms(), p2.timing.streaming_ms + p2.timing.copy_ms);
+    }).await;
+}
+
+// ---------------------------------------------------------------------------
+// Parallel streaming produces identical row counts to sequential (parallel=1).
+// Runs two imports on separate schemas and compares per-table row totals.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_parallel_streaming_matches_sequential() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("users.json");
+        let p1 = pass1::runner::run(
+            &path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None,
+        ).unwrap();
+
+        // Sequential run on the schema provided by with_schema_url
+        db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
+        let seq = pass2::runner::run(
+            &path, "users", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None,
+        ).await.unwrap();
+
+        // Parallel streaming run on a second schema
+        let schema2 = common::unique_schema();
+        let client2 = db::connection::connect(&url).await.unwrap();
+        client2.execute(&format!("CREATE SCHEMA \"{}\"", schema2), &[]).await.unwrap();
+        db::ddl::create_tables(&client2, &p1.schemas, &schema2, false).await.unwrap();
+        let par = pass2::runner::run(
+            &path, "users", &p1.schemas, &client2, &schema2, 1000, false, None, 2, None, None,
+        ).await.unwrap();
+        common::drop_schema(&client2, &schema2).await;
+
+        for (table, &seq_count) in &seq.rows_per_table {
+            let par_count = par.rows_per_table.get(table).copied().unwrap_or(0);
+            assert_eq!(
+                seq_count, par_count,
+                "table {table}: seq={seq_count} par={par_count}"
+            );
+        }
+        assert_eq!(par.timing.total_ms(), par.timing.streaming_ms + par.timing.copy_ms);
+        assert_eq!(par.anomaly_collector.total_anomalies(), 0);
+    }).await;
+}
