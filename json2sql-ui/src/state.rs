@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use urlencoding::encode;
 use zeroize::{Zeroize, Zeroizing};
 use json2sql::io::progress_event::ProgressEvent;
+use json2sql::schema::naming::{ColumnCollision, TruncatedName};
 use json2sql::schema::registry::OverflowWarning;
+use json2sql::schema::stats::ColumnStats;
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 
 // ---------------------------------------------------------------------------
@@ -186,6 +188,13 @@ pub struct AppState {
     /// Persisted in AppState so the selection survives navigation between the two screens.
     pub selected_table_idx: usize,
 
+    // — Pass 1 metadata (also persisted in SchemaSnapshot) —
+    pub truncated_names: Vec<TruncatedName>,
+    pub column_collisions: Vec<ColumnCollision>,
+    pub pass1_stats: Vec<ColumnStats>,
+    /// True when schemas were loaded from a saved snapshot rather than a live Pass 1 run.
+    pub schema_snapshot_loaded: bool,
+
     // — Screen 5 —
     pub pass2_progress: Pass2Progress,
 
@@ -216,6 +225,10 @@ impl Default for AppState {
             overflow_warnings: Vec::new(),
             strategy_overrides: HashMap::new(),
             selected_table_idx: 0,
+            truncated_names: Vec::new(),
+            column_collisions: Vec::new(),
+            pass1_stats: Vec::new(),
+            schema_snapshot_loaded: false,
             pass2_progress: Pass2Progress::default(),
             abort_handle: None,
             workers: 1,
@@ -292,6 +305,34 @@ impl AppState {
         schemas
     }
 
+    /// Populate AppState from a loaded SchemaSnapshot.
+    /// Sets schema_snapshot_loaded = true so Setup screen can adapt its UI.
+    pub fn load_snapshot(&mut self, snapshot: json2sql::schema::persistence::SchemaSnapshot) {
+        self.schemas = snapshot.schemas;
+        self.truncated_names = snapshot.truncated_names;
+        self.column_collisions = snapshot.column_collisions;
+        self.pass1_stats = snapshot.stats;
+        self.strategy_overrides = snapshot.strategy_overrides;
+        self.pass1_progress.rows_scanned = snapshot.total_rows;
+        self.pass1_progress.done = true;
+        self.schema_snapshot_loaded = true;
+        self.selected_table_idx = 0;
+    }
+
+    /// Remove a loaded snapshot and restore the default Pass 1 flow.
+    /// Preserves source_file, pg config, and pg_schema — only clears schema data.
+    pub fn clear_snapshot(&mut self) {
+        self.schemas = Vec::new();
+        self.overflow_warnings = Vec::new();
+        self.strategy_overrides = std::collections::HashMap::new();
+        self.truncated_names = Vec::new();
+        self.column_collisions = Vec::new();
+        self.pass1_stats = Vec::new();
+        self.pass1_progress = Pass1Progress::default();
+        self.selected_table_idx = 0;
+        self.schema_snapshot_loaded = false;
+    }
+
     /// Convenience: true when both source file and PG config are ready.
     pub fn ready_to_start(&self) -> bool {
         self.source_file.is_some()
@@ -313,6 +354,10 @@ impl AppState {
         self.schemas = Vec::new();
         self.overflow_warnings = Vec::new();
         self.strategy_overrides = HashMap::new();
+        self.truncated_names = Vec::new();
+        self.column_collisions = Vec::new();
+        self.pass1_stats = Vec::new();
+        self.schema_snapshot_loaded = false;
         self.pg_testing = false;
         self.pg_ok = None;
         self.pg_error = None;
@@ -376,6 +421,90 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_snapshot_resets_schema_fields_but_keeps_pg_and_source() {
+        use json2sql::schema::persistence::SchemaSnapshot;
+        use std::collections::HashMap;
+
+        let mut s = AppState::default();
+        s.source_file = Some(std::path::PathBuf::from("/tmp/data.json"));
+        s.pg.host = "myhost".to_string();
+        s.load_snapshot(SchemaSnapshot {
+            version: 1,
+            total_rows: 10,
+            schemas: vec![],
+            truncated_names: vec![],
+            column_collisions: vec![],
+            stats: vec![],
+            strategy_overrides: HashMap::new(),
+        });
+
+        s.clear_snapshot();
+
+        assert!(!s.schema_snapshot_loaded);
+        assert!(s.schemas.is_empty());
+        assert!(s.strategy_overrides.is_empty());
+        assert!(!s.pass1_progress.done);
+        // source_file and pg are preserved
+        assert!(s.source_file.is_some());
+        assert_eq!(s.pg.host, "myhost");
+    }
+
+    #[test]
+    fn load_snapshot_populates_state_and_sets_flag() {
+        use json2sql::schema::persistence::SchemaSnapshot;
+        use std::collections::HashMap;
+
+        let snapshot = SchemaSnapshot {
+            version: 1,
+            total_rows: 42,
+            schemas: vec![],
+            truncated_names: vec![],
+            column_collisions: vec![],
+            stats: vec![],
+            strategy_overrides: {
+                let mut m = HashMap::new();
+                m.insert("t".to_string(), json2sql::schema::table_schema::WideStrategy::Jsonb);
+                m
+            },
+        };
+
+        let mut s = AppState::default();
+        s.load_snapshot(snapshot);
+
+        assert!(s.schema_snapshot_loaded);
+        assert_eq!(s.pass1_progress.rows_scanned, 42);
+        assert!(matches!(
+            s.strategy_overrides.get("t"),
+            Some(json2sql::schema::table_schema::WideStrategy::Jsonb)
+        ));
+    }
+
+    #[test]
+    fn snapshot_fields_default_to_empty_and_false() {
+        let s = AppState::default();
+        assert!(!s.schema_snapshot_loaded);
+        assert!(s.truncated_names.is_empty());
+        assert!(s.column_collisions.is_empty());
+        assert!(s.pass1_stats.is_empty());
+    }
+
+    #[test]
+    fn cancel_resets_snapshot_fields() {
+        let mut s = AppState::default();
+        s.schema_snapshot_loaded = true;
+        s.truncated_names.push(json2sql::schema::naming::TruncatedName {
+            original_path: "a.b".to_string(),
+            full_name: "a_b_long".to_string(),
+            pg_name: "a_b".to_string(),
+        });
+        s.cancel();
+        assert!(!s.schema_snapshot_loaded);
+        assert!(s.truncated_names.is_empty());
+        assert!(s.column_collisions.is_empty());
+        assert!(s.pass1_stats.is_empty());
+    }
 
     #[test]
     fn pass2_parallel_default_is_in_valid_range() {

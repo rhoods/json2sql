@@ -17,7 +17,7 @@ use dioxus::prelude::*;
 use json2sql::schema::registry::OverflowWarning;
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 
-use crate::screens::{strategy_color, strategy_label};
+use crate::screens::{pick_save_file_zenity, strategy_color, strategy_label, PickResult};
 use crate::state::{AppScreen, AppState};
 use crate::theme;
 
@@ -30,6 +30,8 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     // Buffer for the id_column name when setting NormalizeDynamicKeys.
     let mut normalize_id_col: Signal<String> = use_signal(|| "id".to_string());
     let mut banner_dismissed = use_signal(|| false);
+    // Feedback after save: Some(Ok(path)) or Some(Err(msg))
+    let mut save_feedback: Signal<Option<Result<String, String>>> = use_signal(|| None);
 
     let schemas = state.read().schemas.clone();
     let overflow_warnings = state.read().overflow_warnings.clone();
@@ -78,6 +80,61 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                 span {
                     style: "background:{theme::BG_SIDEBAR};color:{theme::ON_SURFACE_VARIANT};font-size:0.6875rem;padding:3px 8px;border-radius:2px;font-family:{theme::FONT_CODE};",
                     "{columns_count} columns"
+                }
+                // Save feedback inline
+                if let Some(ref result) = *save_feedback.read() {
+                    match result {
+                        Ok(path) => rsx! {
+                            span {
+                                style: "color:{theme::PRIMARY};font-size:0.6875rem;",
+                                "✓ Saved to {path}"
+                            }
+                        },
+                        Err(msg) => rsx! {
+                            span {
+                                style: "color:{theme::ERROR};font-size:0.6875rem;",
+                                "✗ {msg}"
+                            }
+                        },
+                    }
+                }
+                button {
+                    class: "btn-ghost",
+                    style: "font-size:0.8125rem;padding:4px 10px;",
+                    onclick: move |_| {
+                        let s = state.read();
+                        let schemas = s.schemas.clone();
+                        let total_rows = s.pass1_progress.rows_scanned;
+                        let truncated = s.truncated_names.clone();
+                        let collisions = s.column_collisions.clone();
+                        let stats = s.pass1_stats.clone();
+                        let overrides = s.strategy_overrides.clone();
+                        drop(s);
+                        let mut fb = save_feedback.clone();
+                        spawn(async move {
+                            match pick_save_file_zenity("schema.json").await {
+                                PickResult::Selected(path) => {
+                                    let result = json2sql::schema::persistence::save_with_overrides(
+                                        &schemas, total_rows, &truncated, &collisions, &stats, &overrides, &path,
+                                    );
+                                    match result {
+                                        Ok(()) => fb.set(Some(Ok(
+                                            path.file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("schema.json")
+                                                .to_string()
+                                        ))),
+                                        Err(e) => fb.set(Some(Err(e.to_string()))),
+                                    }
+                                }
+                                PickResult::Cancelled => {}
+                                PickResult::NotAvailable => {
+                                    fb.set(Some(Err("zenity not available".to_string())));
+                                }
+                            }
+                        });
+                    },
+                    "💾 Save schema"
                 }
             }
 

@@ -1,7 +1,7 @@
 use crate::schema::type_tracker::PgType;
 
 /// Type distribution for one column observed during Pass 1.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ColumnStats {
     pub table_name: String,
     pub column_name: String,

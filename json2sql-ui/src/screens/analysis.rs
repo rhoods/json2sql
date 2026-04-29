@@ -128,8 +128,13 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         // Retrieve schemas from the completed result.
         match handle.await {
             Ok(Ok(result)) => {
-                state.write().schemas = result.schemas;
-                state.write().overflow_warnings = result.overflow_warnings;
+                let mut s = state.write();
+                s.schemas = result.schemas;
+                s.overflow_warnings = result.overflow_warnings;
+                s.truncated_names = result.truncated_names;
+                s.column_collisions = result.column_collisions;
+                s.pass1_stats = result.stats;
+                s.schema_snapshot_loaded = false;
             }
             Ok(Err(e)) => {
                 state

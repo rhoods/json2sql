@@ -4,66 +4,15 @@
 /// Transitions to Screen 2 (Analysis) when both source and target are configured.
 use dioxus::prelude::*;
 
+use crate::screens::{pick_file_zenity, pick_folder_zenity, PickResult};
 use crate::state::{format_bytes, AppScreen, AppState};
 use crate::theme;
-
-/// Result of a zenity picker invocation.
-enum PickResult {
-    /// User selected a path.
-    Selected(std::path::PathBuf),
-    /// User closed or cancelled the dialog.
-    Cancelled,
-    /// `zenity` binary is not installed on this system.
-    NotAvailable,
-}
-
-/// Run zenity with the given args. Returns `NotAvailable` when the binary is
-/// missing (`io::ErrorKind::NotFound`), `Cancelled` on any other failure or
-/// empty selection, and `Selected` on success.
-async fn run_zenity(args: Vec<String>) -> PickResult {
-    let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("zenity").args(&args).output()
-    })
-    .await;
-
-    let output = match output {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => return PickResult::NotAvailable,
-        _ => return PickResult::Cancelled,
-    };
-
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if path.is_empty() {
-            PickResult::Cancelled
-        } else {
-            PickResult::Selected(std::path::PathBuf::from(path))
-        }
-    } else {
-        PickResult::Cancelled
-    }
-}
-
-async fn pick_file_zenity(filters: &[(&str, &str)]) -> PickResult {
-    let mut args = vec!["--file-selection".to_string(), "--title=Select file".to_string()];
-    for (_, glob) in filters {
-        args.push(format!("--file-filter={}", glob));
-    }
-    run_zenity(args).await
-}
-
-async fn pick_folder_zenity() -> PickResult {
-    run_zenity(vec![
-        "--file-selection".to_string(),
-        "--directory".to_string(),
-        "--title=Select folder".to_string(),
-    ])
-    .await
-}
 
 #[component]
 pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let ready = state.read().ready_to_start();
+    let snapshot_loaded = state.read().schema_snapshot_loaded;
+    let snapshot_tables = state.read().schemas.len();
     let source_path = state.read().source_file.clone();
     let source_label = source_path
         .as_ref()
@@ -108,8 +57,11 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     // a second click while the dialog is open is silently ignored.
     let mut picking_source  = use_signal(|| false);
     let mut picking_anomaly = use_signal(|| false);
+    let mut picking_schema  = use_signal(|| false);
     // Set to Some(msg) when zenity is not installed; displayed near the Browse button.
     let mut picker_error: Signal<Option<String>> = use_signal(|| None);
+    // Error message when schema load fails.
+    let mut load_error: Signal<Option<String>> = use_signal(|| None);
 
     rsx! {
         div {
@@ -460,14 +412,82 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                 }
 
                 // ── CTA ───────────────────────────────────────────────────
-                button {
-                    class: "btn-primary",
-                    style: "width:100%;",
-                    disabled: !ready,
-                    onclick: move |_| {
-                        state.write().screen = AppScreen::Analysis;
-                    },
-                    "Start Analysis →"
+                if snapshot_loaded {
+                    // Snapshot mode: replace Pass 1 button with visualize + remove actions.
+                    div {
+                        style: "background:{theme::BG_INPUT};border-radius:4px;padding:12px 14px;margin-bottom:10px;display:flex;align-items:center;gap:10px;",
+                        span {
+                            style: "color:{theme::PRIMARY};font-size:0.75rem;flex:1;",
+                            "✓ Schema loaded — {snapshot_tables} tables"
+                        }
+                        button {
+                            class: "btn-ghost btn-ghost--sm",
+                            style: "color:{theme::ERROR};border-color:{theme::ERROR}44;",
+                            onclick: move |_| { state.write().clear_snapshot(); },
+                            "✕ Remove"
+                        }
+                    }
+                    button {
+                        class: "btn-primary",
+                        style: "width:100%;",
+                        onclick: move |_| {
+                            state.write().screen = AppScreen::Strategy;
+                        },
+                        "👁 Visualize schema →"
+                    }
+                } else {
+                    button {
+                        class: "btn-primary",
+                        style: "width:100%;",
+                        disabled: !ready,
+                        onclick: move |_| {
+                            state.write().screen = AppScreen::Analysis;
+                        },
+                        "Start Analysis →"
+                    }
+                }
+
+                // ── Load saved schema ─────────────────────────────────────
+                div {
+                    style: "margin-top:10px;display:flex;flex-direction:column;gap:6px;",
+                    button {
+                        class: "btn-ghost",
+                        style: "width:100%;",
+                        disabled: picking_schema(),
+                        onclick: move |_| async move {
+                            if picking_schema() { return; }
+                            picking_schema.set(true);
+                            load_error.set(None);
+                            let result = pick_file_zenity(&[
+                                ("Schema snapshot", "*.json"),
+                            ]).await;
+                            picking_schema.set(false);
+                            match result {
+                                PickResult::Selected(path) => {
+                                    match json2sql::schema::persistence::load(&path) {
+                                        Ok(snapshot) => {
+                                            state.write().load_snapshot(snapshot);
+                                            state.write().screen = AppScreen::Strategy;
+                                        }
+                                        Err(e) => {
+                                            load_error.set(Some(format!("Failed to load schema: {e}")));
+                                        }
+                                    }
+                                }
+                                PickResult::Cancelled => {}
+                                PickResult::NotAvailable => {
+                                    load_error.set(Some("zenity not found — install it: sudo apt install zenity".to_string()));
+                                }
+                            }
+                        },
+                        if picking_schema() { "Loading…" } else if snapshot_loaded { "📂 Load different schema…" } else { "📂 Load saved schema" }
+                    }
+                    if let Some(ref err) = load_error() {
+                        span {
+                            style: "color:{theme::ERROR};font-size:0.75rem;text-align:center;",
+                            "{err}"
+                        }
+                    }
                 }
             }
         }
