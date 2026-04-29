@@ -216,6 +216,13 @@ pub struct TableSchema {
     /// Empty for tables that have no flattened children.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub flatten_sources: HashMap<String, String>,
+    /// Cascaded routing: maps a JSON sub-key found inside a sibling pivot row to the child
+    /// table that should receive that sub-object. Populated by `finalize_cascading` for two cases:
+    ///   1. Co-sibling children merged into a synthetic pivot T (child_routes["k"] = T.name)
+    ///   2. Independent children re-parented from an absorbed sibling to this pivot table
+    /// Empty for all non-cascaded tables (routing falls back to path_map in Pass 2).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub child_routes: HashMap<String, String>,
 }
 
 impl TableSchema {
@@ -229,6 +236,7 @@ impl TableSchema {
             depth,
             wide_strategy: WideStrategy::default(),
             flatten_sources: HashMap::new(),
+            child_routes: HashMap::new(),
         }
     }
 
@@ -309,5 +317,48 @@ impl std::fmt::Display for KeyShape {
             KeyShape::Slug    => write!(f, "SLUG"),
             KeyShape::Mixed   => write!(f, "MIXED"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_schema(name: &str) -> TableSchema {
+        TableSchema::new(name.to_string(), vec![name.to_string()], 0)
+    }
+
+    #[test]
+    fn child_routes_empty_by_default() {
+        let s = make_schema("root");
+        assert!(s.child_routes.is_empty());
+    }
+
+    #[test]
+    fn child_routes_round_trip_json() {
+        let mut s = make_schema("root");
+        s.child_routes.insert("k1".to_string(), "root_pivot_k1".to_string());
+        s.child_routes.insert("k2".to_string(), "root_pivot_k2".to_string());
+
+        let json = serde_json::to_string(&s).unwrap();
+        let back: TableSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.child_routes.get("k1").map(|s| s.as_str()), Some("root_pivot_k1"));
+        assert_eq!(back.child_routes.get("k2").map(|s| s.as_str()), Some("root_pivot_k2"));
+    }
+
+    #[test]
+    fn child_routes_skipped_when_empty_in_json() {
+        let s = make_schema("root");
+        let json = serde_json::to_string(&s).unwrap();
+        // Empty map must not appear in the serialised form (skip_serializing_if)
+        assert!(!json.contains("child_routes"));
+    }
+
+    #[test]
+    fn child_routes_absent_in_old_json_deserialises_as_empty() {
+        // Simulate a schema snapshot that predates the child_routes field.
+        let json = r#"{"name":"root","path":["root"],"columns":[],"depth":0,"wide_strategy":"Columns","flatten_sources":{}}"#;
+        let s: TableSchema = serde_json::from_str(json).unwrap();
+        assert!(s.child_routes.is_empty());
     }
 }

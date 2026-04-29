@@ -58,6 +58,7 @@ pub async fn run(
     let path_map: HashMap<String, &TableSchema> =
         schemas.iter().map(|s| (s.path.join("."), s)).collect();
 
+
     // Open a TempFileSink for each table
     let mut sinks: HashMap<String, TempFileSink> = HashMap::new();
     for schema in schemas {
@@ -385,7 +386,7 @@ fn insert_object(
                             }
                             WideStrategy::KeyedPivot(sibling_schema) => {
                                 insert_keyed_pivot_object(
-                                    sinks, anomalies, child_schema, nested, row_id, sibling_schema,
+                                    path_map, sinks, anomalies, child_schema, nested, row_id, sibling_schema,
                                 )?;
                             }
                             WideStrategy::MultiKeyedPivot(groups) => {
@@ -570,7 +571,7 @@ fn insert_object(
                         }
                         WideStrategy::KeyedPivot(sibling_schema) => {
                             insert_keyed_pivot_object(
-                                sinks, anomalies, child_schema, nested, row_id, sibling_schema,
+                                path_map, sinks, anomalies, child_schema, nested, row_id, sibling_schema,
                             )?;
                         }
                         WideStrategy::MultiKeyedPivot(groups) => {
@@ -701,7 +702,7 @@ fn insert_jsonb_object(
                             }
                             WideStrategy::KeyedPivot(sibling_schema) => {
                                 insert_keyed_pivot_object(
-                                    sinks, anomalies, child_schema, nested, child_id, sibling_schema,
+                                    path_map, sinks, anomalies, child_schema, nested, child_id, sibling_schema,
                                 )?;
                             }
                             WideStrategy::MultiKeyedPivot(groups) => {
@@ -857,6 +858,55 @@ fn insert_structured_pivot_object(
     Ok(())
 }
 
+/// Route sub-objects and sub-arrays declared in `schema.child_routes` to their target tables.
+/// Called after writing each pivot row so that nested tables created by cascade merging
+/// receive their data with the correct parent FK.
+fn dispatch_child_routes(
+    path_map: &HashMap<String, &TableSchema>,
+    sinks: &mut HashMap<String, TempFileSink>,
+    anomalies: &mut AnomalyCollector,
+    schema: &TableSchema,
+    child_obj: &serde_json::Map<String, Value>,
+    row_id: Uuid,
+) -> Result<()> {
+    if schema.child_routes.is_empty() {
+        return Ok(());
+    }
+    for (sub_key, child_table_name) in &schema.child_routes {
+        let sub_value = match child_obj.get(sub_key) {
+            Some(v) => v,
+            None => continue,
+        };
+        let child_schema = match path_map.values().find(|&&s| s.name == *child_table_name) {
+            Some(&s) => s,
+            None => continue,
+        };
+        match sub_value {
+            Value::Object(nested) => {
+                match &child_schema.wide_strategy {
+                    WideStrategy::KeyedPivot(ss) => {
+                        let ss = ss.clone();
+                        insert_keyed_pivot_object(path_map, sinks, anomalies, child_schema, nested, row_id, &ss)?;
+                    }
+                    WideStrategy::MultiKeyedPivot(groups) => {
+                        let groups = groups.clone();
+                        insert_multi_keyed_pivot(path_map, sinks, anomalies, child_schema, nested, row_id, &groups)?;
+                    }
+                    _ => {
+                        let child_id = Uuid::now_v7();
+                        insert_object(path_map, sinks, anomalies, child_schema, nested, child_id, Some(row_id), None)?;
+                    }
+                }
+            }
+            Value::Array(arr) => {
+                insert_array(path_map, sinks, anomalies, child_schema, arr, row_id)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Insert one row per sibling key for a KeyedPivot table.
 /// Columns: j2s_id, j2s_parent_id, key TEXT, <union data cols...>
 ///
@@ -867,6 +917,7 @@ fn insert_structured_pivot_object(
 /// When `sibling_schema.array_children` is true, each key maps to an array of objects
 /// instead of a single object. One row is emitted per array element, with j2s_order set.
 fn insert_keyed_pivot_object(
+    path_map: &HashMap<String, &TableSchema>,
     sinks: &mut HashMap<String, TempFileSink>,
     anomalies: &mut AnomalyCollector,
     schema: &TableSchema,
@@ -875,7 +926,7 @@ fn insert_keyed_pivot_object(
     sibling_schema: &SiblingSchema,
 ) -> Result<()> {
     if sibling_schema.array_children {
-        return insert_keyed_pivot_array_of_objects(sinks, anomalies, schema, obj, parent_id, sibling_schema);
+        return insert_keyed_pivot_array_of_objects(path_map, sinks, anomalies, schema, obj, parent_id, sibling_schema);
     }
 
     for (key, value) in obj {
@@ -949,6 +1000,9 @@ fn insert_keyed_pivot_object(
         if let Some(sink) = sinks.get_mut(&schema.name) {
             sink.write_row(builder.finish())?;
         }
+
+        // Route sub-objects/arrays declared in child_routes to their target tables.
+        dispatch_child_routes(path_map, sinks, anomalies, schema, child_obj, row_id)?;
     }
     Ok(())
 }
@@ -959,6 +1013,7 @@ fn insert_keyed_pivot_object(
 /// Each key in `obj` maps to an array of objects. One row is emitted per element,
 /// with j2s_order tracking the element's position within the array.
 fn insert_keyed_pivot_array_of_objects(
+    path_map: &HashMap<String, &TableSchema>,
     sinks: &mut HashMap<String, TempFileSink>,
     anomalies: &mut AnomalyCollector,
     schema: &TableSchema,
@@ -1044,6 +1099,9 @@ fn insert_keyed_pivot_array_of_objects(
             if let Some(sink) = sinks.get_mut(&schema.name) {
                 sink.write_row(builder.finish())?;
             }
+
+            // Route sub-objects/arrays declared in child_routes to their target tables.
+            dispatch_child_routes(path_map, sinks, anomalies, schema, item_obj, row_id)?;
         }
     }
     Ok(())
@@ -1173,7 +1231,7 @@ fn insert_multi_keyed_pivot(
                     match &child_schema.wide_strategy {
                         WideStrategy::KeyedPivot(ss) => {
                             insert_keyed_pivot_object(
-                                sinks, anomalies, child_schema, nested, routing_id, ss,
+                                path_map, sinks, anomalies, child_schema, nested, routing_id, ss,
                             )?;
                         }
                         WideStrategy::MultiKeyedPivot(child_groups) => {
@@ -1211,7 +1269,7 @@ fn insert_multi_keyed_pivot(
         let pivot_path_key = format!("{}.{}", routing_path, suffix);
         if let Some(pivot_schema) = path_map.get(&pivot_path_key) {
             insert_keyed_pivot_object(
-                sinks, anomalies, pivot_schema, submap, routing_id, &group.sibling_schema,
+                path_map, sinks, anomalies, pivot_schema, submap, routing_id, &group.sibling_schema,
             )?;
         }
     }
