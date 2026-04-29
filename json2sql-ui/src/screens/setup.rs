@@ -461,21 +461,28 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                             let result = pick_file_zenity(&[
                                 ("Schema snapshot", "*.json"),
                             ]).await;
-                            picking_schema.set(false);
                             match result {
                                 PickResult::Selected(path) => {
-                                    match json2sql::schema::persistence::load(&path) {
-                                        Ok(snapshot) => {
+                                    let load_result = tokio::task::spawn_blocking(move || {
+                                        json2sql::schema::persistence::load(&path)
+                                    }).await;
+                                    picking_schema.set(false);
+                                    match load_result {
+                                        Ok(Ok(snapshot)) => {
                                             state.write().load_snapshot(snapshot);
                                             state.write().screen = AppScreen::Strategy;
                                         }
-                                        Err(e) => {
+                                        Ok(Err(e)) => {
                                             load_error.set(Some(format!("Failed to load schema: {e}")));
+                                        }
+                                        Err(_) => {
+                                            load_error.set(Some("Schema loading task panicked.".to_string()));
                                         }
                                     }
                                 }
-                                PickResult::Cancelled => {}
+                                PickResult::Cancelled => { picking_schema.set(false); }
                                 PickResult::NotAvailable => {
+                                    picking_schema.set(false);
                                     load_error.set(Some("zenity not found — install it: sudo apt install zenity".to_string()));
                                 }
                             }
