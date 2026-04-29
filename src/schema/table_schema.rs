@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::naming::PG_TABLE_MAX_IDENT;
 use super::type_tracker::PgType;
 
 /// One suffix column in a StructuredPivot table.
@@ -165,13 +166,14 @@ impl ColumnSchema {
     /// Create the FK column pointing to the parent table.
     /// Column name: `j2s_{parent_name}_id`, truncated so the total is ≤ 63 chars.
     pub fn parent_fk(parent_name: &str) -> Self {
-        // "j2s_" (4) + parent_name + "_id" (3) must fit in 63 chars → max 56 chars for parent_name
-        let truncated = if parent_name.len() > 56 {
-            &parent_name[..56]
-        } else {
-            parent_name
-        };
-        let col_name = format!("j2s_{}_id", truncated);
+        // NamingRegistry guarantees table names ≤ PG_TABLE_MAX_IDENT (53), so
+        // "j2s_" (4) + name (≤53) + "_id" (3) = ≤60 — always within PG's 63-byte limit.
+        debug_assert!(
+            parent_name.len() <= PG_TABLE_MAX_IDENT,
+            "parent_name '{}' is {} chars — NamingRegistry should have truncated it to ≤{}",
+            parent_name, parent_name.len(), PG_TABLE_MAX_IDENT
+        );
+        let col_name = format!("j2s_{}_id", parent_name);
         Self {
             name: col_name.clone(),
             original_name: col_name,
@@ -323,6 +325,7 @@ impl std::fmt::Display for KeyShape {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::naming::PG_TABLE_MAX_IDENT;
 
     fn make_schema(name: &str) -> TableSchema {
         TableSchema::new(name.to_string(), vec![name.to_string()], 0)
@@ -352,6 +355,24 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         // Empty map must not appear in the serialised form (skip_serializing_if)
         assert!(!json.contains("child_routes"));
+    }
+
+    #[test]
+    fn parent_fk_short_name() {
+        let col = ColumnSchema::parent_fk("users");
+        assert_eq!(col.name, "j2s_users_id");
+        assert!(col.is_parent_fk);
+        assert!(col.is_generated);
+    }
+
+    #[test]
+    fn parent_fk_max_budget_name_fits_pg_limit() {
+        // A parent name at the PG_TABLE_MAX_IDENT budget (53 chars) must produce
+        // a column name ≤ 63 chars: "j2s_" (4) + 53 + "_id" (3) = 60 ≤ 63.
+        let parent_name = "a".repeat(PG_TABLE_MAX_IDENT);
+        let col = ColumnSchema::parent_fk(&parent_name);
+        assert_eq!(col.name.len(), 4 + PG_TABLE_MAX_IDENT + 3);
+        assert!(col.name.len() <= 63);
     }
 
     #[test]

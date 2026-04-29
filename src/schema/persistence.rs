@@ -7,7 +7,10 @@ use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::stats::ColumnStats;
 use crate::schema::table_schema::{TableSchema, WideStrategy};
 
-const SCHEMA_FORMAT_VERSION: u32 = 1;
+/// v2: table names are now capped at 53 chars (PG_TABLE_MAX_IDENT) instead of 63,
+/// ensuring all derived identifiers (pk_, fk_..._parent, j2s_..._id) fit within
+/// PostgreSQL's 63-byte NAMEDATALEN limit. Snapshots from v1 must be regenerated.
+const SCHEMA_FORMAT_VERSION: u32 = 2;
 
 /// Serializable snapshot of a Pass 1 result, optionally including user strategy overrides.
 #[derive(Serialize, Deserialize)]
@@ -79,6 +82,13 @@ pub fn load(path: &Path) -> Result<SchemaSnapshot> {
     let snapshot: SchemaSnapshot = serde_json::from_slice(&data)
         .map_err(|e| J2sError::InvalidInput(format!("Schema deserialization failed: {}", e)))?;
     if snapshot.version != SCHEMA_FORMAT_VERSION {
+        if snapshot.version == 1 {
+            return Err(J2sError::InvalidInput(
+                "Schema snapshot v1 is no longer supported — table names used a wider budget \
+                 that could cause PostgreSQL constraint name collisions. \
+                 Please re-run Pass 1 to regenerate a v2 snapshot.".to_string()
+            ));
+        }
         return Err(J2sError::InvalidInput(format!(
             "Schema snapshot version {} is not supported (expected {})",
             snapshot.version, SCHEMA_FORMAT_VERSION
@@ -95,7 +105,7 @@ mod tests {
 
     fn empty_snapshot() -> SchemaSnapshot {
         SchemaSnapshot {
-            version: 1,
+            version: SCHEMA_FORMAT_VERSION,
             total_rows: 0,
             schemas: vec![],
             truncated_names: vec![],
@@ -121,14 +131,26 @@ mod tests {
     }
 
     #[test]
-    fn old_snapshot_without_overrides_deserialises_as_empty() {
-        // Simulate a snapshot saved before strategy_overrides was added.
+    fn v1_snapshot_returns_clear_error() {
+        // v1 snapshots used a 63-char table name budget; v2 uses 53. They are incompatible.
         let json = r#"{"version":1,"total_rows":0,"schemas":[],"truncated_names":[],"column_collisions":[],"stats":[]}"#;
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
 
+        let err = load(tmp.path()).err().expect("expected an error for v1 snapshot");
+        let msg = err.to_string();
+        assert!(msg.contains("v1"), "error should mention v1, got: {}", msg);
+        assert!(msg.contains("Pass 1") || msg.contains("re-run") || msg.contains("regenerate"),
+            "error should tell user to re-run Pass 1, got: {}", msg);
+    }
+
+    #[test]
+    fn v2_snapshot_round_trips() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        save(&[], 42, &[], &[], &[], tmp.path()).unwrap();
         let loaded = load(tmp.path()).unwrap();
-        assert!(loaded.strategy_overrides.is_empty());
+        assert_eq!(loaded.version, SCHEMA_FORMAT_VERSION);
+        assert_eq!(loaded.total_rows, 42);
     }
 
     #[test]

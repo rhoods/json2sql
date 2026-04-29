@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 /// Maximum PostgreSQL identifier length in bytes.
 const PG_MAX_IDENT: usize = 63;
+/// Maximum length for table names, ensuring all derived identifiers fit within PG_MAX_IDENT.
+/// The tightest constraint is `fk_{name}_parent` (3 + name + 7 = 10 + name ≤ 63 → name ≤ 53).
+pub(crate) const PG_TABLE_MAX_IDENT: usize = 53;
 /// Characters reserved for the hash suffix when truncating.
 const HASH_SUFFIX_LEN: usize = 8; // "_" + 7 hex chars
 
@@ -178,7 +181,7 @@ impl NamingRegistry {
     }
 
     fn ensure_unique(&mut self, sanitized: String, original_key: &str) -> String {
-        let truncated = truncate_to_pg_limit(&sanitized, original_key);
+        let truncated = truncate_to_limit(&sanitized, original_key, PG_TABLE_MAX_IDENT);
 
         // Record truncation if the name was shortened
         if truncated != sanitized {
@@ -195,7 +198,7 @@ impl NamingRegistry {
             }
             // Collision after truncation: re-hash the original key differently
             // This should be extremely rare
-            let alt = truncate_to_pg_limit(&sanitized, &format!("{}_alt", original_key));
+            let alt = truncate_to_limit(&sanitized, &format!("{}_alt", original_key), PG_TABLE_MAX_IDENT);
             self.reverse.insert(alt.clone(), original_key.to_string());
             return alt;
         }
@@ -291,16 +294,20 @@ pub fn sanitize_identifier(s: &str) -> String {
     result
 }
 
-/// Truncate an identifier to PG_MAX_IDENT bytes.
+/// Truncate an identifier to `max_len` bytes.
 /// If truncation is needed, replace the last HASH_SUFFIX_LEN bytes with a hash.
-fn truncate_to_pg_limit(sanitized: &str, original_key: &str) -> String {
-    if sanitized.len() <= PG_MAX_IDENT {
+fn truncate_to_limit(sanitized: &str, original_key: &str, max_len: usize) -> String {
+    if sanitized.len() <= max_len {
         return sanitized.to_string();
     }
     let hash = short_hash(original_key);
-    let prefix_len = PG_MAX_IDENT - HASH_SUFFIX_LEN;
+    let prefix_len = max_len - HASH_SUFFIX_LEN;
     let prefix = &sanitized[..prefix_len];
     format!("{}_{}", prefix, hash)
+}
+
+fn truncate_to_pg_limit(sanitized: &str, original_key: &str) -> String {
+    truncate_to_limit(sanitized, original_key, PG_MAX_IDENT)
 }
 
 /// Compute a 7-char hex hash of a string using FNV-1a 64-bit.
@@ -463,6 +470,77 @@ mod tests {
         let via_key = reg.table_name_lookup_from_dot_key(&dot_key);
 
         assert_eq!(via_path, via_key);
+    }
+
+    // --- PG_TABLE_MAX_IDENT budget: all derived identifiers must fit in 63 chars ---
+
+    #[test]
+    fn table_name_max_fits_pk_constraint() {
+        // pk_{name} must be <= 63: budget is 60 chars for name
+        let mut reg = NamingRegistry::new();
+        // Use a path that produces a long name (> 53 chars without the fix)
+        let path: Vec<String> = vec![
+            "openfoodfacts_products_images".to_string(),
+            "selected_nutrition_new_lc_sizes".to_string(),
+        ];
+        let name = reg.table_name(&path);
+        assert!(
+            format!("pk_{}", name).len() <= 63,
+            "pk_{} is {} chars (> 63)", name, format!("pk_{}", name).len()
+        );
+    }
+
+    #[test]
+    fn table_name_max_fits_fk_constraint() {
+        // fk_{name}_parent must be <= 63: budget is 53 chars for name (most restrictive)
+        let mut reg = NamingRegistry::new();
+        let path: Vec<String> = vec![
+            "openfoodfacts_products_images".to_string(),
+            "selected_nutrition_new_lc_sizes".to_string(),
+        ];
+        let name = reg.table_name(&path);
+        assert!(
+            format!("fk_{}_parent", name).len() <= 63,
+            "fk_{}_parent is {} chars (> 63)", name, format!("fk_{}_parent", name).len()
+        );
+    }
+
+    #[test]
+    fn table_name_max_fits_j2s_id_column() {
+        // j2s_{name}_id must be <= 63: budget is 56 chars for name
+        let mut reg = NamingRegistry::new();
+        let path: Vec<String> = vec![
+            "openfoodfacts_products_images".to_string(),
+            "selected_nutrition_new_lc_sizes".to_string(),
+        ];
+        let name = reg.table_name(&path);
+        assert!(
+            format!("j2s_{}_id", name).len() <= 63,
+            "j2s_{}_id is {} chars (> 63)", name, format!("j2s_{}_id", name).len()
+        );
+    }
+
+    #[test]
+    fn table_name_fits_pg_table_budget() {
+        // All table names must be <= PG_TABLE_MAX_IDENT (53)
+        let mut reg = NamingRegistry::new();
+        let path: Vec<String> = vec![
+            "openfoodfacts_products_images".to_string(),
+            "selected_nutrition_new_lc_sizes".to_string(),
+        ];
+        let name = reg.table_name(&path);
+        assert!(
+            name.len() <= PG_TABLE_MAX_IDENT,
+            "table name '{}' is {} chars (> {})", name, name.len(), PG_TABLE_MAX_IDENT
+        );
+    }
+
+    #[test]
+    fn short_table_name_unchanged_by_tighter_budget() {
+        // Names already within 53 chars must not be modified
+        let mut reg = NamingRegistry::new();
+        let name = reg.table_name(&["users".to_string(), "orders".to_string()]);
+        assert_eq!(name, "users_orders");
     }
 
     #[test]

@@ -56,7 +56,7 @@ pub async fn create_tables(
                 .find(|c| c.is_parent_fk)
                 .map(|c| c.name.as_str())
                 .unwrap_or("j2s_parent_id");
-            let constraint_name = trunc_constraint_name(&format!("fk_{}_parent", schema.name));
+            let constraint_name = format!("fk_{}_parent", schema.name);
             let fk_sql = format!(
                 "DO $$ BEGIN \
                     ALTER TABLE {schema_q}.{table_q} \
@@ -100,10 +100,11 @@ pub fn generate_create_table(schema: &TableSchema, pg_schema: &str, drop_existin
         ));
     }
 
-    // Primary key constraint
+    // Primary key constraint — name is guaranteed ≤ 63 chars because NamingRegistry
+    // caps table names at PG_TABLE_MAX_IDENT (53): "pk_" (3) + 53 = 56 ≤ 63.
     col_defs.push(format!(
         "    CONSTRAINT {} PRIMARY KEY (j2s_id)",
-        quote_ident(&trunc_constraint_name(&format!("pk_{}", schema.name)))
+        quote_ident(&format!("pk_{}", schema.name))
     ));
 
     format!(
@@ -132,7 +133,7 @@ pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
 
     col_defs.push(format!(
         "    CONSTRAINT {} PRIMARY KEY (j2s_id)",
-        quote_ident(&trunc_constraint_name(&format!("pk_{}", schema.name)))
+        quote_ident(&format!("pk_{}", schema.name))
     ));
 
     if let Some(ref parent_name) = schema.parent_table {
@@ -144,7 +145,7 @@ pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
             .unwrap_or("j2s_parent_id");
         col_defs.push(format!(
             "    CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}.{} (j2s_id)",
-            quote_ident(&trunc_constraint_name(&format!("fk_{}_parent", schema.name))),
+            quote_ident(&format!("fk_{}_parent", schema.name)),
             quote_ident(fk_col),
             quote_ident(pg_schema),
             quote_ident(parent_name),
@@ -162,26 +163,6 @@ pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
 /// Quote a PostgreSQL identifier with double quotes, escaping internal quotes.
 pub fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
-}
-
-/// Ensure a constraint name fits within PostgreSQL's 63-byte NAMEDATALEN limit.
-/// If the name is too long, keep a 54-char prefix and append a FNV-1a hash suffix
-/// so that distinct long names never collide after truncation.
-fn trunc_constraint_name(name: &str) -> String {
-    if name.len() <= 63 {
-        return name.to_string();
-    }
-    let hash = fnv1a_32(name);
-    format!("{}_{:08x}", &name[..54], hash)
-}
-
-fn fnv1a_32(s: &str) -> u32 {
-    let mut h: u32 = 2_166_136_261;
-    for b in s.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(16_777_619);
-    }
-    h
 }
 
 // ---------------------------------------------------------------------------
@@ -227,35 +208,5 @@ mod tests {
     fn test_quote_ident() {
         assert_eq!(quote_ident("users"), "\"users\"");
         assert_eq!(quote_ident("my\"table"), "\"my\"\"table\"");
-    }
-
-    #[test]
-    fn trunc_constraint_name_short_unchanged() {
-        let name = "pk_users";
-        assert_eq!(trunc_constraint_name(name), name);
-    }
-
-    #[test]
-    fn trunc_constraint_name_exactly_63_unchanged() {
-        let name = "a".repeat(63);
-        assert_eq!(trunc_constraint_name(&name), name);
-    }
-
-    #[test]
-    fn trunc_constraint_name_long_fits_in_63() {
-        let name = "a".repeat(64);
-        let result = trunc_constraint_name(&name);
-        assert_eq!(result.len(), 63);
-    }
-
-    #[test]
-    fn trunc_constraint_name_collision_openfoodfacts() {
-        // These two real tables from OpenFoodFacts both produced the same 63-char PK name
-        // when PostgreSQL silently truncated the identifier.
-        let a = "pk_openfoodfacts_products_images_selected_nutrition_new_lc_sizes";
-        let b = "pk_openfoodfacts_products_images_selected_nutrition_new_lc_sizes_num";
-        assert_ne!(trunc_constraint_name(a), trunc_constraint_name(b));
-        assert!(trunc_constraint_name(a).len() <= 63);
-        assert!(trunc_constraint_name(b).len() <= 63);
     }
 }
