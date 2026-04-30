@@ -1,0 +1,1110 @@
+┌─ openfoodfacts_products (98 columns)
+│  id_ca5e613                     VARCHAR(16)
+│  allergens                      VARCHAR(9)
+│  allergens_from_ingredients     VARCHAR(1)
+│  allergens_from_user            VARCHAR(15)
+│  allergens_lc                   VARCHAR(3)
+│  brands                         VARCHAR(9)
+│  brands_lc                      VARCHAR(3)
+│  brands_old                     VARCHAR(9)
+│  categories                     VARCHAR(233)
+│  categories_lc                  VARCHAR(3)
+│  categories_old                 VARCHAR(240)
+│  code                           VARCHAR(16)
+│  compared_to_category           VARCHAR(36)
+│  complete                       INTEGER
+│  completeness                   DOUBLE PRECISION
+│  countries                      VARCHAR(8)
+│  countries_lc                   VARCHAR(3)
+│  created_t                      INTEGER
+│  creator                        VARCHAR(9)
+│  data_sources                   VARCHAR(20)
+│  emb_codes                      VARCHAR(1)
+│  emb_codes_orig                 VARCHAR(1)
+│  environmental_score_grade      VARCHAR(2)
+│  environmental_score_score      INTEGER
+│  expiration_date                DATE
+│  food_groups                    VARCHAR(11)
+│  generic_name                   VARCHAR(1)
+│  generic_name_fr                VARCHAR(1)
+│  id_55c3ac0                     VARCHAR(16)
+│  ingredients_text               VARCHAR(1)
+│  ingredients_text_debug         VARCHAR(1)
+│  ingredients_text_fr            VARCHAR(1)
+│  ingredients_text_with_allergens_fr VARCHAR(1)
+│  interface_version_created      VARCHAR(16)
+│  interface_version_modified     VARCHAR(10)
+│  labels                         VARCHAR(38)
+│  labels_lc                      VARCHAR(3)
+│  labels_old                     VARCHAR(39)
+│  lang                           VARCHAR(3)
+│  last_editor                    VARCHAR(21)
+│  last_image_t                   INTEGER
+│  last_modified_by               VARCHAR(21)
+│  last_modified_t                INTEGER
+│  last_updated_t                 INTEGER
+│  lc                             VARCHAR(3)
+│  link                           VARCHAR(1)
+│  manufacturing_places           VARCHAR(1)
+│  max_imgid                      VARCHAR(2)
+│  no_nutrition_data              VARCHAR(1)
+│  nova_group_debug               VARCHAR(68)
+│  nova_group_error               VARCHAR(23)
+│  nutriscore_grade               VARCHAR(2)
+│  nutriscore_score               INTEGER
+│  nutriscore_score_opposite      INTEGER
+│  nutriscore_version             VARCHAR(5)
+│  nutrition_data                 VARCHAR(3)
+│  nutrition_data_per             VARCHAR(5)
+│  nutrition_data_prepared        VARCHAR(1)
+│  nutrition_data_prepared_per    VARCHAR(5)
+│  nutrition_grade_fr             VARCHAR(2)
+│  nutrition_grades               VARCHAR(2)
+│  nutrition_score_beverage       INTEGER
+│  nutrition_score_debug          VARCHAR(1)
+│  nutrition_score_warning_fruits_vegetables_nuts_estimate INTEGER
+│  nutrition_score_warning_no_fiber INTEGER
+│  origin                         VARCHAR(1)
+│  origin_fr                      VARCHAR(1)
+│  origins                        VARCHAR(1)
+│  origins_lc                     VARCHAR(3)
+│  origins_old                    VARCHAR(1)
+│  packaging                      VARCHAR(1)
+│  packaging_lc                   VARCHAR(3)
+│  packaging_old                  VARCHAR(1)
+│  packaging_text                 VARCHAR(1)
+│  packaging_text_fr              VARCHAR(1)
+│  packagings_complete            INTEGER
+│  packagings_n                   INTEGER
+│  pnns_groups_1                  VARCHAR(16)
+│  pnns_groups_2                  VARCHAR(8)
+│  popularity_key                 INTEGER
+│  product_name                   VARCHAR(63)
+│  product_name_fr                VARCHAR(63)
+│  product_quantity               VARCHAR(4)
+│  product_quantity_unit          VARCHAR(2)
+│  product_type                   VARCHAR(5)
+│  purchase_places                VARCHAR(1)
+│  quantity                       VARCHAR(6)
+│  rev                            INTEGER
+│  scans_n                        INTEGER
+│  schema_version                 INTEGER
+│  states                         TEXT
+│  stores                         VARCHAR(1)
+│  traces                         VARCHAR(1)
+│  traces_from_ingredients        VARCHAR(1)
+│  traces_from_user               VARCHAR(6)
+│  traces_lc                      VARCHAR(3)
+│  unique_scans_n                 INTEGER
+│  update_key                     VARCHAR(8)
+
+┌─ openfoodfacts_products_keywords (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(17)
+
+┌─ openfoodfacts_products_allergens_hierarchy (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(9)
+
+┌─ openfoodfacts_products_allergens_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(9)
+
+┌─ openfoodfacts_products_brands_hierarchy (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(12)
+
+┌─ openfoodfacts_products_brands_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(12)
+
+┌─ openfoodfacts_products_categories_hierarchy (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(36)
+
+┌─ openfoodfacts_products_categories_properties (3 columns)
+│  parent: openfoodfacts_products
+│  agribalyse_food_code_en        VARCHAR(6)
+│  agribalyse_proxy_food_code_en  VARCHAR(6)
+│  ciqual_food_code_en            VARCHAR(6)
+
+┌─ openfoodfacts_products_categories_properties_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(39)
+
+┌─ openfoodfacts_products_categories_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(36)
+
+┌─ openfoodfacts_products_category_properties (1 columns)
+│  parent: openfoodfacts_products
+│  ciqual_food_name_en            VARCHAR(38)
+
+┌─ openfoodfacts_products_ciqual_food_name_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(38)
+
+┌─ openfoodfacts_products_codes_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(24)
+
+┌─ openfoodfacts_products_correctors_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(32)
+
+┌─ openfoodfacts_products_countries_hierarchy (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(11)
+
+┌─ openfoodfacts_products_countries_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(11)
+
+┌─ openfoodfacts_products_data_quality_info_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(59)
+
+┌─ openfoodfacts_products_data_quality_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(93)
+
+┌─ openfoodfacts_products_data_quality_warnings_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(93)
+
+┌─ openfoodfacts_products_data_sources_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(10)
+
+┌─ openfoodfacts_products_debug_param_sorted_langs (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(3)
+
+┌─ openfoodfacts_products_ecoscore_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(2)
+
+┌─ openfoodfacts_products_editors_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(71)
+
+┌─ openfoodfacts_products_entry_dates_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(12)
+
+┌─ openfoodfacts_products_environmental_score_data (4 columns)
+│  parent: openfoodfacts_products
+│  grade                          VARCHAR(2)
+│  missing_data_warning           INTEGER
+│  score                          INTEGER
+│  status                         VARCHAR(6)
+
+┌─ openfoodfacts_products_environmental_score_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(2)
+
+┌─ openfoodfacts_products_food_groups_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(20)
+
+┌─ openfoodfacts_products_images (0 columns)
+│  parent: openfoodfacts_products
+
+┌─ openfoodfacts_products_informers_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(71)
+
+┌─ openfoodfacts_products_labels_hierarchy (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(17)
+
+┌─ openfoodfacts_products_labels_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(17)
+
+┌─ openfoodfacts_products_languages (1 columns)
+│  parent: openfoodfacts_products
+│  en_french                      INTEGER
+
+┌─ openfoodfacts_products_languages_codes (1 columns)
+│  parent: openfoodfacts_products
+│  fr                             INTEGER
+
+┌─ openfoodfacts_products_languages_hierarchy (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(11)
+
+┌─ openfoodfacts_products_languages_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(11)
+
+┌─ openfoodfacts_products_last_edit_dates_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(12)
+
+┌─ openfoodfacts_products_last_image_dates_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(12)
+
+┌─ openfoodfacts_products_misc_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(57)
+
+┌─ openfoodfacts_products_nova_groups_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(9)
+
+┌─ openfoodfacts_products_nutrient_levels (4 columns)
+│  parent: openfoodfacts_products
+│  fat                            VARCHAR(5)
+│  salt                           VARCHAR(4)
+│  saturated_fat                  VARCHAR(5)
+│  sugars                         VARCHAR(5)
+
+┌─ openfoodfacts_products_nutrient_levels_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(40)
+
+┌─ openfoodfacts_products_nutriments (51 columns)
+│  parent: openfoodfacts_products
+│  carbohydrates                  INTEGER
+│  carbohydrates_100g             INTEGER
+│  carbohydrates_unit             VARCHAR(2)
+│  carbohydrates_value            INTEGER
+│  cocoa                          DOUBLE PRECISION
+│  cocoa_100g                     DOUBLE PRECISION
+│  cocoa_label                    VARCHAR(2)
+│  cocoa_serving                  DOUBLE PRECISION
+│  cocoa_unit                     VARCHAR(2)
+│  cocoa_value                    DOUBLE PRECISION
+│  energy                         INTEGER
+│  energy_kcal                    INTEGER
+│  energy_kcal_100g               INTEGER
+│  energy_kcal_unit               VARCHAR(5)
+│  energy_kcal_value              INTEGER
+│  energy_kcal_value_computed     INTEGER
+│  energy_100g                    INTEGER
+│  energy_unit                    VARCHAR(5)
+│  energy_value                   INTEGER
+│  fat                            INTEGER
+│  fat_100g                       INTEGER
+│  fat_unit                       VARCHAR(2)
+│  fat_value                      INTEGER
+│  fruits_vegetables_nuts_estimate INTEGER
+│  fruits_vegetables_nuts_estimate_100g INTEGER
+│  fruits_vegetables_nuts_estimate_label VARCHAR(2)
+│  fruits_vegetables_nuts_estimate_serving INTEGER
+│  fruits_vegetables_nuts_estimate_unit VARCHAR(2)
+│  fruits_vegetables_nuts_estimate_value INTEGER
+│  nutrition_score_fr             INTEGER
+│  nutrition_score_fr_100g        INTEGER
+│  proteins                       INTEGER
+│  proteins_100g                  INTEGER
+│  proteins_unit                  VARCHAR(2)
+│  proteins_value                 INTEGER
+│  salt                           DOUBLE PRECISION
+│  salt_100g                      DOUBLE PRECISION
+│  salt_unit                      VARCHAR(2)
+│  salt_value                     DOUBLE PRECISION
+│  saturated_fat                  INTEGER
+│  saturated_fat_100g             INTEGER
+│  saturated_fat_unit             VARCHAR(2)
+│  saturated_fat_value            INTEGER
+│  sodium                         DOUBLE PRECISION
+│  sodium_100g                    DOUBLE PRECISION
+│  sodium_unit                    VARCHAR(2)
+│  sodium_value                   DOUBLE PRECISION
+│  sugars                         INTEGER
+│  sugars_100g                    INTEGER
+│  sugars_unit                    VARCHAR(2)
+│  sugars_value                   INTEGER
+
+┌─ openfoodfacts_products_nutriscore (0 columns)
+│  parent: openfoodfacts_products
+
+┌─ openfoodfacts_products_nutriscore_2021_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(2)
+
+┌─ openfoodfacts_products_nutriscore_2023_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(2)
+
+┌─ openfoodfacts_products_nutriscore_data (13 columns)
+│  parent: openfoodfacts_products
+│  count_proteins                 INTEGER
+│  count_proteins_reason          VARCHAR(52)
+│  grade                          VARCHAR(2)
+│  is_beverage                    INTEGER
+│  is_cheese                      INTEGER
+│  is_fat_oil_nuts_seeds          INTEGER
+│  is_red_meat_product            INTEGER
+│  is_water                       INTEGER
+│  negative_points                INTEGER
+│  negative_points_max            INTEGER
+│  positive_points                INTEGER
+│  positive_points_max            INTEGER
+│  score                          INTEGER
+
+┌─ openfoodfacts_products_nutriscore_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(2)
+
+┌─ openfoodfacts_products_nutrition_grades_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(2)
+
+┌─ openfoodfacts_products_packaging_materials_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(10)
+
+┌─ openfoodfacts_products_packaging_recycling_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(30)
+
+┌─ openfoodfacts_products_packaging_shapes_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(8)
+
+┌─ openfoodfacts_products_packagings (6 columns)
+│  parent: openfoodfacts_products
+│  food_contact                   INTEGER
+│  material                       VARCHAR(10)
+│  number_of_units                INTEGER
+│  recycling                      VARCHAR(30)
+│  shape                          VARCHAR(8)
+│  quantity_per_unit              VARCHAR(4)
+
+┌─ openfoodfacts_products_packagings_materials (0 columns)
+│  parent: openfoodfacts_products
+
+┌─ openfoodfacts_products_photographers_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(9)
+
+┌─ openfoodfacts_products_pnns_groups_1_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(16)
+
+┌─ openfoodfacts_products_pnns_groups_2_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(8)
+
+┌─ openfoodfacts_products_popularity_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(30)
+
+┌─ openfoodfacts_products_states_hierarchy (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(41)
+
+┌─ openfoodfacts_products_states_tags (1 columns)
+│  parent: openfoodfacts_products
+│  value                          VARCHAR(41)
+
+┌─ openfoodfacts_products_packagings_materials_all (0 columns)
+│  parent: openfoodfacts_products_packagings_materials
+
+┌─ openfoodfacts_products_packagings_materials_en_glass (0 columns)
+│  parent: openfoodfacts_products_packagings_materials
+
+┌─ openfoodfacts_products_packagings_materials_en_metal (0 columns)
+│  parent: openfoodfacts_products_packagings_materials
+
+┌─ openfoodfacts_products_nutriscore_data_components (0 columns)
+│  parent: openfoodfacts_products_nutriscore_data
+
+┌─ openfoodfacts_products_nutriscore_data_positive_nutrients (1 columns)
+│  parent: openfoodfacts_products_nutriscore_data
+│  value                          VARCHAR(30)
+
+┌─ openfoodfacts_products_nutriscore_2021 (6 columns)
+│  parent: openfoodfacts_products_nutriscore
+│  category_available             INTEGER
+│  grade                          VARCHAR(2)
+│  nutrients_available            INTEGER
+│  nutriscore_applicable          INTEGER
+│  nutriscore_computed            INTEGER
+│  score                          INTEGER
+
+┌─ openfoodfacts_products_nutriscore_2023 (6 columns)
+│  parent: openfoodfacts_products_nutriscore
+│  category_available             INTEGER
+│  grade                          VARCHAR(2)
+│  nutrients_available            INTEGER
+│  nutriscore_applicable          INTEGER
+│  nutriscore_computed            INTEGER
+│  score                          INTEGER
+
+┌─ openfoodfacts_products_images_selected (0 columns)
+│  parent: openfoodfacts_products_images
+
+┌─ openfoodfacts_products_images_uploaded (0 columns)
+│  parent: openfoodfacts_products_images
+
+┌─ openfoodfacts_products_environmental_score_data_adjustments (0 columns)
+│  parent: openfoodfacts_products_environmental_score_data
+
+┌─ openfoodfacts_products_environmental_score_data_agribalyse (23 columns)
+│  parent: openfoodfacts_products_environmental_score_data
+│  agribalyse_food_code           VARCHAR(6)
+│  agribalyse_proxy_food_code     VARCHAR(6)
+│  co2_agriculture                DOUBLE PRECISION
+│  co2_consumption                INTEGER
+│  co2_distribution               DOUBLE PRECISION
+│  co2_packaging                  DOUBLE PRECISION
+│  co2_processing                 DOUBLE PRECISION
+│  co2_total                      DOUBLE PRECISION
+│  co2_transportation             DOUBLE PRECISION
+│  code                           VARCHAR(6)
+│  dqr                            VARCHAR(5)
+│  ef_agriculture                 DOUBLE PRECISION
+│  ef_consumption                 INTEGER
+│  ef_distribution                DOUBLE PRECISION
+│  ef_packaging                   DOUBLE PRECISION
+│  ef_processing                  DOUBLE PRECISION
+│  ef_total                       DOUBLE PRECISION
+│  ef_transportation              DOUBLE PRECISION
+│  is_beverage                    INTEGER
+│  name_en                        VARCHAR(38)
+│  name_fr                        VARCHAR(46)
+│  score                          INTEGER
+│  version                        VARCHAR(6)
+
+┌─ openfoodfacts_products_environmental_score_data_grades (63 columns)
+│  parent: openfoodfacts_products_environmental_score_data
+│  ad                             VARCHAR(2)
+│  al                             VARCHAR(2)
+│  at                             VARCHAR(2)
+│  ax                             VARCHAR(2)
+│  ba                             VARCHAR(2)
+│  be                             VARCHAR(2)
+│  bg                             VARCHAR(2)
+│  ch                             VARCHAR(2)
+│  cy                             VARCHAR(2)
+│  cz                             VARCHAR(2)
+│  de                             VARCHAR(2)
+│  dk                             VARCHAR(2)
+│  dz                             VARCHAR(2)
+│  ee                             VARCHAR(2)
+│  eg                             VARCHAR(2)
+│  es                             VARCHAR(2)
+│  fi                             VARCHAR(2)
+│  fo                             VARCHAR(2)
+│  fr                             VARCHAR(2)
+│  gg                             VARCHAR(2)
+│  gi                             VARCHAR(2)
+│  gr                             VARCHAR(2)
+│  hr                             VARCHAR(2)
+│  hu                             VARCHAR(2)
+│  ie                             VARCHAR(2)
+│  il                             VARCHAR(2)
+│  im                             VARCHAR(2)
+│  is                             VARCHAR(2)
+│  it                             VARCHAR(2)
+│  je                             VARCHAR(2)
+│  lb                             VARCHAR(2)
+│  li                             VARCHAR(2)
+│  lt                             VARCHAR(2)
+│  lu                             VARCHAR(2)
+│  lv                             VARCHAR(2)
+│  ly                             VARCHAR(2)
+│  ma                             VARCHAR(2)
+│  mc                             VARCHAR(2)
+│  md                             VARCHAR(2)
+│  me                             VARCHAR(2)
+│  mk                             VARCHAR(2)
+│  mt                             VARCHAR(2)
+│  nl                             VARCHAR(2)
+│  no                             VARCHAR(2)
+│  pl                             VARCHAR(2)
+│  ps                             VARCHAR(2)
+│  pt                             VARCHAR(2)
+│  ro                             VARCHAR(2)
+│  rs                             VARCHAR(2)
+│  se                             VARCHAR(2)
+│  si                             VARCHAR(2)
+│  sj                             VARCHAR(2)
+│  sk                             VARCHAR(2)
+│  sm                             VARCHAR(2)
+│  sy                             VARCHAR(2)
+│  tn                             VARCHAR(2)
+│  tr                             VARCHAR(2)
+│  ua                             VARCHAR(2)
+│  uk                             VARCHAR(2)
+│  us                             VARCHAR(2)
+│  va                             VARCHAR(2)
+│  world                          VARCHAR(2)
+│  xk                             VARCHAR(2)
+
+┌─ openfoodfacts_products_environmental_score_data_missing (4 columns)
+│  parent: openfoodfacts_products_environmental_score_data
+│  ingredients                    INTEGER
+│  labels                         INTEGER
+│  origins                        INTEGER
+│  packagings                     INTEGER
+
+┌─ openfoodfacts_products_environmental_score_data_scores (63 columns)
+│  parent: openfoodfacts_products_environmental_score_data
+│  ad                             INTEGER
+│  al                             INTEGER
+│  at                             INTEGER
+│  ax                             INTEGER
+│  ba                             INTEGER
+│  be                             INTEGER
+│  bg                             INTEGER
+│  ch                             INTEGER
+│  cy                             INTEGER
+│  cz                             INTEGER
+│  de                             INTEGER
+│  dk                             INTEGER
+│  dz                             INTEGER
+│  ee                             INTEGER
+│  eg                             INTEGER
+│  es                             INTEGER
+│  fi                             INTEGER
+│  fo                             INTEGER
+│  fr                             INTEGER
+│  gg                             INTEGER
+│  gi                             INTEGER
+│  gr                             INTEGER
+│  hr                             INTEGER
+│  hu                             INTEGER
+│  ie                             INTEGER
+│  il                             INTEGER
+│  im                             INTEGER
+│  is                             INTEGER
+│  it                             INTEGER
+│  je                             INTEGER
+│  lb                             INTEGER
+│  li                             INTEGER
+│  lt                             INTEGER
+│  lu                             INTEGER
+│  lv                             INTEGER
+│  ly                             INTEGER
+│  ma                             INTEGER
+│  mc                             INTEGER
+│  md                             INTEGER
+│  me                             INTEGER
+│  mk                             INTEGER
+│  mt                             INTEGER
+│  nl                             INTEGER
+│  no                             INTEGER
+│  pl                             INTEGER
+│  ps                             INTEGER
+│  pt                             INTEGER
+│  ro                             INTEGER
+│  rs                             INTEGER
+│  se                             INTEGER
+│  si                             INTEGER
+│  sj                             INTEGER
+│  sk                             INTEGER
+│  sm                             INTEGER
+│  sy                             INTEGER
+│  tn                             INTEGER
+│  tr                             INTEGER
+│  ua                             INTEGER
+│  uk                             INTEGER
+│  us                             INTEGER
+│  va                             INTEGER
+│  world                          INTEGER
+│  xk                             INTEGER
+
+┌─ openfoodfacts_products_nutriscore_data_components_negative (5 columns)
+│  parent: openfoodfacts_products_nutriscore_data_components
+│  id                             VARCHAR(16)
+│  points                         INTEGER
+│  points_max                     INTEGER
+│  unit                           VARCHAR(3)
+│  value                          DOUBLE PRECISION
+
+┌─ openfoodfacts_products_nutriscore_data_components_positive (5 columns)
+│  parent: openfoodfacts_products_nutriscore_data_components
+│  id                             VARCHAR(30)
+│  points                         INTEGER
+│  points_max                     INTEGER
+│  unit                           VARCHAR(2)
+│  value                          TEXT
+
+┌─ openfoodfacts_products_nutriscore_2023_data (11 columns)
+│  parent: openfoodfacts_products_nutriscore_2023
+│  count_proteins                 INTEGER
+│  count_proteins_reason          VARCHAR(52)
+│  is_beverage                    INTEGER
+│  is_cheese                      INTEGER
+│  is_fat_oil_nuts_seeds          INTEGER
+│  is_red_meat_product            INTEGER
+│  is_water                       INTEGER
+│  negative_points                INTEGER
+│  negative_points_max            INTEGER
+│  positive_points                INTEGER
+│  positive_points_max            INTEGER
+
+┌─ openfoodfacts_products_nutriscore_2021_data (27 columns)
+│  parent: openfoodfacts_products_nutriscore_2021
+│  energy                         INTEGER
+│  energy_points                  INTEGER
+│  energy_value                   INTEGER
+│  fiber                          INTEGER
+│  fiber_points                   INTEGER
+│  fiber_value                    INTEGER
+│  fruits_vegetables_nuts_colza_walnut_olive_oils INTEGER
+│  fruits_vegetables_nuts_colza_walnut_olive_oils_points INTEGER
+│  fruits_vegetables_nuts_colza_walnut_olive_oils_value INTEGER
+│  is_beverage                    INTEGER
+│  is_cheese                      INTEGER
+│  is_fat                         INTEGER
+│  is_water                       INTEGER
+│  negative_points                INTEGER
+│  positive_points                INTEGER
+│  proteins                       INTEGER
+│  proteins_points                INTEGER
+│  proteins_value                 INTEGER
+│  saturated_fat                  INTEGER
+│  saturated_fat_points           INTEGER
+│  saturated_fat_value            INTEGER
+│  sodium                         INTEGER
+│  sodium_points                  INTEGER
+│  sodium_value                   INTEGER
+│  sugars                         INTEGER
+│  sugars_points                  INTEGER
+│  sugars_value                   INTEGER
+
+┌─ openfoodfacts_products_images_uploaded_1 (2 columns)
+│  parent: openfoodfacts_products_images_uploaded
+│  uploaded_t                     VARCHAR(12)
+│  uploader                       VARCHAR(9)
+
+┌─ openfoodfacts_products_images_uploaded_2 (2 columns)
+│  parent: openfoodfacts_products_images_uploaded
+│  uploaded_t                     VARCHAR(12)
+│  uploader                       VARCHAR(9)
+
+┌─ openfoodfacts_products_images_uploaded_3 (2 columns)
+│  parent: openfoodfacts_products_images_uploaded
+│  uploaded_t                     INTEGER
+│  uploader                       VARCHAR(9)
+
+┌─ openfoodfacts_products_images_selected_front (0 columns)
+│  parent: openfoodfacts_products_images_selected
+
+┌─ openfoodfacts_products_images_selected_ingredients (0 columns)
+│  parent: openfoodfacts_products_images_selected
+
+┌─ openfoodfacts_products_images_selected_nutrition (0 columns)
+│  parent: openfoodfacts_products_images_selected
+
+┌─ openfoodfacts_products_environmental_score_data_adjustm_769aed9 (3 columns)
+│  parent: openfoodfacts_products_environmental_score_data_adjustments
+│  epi_score                      INTEGER
+│  epi_value                      INTEGER
+│  warning                        VARCHAR(38)
+
+┌─ openfoodfacts_products_environmental_score_data_adjustm_e8272aa (4 columns)
+│  parent: openfoodfacts_products_environmental_score_data_adjustments
+│  non_recyclable_and_non_biodegradable_materials INTEGER
+│  score                          INTEGER
+│  value                          INTEGER
+│  warning                        VARCHAR(17)
+
+┌─ openfoodfacts_products_environmental_score_data_adjustm_719af08 (2 columns)
+│  parent: openfoodfacts_products_environmental_score_data_adjustments
+│  value                          INTEGER
+│  warning                        VARCHAR(10)
+
+┌─ openfoodfacts_products_environmental_score_data_adjustm_299dd24 (1 columns)
+│  parent: openfoodfacts_products_environmental_score_data_adjustments
+│  warning                        VARCHAR(23)
+
+┌─ openfoodfacts_products_nutriscore_2023_data_components (0 columns)
+│  parent: openfoodfacts_products_nutriscore_2023_data
+
+┌─ openfoodfacts_products_nutriscore_2023_data_positive_nutrients (1 columns)
+│  parent: openfoodfacts_products_nutriscore_2023_data
+│  value                          VARCHAR(30)
+
+┌─ openfoodfacts_products_images_uploaded_3_sizes (0 columns)
+│  parent: openfoodfacts_products_images_uploaded_3
+
+┌─ openfoodfacts_products_images_uploaded_2_sizes (0 columns)
+│  parent: openfoodfacts_products_images_uploaded_2
+
+┌─ openfoodfacts_products_images_uploaded_1_sizes (0 columns)
+│  parent: openfoodfacts_products_images_uploaded_1
+
+┌─ openfoodfacts_products_images_selected_nutrition_fr (2 columns)
+│  parent: openfoodfacts_products_images_selected_nutrition
+│  imgid                          VARCHAR(2)
+│  rev                            VARCHAR(3)
+
+┌─ openfoodfacts_products_images_selected_ingredients_fr (2 columns)
+│  parent: openfoodfacts_products_images_selected_ingredients
+│  imgid                          VARCHAR(2)
+│  rev                            VARCHAR(3)
+
+┌─ openfoodfacts_products_images_selected_front_fr (2 columns)
+│  parent: openfoodfacts_products_images_selected_front
+│  imgid                          VARCHAR(2)
+│  rev                            VARCHAR(2)
+
+┌─ openfoodfacts_products_environmental_score_data_adjustm_fe859ac (8 columns)
+│  parent: openfoodfacts_products_environmental_score_data_adjustm_e8272aa
+│  environmental_score_material_score INTEGER
+│  environmental_score_shape_ratio DOUBLE PRECISION
+│  food_contact                   INTEGER
+│  material                       VARCHAR(10)
+│  number_of_units                INTEGER
+│  recycling                      VARCHAR(30)
+│  shape                          VARCHAR(8)
+│  quantity_per_unit              VARCHAR(4)
+
+┌─ openfoodfacts_products_environmental_score_data_adjustm_fe9baf0 (2 columns)
+│  parent: openfoodfacts_products_environmental_score_data_adjustm_769aed9
+│  origin                         VARCHAR(12)
+│  percent                        INTEGER
+
+┌─ openfoodfacts_products_environmental_score_data_adjustm_1b3d27a (1 columns)
+│  parent: openfoodfacts_products_environmental_score_data_adjustm_769aed9
+│  value                          VARCHAR(12)
+
+┌─ openfoodfacts_products_environmental_score_data_adjustm_4ea6f3a (1 columns)
+│  parent: openfoodfacts_products_environmental_score_data_adjustm_769aed9
+│  value                          VARCHAR(12)
+
+┌─ openfoodfacts_products_environmental_score_data_adjustm_db9ed27 (63 columns)
+│  parent: openfoodfacts_products_environmental_score_data_adjustm_769aed9
+│  ad                             INTEGER
+│  al                             INTEGER
+│  at                             INTEGER
+│  ax                             INTEGER
+│  ba                             INTEGER
+│  be                             INTEGER
+│  bg                             INTEGER
+│  ch                             INTEGER
+│  cy                             INTEGER
+│  cz                             INTEGER
+│  de                             INTEGER
+│  dk                             INTEGER
+│  dz                             INTEGER
+│  ee                             INTEGER
+│  eg                             INTEGER
+│  es                             INTEGER
+│  fi                             INTEGER
+│  fo                             INTEGER
+│  fr                             INTEGER
+│  gg                             INTEGER
+│  gi                             INTEGER
+│  gr                             INTEGER
+│  hr                             INTEGER
+│  hu                             INTEGER
+│  ie                             INTEGER
+│  il                             INTEGER
+│  im                             INTEGER
+│  is                             INTEGER
+│  it                             INTEGER
+│  je                             INTEGER
+│  lb                             INTEGER
+│  li                             INTEGER
+│  lt                             INTEGER
+│  lu                             INTEGER
+│  lv                             INTEGER
+│  ly                             INTEGER
+│  ma                             INTEGER
+│  mc                             INTEGER
+│  md                             INTEGER
+│  me                             INTEGER
+│  mk                             INTEGER
+│  mt                             INTEGER
+│  nl                             INTEGER
+│  no                             INTEGER
+│  pl                             INTEGER
+│  ps                             INTEGER
+│  pt                             INTEGER
+│  ro                             INTEGER
+│  rs                             INTEGER
+│  se                             INTEGER
+│  si                             INTEGER
+│  sj                             INTEGER
+│  sk                             INTEGER
+│  sm                             INTEGER
+│  sy                             INTEGER
+│  tn                             INTEGER
+│  tr                             INTEGER
+│  ua                             INTEGER
+│  uk                             INTEGER
+│  us                             INTEGER
+│  va                             INTEGER
+│  world                          INTEGER
+│  xk                             INTEGER
+
+┌─ openfoodfacts_products_environmental_score_data_adjustm_b502d4a (63 columns)
+│  parent: openfoodfacts_products_environmental_score_data_adjustm_769aed9
+│  ad                             INTEGER
+│  al                             INTEGER
+│  at                             INTEGER
+│  ax                             INTEGER
+│  ba                             INTEGER
+│  be                             INTEGER
+│  bg                             INTEGER
+│  ch                             INTEGER
+│  cy                             INTEGER
+│  cz                             INTEGER
+│  de                             INTEGER
+│  dk                             INTEGER
+│  dz                             INTEGER
+│  ee                             INTEGER
+│  eg                             INTEGER
+│  es                             INTEGER
+│  fi                             INTEGER
+│  fo                             INTEGER
+│  fr                             INTEGER
+│  gg                             INTEGER
+│  gi                             INTEGER
+│  gr                             INTEGER
+│  hr                             INTEGER
+│  hu                             INTEGER
+│  ie                             INTEGER
+│  il                             INTEGER
+│  im                             INTEGER
+│  is                             INTEGER
+│  it                             INTEGER
+│  je                             INTEGER
+│  lb                             INTEGER
+│  li                             INTEGER
+│  lt                             INTEGER
+│  lu                             INTEGER
+│  lv                             INTEGER
+│  ly                             INTEGER
+│  ma                             INTEGER
+│  mc                             INTEGER
+│  md                             INTEGER
+│  me                             INTEGER
+│  mk                             INTEGER
+│  mt                             INTEGER
+│  nl                             INTEGER
+│  no                             INTEGER
+│  pl                             INTEGER
+│  ps                             INTEGER
+│  pt                             INTEGER
+│  ro                             INTEGER
+│  rs                             INTEGER
+│  se                             INTEGER
+│  si                             INTEGER
+│  sj                             INTEGER
+│  sk                             INTEGER
+│  sm                             INTEGER
+│  sy                             INTEGER
+│  tn                             INTEGER
+│  tr                             INTEGER
+│  ua                             INTEGER
+│  uk                             INTEGER
+│  us                             INTEGER
+│  va                             INTEGER
+│  world                          INTEGER
+│  xk                             INTEGER
+
+┌─ openfoodfacts_products_environmental_score_data_adjustm_746d96b (63 columns)
+│  parent: openfoodfacts_products_environmental_score_data_adjustm_769aed9
+│  ad                             INTEGER
+│  al                             INTEGER
+│  at                             INTEGER
+│  ax                             INTEGER
+│  ba                             INTEGER
+│  be                             INTEGER
+│  bg                             INTEGER
+│  ch                             INTEGER
+│  cy                             INTEGER
+│  cz                             INTEGER
+│  de                             INTEGER
+│  dk                             INTEGER
+│  dz                             INTEGER
+│  ee                             INTEGER
+│  eg                             INTEGER
+│  es                             INTEGER
+│  fi                             INTEGER
+│  fo                             INTEGER
+│  fr                             INTEGER
+│  gg                             INTEGER
+│  gi                             INTEGER
+│  gr                             INTEGER
+│  hr                             INTEGER
+│  hu                             INTEGER
+│  ie                             INTEGER
+│  il                             INTEGER
+│  im                             INTEGER
+│  is                             INTEGER
+│  it                             INTEGER
+│  je                             INTEGER
+│  lb                             INTEGER
+│  li                             INTEGER
+│  lt                             INTEGER
+│  lu                             INTEGER
+│  lv                             INTEGER
+│  ly                             INTEGER
+│  ma                             INTEGER
+│  mc                             INTEGER
+│  md                             INTEGER
+│  me                             INTEGER
+│  mk                             INTEGER
+│  mt                             INTEGER
+│  nl                             INTEGER
+│  no                             INTEGER
+│  pl                             INTEGER
+│  ps                             INTEGER
+│  pt                             INTEGER
+│  ro                             INTEGER
+│  rs                             INTEGER
+│  se                             INTEGER
+│  si                             INTEGER
+│  sj                             INTEGER
+│  sk                             INTEGER
+│  sm                             INTEGER
+│  sy                             INTEGER
+│  tn                             INTEGER
+│  tr                             INTEGER
+│  ua                             INTEGER
+│  uk                             INTEGER
+│  us                             INTEGER
+│  va                             INTEGER
+│  world                          INTEGER
+│  xk                             INTEGER
+
+┌─ openfoodfacts_products_nutriscore_2023_data_components_negative (5 columns)
+│  parent: openfoodfacts_products_nutriscore_2023_data_components
+│  id                             VARCHAR(16)
+│  points                         INTEGER
+│  points_max                     INTEGER
+│  unit                           VARCHAR(3)
+│  value                          DOUBLE PRECISION
+
+┌─ openfoodfacts_products_nutriscore_2023_data_components_positive (5 columns)
+│  parent: openfoodfacts_products_nutriscore_2023_data_components
+│  id                             VARCHAR(30)
+│  points                         INTEGER
+│  points_max                     INTEGER
+│  unit                           VARCHAR(2)
+│  value                          TEXT
+
+┌─ openfoodfacts_products_images_uploaded_3_sizes_100 (2 columns)
+│  parent: openfoodfacts_products_images_uploaded_3_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_uploaded_3_sizes_400 (2 columns)
+│  parent: openfoodfacts_products_images_uploaded_3_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_uploaded_3_sizes_full (2 columns)
+│  parent: openfoodfacts_products_images_uploaded_3_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_uploaded_2_sizes_100 (2 columns)
+│  parent: openfoodfacts_products_images_uploaded_2_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_uploaded_2_sizes_400 (2 columns)
+│  parent: openfoodfacts_products_images_uploaded_2_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_uploaded_2_sizes_full (2 columns)
+│  parent: openfoodfacts_products_images_uploaded_2_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_uploaded_1_sizes_100 (2 columns)
+│  parent: openfoodfacts_products_images_uploaded_1_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_uploaded_1_sizes_400 (2 columns)
+│  parent: openfoodfacts_products_images_uploaded_1_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_uploaded_1_sizes_full (2 columns)
+│  parent: openfoodfacts_products_images_uploaded_1_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_nutrition_fr_sizes (0 columns)
+│  parent: openfoodfacts_products_images_selected_nutrition_fr
+
+┌─ openfoodfacts_products_images_selected_ingredients_fr_g_e9cb4dc (6 columns)
+│  parent: openfoodfacts_products_images_selected_ingredients_fr
+│  angle                          INTEGER
+│  coordinates_image_size         VARCHAR(4)
+│  x1                             INTEGER
+│  x2                             INTEGER
+│  y1                             INTEGER
+│  y2                             INTEGER
+
+┌─ openfoodfacts_products_images_selected_ingredients_fr_sizes (0 columns)
+│  parent: openfoodfacts_products_images_selected_ingredients_fr
+
+┌─ openfoodfacts_products_images_selected_front_fr_sizes (0 columns)
+│  parent: openfoodfacts_products_images_selected_front_fr
+
+┌─ openfoodfacts_products_images_selected_nutrition_fr_sizes_100 (2 columns)
+│  parent: openfoodfacts_products_images_selected_nutrition_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_nutrition_fr_sizes_200 (2 columns)
+│  parent: openfoodfacts_products_images_selected_nutrition_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_nutrition_fr_sizes_400 (2 columns)
+│  parent: openfoodfacts_products_images_selected_nutrition_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_nutrition_fr_sizes_full (2 columns)
+│  parent: openfoodfacts_products_images_selected_nutrition_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_ingredients_fr_sizes_100 (2 columns)
+│  parent: openfoodfacts_products_images_selected_ingredients_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_ingredients_fr_sizes_200 (2 columns)
+│  parent: openfoodfacts_products_images_selected_ingredients_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_ingredients_fr_sizes_400 (2 columns)
+│  parent: openfoodfacts_products_images_selected_ingredients_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_ingredients_fr_s_bd049eb (2 columns)
+│  parent: openfoodfacts_products_images_selected_ingredients_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_front_fr_sizes_100 (2 columns)
+│  parent: openfoodfacts_products_images_selected_front_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_front_fr_sizes_200 (2 columns)
+│  parent: openfoodfacts_products_images_selected_front_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_front_fr_sizes_400 (2 columns)
+│  parent: openfoodfacts_products_images_selected_front_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+
+┌─ openfoodfacts_products_images_selected_front_fr_sizes_full (2 columns)
+│  parent: openfoodfacts_products_images_selected_front_fr_sizes
+│  h                              INTEGER
+│  w                              INTEGER
+

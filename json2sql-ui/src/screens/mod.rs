@@ -21,7 +21,13 @@ pub enum PickResult {
 /// Run zenity with the given args.
 pub async fn run_zenity(args: Vec<String>) -> PickResult {
     let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("zenity").args(&args).output()
+        // Force X11 backend so zenity uses XWayland instead of connecting to the
+        // Wayland compositor directly. Without this, zenity's Wayland connection
+        // teardown disrupts the parent process's compositor session on exit.
+        std::process::Command::new("zenity")
+            .env("GDK_BACKEND", "x11")
+            .args(&args)
+            .output()
     })
     .await;
 

@@ -1,4 +1,6 @@
-use std::io::{BufWriter, Write};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
 
 use bytes::Bytes;
 use futures_util::SinkExt;
@@ -27,6 +29,10 @@ pub const COPY_DELIMITER: u8 = b'\t';
 /// triggers a preventive flush of all active sinks to recycle file descriptors.
 /// Chosen conservatively below the typical ulimit of 1024.
 pub const MAX_OPEN_TEMP_FILES: usize = 950;
+
+/// Row data accumulates in memory up to this size before being spilled to disk.
+/// Large batches amortize the syscall overhead of write() and open()/close().
+const SPILL_THRESHOLD: usize = 256 * 1024;
 
 // ---------------------------------------------------------------------------
 // Row builder
@@ -63,7 +69,6 @@ impl RowBuilder {
     }
 
     /// Write a UUID column directly into the COPY buffer without a heap allocation.
-    /// UUIDs are always 36 bytes; we format into a stack array then extend the buffer.
     #[inline]
     pub fn push_uuid(&mut self, uuid: Uuid) {
         if !self.first {
@@ -89,24 +94,52 @@ impl Default for RowBuilder {
 }
 
 // ---------------------------------------------------------------------------
+// TempFilePath — owns the temp file path and deletes it on drop
+// ---------------------------------------------------------------------------
+
+struct TempFilePath(PathBuf);
+
+impl Drop for TempFilePath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TempFileSink
 // ---------------------------------------------------------------------------
 
-/// Buffers rows for one table to a temp file during pass 2.
-/// After streaming is done, `copy_to_db` sends the file to PostgreSQL via COPY.
-/// `flush_to_db` can be called periodically to stream data incrementally and
-/// keep temp file sizes bounded.
+/// Buffers rows for one table during Pass 2, then COPYs them to PostgreSQL.
 ///
-/// The temp file is opened lazily on the first `write_row` call so that tables
-/// that receive no rows consume no file descriptors.
+/// # Memory vs. disk buffering
+///
+/// Rows accumulate in an in-memory `pending` buffer. When `pending` exceeds
+/// [`SPILL_THRESHOLD`], the data is flushed to a temp file (a "spill") and the
+/// buffer is cleared. This batches disk writes to large, efficient chunks.
+///
+/// # Hibernation
+///
+/// `hibernate()` closes the open file descriptor (if any) **without flushing
+/// `pending`**. In-memory data survives the hibernation intact. The FD is
+/// reopened on the next spill. This makes hibernation cheap — just a
+/// `close()` syscall — regardless of how many rows are buffered.
+///
+/// This design avoids flushing small BufWriter buffers on every insert, which
+/// was the bottleneck in the previous implementation.
 pub struct TempFileSink {
     pub table_name: String,
     /// Rows buffered since the last flush (or since creation).
     pub row_count: u64,
-    /// Total rows sent to PG across all periodic flushes (not counting unflushed rows).
+    /// Total rows sent to PG across all periodic flushes.
     pub total_flushed: u64,
-    /// None until the first write_row — avoids opening O(n_tables) fds upfront.
-    writer: Option<BufWriter<NamedTempFile>>,
+    /// In-memory row data. Survives hibernation. Spilled to disk when it grows
+    /// past SPILL_THRESHOLD.
+    pending: Vec<u8>,
+    /// Raw file descriptor. Open only while a spill is in progress.
+    /// None = FD released (hibernated or no spill yet).
+    writer: Option<File>,
+    /// Keeps the temp file alive between spills. None until the first spill.
+    temp_file: Option<TempFilePath>,
     copy_sql: String,
 }
 
@@ -129,54 +162,107 @@ impl TempFileSink {
             table_name: schema.name.clone(),
             row_count: 0,
             total_flushed: 0,
+            pending: Vec::new(),
             writer: None,
+            temp_file: None,
             copy_sql,
         })
     }
 
-    /// Returns true if this sink currently has an open temp file (fd in use).
+    /// Returns true when a temp-file FD is currently held open (i.e. a spill
+    /// is in progress or has just completed and hibernate has not been called).
     pub fn is_open(&self) -> bool {
         self.writer.is_some()
     }
 
-    /// Open the temp file on the first write. Subsequent calls are a no-op.
-    fn ensure_writer(&mut self) -> Result<&mut BufWriter<NamedTempFile>> {
+    /// Close the open file descriptor without touching the in-memory `pending`
+    /// buffer. This is cheap: a single `close()` syscall regardless of how
+    /// many rows are buffered. Data in `pending` is preserved for the next write.
+    ///
+    /// No-op when no FD is held.
+    pub fn hibernate(&mut self) -> Result<()> {
+        self.writer = None; // drop File → close FD; pending stays in memory
+        Ok(())
+    }
+
+    /// Open (or reopen) the temp file for appending.
+    fn ensure_file(&mut self) -> Result<&mut File> {
         if self.writer.is_none() {
-            let temp = NamedTempFile::new().map_err(J2sError::Io)?;
-            self.writer = Some(BufWriter::with_capacity(256 * 1024, temp));
+            let file = if let Some(ref guard) = self.temp_file {
+                OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .open(&guard.0)
+                    .map_err(J2sError::Io)?
+            } else {
+                let tmp = NamedTempFile::new().map_err(J2sError::Io)?;
+                let (file, path) = tmp
+                    .keep()
+                    .map_err(|e| J2sError::Io(std::io::Error::other(e)))?;
+                self.temp_file = Some(TempFilePath(path));
+                file
+            };
+            self.writer = Some(file);
         }
         Ok(self.writer.as_mut().unwrap())
     }
 
-    pub fn write_row(&mut self, row: Vec<u8>) -> Result<()> {
-        self.ensure_writer()?.write_all(&row).map_err(J2sError::Io)?;
-        self.row_count += 1;
+    /// Write all of `pending` to the temp file and clear the buffer.
+    /// The file FD stays open after the spill for the next spill.
+    fn spill(&mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        // mem::take satisfies the borrow checker: ensure_file borrows &mut self,
+        // so we extract pending first. On write failure the data is lost, but
+        // an I/O error on a temp file is already fatal to the import.
+        let data = std::mem::take(&mut self.pending);
+        let file = self.ensure_file()?;
+        file.write_all(&data).map_err(J2sError::Io)?;
         Ok(())
     }
 
-    /// Flush currently buffered rows to PostgreSQL, then reset the temp file for
-    /// continued use. The `row_count` is added to `total_flushed` and reset to 0.
-    /// This bounds temp-file disk usage when called periodically during Pass 2.
+    pub fn write_row(&mut self, row: Vec<u8>) -> Result<()> {
+        self.pending.extend_from_slice(&row);
+        self.row_count += 1;
+        if self.pending.len() >= SPILL_THRESHOLD {
+            self.spill()?;
+        }
+        Ok(())
+    }
+
+    /// Send all buffered rows to PostgreSQL, then reset the sink for reuse.
+    /// Data may be split between the temp file (previous spills) and `pending`
+    /// (rows accumulated since the last spill).
     pub async fn flush_to_db(&mut self, client: &Client) -> Result<u64> {
         if self.row_count == 0 {
             return Ok(0);
         }
 
-        let writer = self.writer.as_mut().expect("writer must exist when row_count > 0");
+        // Close the FD before reading (no flush needed — pending is separate).
+        self.writer = None;
 
-        // Drain BufWriter's internal buffer to the underlying file.
-        writer.flush().map_err(J2sError::Io)?;
+        // Collect on-disk data.
+        let file_data = if let Some(ref guard) = self.temp_file {
+            tokio::fs::read(&guard.0).await.map_err(J2sError::Io)?
+        } else {
+            Vec::new()
+        };
 
-        let path = writer.get_ref().path().to_path_buf();
-        let data = tokio::fs::read(&path).await.map_err(J2sError::Io)?;
-
-        if !data.is_empty() {
+        let has_data = !file_data.is_empty() || !self.pending.is_empty();
+        if has_data {
             let sink = client
                 .copy_in::<_, Bytes>(&self.copy_sql)
                 .await
                 .map_err(|e| pg_err(&format!("COPY INTO {}", self.table_name), e))?;
             let mut pinned = Box::pin(sink);
-            for chunk in data.chunks(1024 * 1024) {
+            for chunk in file_data.chunks(1024 * 1024) {
+                pinned
+                    .send(Bytes::copy_from_slice(chunk))
+                    .await
+                    .map_err(|e| pg_err(&format!("COPY send {}", self.table_name), e))?;
+            }
+            for chunk in self.pending.chunks(1024 * 1024) {
                 pinned
                     .send(Bytes::copy_from_slice(chunk))
                     .await
@@ -188,11 +274,15 @@ impl TempFileSink {
                 .map_err(|e| pg_err(&format!("COPY close {}", self.table_name), e))?;
         }
 
-        // Drop the writer so the NamedTempFile is deleted and the fd is released
-        // immediately. The next write_row call will open a fresh temp file via
-        // ensure_writer(), keeping peak fd usage bounded to tables active since
-        // the last flush rather than all tables that have ever received a row.
-        self.writer = None;
+        // Truncate the on-disk file for reuse; clear the in-memory buffer.
+        if let Some(ref guard) = self.temp_file {
+            OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&guard.0)
+                .map_err(J2sError::Io)?;
+        }
+        self.pending.clear();
 
         let flushed = self.row_count;
         self.total_flushed += flushed;
@@ -200,58 +290,149 @@ impl TempFileSink {
         Ok(flushed)
     }
 
-    /// Flush the remaining temp file rows and stream them into PostgreSQL via COPY FROM STDIN.
-    /// Returns the total number of rows sent across all flushes (periodic + this final call).
+    /// Flush all remaining rows to PostgreSQL.
+    /// Returns total rows sent (periodic flushes + this final call).
     pub async fn copy_to_db(self, client: &Client) -> Result<u64> {
-        let remaining = self.row_count;
-        let total_flushed = self.total_flushed;
+        // Destructure — TempFileSink has no Drop; TempFilePath (in temp_file) does.
+        let TempFileSink {
+            row_count,
+            total_flushed,
+            pending,
+            writer,
+            temp_file,
+            copy_sql,
+            table_name,
+        } = self;
 
-        let Some(mut writer) = self.writer else {
-            // No rows ever written — nothing to COPY.
+        if row_count == 0 {
             return Ok(total_flushed);
+        }
+
+        // Close FD if open (no flush needed — pending is the source of truth).
+        drop(writer);
+
+        // Read on-disk data (from previous spills).
+        let file_data = if let Some(ref guard) = temp_file {
+            tokio::fs::read(&guard.0).await.map_err(J2sError::Io)?
+        } else {
+            Vec::new()
         };
 
-        writer.flush().map_err(J2sError::Io)?;
-        let temp_file = writer
-            .into_inner()
-            .map_err(|e| J2sError::Io(e.into_error()))?;
-
-        let data = tokio::fs::read(temp_file.path())
-            .await
-            .map_err(J2sError::Io)?;
-
-        // NamedTempFile deletes itself on drop
+        // Delete the temp file before starting the COPY.
         drop(temp_file);
 
-        if !data.is_empty() {
-            // Open the COPY session.
+        let has_data = !file_data.is_empty() || !pending.is_empty();
+        if has_data {
             let sink = client
-                .copy_in::<_, Bytes>(&self.copy_sql)
+                .copy_in::<_, Bytes>(&copy_sql)
                 .await
-                .map_err(|e| pg_err(&format!("COPY INTO {}", self.table_name), e))?;
-
-            // CopyInSink<T> is !Unpin (uses PhantomPinned as an API marker).
-            // Pin<Box<T>>: Unpin because Box<T>: Unpin regardless of T, so
-            // SinkExt::send (which requires Self: Unpin) is callable on it.
+                .map_err(|e| pg_err(&format!("COPY INTO {}", table_name), e))?;
             let mut pinned = Box::pin(sink);
-
-            for chunk in data.chunks(1024 * 1024) {
+            for chunk in file_data.chunks(1024 * 1024) {
                 pinned
                     .send(Bytes::copy_from_slice(chunk))
                     .await
-                    .map_err(|e| pg_err(&format!("COPY send {}", self.table_name), e))?;
+                    .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
             }
-
-            // `finish()` on CopyInSink takes `self` and returns the server row count.
-            // Since we track row_count ourselves, we use `close()` (via SinkExt)
-            // which sends the COPY terminator and waits for CommandComplete.
-            // Pin<Box<T>>: Unpin (Box: Unpin regardless of T), so close() is callable.
+            for chunk in pending.chunks(1024 * 1024) {
+                pinned
+                    .send(Bytes::copy_from_slice(chunk))
+                    .await
+                    .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+            }
             pinned
                 .close()
                 .await
-                .map_err(|e| pg_err(&format!("COPY close {}", self.table_name), e))?;
+                .map_err(|e| pg_err(&format!("COPY close {}", table_name), e))?;
         }
 
-        Ok(total_flushed + remaining)
+        Ok(total_flushed + row_count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::table_schema::{ColumnSchema, TableSchema};
+    use crate::schema::type_tracker::PgType;
+
+    fn make_sink() -> TempFileSink {
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        schema.columns.push(ColumnSchema {
+            name: "col".to_string(),
+            original_name: "col".to_string(),
+            pg_type: PgType::Text,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
+        });
+        TempFileSink::new(&schema, "public").unwrap()
+    }
+
+    /// Returns true if any /proc/self/fd/N symlink resolves to `path`.
+    #[cfg(target_os = "linux")]
+    fn fd_points_to(path: &std::path::Path) -> bool {
+        let Ok(fds) = std::fs::read_dir("/proc/self/fd") else {
+            return false;
+        };
+        fds.flatten()
+            .any(|e| std::fs::read_link(e.path()).map_or(false, |t| t == path))
+    }
+
+    /// Small writes (below SPILL_THRESHOLD) must not open any file descriptor.
+    #[test]
+    fn no_fd_below_spill_threshold() {
+        let mut sink = make_sink();
+        sink.write_row(b"row\n".to_vec()).unwrap();
+        assert!(!sink.is_open(), "no FD should be opened below spill threshold");
+        assert!(sink.temp_file.is_none(), "no temp file should be created below threshold");
+    }
+
+    /// Data written across multiple writes and hibernations must all end up in
+    /// `pending` (when no spill has occurred).
+    #[test]
+    fn write_after_hibernate_appends() {
+        let mut sink = make_sink();
+
+        sink.write_row(b"row1\n".to_vec()).unwrap();
+        sink.hibernate().unwrap();
+        sink.write_row(b"row2\n".to_vec()).unwrap();
+        sink.hibernate().unwrap();
+
+        assert_eq!(sink.row_count, 2);
+        assert_eq!(&sink.pending, b"row1\nrow2\n");
+        assert!(!sink.is_open(), "no FD after hibernate");
+    }
+
+    /// After a spill, hibernate must close the file descriptor.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hibernate_releases_fd_after_spill() {
+        let mut sink = make_sink();
+        // Write enough to trigger a spill.
+        let row = vec![b'x'; SPILL_THRESHOLD + 1];
+        sink.write_row(row).unwrap();
+
+        let path = sink.temp_file.as_ref().unwrap().0.clone();
+        assert!(fd_points_to(&path), "FD should be open after spill");
+
+        sink.hibernate().unwrap();
+        assert!(!fd_points_to(&path), "FD must be closed after hibernate");
+        // pending is empty (was spilled), but temp_file still exists.
+        assert!(sink.pending.is_empty());
+    }
+
+    /// is_open() must be false after hibernation.
+    #[test]
+    fn is_open_false_after_hibernate() {
+        let mut sink = make_sink();
+
+        // Force a spill to open a FD.
+        let row = vec![b'y'; SPILL_THRESHOLD + 1];
+        sink.write_row(row).unwrap();
+        assert!(sink.is_open());
+
+        sink.hibernate().unwrap();
+        assert!(!sink.is_open());
     }
 }

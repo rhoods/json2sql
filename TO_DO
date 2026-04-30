@@ -1,0 +1,8 @@
+il faut modifier la pass2:
+
+plus de creation de pk et fk au départ. les uuid sont générées côté client donc pas de doublons ou autre.
+ --> on peut faire du multi-threading pour la pass2, et faire les insertions en parallèle.
+
+ revoir la structure de la pass2 pour faire les insertions en parallèle, et faire les flushs périodiques pour éviter les problèmes de mémoire.
+ le sémaphore pour les flushs périodiques doit être partagé entre les threads, et il doit être déclenché lorsque la mémoire utilisée dépasse un certain seuil.
+ le round-robin pour les flushs périodiques doit être implémenté pour éviter les conflits entre les threads.

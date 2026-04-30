@@ -105,6 +105,13 @@ pub async fn run(
             Vec::with_capacity(parallel);
         let mut worker_handles = Vec::with_capacity(parallel);
 
+        // FD guard: limit how many workers may run insert_object simultaneously.
+        // Each insert opens at most schemas.len() temp-file FDs. Capping concurrent
+        // inserts ensures peak FDs stay within the OS ulimit regardless of schema size.
+        let n_tables = schemas.len();
+        let max_concurrent = max_concurrent_inserts(n_tables, parallel);
+        let insert_sem = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+
         for _ in 0..parallel {
             let (tx, mut rx) =
                 tokio::sync::mpsc::channel::<serde_json::Map<String, Value>>(CHANNEL_CAP);
@@ -117,10 +124,24 @@ pub async fn run(
             let mut worker_anomalies = AnomalyCollector::new(None);
             let pm = path_map_arc.clone();
             let rs = root_schema_arc.clone();
+            let sem = insert_sem.clone();
 
             let handle = tokio::task::spawn(async move {
                 let mut sinks = worker_sinks;
                 while let Some(obj) = rx.recv().await {
+                    // Try to grab an insert slot without blocking.
+                    // If all slots are taken, hibernate open FDs first (cheap: just
+                    // close(), no write — pending stays in memory) then wait.
+                    let _permit = match sem.try_acquire() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            for sink in sinks.values_mut() {
+                                sink.hibernate()?;
+                            }
+                            sem.acquire().await
+                                .map_err(|_| J2sError::InvalidInput("insert semaphore closed".into()))?
+                        }
+                    };
                     insert_object(
                         &pm,
                         &mut sinks,
@@ -131,6 +152,8 @@ pub async fn run(
                         None,
                         None,
                     )?;
+                    // Permit released here. Open FDs (from spills) persist until
+                    // the next time this worker must wait for a slot.
                 }
                 Ok::<_, J2sError>((sinks, worker_anomalies))
             });
@@ -140,13 +163,16 @@ pub async fn run(
         // Distribute root objects round-robin to workers
         let stream_start = Instant::now();
         let mut robin = 0usize;
-        while let Some(item) = reader.next() {
+        let mut worker_died = false;
+        'dispatch: while let Some(item) = reader.next() {
             let value = item?;
             if let Value::Object(obj) = value {
-                senders[robin]
-                    .send(obj)
-                    .await
-                    .map_err(|_| J2sError::InvalidInput("worker channel closed unexpectedly".into()))?;
+                if senders[robin].send(obj).await.is_err() {
+                    // A worker exited early (likely with an error). Stop dispatching;
+                    // the real error will be collected from the JoinHandle below.
+                    worker_died = true;
+                    break 'dispatch;
+                }
                 rows_processed += 1;
                 robin = (robin + 1) % parallel;
                 if let Some(ref bar) = progress {
@@ -181,21 +207,36 @@ pub async fn run(
         let streaming_ms = stream_start.elapsed().as_millis() as u64;
         eprintln!("Pass 2 streaming done ({parallel} workers). Flushing remaining rows to PostgreSQL...");
 
-        // Collect worker results
+        // Collect worker results — always drain all handles so we surface the real error.
         let mut all_worker_sinks: Vec<HashMap<String, TempFileSink>> =
             Vec::with_capacity(parallel);
         let mut merged_anomalies = AnomalyCollector::new(anomaly_dir);
+        let mut first_worker_error: Option<J2sError> = None;
         for handle in worker_handles {
             match handle.await {
                 Ok(Ok((w_sinks, w_anomalies))) => {
                     all_worker_sinks.push(w_sinks);
                     merged_anomalies.merge(w_anomalies);
                 }
-                Ok(Err(e)) => return Err(e),
+                Ok(Err(e)) => {
+                    if first_worker_error.is_none() {
+                        first_worker_error = Some(e);
+                    }
+                }
                 Err(e) => {
-                    return Err(J2sError::InvalidInput(format!("worker join error: {}", e)))
+                    if first_worker_error.is_none() {
+                        first_worker_error = Some(J2sError::InvalidInput(
+                            format!("worker panic: {}", e),
+                        ));
+                    }
                 }
             }
+        }
+        if let Some(err) = first_worker_error {
+            return Err(err);
+        }
+        if worker_died {
+            return Err(J2sError::InvalidInput("worker channel closed unexpectedly".into()));
         }
 
         // COPY in topological order: ALL workers' sinks for each table before moving to
@@ -305,7 +346,7 @@ pub async fn run(
     let flush_check_interval = if flush_threshold > 0 { (flush_threshold / 100).max(1) } else { 0 };
     let mut flush_check_counter = 0u64;
 
-    const FD_CHECK_INTERVAL: u64 = 10_000;
+    const FD_CHECK_INTERVAL: u64 = 1_000;
     let mut fd_check_counter = 0u64;
 
     let stream_start = Instant::now();
@@ -488,9 +529,22 @@ pub async fn run(
     Ok(Pass2Result { rows_per_table, anomaly_collector: anomalies, timing: Pass2Timing { streaming_ms, copy_ms } })
 }
 
+/// Compute how many workers may execute `insert_object` simultaneously so that
+/// peak open temp-file FDs stay within the OS soft limit.
+///
+/// Each insert can open at most `n_tables` FDs. With `k` concurrent inserts,
+/// the peak is `k × n_tables`. We bound this to `MAX_OPEN_TEMP_FILES - BASELINE_FDS`
+/// to leave headroom for the PG connection, the JSON reader, stdin/stdout/stderr,
+/// and tokio internals.
+fn max_concurrent_inserts(n_tables: usize, parallel: usize) -> usize {
+    const BASELINE_FDS: usize = 32;
+    let safe = MAX_OPEN_TEMP_FILES.saturating_sub(BASELINE_FDS);
+    (safe / n_tables.max(1)).max(1).min(parallel)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Pass2Timing;
+    use super::*;
 
     #[test]
     fn pass2_timing_total_ms_is_sum() {
@@ -502,5 +556,35 @@ mod tests {
     fn pass2_timing_zero() {
         let t = Pass2Timing { streaming_ms: 0, copy_ms: 0 };
         assert_eq!(t.total_ms(), 0);
+    }
+
+    /// The peak FD count (max_concurrent × n_tables) must stay within the safe limit.
+    #[test]
+    fn max_concurrent_peak_fds_within_safe_limit() {
+        for &n_tables in &[1usize, 50, 150, 300, 500] {
+            for &parallel in &[1usize, 4, 8] {
+                let k = max_concurrent_inserts(n_tables, parallel);
+                let peak = k * n_tables;
+                let safe = MAX_OPEN_TEMP_FILES - 32;
+                assert!(
+                    peak <= safe,
+                    "n_tables={n_tables} parallel={parallel}: peak={peak} > safe={safe}"
+                );
+            }
+        }
+    }
+
+    /// At least 1 worker must always be allowed to insert, even with a huge schema.
+    #[test]
+    fn max_concurrent_at_least_one() {
+        assert_eq!(max_concurrent_inserts(10_000, 8), 1);
+        assert_eq!(max_concurrent_inserts(usize::MAX / 2, 4), 1);
+    }
+
+    /// max_concurrent must never exceed the actual number of parallel workers.
+    #[test]
+    fn max_concurrent_never_exceeds_parallel() {
+        assert_eq!(max_concurrent_inserts(1, 8), 8);
+        assert_eq!(max_concurrent_inserts(10, 4), 4);
     }
 }
