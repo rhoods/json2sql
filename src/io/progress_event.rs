@@ -37,6 +37,9 @@ pub enum ProgressEvent {
     Pass2Done {
         total_rows: u64,
         anomaly_count: u64,
+        /// Number of FK constraints that could not be applied after import.
+        /// PK failures are fatal (surfaced as errors); only FK failures appear here.
+        constraint_warning_count: u64,
     },
 }
 

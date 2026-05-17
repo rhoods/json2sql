@@ -82,19 +82,15 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             });
 
             // 2. Create tables (behaviour driven by user's drop_existing choice)
-            ddl::create_tables(&client, &schemas, &pg_schema, drop_existing).await?;
+            ddl::create_tables_no_constraints(&client, &schemas, &pg_schema, drop_existing).await?;
 
-            // 3. Run Pass 2 — parallel COPY sessions per topo level when pass2_parallel > 1.
-            let db_url_str = if pass2_parallel > 1 { Some(pg_url.as_str()) } else { None };
+            // 3. Run Pass 2 — parallel streaming then COPY then constraints.
             json2sql::pass2::runner::run(
                 &source_file,
                 &root_table,
                 &schemas,
                 &client,
                 &pg_schema,
-                100_000,        // flush_threshold
-                false,          // use_transaction
-                db_url_str,
                 pass2_parallel,
                 anomaly_dir,
                 Some(tx),
@@ -225,6 +221,12 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                             p {
                                 style: "color:{theme::SECONDARY};font-weight:600;margin:0 0 8px 0;",
                                 "✓ {total_rows_flushed} rows imported into {table_rows.len()} tables · {progress.total_anomalies} anomalies"
+                            }
+                            if progress.constraint_warning_count > 0 {
+                                p {
+                                    style: "color:{theme::TERTIARY};font-size:0.8125rem;margin:0 0 8px 0;",
+                                    "⚠ {progress.constraint_warning_count} FK constraint(s) could not be applied — see log for details"
+                                }
                             }
                             button {
                                 class: "btn-primary",

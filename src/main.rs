@@ -362,7 +362,7 @@ async fn run(cli: Cli) -> Result<()> {
     // Create tables
     // -------------------------------------------------------------------------
     eprintln!("\nCreating tables in schema '{}'...", cli.schema);
-    db::ddl::create_tables(&client, &pass1.schemas, &cli.schema, cli.drop_existing).await?;
+    db::ddl::create_tables_no_constraints(&client, &pass1.schemas, &cli.schema, cli.drop_existing).await?;
 
     // -------------------------------------------------------------------------
     // Pass 2 — Data insertion
@@ -374,12 +374,9 @@ async fn run(cli: Cli) -> Result<()> {
         &pass1.schemas,
         &client,
         &cli.schema,
-        cli.batch_size,
-        cli.transaction,
-        cli.db_url.as_deref(),
         cli.parallel,
         cli.anomaly_dir.clone(),
-        None, // no IHM channel in CLI mode
+        None,
     )
     .await?;
 

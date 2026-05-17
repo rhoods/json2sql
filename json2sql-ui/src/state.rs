@@ -137,6 +137,8 @@ pub struct Pass2Progress {
     pub log_lines: VecDeque<String>,
     pub done: bool,
     pub total_anomalies: u64,
+    /// FK constraints that failed after import (non-fatal; PK failures are errors).
+    pub constraint_warning_count: u64,
 }
 
 impl Pass2Progress {
@@ -405,13 +407,14 @@ impl AppState {
             Pass2Log(msg) => {
                 self.pass2_progress.push_log(msg);
             }
-            Pass2Done { total_rows, anomaly_count } => {
+            Pass2Done { total_rows, anomaly_count, constraint_warning_count } => {
                 self.pass2_progress.rows_processed = total_rows;
                 self.pass2_progress.total_anomalies = anomaly_count;
+                self.pass2_progress.constraint_warning_count = constraint_warning_count;
                 self.pass2_progress.done = true;
                 self.pass2_progress.push_log(format!(
-                    "Import complete: {} rows, {} anomalies",
-                    total_rows, anomaly_count
+                    "Import complete: {} rows, {} anomalies, {} FK warnings",
+                    total_rows, anomaly_count, constraint_warning_count
                 ));
             }
         }

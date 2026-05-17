@@ -43,9 +43,9 @@ async fn test_pivot_strategy() {
             .map(|c| c.name.clone())
             .expect("products_nutrients must have a parent FK column");
 
-        db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1000, false, None, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
             .await.unwrap();
 
         // Widget:4 + Gadget:4 + Doohickey:3 = 11 paires EAV
@@ -134,7 +134,7 @@ async fn test_jsonb_strategy() {
             .expect("products must have a j2s_id column");
         let products_id_col = "j2s_id";
 
-        db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
         let tables_created: i64 = client
             .query_one(
@@ -144,7 +144,7 @@ async fn test_jsonb_strategy() {
             ).await.unwrap().get("count");
         assert_eq!(tables_created, 2);
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1000, false, None, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
@@ -215,7 +215,7 @@ async fn test_flatten_strategy() {
         assert_eq!(products_schema.data_columns().count(), 5,
             "products doit avoir 5 colonnes de données après flatten (id, name, dims_*)");
 
-        db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
         let dims_absent: i64 = client
             .query_one("SELECT COUNT(*) FROM information_schema.tables \
@@ -223,7 +223,7 @@ async fn test_flatten_strategy() {
             .await.unwrap().get("count");
         assert_eq!(dims_absent, 0, "products_dims ne doit pas être créé");
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1000, false, None, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "products").await, 3);
@@ -279,8 +279,8 @@ async fn test_null_patterns() {
             "tag doit être inféré TEXT/VarChar, obtenu {:?}", tag_col.pg_type
         );
 
-        db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
+        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("people").unwrap(), 4);
@@ -358,9 +358,9 @@ async fn test_structured_pivot_strategy() {
             .map(|c| c.name.clone())
             .expect("products_nutrients must have a parent FK column");
 
-        db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1000, false, None, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
             .await.unwrap();
 
         // Widget:2 + Gadget:2 + Doohickey:1 = 5 lignes
@@ -450,9 +450,9 @@ async fn test_auto_split_strategy() {
         assert!(stable_cols.iter().any(|c| c.original_name == "name"), "colonne name absente");
 
         let schemas = p1.schemas;
-        db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1000, false, None, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(),         5);
@@ -548,7 +548,7 @@ async fn test_keyed_pivot_strategy() {
         assert!(data_cols.iter().any(|c| c.name == "j2s_data"),  "colonne j2s_data JSONB absente");
 
         let schemas = p1.schemas;
-        db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
         // Vérifier que les tables fr/en/de ne sont PAS créées en base
         let sibling_tables: i64 = client.query_one(
@@ -559,7 +559,7 @@ async fn test_keyed_pivot_strategy() {
         ).await.unwrap().get(0);
         assert_eq!(sibling_tables, 0, "tables siblings ne doivent pas être créées");
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1000, false, None, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(),              2);
@@ -656,11 +656,11 @@ async fn test_keyed_pivot_pure_container() {
         );
 
         let schemas = p1.schemas;
-        db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
         let p2 = pass2::runner::run(
             &path, "graph", &schemas, &client, &schema,
-            1000, false, None, 1, None, None,
+            1, None, None,
         ).await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("graph").unwrap(),         2);
@@ -731,9 +731,9 @@ async fn test_normalize_dynamic_keys_strategy() {
         assert!(data_cols.iter().any(|c| c.name == "url"),      "colonne url absente");
         assert!(data_cols.iter().any(|c| c.name == "width"),    "colonne width absente");
 
-        db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1000, false, None, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(),        3);
@@ -799,7 +799,7 @@ async fn test_jsonb_flatten_strategy() {
         assert!(jsonb_col.is_some(), "products doit avoir une colonne products_dims JSONB");
         assert_eq!(jsonb_col.unwrap().pg_type, PgType::Jsonb);
 
-        db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
         let dims_absent: i64 = client
             .query_one("SELECT COUNT(*) FROM information_schema.tables \
@@ -814,7 +814,7 @@ async fn test_jsonb_flatten_strategy() {
             .await.unwrap().get("count");
         assert_eq!(jsonb_col_present, 1, "products doit avoir une colonne products_dims");
 
-        pass2::runner::run(&path, "products", &schemas, &client, &schema, 100_000, false, None, 1, None, None).await.unwrap();
+        pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None).await.unwrap();
 
         // Widget : dims = {"width": 10, "height": 20, "depth": 5}
         let widget = client.query_one(
@@ -891,7 +891,7 @@ async fn test_keyed_pivot_array_strategy() {
         assert!(data_cols.iter().any(|c| c.name == "target"), "colonne target absente");
 
         let schemas = p1.schemas;
-        db::ddl::create_tables(&client, &schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
         // Vérifier que les tables gcf_* ne sont PAS créées en base
         let gcf_tables: i64 = client.query_one(
@@ -903,7 +903,7 @@ async fn test_keyed_pivot_array_strategy() {
 
         let p2 = pass2::runner::run(
             &path, "graph", &schemas, &client, &schema,
-            1000, false, None, 1, None, None,
+            1, None, None,
         ).await.unwrap();
 
         // graph : 2 lignes

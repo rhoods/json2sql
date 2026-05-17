@@ -26,8 +26,8 @@ async fn test_override_type_valid() {
         let config = SchemaConfig::from_file(&common::fixture("override_score.toml")).unwrap();
         apply_overrides(&mut p1.schemas, &config);
 
-        db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
+        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("people").unwrap(), 3);
@@ -97,7 +97,7 @@ async fn test_override_bad() {
             "score doit être INTEGER après override, obtenu {:?}", score_col.pg_type
         );
 
-        db::ddl::create_tables(&client, &p1.schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
 
         // Type DDL réel en base AVANT Pass 2.
         let type_sql = "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) \
@@ -110,7 +110,7 @@ async fn test_override_bad() {
         let pg_type: String = row.get(0);
         assert_eq!(pg_type, "integer", "score doit être INTEGER en base, obtenu: {}", pg_type);
 
-        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1000, false, None, 1, None, None)
+        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1, None, None)
             .await.unwrap();
 
         // rows_per_table = compteur pipeline interne ; row_count = vérité DB via COUNT(*).
