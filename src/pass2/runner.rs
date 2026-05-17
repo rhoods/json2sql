@@ -9,7 +9,8 @@ use tokio_postgres::Client;
 use uuid::Uuid;
 
 use crate::anomaly::collector::AnomalyCollector;
-use crate::db::copy_sink::{TempFileSink, MAX_OPEN_TEMP_FILES};
+use crate::db::copy_sink::{TempFileSink, INTERIM_FLUSH_THRESHOLD, MAX_OPEN_TEMP_FILES};
+use crate::schema::PATH_SEP;
 use crate::db::ddl::{add_constraints, ConstraintWarning};
 use crate::error::{J2sError, Result};
 use crate::io::progress::ProgressTracker;
@@ -94,15 +95,21 @@ pub async fn run(
     let mut rows_processed = 0u64;
     const PROGRESS_INTERVAL: u64 = 1_000;
 
+    let sep = PATH_SEP.to_string();
     let path_map: HashMap<String, TableSchema> =
-        schemas.iter().map(|s| (s.path.join("."), s.clone())).collect();
+        schemas.iter().map(|s| (s.path.join(&sep), s.clone())).collect();
 
     let root_schema = schemas
         .iter()
-        .find(|s| s.path.join(".") == root_table)
+        .find(|s| s.path.join(&sep) == root_table)
         .ok_or_else(|| J2sError::Schema(format!("Root table '{}' not found", root_table)))?;
 
     let table_names: Vec<String> = schemas.iter().map(|s| s.name.clone()).collect();
+
+    // Keyed by table name so workers can create replacement sinks after interim flushes.
+    let schema_by_name: Arc<HashMap<String, TableSchema>> = Arc::new(
+        schemas.iter().map(|s| (s.name.clone(), s.clone())).collect(),
+    );
 
     if let Some(ref dir) = anomaly_dir {
         std::fs::create_dir_all(dir).map_err(J2sError::Io)?;
@@ -133,6 +140,12 @@ pub async fn run(
     // total process FD pressure, not just its own slice.
     let global_open_fds = Arc::new(AtomicUsize::new(0));
 
+    // Interim-flush channel: workers send over-threshold sinks to the main task
+    // for COPY without blocking. Main task drains this with try_recv between
+    // dispatches. Workers replace the sent sink with a fresh empty one.
+    let (flush_tx, mut flush_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, TempFileSink)>();
+
     for _ in 0..parallel {
         let (tx, mut rx) =
             tokio::sync::mpsc::channel::<serde_json::Map<String, Value>>(CHANNEL_CAP);
@@ -146,6 +159,9 @@ pub async fn run(
         let pm = path_map_arc.clone();
         let rs = root_schema_arc.clone();
         let global = Arc::clone(&global_open_fds);
+        let ftx = flush_tx.clone();
+        let sbn = schema_by_name.clone();
+        let pg_schema_owned = pg_schema.to_string();
 
         let handle = tokio::task::spawn(async move {
             let mut sinks = worker_sinks;
@@ -199,6 +215,42 @@ pub async fn run(
                     global_sub(&global, my_open);
                     my_open = 0;
                 }
+
+                // Interim-flush check: if this worker's total buffered bytes exceed
+                // the threshold, hand off the largest sink to the main task for a
+                // COPY and replace it with a fresh empty sink. Non-blocking — the
+                // main task drains flush_rx between dispatches.
+                let total_bytes: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
+                if total_bytes > INTERIM_FLUSH_THRESHOLD {
+                    if let Some(name) = sinks
+                        .iter()
+                        .filter(|(_, s)| s.bytes_buffered > 0)
+                        .max_by_key(|(_, s)| s.bytes_buffered)
+                        .map(|(k, _)| k.clone())
+                    {
+                        if let Some(old_sink) = sinks.remove(&name) {
+                            // Adjust FD tracking before removing the sink.
+                            if old_sink.is_open() {
+                                global_sub(&global, 1);
+                                my_open = my_open.saturating_sub(1);
+                            }
+                            if let Some(schema) = sbn.get(&name) {
+                                match TempFileSink::new(schema, &pg_schema_owned) {
+                                    Ok(new_sink) => {
+                                        let _ = ftx.send((name.clone(), old_sink));
+                                        sinks.insert(name, new_sink);
+                                    }
+                                    Err(_) => {
+                                        // Can't create replacement; put old sink back.
+                                        sinks.insert(name, old_sink);
+                                    }
+                                }
+                            } else {
+                                sinks.insert(name, old_sink);
+                            }
+                        }
+                    }
+                }
             }
 
             // Release this worker's FDs from the global counter on exit.
@@ -207,6 +259,9 @@ pub async fn run(
         });
         worker_handles.push(handle);
     }
+
+    // Drop the main-task's sender clone; only the per-worker clones remain.
+    drop(flush_tx);
 
     let stream_start = Instant::now();
     let mut robin = 0usize;
@@ -233,6 +288,17 @@ pub async fn run(
                     });
                 }
             }
+        }
+        // Drain any interim flush requests sent by workers.
+        while let Ok((table_name, mut sink)) = flush_rx.try_recv() {
+            eprintln!("  Interim flush: {} ({} rows)...", table_name, sink.row_count);
+            if let Some(ref tx) = progress_tx {
+                let _ = tx.send(ProgressEvent::Pass2Log(format!(
+                    "Interim flush {} ({} rows)",
+                    table_name, sink.row_count
+                )));
+            }
+            sink.flush_to_db(client).await?;
         }
     }
     drop(senders);
@@ -283,6 +349,13 @@ pub async fn run(
         return Err(J2sError::InvalidInput(
             "worker channel closed unexpectedly".into(),
         ));
+    }
+
+    // Drain any flush requests that workers sent near end-of-stream but that
+    // the dispatch loop didn't get a chance to process.
+    while let Ok((table_name, mut sink)) = flush_rx.try_recv() {
+        eprintln!("  Post-stream flush: {} ({} rows)...", table_name, sink.row_count);
+        sink.flush_to_db(client).await?;
     }
 
     // -------------------------------------------------------------------------

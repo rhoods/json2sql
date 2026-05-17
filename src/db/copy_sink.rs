@@ -30,6 +30,11 @@ pub const COPY_DELIMITER: u8 = b'\t';
 /// Chosen conservatively below the typical ulimit of 1024.
 pub const MAX_OPEN_TEMP_FILES: usize = 950;
 
+/// Total bytes written to a single worker's sinks that trigger an interim
+/// COPY-to-PostgreSQL flush during Phase B streaming. Keeps per-worker peak
+/// temp-file disk usage bounded instead of accumulating the full source file.
+pub const INTERIM_FLUSH_THRESHOLD: u64 = 512 * 1024 * 1024; // 512 MiB per worker
+
 /// Row data accumulates in memory up to this size before being spilled to disk.
 /// Large batches amortize the syscall overhead of write() and open()/close().
 const SPILL_THRESHOLD: usize = 256 * 1024;
@@ -132,6 +137,9 @@ pub struct TempFileSink {
     pub row_count: u64,
     /// Total rows sent to PG across all periodic flushes.
     pub total_flushed: u64,
+    /// Raw bytes written since the last flush. Used by the runner to decide
+    /// when to trigger an interim COPY to bound per-worker disk usage.
+    pub bytes_buffered: u64,
     /// In-memory row data. Survives hibernation. Spilled to disk when it grows
     /// past SPILL_THRESHOLD.
     pending: Vec<u8>,
@@ -162,6 +170,7 @@ impl TempFileSink {
             table_name: schema.name.clone(),
             row_count: 0,
             total_flushed: 0,
+            bytes_buffered: 0,
             pending: Vec::new(),
             writer: None,
             temp_file: None,
@@ -223,6 +232,7 @@ impl TempFileSink {
     }
 
     pub fn write_row(&mut self, row: Vec<u8>) -> Result<()> {
+        self.bytes_buffered += row.len() as u64;
         self.pending.extend_from_slice(&row);
         self.row_count += 1;
         if self.pending.len() >= SPILL_THRESHOLD {
@@ -287,6 +297,7 @@ impl TempFileSink {
         let flushed = self.row_count;
         self.total_flushed += flushed;
         self.row_count = 0;
+        self.bytes_buffered = 0;
         Ok(flushed)
     }
 
@@ -297,6 +308,7 @@ impl TempFileSink {
         let TempFileSink {
             row_count,
             total_flushed,
+            bytes_buffered: _,
             pending,
             writer,
             temp_file,
@@ -420,6 +432,32 @@ mod tests {
         assert!(!fd_points_to(&path), "FD must be closed after hibernate");
         // pending is empty (was spilled), but temp_file still exists.
         assert!(sink.pending.is_empty());
+    }
+
+    #[test]
+    fn bytes_buffered_tracks_written_data() {
+        let mut sink = make_sink();
+        assert_eq!(sink.bytes_buffered, 0);
+
+        let row1 = b"hello\n".to_vec();
+        let len1 = row1.len() as u64;
+        sink.write_row(row1).unwrap();
+        assert_eq!(sink.bytes_buffered, len1);
+
+        let row2 = b"world\n".to_vec();
+        let len2 = row2.len() as u64;
+        sink.write_row(row2).unwrap();
+        assert_eq!(sink.bytes_buffered, len1 + len2);
+    }
+
+    #[test]
+    fn bytes_buffered_survives_spill() {
+        let mut sink = make_sink();
+        let large_row = vec![b'x'; SPILL_THRESHOLD + 1];
+        let expected = large_row.len() as u64;
+        sink.write_row(large_row).unwrap();
+        assert!(sink.is_open(), "spill should have opened a file");
+        assert_eq!(sink.bytes_buffered, expected, "bytes_buffered must reflect spilled data");
     }
 
     /// is_open() must be false after hibernation.
