@@ -373,6 +373,7 @@ async fn run(cli: Cli) -> Result<()> {
         &root_table,
         &pass1.schemas,
         &client,
+        db_url,
         &cli.schema,
         cli.parallel,
         cli.anomaly_dir.clone(),

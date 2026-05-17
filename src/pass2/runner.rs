@@ -81,6 +81,7 @@ pub async fn run(
     root_table: &str,
     schemas: &[TableSchema],
     client: &Client,
+    pg_url: &str,
     pg_schema: &str,
     parallel: usize,
     anomaly_dir: Option<PathBuf>,
@@ -359,36 +360,77 @@ pub async fn run(
     }
 
     // -------------------------------------------------------------------------
-    // Phase C — COPY temp files to PostgreSQL
-    // No FK constraints are active yet, so table order does not matter.
+    // Phase C — Parallel COPY to PostgreSQL
+    // No FK constraints are active yet so tables are fully independent.
+    // Distribute tables round-robin across `parallel` connections; each
+    // connection runs its COPYs sequentially within its own batch.
     // -------------------------------------------------------------------------
     let copy_start = Instant::now();
-    let mut rows_per_table: HashMap<String, u64> = HashMap::new();
-    for name in &table_names {
-        let mut table_total = 0u64;
-        for worker_sinks in &mut all_worker_sinks {
-            if let Some(sink) = worker_sinks.remove(name) {
-                if sink.row_count > 0 {
-                    if let Some(ref tx) = progress_tx {
-                        let _ = tx.send(ProgressEvent::Pass2Log(format!(
-                            "COPY {} ({} rows, worker)",
-                            name, sink.row_count
-                        )));
+
+    // Build per-connection batches: Vec<(table_name, Vec<TempFileSink>)>
+    let n_conns = parallel.min(table_names.len().max(1));
+    let name_batches = batch_table_names(&table_names, n_conns);
+
+    let mut conn_batches: Vec<Vec<(String, Vec<TempFileSink>)>> =
+        name_batches.into_iter().map(|names| {
+            names.into_iter().map(|name| {
+                let sinks: Vec<TempFileSink> = all_worker_sinks
+                    .iter_mut()
+                    .filter_map(|ws| ws.remove(&name))
+                    .collect();
+                (name, sinks)
+            }).collect()
+        }).collect();
+
+    let mut copy_handles = Vec::with_capacity(n_conns);
+    for batch in conn_batches.drain(..) {
+        let pg_url_owned = pg_url.to_string();
+        let pg_schema_owned = pg_schema.to_string();
+        let ptx = progress_tx.clone();
+        let handle = tokio::task::spawn(async move {
+            use crate::db::connection::connect;
+            let conn = connect(&pg_url_owned).await?;
+            let mut batch_rows: HashMap<String, u64> = HashMap::new();
+            for (table_name, sinks) in batch {
+                let mut table_total = 0u64;
+                for sink in sinks {
+                    if sink.row_count > 0 || sink.total_flushed > 0 {
+                        if let Some(ref tx) = ptx {
+                            let _ = tx.send(ProgressEvent::Pass2Log(format!(
+                                "COPY {} ({} rows)",
+                                table_name, sink.row_count
+                            )));
+                        }
+                        eprintln!("  COPY {} ({} rows)...", table_name, sink.row_count);
+                        let inserted = sink.copy_to_db(&conn).await?;
+                        table_total += inserted;
                     }
-                    eprintln!("  COPY {} ({} rows)...", name, sink.row_count);
-                    let inserted = sink.copy_to_db(client).await?;
-                    table_total += inserted;
+                }
+                batch_rows.insert(table_name, table_total);
+            }
+            Ok::<_, J2sError>(batch_rows)
+        });
+        copy_handles.push(handle);
+    }
+
+    let mut rows_per_table: HashMap<String, u64> = HashMap::new();
+    for handle in copy_handles {
+        match handle.await {
+            Ok(Ok(batch_rows)) => {
+                for (name, count) in batch_rows {
+                    if count > 0 {
+                        if let Some(ref tx) = progress_tx {
+                            let _ = tx.send(ProgressEvent::Pass2Flush {
+                                table_name: name.clone(),
+                                rows_flushed: count,
+                            });
+                        }
+                    }
+                    rows_per_table.insert(name, count);
                 }
             }
-        }
-        rows_per_table.insert(name.clone(), table_total);
-        if table_total > 0 {
-            if let Some(ref tx) = progress_tx {
-                let _ = tx.send(ProgressEvent::Pass2Flush {
-                    table_name: name.clone(),
-                    rows_flushed: table_total,
-                });
-            }
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(J2sError::InvalidInput(format!("COPY task panic: {e}"))),
         }
     }
 
@@ -435,11 +477,22 @@ pub async fn run(
     })
 }
 
+/// Distribute `names` across `n` buckets round-robin.
+/// Used to assign tables to parallel COPY connections in Phase C.
+fn batch_table_names(names: &[String], n: usize) -> Vec<Vec<String>> {
+    let n = n.max(1);
+    let mut batches = vec![Vec::new(); n];
+    for (i, name) in names.iter().enumerate() {
+        batches[i % n].push(name.clone());
+    }
+    batches
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{global_sub, Pass2Timing};
+    use super::{batch_table_names, global_sub, Pass2Timing};
 
     #[test]
     fn pass2_timing_total_ms_is_sum() {
@@ -472,5 +525,41 @@ mod tests {
         let g = AtomicUsize::new(50);
         global_sub(&g, 50);
         assert_eq!(g.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn batch_table_names_distributes_round_robin() {
+        let names: Vec<String> = (0..8).map(|i| format!("t{i}")).collect();
+        let batches = batch_table_names(&names, 3);
+        assert_eq!(batches.len(), 3);
+        // Round-robin: bucket 0 gets t0,t3,t6 ; bucket 1 gets t1,t4,t7 ; bucket 2 gets t2,t5
+        assert_eq!(batches[0], ["t0", "t3", "t6"]);
+        assert_eq!(batches[1], ["t1", "t4", "t7"]);
+        assert_eq!(batches[2], ["t2", "t5"]);
+        let total: usize = batches.iter().map(|b| b.len()).sum();
+        assert_eq!(total, 8);
+    }
+
+    #[test]
+    fn batch_table_names_fewer_tables_than_connections() {
+        let names: Vec<String> = vec!["t0".into(), "t1".into()];
+        let batches = batch_table_names(&names, 8);
+        assert_eq!(batches.len(), 8);
+        let total: usize = batches.iter().map(|b| b.len()).sum();
+        assert_eq!(total, 2, "no tables must be lost");
+        // Each of the first 2 buckets has 1 table; remaining 6 are empty
+        assert_eq!(batches[0], ["t0"]);
+        assert_eq!(batches[1], ["t1"]);
+        for empty in &batches[2..] {
+            assert!(empty.is_empty());
+        }
+    }
+
+    #[test]
+    fn batch_table_names_n_zero_treated_as_one() {
+        let names: Vec<String> = vec!["t0".into(), "t1".into()];
+        let batches = batch_table_names(&names, 0);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0], ["t0", "t1"]);
     }
 }

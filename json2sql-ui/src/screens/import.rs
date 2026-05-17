@@ -90,6 +90,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 &root_table,
                 &schemas,
                 &client,
+                &pg_url,
                 &pg_schema,
                 pass2_parallel,
                 anomaly_dir,
