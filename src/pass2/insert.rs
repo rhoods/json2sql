@@ -8,6 +8,7 @@ use crate::db::copy_sink::{RowBuilder, TempFileSink};
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::error::Result;
 use crate::pass2::coercer::{coerce, CoerceResult};
+use crate::schema::PATH_SEP;
 use crate::schema::table_schema::{ChildKind, SiblingGroup, SiblingSchema, SuffixSchema, TableSchema, WideStrategy};
 
 pub(crate) fn insert_object(
@@ -21,7 +22,7 @@ pub(crate) fn insert_object(
     order: Option<i64>,
 ) -> Result<()> {
     // Pre-compute the parent path key once — reused for every child field lookup below.
-    let parent_path_key = schema.path.join(".");
+    let parent_path_key = schema.path.join(&PATH_SEP.to_string());
 
     // Special case: root table (no parent) with Jsonb strategy set via config override.
     // Write the full object as a JSONB blob, then still recurse into child tables so
@@ -41,7 +42,7 @@ pub(crate) fn insert_object(
         }
         // Recurse into child fields so their tables still get populated.
         for (field, value) in obj {
-            let child_key = format!("{}.{}", parent_path_key, field);
+            let child_key = format!("{}{}{}", parent_path_key, PATH_SEP, field);
             match value {
                 Value::Object(nested) => {
                     if let Some(child_schema) = path_map.get(&child_key) {
@@ -225,7 +226,7 @@ pub(crate) fn insert_object(
 
     // Recurse into child fields
     for (field, value) in obj {
-        let child_key = format!("{}.{}", parent_path_key, field);
+        let child_key = format!("{}{}{}", parent_path_key, PATH_SEP, field);
 
         match value {
             Value::Object(nested) => {
@@ -355,9 +356,9 @@ fn insert_jsonb_object(
 
     // Recurse into children of this JSONB table so they still receive data.
     if let Value::Object(obj) = value {
-        let parent_path_key = schema.path.join(".");
+        let parent_path_key = schema.path.join(&PATH_SEP.to_string());
         for (field, child_value) in obj {
-            let child_key = format!("{}.{}", parent_path_key, field);
+            let child_key = format!("{}{}{}", parent_path_key, PATH_SEP, field);
             match child_value {
                 Value::Object(nested) => {
                     if let Some(child_schema) = path_map.get(&child_key) {
@@ -887,7 +888,7 @@ fn insert_multi_keyed_pivot(
         sink.write_row(rb.finish())?;
     }
 
-    let routing_path = schema.path.join(".");
+    let routing_path = schema.path.join(&PATH_SEP.to_string());
 
     // Build per-group submaps. Keys that have a dedicated child schema (significant
     // container left independent by finalize_siblings) are delegated directly rather
@@ -897,7 +898,7 @@ fn insert_multi_keyed_pivot(
 
     for (key, value) in obj {
         // Check for a dedicated child schema surviving independently in path_map.
-        let child_path_key = format!("{}.{}", routing_path, key);
+        let child_path_key = format!("{}{}{}", routing_path, PATH_SEP, key);
         if let Some(child_schema) = path_map.get(&child_path_key) {
             if child_schema.parent_table.as_deref() == Some(schema.name.as_str()) {
                 if let Value::Object(nested) = value {
@@ -939,7 +940,7 @@ fn insert_multi_keyed_pivot(
             continue;
         }
         let suffix = if group.key_is_numeric { "num" } else { "key" };
-        let pivot_path_key = format!("{}.{}", routing_path, suffix);
+        let pivot_path_key = format!("{}{}{}", routing_path, PATH_SEP, suffix);
         if let Some(pivot_schema) = path_map.get(&pivot_path_key) {
             insert_keyed_pivot_object(
                 path_map, sinks, anomalies, pivot_schema, submap, routing_id, &group.sibling_schema,

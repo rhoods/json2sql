@@ -3,16 +3,17 @@ use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::error::{J2sError, Result};
+use super::PATH_SEP;
 use super::naming::{ColumnCollision, ColumnNameRegistry, NamingRegistry, TruncatedName};
 use super::stats::ColumnStats;
 use super::suffix_detector::detect_suffix_schema;
 use super::table_schema::{ChildKind, ColumnSchema, KeyShape, SiblingSchema, SuffixSchema, TableSchema, WideStrategy};
 use super::type_tracker::{widen_pg_types, InferredType, PgType, TypeTracker};
 
-/// One entry in the registry per table (keyed by dot-joined path).
+/// One entry in the registry per table (keyed by PATH_SEP-joined path).
 #[derive(Debug)]
 struct TableEntry {
-    /// dot-joined path key, e.g. "users.orders.items"
+    /// PATH_SEP-joined path key, e.g. "users\x00orders\x00items"
     path_key: String,
     /// path segments, e.g. ["users", "orders", "items"]
     path: Vec<String>,
@@ -32,7 +33,7 @@ struct TableEntry {
 
 impl TableEntry {
     fn new(path: Vec<String>, parent_key: String, child_kind: Option<ChildKind>) -> Self {
-        let path_key = path.join(".");
+        let path_key = path.join(&PATH_SEP.to_string());
         Self {
             path_key,
             path,
@@ -149,8 +150,7 @@ impl SchemaRegistry {
             for (field, value) in map {
                 match value {
                     Value::Object(nested) => {
-                        let safe_field = if field.contains('.') { field.replace('.', "_") } else { field.to_string() };
-                        let child_key = format!("{}.{}", path_key, safe_field);
+                        let child_key = format!("{}{}{}", path_key, PATH_SEP, field);
                         self.ensure_table_key(&child_key, &path_key, Some(ChildKind::Object));
                         stack.push((child_key, nested));
                     }
@@ -158,8 +158,7 @@ impl SchemaRegistry {
                         if arr.is_empty() {
                             continue;
                         }
-                        let safe_field = if field.contains('.') { field.replace('.', "_") } else { field.to_string() };
-                        let child_key = format!("{}.{}", path_key, safe_field);
+                        let child_key = format!("{}{}{}", path_key, PATH_SEP, field);
                         let first_is_object = arr.iter().any(|v| matches!(v, Value::Object(_)));
 
                         if first_is_object {
@@ -214,10 +213,10 @@ impl SchemaRegistry {
         }
     }
 
-    /// Register a table by its pre-joined dot-key. Only allocates when the table is new.
+    /// Register a table by its pre-joined PATH_SEP key. Only allocates when the table is new.
     fn ensure_table_key(&mut self, key: &str, parent_key: &str, child_kind: Option<ChildKind>) {
         self.tables.entry(key.to_string()).or_insert_with(|| {
-            let path: Vec<String> = key.split('.').map(|s| s.to_string()).collect();
+            let path: Vec<String> = key.split(PATH_SEP).map(|s| s.to_string()).collect();
             TableEntry::new(path, parent_key.to_string(), child_kind)
         });
     }
@@ -276,7 +275,9 @@ impl SchemaRegistry {
         self.column_collisions = all_collisions;
 
         schemas.extend(extra_schemas);
-        schemas.sort_by_key(|s| s.depth);
+        // Secondary sort by name within each depth level ensures schema ordering
+        // is fully deterministic regardless of par_iter() task scheduling order.
+        schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
 
         {
             let mut seen = std::collections::HashSet::new();
@@ -1526,7 +1527,11 @@ fn collect_children_by_key(
     }
     let mut out: Vec<(String, Vec<usize>, bool)> = key_map
         .into_iter()
-        .map(|(k, (v, a))| (k, v, a))
+        .map(|(k, (mut v, a))| {
+            // Sort children by name so sibling[0] is always deterministic.
+            v.sort_by_key(|&i| &schemas[i].name);
+            (k, v, a)
+        })
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -1579,6 +1584,8 @@ fn run_sibling_wave(
 
     // Wave 0: all parents with enough children.
     // Each work item carries (parent_name, child_indices, array_children).
+    // Sort child_indices by schema name so sibling[0] (used as Jaccard reference
+    // in the large-group fast path) is always the alphabetically first child → deterministic.
     let mut work: Vec<(String, Vec<usize>, bool)> = Vec::new();
     for (parent_map, array_children) in [
         (&parent_to_object_children, false),
@@ -1586,10 +1593,13 @@ fn run_sibling_wave(
     ] {
         for (parent_name, child_indices) in parent_map {
             if child_indices.len() >= threshold {
-                work.push((parent_name.clone(), child_indices.clone(), array_children));
+                let mut sorted = child_indices.clone();
+                sorted.sort_by_key(|&i| &schemas[i].name);
+                work.push((parent_name.clone(), sorted, array_children));
             }
         }
     }
+    work.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Helper: build one SubgroupData from a slice of child indices.
     let make_subgroup = |parent_name: &str, indices: &[usize], key_is_numeric: bool, suffix: &str| -> SubgroupData {
@@ -3320,5 +3330,71 @@ mod tests {
 
         let score = child_compatibility_score(&schemas, &[1, 2], &obj_map, &arr_map);
         assert_eq!(score, 1.0, "no shared child keys → compat = 1.0 (unshared keys do not penalise)");
+    }
+
+    // ── Dot-in-key regression tests ──────────────────────────────────────────
+
+    /// A JSON object field named "foo.bar" must NOT be merged with "foo_bar".
+    /// Both are scalar columns → they should be two distinct columns in root.
+    #[test]
+    fn dot_in_scalar_field_distinct_from_underscore() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        reg.observe_root("root", make_root(&json!({"foo.bar": 1, "foo_bar": 2})));
+        let schemas = reg.finalize();
+        let root = schemas.iter().find(|s| s.name == "root").unwrap();
+        assert!(
+            root.find_by_original("foo.bar").is_some(),
+            "column 'foo.bar' must be present in root"
+        );
+        assert!(
+            root.find_by_original("foo_bar").is_some(),
+            "column 'foo_bar' must be present in root"
+        );
+    }
+
+    /// A field "foo.bar" that is an object must NOT be merged with a field
+    /// "foo_bar" that is also an object. They must produce two distinct child
+    /// tables, not one merged table.
+    #[test]
+    fn dot_in_object_field_creates_distinct_child_table() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        reg.observe_root("root", make_root(&json!({"foo.bar": {"baz": 1}})));
+        reg.observe_root("root", make_root(&json!({"foo_bar": {"baz": 2}})));
+        let schemas = reg.finalize();
+        // root + two distinct children = 3 schemas total
+        assert_eq!(
+            schemas.len(), 3,
+            "expected root + 2 distinct child tables, got: {:?}",
+            schemas.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    // ── Sibling determinism ───────────────────────────────────────────────────
+
+    /// Observing siblings in different order must produce the same schema names.
+    /// Catches non-determinism from par_iter() or HashMap iteration in the
+    /// sibling detection pipeline.
+    #[test]
+    fn sibling_detection_schema_names_are_deterministic() {
+        let fields_fwd = ["alpha", "beta", "gamma", "delta", "epsilon"];
+        let fields_rev = ["epsilon", "delta", "gamma", "beta", "alpha"];
+
+        let run = |order: &[&str]| -> Vec<String> {
+            // threshold=3 so 5 siblings triggers detection (≥ 3)
+            let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+            for field in order {
+                reg.observe_root(
+                    "root",
+                    make_root(&json!({ *field: { "value": 1, "name": "x" } })),
+                );
+            }
+            let mut names: Vec<String> = reg.finalize().into_iter().map(|s| s.name).collect();
+            names.sort(); // sort for comparison (depth order may differ by run)
+            names
+        };
+
+        let fwd = run(&fields_fwd);
+        let rev = run(&fields_rev);
+        assert_eq!(fwd, rev, "schema names must be identical regardless of observation order");
     }
 }

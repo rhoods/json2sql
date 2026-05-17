@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use super::PATH_SEP;
+
 /// Maximum PostgreSQL identifier length in bytes.
 const PG_MAX_IDENT: usize = 63;
 /// Maximum length for table names, ensuring all derived identifiers fit within PG_MAX_IDENT.
@@ -128,7 +130,7 @@ impl NamingRegistry {
     /// Convert a hierarchical path (e.g. ["users", "orders", "items"]) to a
     /// safe PostgreSQL table name (<= 63 bytes, lowercase, no special chars).
     pub fn table_name(&mut self, path: &[String]) -> String {
-        let key = path.join(".");
+        let key = path.join(&PATH_SEP.to_string());
         if let Some(cached) = self.cache.get(&key) {
             return cached.clone();
         }
@@ -139,14 +141,14 @@ impl NamingRegistry {
         result
     }
 
-    /// Register and return a safe PostgreSQL table name from a pre-computed dot-joined path key
-    /// (e.g. `"users.orders.items"`). Avoids two `path.join()` allocations compared to
-    /// `table_name(&[String])` — use in hot loops where the dot-key is already available.
+    /// Register and return a safe PostgreSQL table name from a pre-computed PATH_SEP-joined key
+    /// (e.g. `"users\x00orders\x00items"`). Avoids two `path.join()` allocations compared to
+    /// `table_name(&[String])` — use in hot loops where the key is already available.
     pub fn table_name_from_dot_key(&mut self, dot_key: &str) -> String {
         if let Some(cached) = self.cache.get(dot_key) {
             return cached.clone();
         }
-        let joined = dot_key.replace('.', "_");
+        let joined = dot_key.replace(PATH_SEP, "_");
         let sanitized = sanitize_identifier(&joined);
         let result = self.ensure_unique(sanitized, dot_key);
         self.cache.insert(dot_key.to_string(), result.clone());
@@ -157,18 +159,18 @@ impl NamingRegistry {
     /// `table_name()` has been called for this path (i.e. after the pre-registration
     /// phase in `finalize()`). Safe to call from multiple threads.
     pub fn table_name_lookup(&self, path: &[String]) -> String {
-        let key = path.join(".");
+        let key = path.join(&PATH_SEP.to_string());
         self.cache.get(&key).cloned().unwrap_or_else(|| {
             // Fallback: should never happen after pre-registration, but be safe.
             sanitize_identifier(&path.join("_"))
         })
     }
 
-    /// Read-only lookup from a pre-computed dot-joined key. Avoids the `path.join(".")` allocation.
-    /// Use in the parallel schema-building phase where the dot-key is already available.
+    /// Read-only lookup from a pre-computed PATH_SEP-joined key.
+    /// Use in the parallel schema-building phase where the key is already available.
     pub fn table_name_lookup_from_dot_key(&self, dot_key: &str) -> String {
         self.cache.get(dot_key).cloned().unwrap_or_else(|| {
-            sanitize_identifier(&dot_key.replace('.', "_"))
+            sanitize_identifier(&dot_key.replace(PATH_SEP, "_"))
         })
     }
 
@@ -194,13 +196,21 @@ impl NamingRegistry {
 
         if let Some(existing) = self.reverse.get(&truncated) {
             if existing == original_key {
-                return truncated;
+                return truncated; // idempotent — same key already registered
             }
-            // Collision after truncation: re-hash the original key differently
-            // This should be extremely rare
-            let alt = truncate_to_limit(&sanitized, &format!("{}_alt", original_key), PG_TABLE_MAX_IDENT);
-            self.reverse.insert(alt.clone(), original_key.to_string());
-            return alt;
+            // Name collision (two different paths produce the same sanitized name).
+            // Append a numeric counter until we find a free slot.
+            let base_len = PG_TABLE_MAX_IDENT.saturating_sub(3); // room for "_NN"
+            let base = if sanitized.len() <= base_len { &sanitized } else { &sanitized[..base_len] };
+            let mut counter = 2usize;
+            loop {
+                let candidate = format!("{}_{}", base, counter);
+                if !self.reverse.contains_key(candidate.as_str()) {
+                    self.reverse.insert(candidate.clone(), original_key.to_string());
+                    return candidate;
+                }
+                counter += 1;
+            }
         }
         self.reverse.insert(truncated.clone(), original_key.to_string());
         truncated
@@ -417,15 +427,15 @@ mod tests {
     #[test]
     fn test_table_name_from_dot_key_matches_path_version() {
         let path = vec!["users".to_string(), "orders".to_string(), "items".to_string()];
-        let dot_key = path.join(".");
+        let key = path.join(&PATH_SEP.to_string());
 
         let mut reg_path = NamingRegistry::new();
         let via_path = reg_path.table_name(&path);
 
         let mut reg_key = NamingRegistry::new();
-        let via_key = reg_key.table_name_from_dot_key(&dot_key);
+        let via_key = reg_key.table_name_from_dot_key(&key);
 
-        assert_eq!(via_path, via_key, "dot-key and path versions must agree");
+        assert_eq!(via_path, via_key, "key and path versions must agree");
         assert_eq!(via_key, "users_orders_items");
     }
 
@@ -433,13 +443,13 @@ mod tests {
     fn test_table_name_from_dot_key_special_chars() {
         // Field names with hyphens, mixed case — sanitization must produce same result
         let path = vec!["myRoot".to_string(), "some-field".to_string()];
-        let dot_key = path.join(".");
+        let key = path.join(&PATH_SEP.to_string());
 
         let mut reg_path = NamingRegistry::new();
         let via_path = reg_path.table_name(&path);
 
         let mut reg_key = NamingRegistry::new();
-        let via_key = reg_key.table_name_from_dot_key(&dot_key);
+        let via_key = reg_key.table_name_from_dot_key(&key);
 
         assert_eq!(via_path, via_key);
     }
@@ -447,13 +457,13 @@ mod tests {
     #[test]
     fn test_table_name_from_dot_key_long_path() {
         let path: Vec<String> = (0..10).map(|i| format!("level{}", i)).collect();
-        let dot_key = path.join(".");
+        let key = path.join(&PATH_SEP.to_string());
 
         let mut reg_path = NamingRegistry::new();
         let via_path = reg_path.table_name(&path);
 
         let mut reg_key = NamingRegistry::new();
-        let via_key = reg_key.table_name_from_dot_key(&dot_key);
+        let via_key = reg_key.table_name_from_dot_key(&key);
 
         assert_eq!(via_path, via_key);
         assert!(via_key.len() <= PG_MAX_IDENT);
@@ -462,12 +472,12 @@ mod tests {
     #[test]
     fn test_table_name_lookup_from_dot_key_matches_path_version() {
         let path = vec!["products".to_string(), "nutrients".to_string()];
-        let dot_key = path.join(".");
+        let key = path.join(&PATH_SEP.to_string());
 
         let mut reg = NamingRegistry::new();
         reg.table_name(&path); // pre-register via path version
         let via_path = reg.table_name_lookup(&path);
-        let via_key = reg.table_name_lookup_from_dot_key(&dot_key);
+        let via_key = reg.table_name_lookup_from_dot_key(&key);
 
         assert_eq!(via_path, via_key);
     }
