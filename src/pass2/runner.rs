@@ -7,6 +7,7 @@ use std::time::Instant;
 use serde_json::Value;
 use simd_json;
 use tokio_postgres::Client;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::anomaly::collector::AnomalyCollector;
@@ -116,6 +117,12 @@ pub async fn run(
 
     let parallel = parallel.max(1);
 
+    // Cancellation token: a DropGuard is held for the lifetime of this async fn.
+    // If the caller aborts the task (e.g. UI cancel), the guard is dropped, the
+    // token is cancelled, and all workers / flush / conn tasks exit their loops.
+    let cancel = CancellationToken::new();
+    let _cancel_guard = cancel.clone().drop_guard();
+
     // -------------------------------------------------------------------------
     // Phase B — Parallel streaming
     // N workers each hold their own HashMap<table_name, TempFileSink>.
@@ -161,13 +168,18 @@ pub async fn run(
         let ftx = flush_tx.clone();
         let sbn = schema_by_name.clone();
         let pg_schema_owned = pg_schema.to_string();
+        let cancel_token = cancel.clone();
 
         let handle = tokio::task::spawn(async move {
             let mut sinks = worker_sinks;
             // FDs this worker currently holds open, reflected in `global`.
             let mut my_open: usize = 0;
 
-            while let Some(mut bytes) = rx.recv().await {
+            loop {
+            let mut bytes = tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                msg = rx.recv() => match msg { Some(b) => b, None => break },
+            };
                 let obj = match simd_json::from_slice::<serde_json::Value>(&mut bytes) {
                     Ok(Value::Object(o)) => o,
                     Ok(other) => return Err(J2sError::InvalidInput(format!(
@@ -298,13 +310,18 @@ pub async fn run(
         conn_senders.push(ctx);
         let url = pg_url.to_string();
         let rtx = result_tx.clone();
+        let cancel_conn = cancel.clone();
         conn_handles.push(tokio::task::spawn(async move {
             use crate::db::connection::connect;
             let conn = match connect(&url).await {
                 Ok(c) => c,
                 Err(e) => { let _ = rtx.send(Err(e)); return; }
             };
-            while let Some(sink) = crx.recv().await {
+            loop {
+                let sink = tokio::select! {
+                    _ = cancel_conn.cancelled() => break,
+                    msg = crx.recv() => match msg { Some(s) => s, None => break },
+                };
                 let name = sink.table_name.clone();
                 let _ = rtx.send(sink.copy_to_db(&conn).await.map(|rows| (name, rows)));
             }
@@ -313,13 +330,18 @@ pub async fn run(
     drop(result_tx); // only conn_workers' clones remain; channel closes when they exit
 
     let ptx_flush = progress_tx.clone();
+    let cancel_flush = cancel.clone();
     let flush_task: tokio::task::JoinHandle<Result<HashMap<String, u64>>> =
         tokio::task::spawn(async move {
             let mut flush_rx = flush_rx;
             let mut robin = 0usize;
 
-            while let Some((table_name, sink)) = flush_rx.recv().await {
-                if sink.row_count == 0 && sink.total_flushed == 0 { continue; }
+            loop {
+            let (table_name, sink) = tokio::select! {
+                _ = cancel_flush.cancelled() => break,
+                msg = flush_rx.recv() => match msg { Some(v) => v, None => break },
+            };
+            if sink.row_count == 0 && sink.total_flushed == 0 { continue; }
                 if let Some(ref tx) = ptx_flush {
                     let _ = tx.send(ProgressEvent::Pass2Log(format!(
                         "COPY {} ({} rows)", table_name, sink.row_count

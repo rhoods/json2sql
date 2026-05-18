@@ -17,7 +17,7 @@ use json2sql::schema::type_tracker::PgType;
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_pivot_strategy() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("pivot_eav.jsonl");
         let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
@@ -45,7 +45,7 @@ async fn test_pivot_strategy() {
 
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         // Widget:4 + Gadget:4 + Doohickey:3 = 11 paires EAV
@@ -101,7 +101,7 @@ async fn test_pivot_strategy() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_jsonb_strategy() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("wide_jsonb.jsonl");
         let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
@@ -144,7 +144,7 @@ async fn test_jsonb_strategy() {
             ).await.unwrap().get("count");
         assert_eq!(tables_created, 2);
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
@@ -192,7 +192,7 @@ async fn test_jsonb_strategy() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_flatten_strategy() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("flatten_nested.jsonl");
         let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
@@ -223,7 +223,7 @@ async fn test_flatten_strategy() {
             .await.unwrap().get("count");
         assert_eq!(dims_absent, 0, "products_dims ne doit pas être créé");
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "products").await, 3);
@@ -264,7 +264,7 @@ async fn test_flatten_strategy() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_null_patterns() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("null_patterns.jsonl");
         let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
@@ -280,7 +280,7 @@ async fn test_null_patterns() {
         );
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("people").unwrap(), 4);
@@ -322,7 +322,7 @@ async fn test_null_patterns() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_structured_pivot_strategy() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("structured_pivot.jsonl");
         let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
@@ -360,7 +360,7 @@ async fn test_structured_pivot_strategy() {
 
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         // Widget:2 + Gadget:2 + Doohickey:1 = 5 lignes
@@ -427,7 +427,7 @@ async fn test_structured_pivot_strategy() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_auto_split_strategy() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("auto_split.jsonl");
         // wide_column_threshold=3 : 5 colonnes scalaires > 3 → wide
         // stable_threshold=0.80, rare_threshold=0.30
@@ -452,7 +452,7 @@ async fn test_auto_split_strategy() {
         let schemas = p1.schemas;
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(),         5);
@@ -523,7 +523,7 @@ async fn test_auto_split_strategy() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_keyed_pivot_strategy() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("keyed_pivot.jsonl");
         // sibling_threshold=3 : au moins 3 siblings pour déclencher KeyedPivot
         // sibling_jaccard=0.5 : Jaccard min acceptable
@@ -559,7 +559,7 @@ async fn test_keyed_pivot_strategy() {
         ).await.unwrap().get(0);
         assert_eq!(sibling_tables, 0, "tables siblings ne doivent pas être créées");
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(),              2);
@@ -630,7 +630,7 @@ async fn test_keyed_pivot_strategy() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_keyed_pivot_pure_container() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("keyed_pivot_pure_container.jsonl");
         let p1 = pass1::runner::run(&path, "graph", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
@@ -659,7 +659,7 @@ async fn test_keyed_pivot_pure_container() {
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
         let p2 = pass2::runner::run(
-            &path, "graph", &schemas, &client, &schema,
+            &path, "graph", &schemas, &client, &url, &schema,
             1, None, None,
         ).await.unwrap();
 
@@ -704,7 +704,7 @@ async fn test_keyed_pivot_pure_container() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_normalize_dynamic_keys_strategy() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("normalize_dynamic_keys.jsonl");
         // sibling_threshold=10 : 5 tables images < 10 → pas d'auto-détection KeyedPivot
         let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 10, 0.5, 0.10, 0.001, None).unwrap();
@@ -733,7 +733,7 @@ async fn test_normalize_dynamic_keys_strategy() {
 
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(),        3);
@@ -779,7 +779,7 @@ async fn test_normalize_dynamic_keys_strategy() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_jsonb_flatten_strategy() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("flatten_nested.jsonl");
         let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
@@ -814,7 +814,7 @@ async fn test_jsonb_flatten_strategy() {
             .await.unwrap().get("count");
         assert_eq!(jsonb_col_present, 1, "products doit avoir une colonne products_dims");
 
-        pass2::runner::run(&path, "products", &schemas, &client, &schema, 1, None, None).await.unwrap();
+        pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None).await.unwrap();
 
         // Widget : dims = {"width": 10, "height": 20, "depth": 5}
         let widget = client.query_one(
@@ -860,7 +860,7 @@ async fn test_jsonb_flatten_strategy() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_keyed_pivot_array_strategy() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("keyed_pivot_array.jsonl");
         let p1 = pass1::runner::run(&path, "graph", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
@@ -902,7 +902,7 @@ async fn test_keyed_pivot_array_strategy() {
         assert_eq!(gcf_tables, 0, "les tables gcf_* ne doivent pas être créées");
 
         let p2 = pass2::runner::run(
-            &path, "graph", &schemas, &client, &schema,
+            &path, "graph", &schemas, &client, &url, &schema,
             1, None, None,
         ).await.unwrap();
 

@@ -24,6 +24,7 @@ simd-json = { version = "0.13", features = ["serde_impl"] }
 # PostgreSQL
 tokio-postgres = { version = "0.7", features = ["with-uuid-1"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 bytes = "1"
 
 # UUID v7

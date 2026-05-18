@@ -7,11 +7,11 @@ use std::io::Write;
 
 #[tokio::test]
 async fn test_nested_row_counts_json_array() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -32,11 +32,11 @@ async fn test_nested_row_counts_json_array() {
 
 #[tokio::test]
 async fn test_nested_row_counts_ndjson() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.jsonl");
         let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -53,18 +53,18 @@ async fn test_nested_row_counts_ndjson() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_drop_existing() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
 
         let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1, None, None)
+        pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
 
         let p1b = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1b.schemas, &schema, true).await.unwrap();
-        pass2::runner::run(&path, "users", &p1b.schemas, &client, &schema, 1, None, None)
+        pass2::runner::run(&path, "users", &p1b.schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
@@ -76,11 +76,11 @@ async fn test_drop_existing() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_transaction_commit() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -464,7 +464,7 @@ fn test_schema_inference_parallel_parity() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_array_as_pg_array() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, "users", 256, true, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
@@ -481,7 +481,7 @@ async fn test_array_as_pg_array() {
         );
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -507,7 +507,7 @@ async fn test_array_as_pg_array() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_column_limit_guard_jsonb_non_root_with_children() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         // root → middle (3 champs scalaires + 1 objet enfant leaf)
         // On force Jsonb sur "root_middle" (non-racine, a un parent) pour tester
         // le chemin Pass 2 qui était manquant.
@@ -534,7 +534,7 @@ async fn test_column_limit_guard_jsonb_non_root_with_children() {
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(
-            f.path(), "root", &p1.schemas, &client, &schema, 1, None, None,
+            f.path(), "root", &p1.schemas, &client, &url, &schema, 1, None, None,
         ).await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "root").await, 2);
@@ -571,13 +571,13 @@ async fn test_column_limit_guard_jsonb_non_root_with_children() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_parallel_copy() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
 
         let p2 = pass2::runner::run(
-            &path, "users", &p1.schemas, &client, &schema, 3, None, None,
+            &path, "users", &p1.schemas, &client, &url, &schema, 3, None, None,
         ).await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -595,11 +595,11 @@ async fn test_parallel_copy() {
 
 #[tokio::test]
 async fn test_pass2_timing_fields_populated() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(p2.timing.total_ms(), p2.timing.streaming_ms + p2.timing.copy_ms);
@@ -621,7 +621,7 @@ async fn test_parallel_streaming_matches_sequential() {
         // Sequential run on the schema provided by with_schema_url
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let seq = pass2::runner::run(
-            &path, "users", &p1.schemas, &client, &schema, 1, None, None,
+            &path, "users", &p1.schemas, &client, &url, &schema, 1, None, None,
         ).await.unwrap();
 
         // Parallel streaming run on a second schema
@@ -630,7 +630,7 @@ async fn test_parallel_streaming_matches_sequential() {
         client2.execute(&format!("CREATE SCHEMA \"{}\"", schema2), &[]).await.unwrap();
         db::ddl::create_tables_no_constraints(&client2, &p1.schemas, &schema2, false).await.unwrap();
         let par = pass2::runner::run(
-            &path, "users", &p1.schemas, &client2, &schema2, 2, None, None,
+            &path, "users", &p1.schemas, &client2, &url, &schema2, 2, None, None,
         ).await.unwrap();
         common::drop_schema(&client2, &schema2).await;
 

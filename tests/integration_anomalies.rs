@@ -8,11 +8,11 @@ use json2sql::{db, pass1, pass2};
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_anomaly_detection() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies.jsonl");
         let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "people").await, 3);
@@ -31,14 +31,14 @@ async fn test_anomaly_detection() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_anomaly_dir_streaming() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies.jsonl");
         let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
 
         let anomaly_dir = tempfile::TempDir::new().unwrap();
         let mut p2 = pass2::runner::run(
-            &path, "people", &p1.schemas, &client, &schema,
+            &path, "people", &p1.schemas, &client, &url, &schema,
             1, Some(anomaly_dir.path().to_path_buf()), None,
         ).await.unwrap();
 
@@ -75,7 +75,7 @@ async fn test_anomaly_dir_streaming() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_float_anomaly_boolean_value() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies_float.jsonl");
         let p1 = pass1::runner::run(&path, "items", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
 
@@ -87,7 +87,7 @@ async fn test_float_anomaly_boolean_value() {
         );
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "items", &p1.schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "items", &p1.schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "items").await, 5);
@@ -106,11 +106,11 @@ async fn test_float_anomaly_boolean_value() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_null_byte_anomaly() {
-    common::with_schema(|client, schema| async move {
+    common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies_nullbytes.jsonl");
         let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &schema, 1, None, None)
+        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None)
             .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "people").await, 3);
