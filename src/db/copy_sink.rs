@@ -362,6 +362,55 @@ impl TempFileSink {
     }
 }
 
+/// Send all buffered rows from multiple sinks to PostgreSQL in a single COPY
+/// session. All sinks must target the same table (same copy_sql / schema).
+///
+/// Reduces COPY overhead for tables whose rows are split across many workers:
+/// instead of N small COPYs, one COPY streams data from all N sinks in sequence.
+pub async fn merge_copy_to_db(sinks: Vec<TempFileSink>, client: &Client) -> Result<u64> {
+    let total_rows: u64 = sinks.iter().map(|s| s.total_flushed + s.row_count).sum();
+    if total_rows == 0 {
+        return Ok(0);
+    }
+
+    let first = sinks.iter().find(|s| s.row_count > 0 || s.total_flushed > 0).unwrap();
+    let copy_sql = first.copy_sql.clone();
+    let table_name = first.table_name.clone();
+
+    let sink = client
+        .copy_in::<_, Bytes>(&copy_sql)
+        .await
+        .map_err(|e| pg_err(&format!("COPY INTO {}", table_name), e))?;
+    let mut pinned = Box::pin(sink);
+
+    for s in sinks {
+        let TempFileSink { row_count, pending, writer, temp_file, .. } = s;
+        if row_count == 0 {
+            continue;
+        }
+        drop(writer);
+        let file_data = if let Some(ref guard) = temp_file {
+            tokio::fs::read(&guard.0).await.map_err(J2sError::Io)?
+        } else {
+            Vec::new()
+        };
+        drop(temp_file);
+        for chunk in file_data.chunks(1024 * 1024) {
+            pinned.send(Bytes::copy_from_slice(chunk)).await
+                .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+        }
+        for chunk in pending.chunks(1024 * 1024) {
+            pinned.send(Bytes::copy_from_slice(chunk)).await
+                .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+        }
+    }
+
+    pinned.close().await
+        .map_err(|e| pg_err(&format!("COPY close {}", table_name), e))?;
+
+    Ok(total_rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +507,51 @@ mod tests {
         sink.write_row(large_row).unwrap();
         assert!(sink.is_open(), "spill should have opened a file");
         assert_eq!(sink.bytes_buffered, expected, "bytes_buffered must reflect spilled data");
+    }
+
+    // -------------------------------------------------------------------------
+    // merge_copy_to_db tests (logic only — no PG connection required)
+    // -------------------------------------------------------------------------
+
+    /// Total rows reported across sinks equals the sum of row_count from each.
+    #[test]
+    fn merge_total_rows_sum_is_correct() {
+        let mut s1 = make_sink();
+        s1.write_row(b"row1\n".to_vec()).unwrap();
+        s1.write_row(b"row2\n".to_vec()).unwrap();
+
+        let mut s2 = make_sink();
+        s2.write_row(b"row3\n".to_vec()).unwrap();
+
+        let total: u64 = [&s1, &s2].iter().map(|s| s.total_flushed + s.row_count).sum();
+        assert_eq!(total, 3);
+    }
+
+    /// Empty sinks (row_count == 0) must not count toward the total.
+    #[test]
+    fn merge_empty_sinks_contribute_zero_rows() {
+        let s_empty = make_sink();
+        assert_eq!(s_empty.row_count, 0);
+        assert_eq!(s_empty.total_flushed, 0);
+        let total: u64 = [&s_empty].iter().map(|s| s.total_flushed + s.row_count).sum();
+        assert_eq!(total, 0);
+    }
+
+    /// Pending bytes from multiple sinks must be individually accessible
+    /// (verifies the data structure is correct for the merge streaming loop).
+    #[test]
+    fn merge_pending_bytes_preserved_across_sinks() {
+        let mut s1 = make_sink();
+        s1.write_row(b"abc\n".to_vec()).unwrap();
+
+        let mut s2 = make_sink();
+        s2.write_row(b"def\n".to_vec()).unwrap();
+        s2.write_row(b"ghi\n".to_vec()).unwrap();
+
+        assert_eq!(&s1.pending, b"abc\n");
+        assert_eq!(&s2.pending, b"def\nghi\n");
+        assert_eq!(s1.row_count, 1);
+        assert_eq!(s2.row_count, 2);
     }
 
     /// is_open() must be false after hibernation.

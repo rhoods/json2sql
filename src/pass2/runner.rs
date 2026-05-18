@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::anomaly::collector::AnomalyCollector;
-use crate::db::copy_sink::{TempFileSink, INTERIM_FLUSH_THRESHOLD, MAX_OPEN_TEMP_FILES};
+use crate::db::copy_sink::{merge_copy_to_db, TempFileSink, INTERIM_FLUSH_THRESHOLD, MAX_OPEN_TEMP_FILES};
 use crate::schema::PATH_SEP;
 use crate::db::ddl::{add_constraints, ConstraintWarning};
 use crate::error::{J2sError, Result};
@@ -294,19 +294,25 @@ pub async fn run(
     drop(flush_tx);
 
     // -------------------------------------------------------------------------
-    // Flush pool — `parallel` persistent PG connections, each running a
-    // sequential loop of COPY operations. Amortizes connect() cost across
-    // many COPYs (critical for datasets with many small tables).
-    // The dispatcher task routes sinks from flush_rx round-robin to the pool.
+    // Flush pool — `parallel` persistent PG connections + accumulating dispatcher.
+    //
+    // The dispatcher (flush_task) groups sinks by table name. Small tables wait
+    // until flush_rx closes and are dispatched as one merged COPY per table
+    // (N worker sinks → 1 COPY). Large tables are dispatched early when their
+    // accumulated bytes_buffered exceeds FLUSH_DISPATCH_THRESHOLD.
     // -------------------------------------------------------------------------
+
+    // Dispatch early if a table's accumulated in-memory bytes exceed 1 MB.
+    const FLUSH_DISPATCH_THRESHOLD: u64 = 1024 * 1024;
+
     let (result_tx, mut result_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<(String, u64)>>();
-    let mut conn_senders: Vec<tokio::sync::mpsc::Sender<TempFileSink>> =
+    let mut conn_senders: Vec<tokio::sync::mpsc::Sender<Vec<TempFileSink>>> =
         Vec::with_capacity(parallel);
     let mut conn_handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(parallel);
 
     for _ in 0..parallel {
-        let (ctx, mut crx) = tokio::sync::mpsc::channel::<TempFileSink>(64);
+        let (ctx, mut crx) = tokio::sync::mpsc::channel::<Vec<TempFileSink>>(64);
         conn_senders.push(ctx);
         let url = pg_url.to_string();
         let rtx = result_tx.clone();
@@ -318,16 +324,17 @@ pub async fn run(
                 Err(e) => { let _ = rtx.send(Err(e)); return; }
             };
             loop {
-                let sink = tokio::select! {
+                let sinks = tokio::select! {
                     _ = cancel_conn.cancelled() => break,
                     msg = crx.recv() => match msg { Some(s) => s, None => break },
                 };
-                let name = sink.table_name.clone();
-                let _ = rtx.send(sink.copy_to_db(&conn).await.map(|rows| (name, rows)));
+                if sinks.is_empty() { continue; }
+                let name = sinks[0].table_name.clone();
+                let _ = rtx.send(merge_copy_to_db(sinks, &conn).await.map(|rows| (name, rows)));
             }
         }));
     }
-    drop(result_tx); // only conn_workers' clones remain; channel closes when they exit
+    drop(result_tx);
 
     let ptx_flush = progress_tx.clone();
     let cancel_flush = cancel.clone();
@@ -335,23 +342,50 @@ pub async fn run(
         tokio::task::spawn(async move {
             let mut flush_rx = flush_rx;
             let mut robin = 0usize;
+            let mut table_pending: HashMap<String, Vec<TempFileSink>> = HashMap::new();
 
             loop {
-            let (table_name, sink) = tokio::select! {
-                _ = cancel_flush.cancelled() => break,
-                msg = flush_rx.recv() => match msg { Some(v) => v, None => break },
-            };
-            if sink.row_count == 0 && sink.total_flushed == 0 { continue; }
+                let (table_name, sink) = tokio::select! {
+                    _ = cancel_flush.cancelled() => break,
+                    msg = flush_rx.recv() => match msg { Some(v) => v, None => break },
+                };
+                if sink.row_count == 0 && sink.total_flushed == 0 { continue; }
+
+                let entry = table_pending.entry(table_name.clone()).or_default();
+                entry.push(sink);
+
+                // Early dispatch for large tables: don't wait for end-of-streaming.
+                let total_bytes: u64 = entry.iter().map(|s| s.bytes_buffered).sum();
+                if total_bytes >= FLUSH_DISPATCH_THRESHOLD {
+                    let sinks = table_pending.remove(&table_name).unwrap();
+                    let total_rows: u64 = sinks.iter().map(|s| s.total_flushed + s.row_count).sum();
+                    if let Some(ref tx) = ptx_flush {
+                        let _ = tx.send(ProgressEvent::Pass2Log(format!(
+                            "COPY {} ({} rows)", table_name, total_rows
+                        )));
+                    }
+                    eprintln!("  COPY {} ({} rows)...", table_name, total_rows);
+                    if conn_senders[robin].send(sinks).await.is_err() { break; }
+                    robin = (robin + 1) % conn_senders.len();
+                }
+            }
+
+            // Dispatch remaining accumulated sinks — one merged COPY per table.
+            // Replaces up to N per-worker COPYs with a single COPY for each table.
+            for (table_name, sinks) in table_pending {
+                let total_rows: u64 = sinks.iter().map(|s| s.total_flushed + s.row_count).sum();
+                if total_rows == 0 { continue; }
                 if let Some(ref tx) = ptx_flush {
                     let _ = tx.send(ProgressEvent::Pass2Log(format!(
-                        "COPY {} ({} rows)", table_name, sink.row_count
+                        "COPY {} ({} rows)", table_name, total_rows
                     )));
                 }
-                eprintln!("  COPY {} ({} rows)...", table_name, sink.row_count);
-                if conn_senders[robin].send(sink).await.is_err() { break; }
+                eprintln!("  COPY {} ({} rows)...", table_name, total_rows);
+                if conn_senders[robin].send(sinks).await.is_err() { break; }
                 robin = (robin + 1) % conn_senders.len();
             }
-            // Signal conn workers to drain their queues and exit.
+
+            // Signal conn workers to drain and exit.
             drop(conn_senders);
 
             // Collect all COPY results (channel closes when all conn workers exit).
@@ -363,7 +397,6 @@ pub async fn run(
                     Err(e) => { if first_error.is_none() { first_error = Some(e); } }
                 }
             }
-            // Join for panic detection (workers are done by this point).
             for handle in conn_handles {
                 if let Err(e) = handle.await {
                     if first_error.is_none() {
