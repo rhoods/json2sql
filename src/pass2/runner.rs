@@ -249,9 +249,12 @@ pub async fn run(
                         .max_by_key(|(_, s)| s.bytes_buffered)
                         .map(|(k, _)| k.clone())
                     {
-                        if let Some(old_sink) = sinks.remove(&name) {
-                            // Adjust FD tracking before removing the sink.
+                        if let Some(mut old_sink) = sinks.remove(&name) {
+                            // Physically close the FD before handing off to the flush task.
+                            // Sinks may now sit in table_pending for the duration of streaming;
+                            // we must close here rather than relying on copy_to_db to close it.
                             if old_sink.is_open() {
+                                let _ = old_sink.hibernate();
                                 global_sub(&global, 1);
                                 my_open = my_open.saturating_sub(1);
                             }
