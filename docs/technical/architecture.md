@@ -102,9 +102,18 @@ Couche d'accès PostgreSQL.
 
 ### `ddl.rs`
 
-- **`create_tables()`** : crée toutes les tables dans l'ordre topologique (parents avant enfants). Si `--drop-existing`, supprime d'abord en CASCADE. Ajoute les contraintes FK après la création de toutes les tables.
-- **`generate_create_table()`** : génère le SQL `CREATE TABLE` complet pour une `TableSchema`
-- **`quote_ident()`** : échappe les identifiants PostgreSQL avec guillemets doubles
+La DDL est séparée en deux temps : **création de tables sans contraintes** (avant le chargement) + **ajout des contraintes** (après le chargement). Cela permet de charger en parallèle sans conflit de FK.
+
+- **`create_tables_no_constraints()`** : crée toutes les tables sans PK ni FK (`IF NOT EXISTS`). Si `drop_existing = true`, supprime d'abord en CASCADE. À appeler avant `pass2::runner::run()`.
+- **`create_tables()`** : version legacy (DDL + contraintes en une passe). Utilisée par `main.rs` dans les chemins non-parallèles.
+- **`generate_create_table_no_constraints()`** : génère le SQL `CREATE TABLE IF NOT EXISTS` sans contraintes pour un schéma.
+- **`generate_create_table()`** : génère le SQL `CREATE TABLE` complet avec PK inline (used by `create_tables()`).
+- **`generate_add_pk_sql()`** : génère l'`ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY` pour un schéma.
+- **`generate_add_fk_sql()`** : génère l'`ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` pour un schéma enfant. Retourne `None` pour les tables racines.
+- **`add_constraints()`** : ajoute d'abord les PK (fatal en cas d'erreur — collision UUID = bug), puis les FK (échecs → `ConstraintWarning`). Appelé en Phase D de la Pass 2, après le chargement complet.
+- **`ConstraintWarning`** / **`ConstraintKind`** : contrainte non appliquée après le chargement. `ConstraintKind::PrimaryKey` est toujours fatal ; `ForeignKey` produit un warning.
+- **`generate_ddl_preview()`** : DDL lisible avec FK inline, pour affichage uniquement (dry-run, IHM).
+- **`quote_ident()`** : échappe les identifiants PostgreSQL avec guillemets doubles.
 
 ### `copy_text.rs`
 
@@ -118,9 +127,19 @@ Type et fonction garantissant la sécurité du format COPY PostgreSQL texte au n
 
 Implémente le chargement via le protocole `COPY FROM STDIN`.
 
-- **`RowBuilder`** : construit une ligne au format texte COPY (colonnes séparées par `\t`, NULL représenté par `\N`). `push_value()` prend un `&CopyEscaped`.
-- **`TempFileSink`** : accumule les lignes dans un fichier temporaire. `flush_to_db()` envoie le contenu en COPY puis réinitialise le sink — appelé périodiquement quand `row_count` atteint `batch_size`. `total_flushed` comptabilise les lignes envoyées sur tous les flush.
-- **`copy_to_db()`** : ouvre une session COPY, transmet le fichier temporaire par blocs de 1 Mo, ferme la session.
+Constantes publiques :
+- **`MAX_OPEN_TEMP_FILES`** (950) : nombre maximal de FD temp-file ouverts simultanément dans le processus. En-dessous du ulimit typique de 1024 pour laisser de la marge aux connexions PG et autres FD.
+- **`INTERIM_FLUSH_THRESHOLD`** (512 MiB) : seuil par worker au-delà duquel le sink le plus gros est expédié à la flush task pour libérer l'espace disque.
+
+Types et fonctions :
+- **`RowBuilder`** : construit une ligne au format texte COPY (colonnes séparées par `\t`, NULL représenté par `\N`). `push_value()` prend un `&CopyEscaped`. `push_null()` et `push_uuid()` disponibles. `finish()` ajoute le `\n` et retourne le buffer.
+- **`TempFileSink`** : accumule les lignes d'une table pendant la Pass 2. Utilise un **buffer in-memory `pending`** qui se renverse dans un fichier temporaire quand il dépasse `SPILL_THRESHOLD` (256 KiB). Champs publics : `table_name`, `row_count`, `total_flushed`, `bytes_buffered`.
+  - `write_row()` : ajoute une ligne ; déclenche un spill si `pending` dépasse le seuil.
+  - `hibernate()` : ferme le FD du fichier temporaire **sans toucher `pending`**. Coût = un syscall `close()`. Le FD est rouvert sur le prochain spill.
+  - `is_open()` : vrai si un FD est actuellement ouvert.
+  - `flush_to_db()` : envoie toutes les données (fichier + `pending`) en COPY puis réinitialise le sink pour réutilisation (flush périodique).
+  - `copy_to_db()` : flush final, consomme le sink, supprime le fichier temporaire.
+- **`merge_copy_to_db(sinks, client)`** : ouvre **une seule session COPY** et y stream les données de N sinks appartenant à la même table. Réduit le overhead COPY de `N_workers × N_tables` à `~N_tables` dans le cas des petites tables.
 
 ---
 
@@ -154,7 +173,7 @@ Protocole de communication entre les runners et l'IHM Dioxus.
 | `Pass2Progress` | rows_processed, bytes_read, total_bytes | Pass 2, périodique |
 | `Pass2Flush` | table_name, rows_flushed | Pass 2, à chaque COPY batch |
 | `Pass2Log` | String | Pass 2, messages de log |
-| `Pass2Done` | total_rows, anomaly_count | Pass 2, fin |
+| `Pass2Done` | total_rows, anomaly_count, constraint_warning_count | Pass 2, fin |
 
 - **`ProgressTx`** : alias `tokio::sync::mpsc::UnboundedSender<ProgressEvent>`
 
@@ -188,10 +207,58 @@ Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cibl
 
 ### `runner.rs`
 
-Orchestre la Pass 2. Relit le fichier et insère les données.
+Orchestre la Pass 2. Relit le fichier et insère les données via une architecture **3 couches** :
 
-- **`run()`** : pour chaque objet racine, appelle `insert_object()` récursivement, remplit un `TempFileSink` par table, puis exécute les COPY dans l'ordre topologique avec flush périodique
-- **`insert_object()`** : construit une ligne pour une table selon sa `WideStrategy` :
+```
+Dispatcher (main task)
+  └─► N Worker tasks  ──flush_tx──►  Flush task (accumulation)
+                                         └─► N Conn tasks  ──► PostgreSQL
+```
+
+**Signature `run()`** :
+
+```rust
+pub async fn run(
+    path: &Path,
+    root_table: &str,
+    schemas: &[TableSchema],
+    client: &Client,     // pour les contraintes (Phase D)
+    pg_url: &str,        // pour les N connexions COPY
+    pg_schema: &str,
+    parallel: usize,
+    anomaly_dir: Option<PathBuf>,
+    progress_tx: Option<ProgressTx>,
+) -> Result<Pass2Result>
+```
+
+Le `client` est utilisé uniquement pour la Phase D (contraintes). Les COPYs passent par des connexions dédiées ouvertes à partir de `pg_url`.
+
+**Phase B — Streaming parallèle (`parallel` workers)** :
+- Le dispatcher lit le fichier raw byte-par-byte et envoie chaque objet JSON (sérialisé `Vec<u8>`) à un worker en round-robin.
+- Chaque worker parse avec `simd_json`, appelle `insert_object()` récursivement, et accumule les lignes dans son propre `HashMap<table_name, TempFileSink>`.
+- **Gestion des FD** : un compteur global `AtomicUsize` trace les FD ouverts entre tous les workers. Quand le budget global (`FD_GLOBAL_THRESHOLD = MAX_OPEN_TEMP_FILES × 90%`) ou le budget par worker est dépassé, tous les sinks du worker sont hibernés (`hibernate()`).
+- **Interim flush** : quand le total en bytes d'un worker dépasse `INTERIM_FLUSH_THRESHOLD`, le sink le plus gros est hiberné et envoyé à la flush task via `flush_tx`. Un sink vide le remplace.
+- **Annulation** : un `CancellationToken` + `DropGuard` est créé au début de `run()`. Si le caller avorte la tâche Tokio (ex : bouton Cancel de l'IHM), le guard est droppé, le token est annulé, et tous les workers/flush/conn tasks sortent de leur `tokio::select!`.
+
+**Flush task — accumulateur par table** :
+- Reçoit les `(table_name, TempFileSink)` des workers via `flush_rx`.
+- Accumule par table dans `table_pending: HashMap<String, Vec<TempFileSink>>`.
+- **Dispatch anticipé** : si une table accumule ≥ 1 MiB de bytes, ses sinks sont envoyés immédiatement à un conn worker (tables larges).
+- **Dispatch final** : une fois `flush_rx` fermé (tous les workers terminés), les sinks restants (tables petites) sont envoyés table par table — `merge_copy_to_db()` fusionne tous les sinks en un seul COPY.
+
+**Conn workers (`parallel` tâches)** :
+- Chaque conn worker ouvre une connexion PG indépendante via `pg_url`.
+- Reçoit des `Vec<TempFileSink>` (sinks d'une même table) et appelle `merge_copy_to_db()`.
+- Renvoie `Result<(table_name, row_count)>` via `result_tx`.
+
+**Phase D — Contraintes** :
+- `add_constraints(client, schemas, pg_schema)` ajoute les PK (fatal en cas d'erreur) puis les FK (échecs → `constraint_warnings`).
+
+**Types de retour** :
+- **`Pass2Timing { streaming_ms, copy_ms }`** : durée de chaque phase. `total_ms()` retourne la somme.
+- **`Pass2Result { rows_per_table, anomaly_collector, constraint_warnings, timing }`** : résumé complet de la Pass 2.
+
+**`insert_object()`** (dans `insert.rs`) : construit une ligne pour une table selon sa `WideStrategy` :
   - `Columns` : une colonne par champ JSON
   - `Pivot` : une ligne `(parent_id, key, value)` par champ
   - `Jsonb` : l'objet entier sérialisé en JSONB
@@ -199,9 +266,8 @@ Orchestre la Pass 2. Relit le fichier et insère les données.
   - `KeyedPivot` : dispatche les sous-objets clé/valeur en lignes (fusion de tables sœurs) ; sérialise l'objet enfant dans `j2s_data JSONB` ; pour ObjectArray, une ligne par élément avec `j2s_order`
   - `AutoSplit` : colonnes stables → table principale, colonnes médiums → table `_wide` (EAV)
   - `Ignore` : clé supprimée
-- **`insert_array()`** : gère les tableaux JSON. Si tableau d'objets → `insert_object()` récursif. Si tableau de scalaires → ligne de junction `(parent_id, order, value)`
-- Mode **séquentiel** : une seule connexion PG, optionnellement dans une transaction
-- Mode **parallèle** : N connexions simultanées avec un sémaphore, une connexion par table
+
+**`insert_array()`** (dans `insert.rs`) : gère les tableaux JSON. Si tableau d'objets → `insert_object()` récursif. Si tableau de scalaires → ligne de junction `(parent_id, order, value)`.
 
 ---
 
