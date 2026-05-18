@@ -117,6 +117,11 @@ pub async fn run(
 
     let parallel = parallel.max(1);
 
+    // Per-worker interim flush threshold: divide the global budget evenly so that
+    // total temp-file disk usage stays bounded at ~INTERIM_FLUSH_THRESHOLD regardless
+    // of the number of workers. Without this, 32 workers × 512 MiB = 16 GiB on disk.
+    let per_worker_flush_threshold = INTERIM_FLUSH_THRESHOLD / parallel as u64;
+
     // Cancellation token: a DropGuard is held for the lifetime of this async fn.
     // If the caller aborts the task (e.g. UI cancel), the guard is dropped, the
     // token is cancelled, and all workers / flush / conn tasks exit their loops.
@@ -242,7 +247,7 @@ pub async fn run(
                 // COPY and replace it with a fresh empty sink. Non-blocking — the
                 // main task drains flush_rx between dispatches.
                 let total_bytes: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
-                if total_bytes > INTERIM_FLUSH_THRESHOLD {
+                if total_bytes > per_worker_flush_threshold {
                     if let Some(name) = sinks
                         .iter()
                         .filter(|(_, s)| s.bytes_buffered > 0)
@@ -589,6 +594,30 @@ mod tests {
         let g = AtomicUsize::new(50);
         global_sub(&g, 50);
         assert_eq!(g.load(Ordering::Relaxed), 0);
+    }
+
+    // INTERIM_FLUSH_THRESHOLD divided by parallel must never be zero,
+    // so the per-worker flush threshold remains a meaningful bound.
+    #[test]
+    fn per_worker_flush_threshold_never_zero() {
+        use crate::db::copy_sink::INTERIM_FLUSH_THRESHOLD;
+        for parallel in [1usize, 2, 4, 8, 16, 32, 64, 128] {
+            let per_worker = INTERIM_FLUSH_THRESHOLD / parallel as u64;
+            assert!(per_worker > 0, "threshold must be > 0 for parallel={parallel}");
+        }
+    }
+
+    // The global budget (per_worker × parallel) must not exceed INTERIM_FLUSH_THRESHOLD
+    // by more than a rounding factor of 1 byte per worker (integer division truncates).
+    #[test]
+    fn per_worker_threshold_bounds_total_disk_usage() {
+        use crate::db::copy_sink::INTERIM_FLUSH_THRESHOLD;
+        for parallel in [1usize, 2, 4, 8, 16, 32, 64] {
+            let per_worker = INTERIM_FLUSH_THRESHOLD / parallel as u64;
+            let total = per_worker * parallel as u64;
+            assert!(total <= INTERIM_FLUSH_THRESHOLD,
+                "total={total} exceeds global budget for parallel={parallel}");
+        }
     }
 
 }
