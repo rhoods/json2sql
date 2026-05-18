@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::Value;
+use simd_json;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
@@ -70,10 +71,9 @@ fn global_sub(global: &AtomicUsize, n: usize) {
 ///
 /// Internal phases:
 ///   B — N workers (parallel ≥ 1) stream root objects round-robin into
-///       per-table `TempFileSink` buffers. File descriptors are managed via a
-///       per-worker budget; sinks are hibernated when the budget is exceeded.
-///   C — All temp files are COPYed to PostgreSQL in schema order.
-///       No FK constraints are active yet, so any table order is safe.
+///       per-table `TempFileSink` buffers. A dedicated flush task runs
+///       concurrently, COPYing sinks to PG (up to `parallel` simultaneous
+///       connections) as they fill up and when workers finish.
 ///   D — `add_constraints()` adds PRIMARY KEY (fatal on error) then
 ///       FOREIGN KEY (failures become `constraint_warnings`).
 pub async fn run(
@@ -105,8 +105,6 @@ pub async fn run(
         .find(|s| s.path.join(&sep) == root_table)
         .ok_or_else(|| J2sError::Schema(format!("Root table '{}' not found", root_table)))?;
 
-    let table_names: Vec<String> = schemas.iter().map(|s| s.name.clone()).collect();
-
     // Keyed by table name so workers can create replacement sinks after interim flushes.
     let schema_by_name: Arc<HashMap<String, TableSchema>> = Arc::new(
         schemas.iter().map(|s| (s.name.clone(), s.clone())).collect(),
@@ -128,7 +126,7 @@ pub async fn run(
     let root_schema_arc: Arc<TableSchema> = Arc::new(root_schema.clone());
 
     const CHANNEL_CAP: usize = 256;
-    let mut senders: Vec<tokio::sync::mpsc::Sender<serde_json::Map<String, Value>>> =
+    let mut senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> =
         Vec::with_capacity(parallel);
     let mut worker_handles = Vec::with_capacity(parallel);
 
@@ -141,15 +139,15 @@ pub async fn run(
     // total process FD pressure, not just its own slice.
     let global_open_fds = Arc::new(AtomicUsize::new(0));
 
-    // Interim-flush channel: workers send over-threshold sinks to the main task
-    // for COPY without blocking. Main task drains this with try_recv between
-    // dispatches. Workers replace the sent sink with a fresh empty one.
-    let (flush_tx, mut flush_rx) =
+    // Flush channel: workers send over-threshold sinks here and replace them
+    // with a fresh empty sink. A dedicated flush task (spawned below) drains
+    // this channel and COPYs sinks to PG concurrently with Phase B streaming.
+    let (flush_tx, flush_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, TempFileSink)>();
 
     for _ in 0..parallel {
         let (tx, mut rx) =
-            tokio::sync::mpsc::channel::<serde_json::Map<String, Value>>(CHANNEL_CAP);
+            tokio::sync::mpsc::channel::<Vec<u8>>(CHANNEL_CAP);
         senders.push(tx);
 
         let worker_sinks: HashMap<String, TempFileSink> = schemas
@@ -169,7 +167,17 @@ pub async fn run(
             // FDs this worker currently holds open, reflected in `global`.
             let mut my_open: usize = 0;
 
-            while let Some(obj) = rx.recv().await {
+            while let Some(mut bytes) = rx.recv().await {
+                let obj = match simd_json::from_slice::<serde_json::Value>(&mut bytes) {
+                    Ok(Value::Object(o)) => o,
+                    Ok(other) => return Err(J2sError::InvalidInput(format!(
+                        "Expected JSON object at root level, found: {other}"
+                    ))),
+                    Err(e) => return Err(J2sError::InvalidInput(format!(
+                        "JSON parse error in worker: {e}"
+                    ))),
+                };
+
                 // Global pressure check: if the process-wide FD count is at or
                 // above threshold, release our share before adding more.
                 if global.load(Ordering::Relaxed) >= FD_GLOBAL_THRESHOLD && my_open > 0 {
@@ -254,9 +262,18 @@ pub async fn run(
                 }
             }
 
-            // Release this worker's FDs from the global counter on exit.
+            // Hibernate all open sinks to release FDs, then send remaining
+            // non-empty sinks to the flush task before exiting.
+            for sink in sinks.values_mut() {
+                let _ = sink.hibernate();
+            }
             global_sub(&global, my_open);
-            Ok::<_, J2sError>((sinks, worker_anomalies))
+            for (name, sink) in sinks {
+                if sink.row_count > 0 || sink.total_flushed > 0 {
+                    let _ = ftx.send((name, sink));
+                }
+            }
+            Ok::<_, J2sError>(worker_anomalies)
         });
         worker_handles.push(handle);
     }
@@ -264,42 +281,101 @@ pub async fn run(
     // Drop the main-task's sender clone; only the per-worker clones remain.
     drop(flush_tx);
 
+    // -------------------------------------------------------------------------
+    // Flush pool — `parallel` persistent PG connections, each running a
+    // sequential loop of COPY operations. Amortizes connect() cost across
+    // many COPYs (critical for datasets with many small tables).
+    // The dispatcher task routes sinks from flush_rx round-robin to the pool.
+    // -------------------------------------------------------------------------
+    let (result_tx, mut result_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<(String, u64)>>();
+    let mut conn_senders: Vec<tokio::sync::mpsc::Sender<TempFileSink>> =
+        Vec::with_capacity(parallel);
+    let mut conn_handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(parallel);
+
+    for _ in 0..parallel {
+        let (ctx, mut crx) = tokio::sync::mpsc::channel::<TempFileSink>(64);
+        conn_senders.push(ctx);
+        let url = pg_url.to_string();
+        let rtx = result_tx.clone();
+        conn_handles.push(tokio::task::spawn(async move {
+            use crate::db::connection::connect;
+            let conn = match connect(&url).await {
+                Ok(c) => c,
+                Err(e) => { let _ = rtx.send(Err(e)); return; }
+            };
+            while let Some(sink) = crx.recv().await {
+                let name = sink.table_name.clone();
+                let _ = rtx.send(sink.copy_to_db(&conn).await.map(|rows| (name, rows)));
+            }
+        }));
+    }
+    drop(result_tx); // only conn_workers' clones remain; channel closes when they exit
+
+    let ptx_flush = progress_tx.clone();
+    let flush_task: tokio::task::JoinHandle<Result<HashMap<String, u64>>> =
+        tokio::task::spawn(async move {
+            let mut flush_rx = flush_rx;
+            let mut robin = 0usize;
+
+            while let Some((table_name, sink)) = flush_rx.recv().await {
+                if sink.row_count == 0 && sink.total_flushed == 0 { continue; }
+                if let Some(ref tx) = ptx_flush {
+                    let _ = tx.send(ProgressEvent::Pass2Log(format!(
+                        "COPY {} ({} rows)", table_name, sink.row_count
+                    )));
+                }
+                eprintln!("  COPY {} ({} rows)...", table_name, sink.row_count);
+                if conn_senders[robin].send(sink).await.is_err() { break; }
+                robin = (robin + 1) % conn_senders.len();
+            }
+            // Signal conn workers to drain their queues and exit.
+            drop(conn_senders);
+
+            // Collect all COPY results (channel closes when all conn workers exit).
+            let mut rows_per_table: HashMap<String, u64> = HashMap::new();
+            let mut first_error: Option<J2sError> = None;
+            while let Some(result) = result_rx.recv().await {
+                match result {
+                    Ok((name, count)) => { *rows_per_table.entry(name).or_insert(0) += count; }
+                    Err(e) => { if first_error.is_none() { first_error = Some(e); } }
+                }
+            }
+            // Join for panic detection (workers are done by this point).
+            for handle in conn_handles {
+                if let Err(e) = handle.await {
+                    if first_error.is_none() {
+                        first_error = Some(J2sError::InvalidInput(format!("conn worker panic: {e}")));
+                    }
+                }
+            }
+            if let Some(e) = first_error { return Err(e); }
+            Ok(rows_per_table)
+        });
+
     let stream_start = Instant::now();
     let mut robin = 0usize;
     let mut worker_died = false;
-    'dispatch: while let Some(item) = reader.next() {
-        let value = item?;
-        if let Value::Object(obj) = value {
-            if senders[robin].send(obj).await.is_err() {
-                // A worker exited early; collect the real error below.
-                worker_died = true;
-                break 'dispatch;
-            }
-            rows_processed += 1;
-            robin = (robin + 1) % parallel;
-            if let Some(ref bar) = progress {
-                bar.inc_rows(1);
-            }
-            if let Some(ref tx) = progress_tx {
-                if rows_processed % PROGRESS_INTERVAL == 0 {
-                    let _ = tx.send(ProgressEvent::Pass2Progress {
-                        rows_processed,
-                        bytes_read: reader.bytes_read(),
-                        total_bytes,
-                    });
-                }
-            }
+    'dispatch: while let Some(item) = reader.next_raw() {
+        let bytes = item?;
+        if senders[robin].send(bytes).await.is_err() {
+            // A worker exited early; collect the real error below.
+            worker_died = true;
+            break 'dispatch;
         }
-        // Drain any interim flush requests sent by workers.
-        while let Ok((table_name, mut sink)) = flush_rx.try_recv() {
-            eprintln!("  Interim flush: {} ({} rows)...", table_name, sink.row_count);
-            if let Some(ref tx) = progress_tx {
-                let _ = tx.send(ProgressEvent::Pass2Log(format!(
-                    "Interim flush {} ({} rows)",
-                    table_name, sink.row_count
-                )));
+        rows_processed += 1;
+        robin = (robin + 1) % parallel;
+        if let Some(ref bar) = progress {
+            bar.inc_rows(1);
+        }
+        if let Some(ref tx) = progress_tx {
+            if rows_processed % PROGRESS_INTERVAL == 0 {
+                let _ = tx.send(ProgressEvent::Pass2Progress {
+                    rows_processed,
+                    bytes_read: reader.bytes_read(),
+                    total_bytes,
+                });
             }
-            sink.flush_to_db(client).await?;
         }
     }
     drop(senders);
@@ -321,13 +397,11 @@ pub async fn run(
 
     // Drain all worker handles — always collect real errors rather than
     // swallowing them behind "worker channel closed unexpectedly".
-    let mut all_worker_sinks: Vec<HashMap<String, TempFileSink>> = Vec::with_capacity(parallel);
     let mut merged_anomalies = AnomalyCollector::new(anomaly_dir);
     let mut first_worker_error: Option<J2sError> = None;
     for handle in worker_handles {
         match handle.await {
-            Ok(Ok((w_sinks, w_anomalies))) => {
-                all_worker_sinks.push(w_sinks);
+            Ok(Ok(w_anomalies)) => {
                 merged_anomalies.merge(w_anomalies);
             }
             Ok(Err(e)) => {
@@ -352,85 +426,27 @@ pub async fn run(
         ));
     }
 
-    // Drain any flush requests that workers sent near end-of-stream but that
-    // the dispatch loop didn't get a chance to process.
-    while let Ok((table_name, mut sink)) = flush_rx.try_recv() {
-        eprintln!("  Post-stream flush: {} ({} rows)...", table_name, sink.row_count);
-        sink.flush_to_db(client).await?;
-    }
-
     // -------------------------------------------------------------------------
-    // Phase C — Parallel COPY to PostgreSQL
-    // No FK constraints are active yet so tables are fully independent.
-    // Distribute tables round-robin across `parallel` connections; each
-    // connection runs its COPYs sequentially within its own batch.
+    // Join flush task — all workers have sent their remaining sinks via flush_rx.
+    // The flush task terminates once flush_rx is exhausted and all in-flight
+    // COPYs complete. rows_per_table accumulates counts from every COPY.
     // -------------------------------------------------------------------------
     let copy_start = Instant::now();
+    let rows_per_table = match flush_task.await {
+        Ok(Ok(rpt)) => rpt,
+        Ok(Err(e)) => return Err(e),
+        Err(e) => return Err(J2sError::InvalidInput(format!("flush task panic: {e}"))),
+    };
 
-    // Build per-connection batches: Vec<(table_name, Vec<TempFileSink>)>
-    let n_conns = parallel.min(table_names.len().max(1));
-    let name_batches = batch_table_names(&table_names, n_conns);
-
-    let mut conn_batches: Vec<Vec<(String, Vec<TempFileSink>)>> =
-        name_batches.into_iter().map(|names| {
-            names.into_iter().map(|name| {
-                let sinks: Vec<TempFileSink> = all_worker_sinks
-                    .iter_mut()
-                    .filter_map(|ws| ws.remove(&name))
-                    .collect();
-                (name, sinks)
-            }).collect()
-        }).collect();
-
-    let mut copy_handles = Vec::with_capacity(n_conns);
-    for batch in conn_batches.drain(..) {
-        let pg_url_owned = pg_url.to_string();
-        let pg_schema_owned = pg_schema.to_string();
-        let ptx = progress_tx.clone();
-        let handle = tokio::task::spawn(async move {
-            use crate::db::connection::connect;
-            let conn = connect(&pg_url_owned).await?;
-            let mut batch_rows: HashMap<String, u64> = HashMap::new();
-            for (table_name, sinks) in batch {
-                let mut table_total = 0u64;
-                for sink in sinks {
-                    if sink.row_count > 0 || sink.total_flushed > 0 {
-                        if let Some(ref tx) = ptx {
-                            let _ = tx.send(ProgressEvent::Pass2Log(format!(
-                                "COPY {} ({} rows)",
-                                table_name, sink.row_count
-                            )));
-                        }
-                        eprintln!("  COPY {} ({} rows)...", table_name, sink.row_count);
-                        let inserted = sink.copy_to_db(&conn).await?;
-                        table_total += inserted;
-                    }
-                }
-                batch_rows.insert(table_name, table_total);
+    // Send Pass2Flush progress events now that all counts are final.
+    for (name, &count) in &rows_per_table {
+        if count > 0 {
+            if let Some(ref tx) = progress_tx {
+                let _ = tx.send(ProgressEvent::Pass2Flush {
+                    table_name: name.clone(),
+                    rows_flushed: count,
+                });
             }
-            Ok::<_, J2sError>(batch_rows)
-        });
-        copy_handles.push(handle);
-    }
-
-    let mut rows_per_table: HashMap<String, u64> = HashMap::new();
-    for handle in copy_handles {
-        match handle.await {
-            Ok(Ok(batch_rows)) => {
-                for (name, count) in batch_rows {
-                    if count > 0 {
-                        if let Some(ref tx) = progress_tx {
-                            let _ = tx.send(ProgressEvent::Pass2Flush {
-                                table_name: name.clone(),
-                                rows_flushed: count,
-                            });
-                        }
-                    }
-                    rows_per_table.insert(name, count);
-                }
-            }
-            Ok(Err(e)) => return Err(e),
-            Err(e) => return Err(J2sError::InvalidInput(format!("COPY task panic: {e}"))),
         }
     }
 
@@ -477,22 +493,12 @@ pub async fn run(
     })
 }
 
-/// Distribute `names` across `n` buckets round-robin.
-/// Used to assign tables to parallel COPY connections in Phase C.
-fn batch_table_names(names: &[String], n: usize) -> Vec<Vec<String>> {
-    let n = n.max(1);
-    let mut batches = vec![Vec::new(); n];
-    for (i, name) in names.iter().enumerate() {
-        batches[i % n].push(name.clone());
-    }
-    batches
-}
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{batch_table_names, global_sub, Pass2Timing};
+    use super::{global_sub, Pass2Timing};
 
     #[test]
     fn pass2_timing_total_ms_is_sum() {
@@ -527,39 +533,4 @@ mod tests {
         assert_eq!(g.load(Ordering::Relaxed), 0);
     }
 
-    #[test]
-    fn batch_table_names_distributes_round_robin() {
-        let names: Vec<String> = (0..8).map(|i| format!("t{i}")).collect();
-        let batches = batch_table_names(&names, 3);
-        assert_eq!(batches.len(), 3);
-        // Round-robin: bucket 0 gets t0,t3,t6 ; bucket 1 gets t1,t4,t7 ; bucket 2 gets t2,t5
-        assert_eq!(batches[0], ["t0", "t3", "t6"]);
-        assert_eq!(batches[1], ["t1", "t4", "t7"]);
-        assert_eq!(batches[2], ["t2", "t5"]);
-        let total: usize = batches.iter().map(|b| b.len()).sum();
-        assert_eq!(total, 8);
-    }
-
-    #[test]
-    fn batch_table_names_fewer_tables_than_connections() {
-        let names: Vec<String> = vec!["t0".into(), "t1".into()];
-        let batches = batch_table_names(&names, 8);
-        assert_eq!(batches.len(), 8);
-        let total: usize = batches.iter().map(|b| b.len()).sum();
-        assert_eq!(total, 2, "no tables must be lost");
-        // Each of the first 2 buckets has 1 table; remaining 6 are empty
-        assert_eq!(batches[0], ["t0"]);
-        assert_eq!(batches[1], ["t1"]);
-        for empty in &batches[2..] {
-            assert!(empty.is_empty());
-        }
-    }
-
-    #[test]
-    fn batch_table_names_n_zero_treated_as_one() {
-        let names: Vec<String> = vec!["t0".into(), "t1".into()];
-        let batches = batch_table_names(&names, 0);
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0], ["t0", "t1"]);
-    }
 }
