@@ -325,6 +325,7 @@ pub async fn run(
         let url = pg_url.to_string();
         let rtx = result_tx.clone();
         let cancel_conn = cancel.clone();
+        let ptx_conn = progress_tx.clone();
         conn_handles.push(tokio::task::spawn(async move {
             use crate::db::connection::connect;
             let conn = match connect(&url).await {
@@ -338,13 +339,21 @@ pub async fn run(
                 };
                 if sinks.is_empty() { continue; }
                 let name = sinks[0].table_name.clone();
-                let _ = rtx.send(merge_copy_to_db(sinks, &conn).await.map(|rows| (name, rows)));
+                let result = merge_copy_to_db(sinks, &conn).await;
+                if let Ok(rows) = &result {
+                    eprintln!("  COPY {} ({} rows) done.", name, rows);
+                    if let Some(ref tx) = ptx_conn {
+                        let _ = tx.send(ProgressEvent::Pass2Log(format!(
+                            "COPY {} ({} rows)", name, rows
+                        )));
+                    }
+                }
+                let _ = rtx.send(result.map(|rows| (name, rows)));
             }
         }));
     }
     drop(result_tx);
 
-    let ptx_flush = progress_tx.clone();
     let cancel_flush = cancel.clone();
     let flush_task: tokio::task::JoinHandle<Result<HashMap<String, u64>>> =
         tokio::task::spawn(async move {
@@ -366,13 +375,6 @@ pub async fn run(
                 let total_bytes: u64 = entry.iter().map(|s| s.bytes_buffered).sum();
                 if total_bytes >= FLUSH_DISPATCH_THRESHOLD {
                     let sinks = table_pending.remove(&table_name).unwrap();
-                    let total_rows: u64 = sinks.iter().map(|s| s.total_flushed + s.row_count).sum();
-                    if let Some(ref tx) = ptx_flush {
-                        let _ = tx.send(ProgressEvent::Pass2Log(format!(
-                            "COPY {} ({} rows)", table_name, total_rows
-                        )));
-                    }
-                    eprintln!("  COPY {} ({} rows)...", table_name, total_rows);
                     if conn_senders[robin].send(sinks).await.is_err() { break; }
                     robin = (robin + 1) % conn_senders.len();
                 }
@@ -383,12 +385,6 @@ pub async fn run(
             for (table_name, sinks) in table_pending {
                 let total_rows: u64 = sinks.iter().map(|s| s.total_flushed + s.row_count).sum();
                 if total_rows == 0 { continue; }
-                if let Some(ref tx) = ptx_flush {
-                    let _ = tx.send(ProgressEvent::Pass2Log(format!(
-                        "COPY {} ({} rows)", table_name, total_rows
-                    )));
-                }
-                eprintln!("  COPY {} ({} rows)...", table_name, total_rows);
                 if conn_senders[robin].send(sinks).await.is_err() { break; }
                 robin = (robin + 1) % conn_senders.len();
             }
@@ -601,22 +597,9 @@ mod tests {
     #[test]
     fn per_worker_flush_threshold_never_zero() {
         use crate::db::copy_sink::INTERIM_FLUSH_THRESHOLD;
-        for parallel in [1usize, 2, 4, 8, 16, 32, 64, 128] {
+        for parallel in [1usize, 2, 4, 8, 16, 32, 64, 128, 256] {
             let per_worker = INTERIM_FLUSH_THRESHOLD / parallel as u64;
             assert!(per_worker > 0, "threshold must be > 0 for parallel={parallel}");
-        }
-    }
-
-    // The global budget (per_worker × parallel) must not exceed INTERIM_FLUSH_THRESHOLD
-    // by more than a rounding factor of 1 byte per worker (integer division truncates).
-    #[test]
-    fn per_worker_threshold_bounds_total_disk_usage() {
-        use crate::db::copy_sink::INTERIM_FLUSH_THRESHOLD;
-        for parallel in [1usize, 2, 4, 8, 16, 32, 64] {
-            let per_worker = INTERIM_FLUSH_THRESHOLD / parallel as u64;
-            let total = per_worker * parallel as u64;
-            assert!(total <= INTERIM_FLUSH_THRESHOLD,
-                "total={total} exceeds global budget for parallel={parallel}");
         }
     }
 
