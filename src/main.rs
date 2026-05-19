@@ -378,6 +378,7 @@ async fn run(cli: Cli) -> Result<()> {
         cli.parallel,
         cli.anomaly_dir.clone(),
         None,
+        None,
     )
     .await?;
 

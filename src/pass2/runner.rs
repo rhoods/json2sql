@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,6 +15,7 @@ use crate::db::copy_sink::{merge_copy_to_db, TempFileSink, INTERIM_FLUSH_THRESHO
 use crate::schema::PATH_SEP;
 use crate::db::ddl::{add_constraints, ConstraintWarning};
 use crate::error::{J2sError, Result};
+use crate::io::mem::ram_pressure_exceeded;
 use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonReader};
@@ -77,6 +78,9 @@ fn global_sub(global: &AtomicUsize, n: usize) {
 ///       connections) as they fill up and when workers finish.
 ///   D — `add_constraints()` adds PRIMARY KEY (fatal on error) then
 ///       FOREIGN KEY (failures become `constraint_warnings`).
+/// Default RAM usage percentage above which workers drain all their sinks.
+pub const DEFAULT_RAM_PRESSURE_PCT: u8 = 70;
+
 pub async fn run(
     path: &Path,
     root_table: &str,
@@ -87,6 +91,7 @@ pub async fn run(
     parallel: usize,
     anomaly_dir: Option<PathBuf>,
     progress_tx: Option<ProgressTx>,
+    ram_pressure_pct: Option<u8>,
 ) -> Result<Pass2Result> {
     let total_bytes = file_size(path)?;
     let progress = if progress_tx.is_none() {
@@ -96,6 +101,10 @@ pub async fn run(
     };
     let mut rows_processed = 0u64;
     const PROGRESS_INTERVAL: u64 = 1_000;
+    let ram_pct = ram_pressure_pct.unwrap_or(DEFAULT_RAM_PRESSURE_PCT);
+    // Shared flag: set by the dispatch loop every PROGRESS_INTERVAL rows when
+    // RSS exceeds ram_pct% of total RAM. Workers drain all sinks when true.
+    let memory_pressure = Arc::new(AtomicBool::new(false));
 
     let sep = PATH_SEP.to_string();
     let path_map: HashMap<String, TableSchema> =
@@ -174,6 +183,7 @@ pub async fn run(
         let sbn = schema_by_name.clone();
         let pg_schema_owned = pg_schema.to_string();
         let cancel_token = cancel.clone();
+        let mem_pressure = Arc::clone(&memory_pressure);
 
         let handle = tokio::task::spawn(async move {
             let mut sinks = worker_sinks;
@@ -242,14 +252,14 @@ pub async fn run(
                     my_open = 0;
                 }
 
-                // Interim-flush check: if this worker's total buffered bytes exceed
-                // the threshold, drain ALL non-empty sinks to the flush task.
+                // Interim-flush check: drain ALL non-empty sinks when either the
+                // per-worker byte budget is exceeded OR when the dispatch loop has
+                // signalled RAM pressure (RSS > threshold% of total system RAM).
                 // Each sink's pending data is force-spilled to its temp file first so
                 // the in-memory Vec is freed — the flush task only holds a file path.
-                // This prevents RAM from accumulating across many small tables that
-                // individually never reach per_worker_flush_threshold.
                 let total_bytes: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
-                if total_bytes > per_worker_flush_threshold {
+                let ram_flag = mem_pressure.load(Ordering::Relaxed);
+                if total_bytes > per_worker_flush_threshold || ram_flag {
                     let names: Vec<String> = sinks
                         .iter()
                         .filter(|(_, s)| s.bytes_buffered > 0)
@@ -444,14 +454,15 @@ pub async fn run(
         if let Some(ref bar) = progress {
             bar.inc_rows(1);
         }
-        if let Some(ref tx) = progress_tx {
-            if rows_processed % PROGRESS_INTERVAL == 0 {
+        if rows_processed % PROGRESS_INTERVAL == 0 {
+            if let Some(ref tx) = progress_tx {
                 let _ = tx.send(ProgressEvent::Pass2Progress {
                     rows_processed,
                     bytes_read: reader.bytes_read(),
                     total_bytes,
                 });
             }
+            memory_pressure.store(ram_pressure_exceeded(ram_pct), Ordering::Relaxed);
         }
     }
     drop(senders);

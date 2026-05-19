@@ -95,6 +95,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 pass2_parallel,
                 anomaly_dir,
                 Some(tx),
+                None,
             )
             .await
         });
