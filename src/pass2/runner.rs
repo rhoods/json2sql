@@ -293,8 +293,8 @@ pub async fn run(
                     for name in handoff_names {
                         if let Some(mut old_sink) = sinks.remove(&name) {
                             let was_open = old_sink.is_open();
-                            let _ = old_sink.force_spill();
-                            let _ = old_sink.hibernate();
+                            old_sink.force_spill()?;
+                            old_sink.hibernate()?;
                             if was_open {
                                 global_sub(&global, 1);
                                 my_open = my_open.saturating_sub(1);
@@ -319,8 +319,8 @@ pub async fn run(
                     for sink in sinks.values_mut() {
                         if sink.bytes_buffered > 0 {
                             let was_open = sink.is_open();
-                            let _ = sink.force_spill();
-                            let _ = sink.hibernate();
+                            sink.force_spill()?;
+                            sink.hibernate()?;
                             if was_open {
                                 global_sub(&global, 1);
                                 my_open = my_open.saturating_sub(1);
@@ -333,7 +333,7 @@ pub async fn run(
             // Hibernate all open sinks to release FDs, then send remaining
             // non-empty sinks to the flush task before exiting.
             for sink in sinks.values_mut() {
-                let _ = sink.hibernate();
+                sink.hibernate()?;
             }
             global_sub(&global, my_open);
             for (name, sink) in sinks {

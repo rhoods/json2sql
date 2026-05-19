@@ -642,4 +642,29 @@ mod tests {
         assert!(!sink.is_open(), "hibernate must close the FD");
         assert!(sink.pending.is_empty());
     }
+
+    /// force_spill must propagate IO errors — deleting the temp file between
+    /// spills simulates a real failure (disk full, removed by another process).
+    ///
+    /// Hibernate is required before deletion: on Linux, an open FD to an unlinked
+    /// file remains valid. Closing the FD first forces ensure_file() to reopen
+    /// the (now missing) path, which returns NotFound.
+    #[test]
+    fn force_spill_propagates_io_error_on_deleted_temp_file() {
+        let mut sink = make_sink();
+        sink.write_row(b"row\n".to_vec()).unwrap();
+        sink.force_spill().unwrap(); // creates temp file, FD open
+        sink.hibernate().unwrap();   // close FD so the next open attempt hits the path
+
+        // Delete the temp file externally to simulate an IO failure.
+        let path = sink.temp_file.as_ref().unwrap().0.clone();
+        std::fs::remove_file(&path).unwrap();
+
+        // Write a second row so pending is non-empty again.
+        sink.write_row(b"row2\n".to_vec()).unwrap();
+
+        // force_spill must fail: FD is closed, file is gone → OpenOptions::open → NotFound.
+        let result = sink.force_spill();
+        assert!(result.is_err(), "force_spill must propagate IO error when temp file is deleted");
+    }
 }
