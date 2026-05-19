@@ -65,20 +65,15 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
         result
     };
 
-    // Pre-compute routing container names so children inherit the dimmed style.
-    // build_effective_schemas() already applies overrides, so checking wide_strategy directly is correct.
-    let routing_container_names: std::collections::HashSet<&str> = schemas.iter()
-        .filter(|t| {
-            matches!(t.wide_strategy, WideStrategy::MultiKeyedPivot(_))
-                && t.columns.iter().all(|c| c.is_generated)
-        })
-        .map(|t| t.name.as_str())
-        .collect();
-
-    // Exclude Skip (Ignore) tables — they have no DDL and won't exist in the DB.
+    // Exclude tables that produce no DDL: Skip (Ignore) and pure routing containers
+    // (MultiKeyedPivot where every column is a generated FK — no data columns).
     let visible_schemas: Vec<_> = schemas.iter()
         .enumerate()
-        .filter(|(_, t)| !matches!(t.wide_strategy, WideStrategy::Ignore))
+        .filter(|(_, t)| {
+            !matches!(t.wide_strategy, WideStrategy::Ignore)
+            && !(matches!(t.wide_strategy, WideStrategy::MultiKeyedPivot(_))
+                 && t.columns.iter().all(|c| c.is_generated))
+        })
         .collect();
 
     rsx! {
@@ -101,81 +96,39 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
             div {
                 style: "display:flex;flex:1;overflow:hidden;min-height:0;min-width:0;",
 
-                // ── Left — table tree with columns (25%) ─────────────────
+                // ── Left — table tree (25%) ──────────────────────────────
                 div {
                     style: "flex:0 1 25%;min-width:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};overflow-y:auto;padding:4px 0;",
                     for &(orig_i, table) in &visible_schemas {
                         {
                             let is_selected = orig_i == idx;
-                            let is_routing_container = (matches!(table.wide_strategy, WideStrategy::MultiKeyedPivot(_))
-                                && table.columns.iter().all(|c| c.is_generated))
-                                || table.parent_table.as_deref()
-                                    .map(|p| routing_container_names.contains(p))
-                                    .unwrap_or(false);
-                            let (label, badge_color) = if is_routing_container {
-                                ("ROUTE", theme::BADGE_ROUTE)
-                            } else {
-                                (strategy_label(&table.wide_strategy), strategy_color(&table.wide_strategy))
-                            };
+                            let (label, badge_color) = (strategy_label(&table.wide_strategy), strategy_color(&table.wide_strategy));
                             let row_bg = if is_selected { format!("background:{};", SELECTED_ROW_BG) } else { "background:transparent;".to_string() };
                             let accent = if is_selected { format!("border-left:2px solid {};", SELECTED_ACCENT_COLOR) } else { "border-left:2px solid transparent;".to_string() };
-                            let name_color = if is_routing_container { theme::ON_SURFACE_DIM } else { theme::ON_SURFACE };
                             let parent_indent = table.depth.saturating_sub(1) * 14 + 8;
                             let connector = if table.depth == 0 { "" } else if is_last_child[orig_i] { "└─" } else { "├─" };
-                            let connector_color = if is_routing_container { theme::ON_SURFACE_DIM } else { "#717680" };
-                            let wrapper_opacity = if is_routing_container { "opacity:0.6;" } else { "" };
-                            let col_indent = table.depth * 14 + 22;
                             rsx! {
                                 div {
                                     key: "{orig_i}",
-                                    style: "{wrapper_opacity}",
-                                    // Table header row
-                                    div {
-                                        style: "display:flex;align-items:center;gap:4px;padding:5px 8px 5px {parent_indent}px;cursor:pointer;{row_bg}{accent}",
-                                        onclick: move |_| {
-                                            let mut s = state.write();
-                                            s.selected_table_indices = std::collections::HashSet::from([orig_i]);
-                                            s.last_selected_idx = orig_i;
-                                        },
-                                        if table.depth > 0 {
-                                            span {
-                                                style: "font-size:0.6875rem;color:{connector_color};flex-shrink:0;line-height:1;",
-                                                "{connector}"
-                                            }
-                                        }
+                                    style: "display:flex;align-items:center;gap:4px;padding:5px 8px 5px {parent_indent}px;cursor:pointer;{row_bg}{accent}",
+                                    onclick: move |_| {
+                                        let mut s = state.write();
+                                        s.selected_table_indices = std::collections::HashSet::from([orig_i]);
+                                        s.last_selected_idx = orig_i;
+                                    },
+                                    if table.depth > 0 {
                                         span {
-                                            style: "font-family:{theme::FONT_CODE};font-size:0.75rem;color:{name_color};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-                                            "{table.name}"
-                                        }
-                                        span {
-                                            style: "font-size:0.5625rem;font-weight:700;letter-spacing:0.04em;color:{BADGE_TEXT_COLOR};background:{badge_color};padding:1px 4px;border-radius:2px;flex-shrink:0;",
-                                            "{label}"
+                                            style: "font-size:0.6875rem;color:#717680;flex-shrink:0;line-height:1;",
+                                            "{connector}"
                                         }
                                     }
-                                    // Column rows
-                                    for (j, col) in table.columns.iter().enumerate() {
-                                        {
-                                            let col_color = if col.is_generated {
-                                                theme::ON_SURFACE_DIM
-                                            } else {
-                                                theme::ON_SURFACE_VARIANT
-                                            };
-                                            let type_str = col.pg_type.as_sql().to_lowercase();
-                                            rsx! {
-                                                div {
-                                                    key: "{j}",
-                                                    style: "display:flex;align-items:baseline;gap:6px;padding:1px 8px 1px {col_indent}px;",
-                                                    span {
-                                                        style: "font-family:{theme::FONT_CODE};font-size:0.6875rem;color:{col_color};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-                                                        "{col.name}"
-                                                    }
-                                                    span {
-                                                        style: "font-size:0.5625rem;color:{theme::ON_SURFACE_DIM};white-space:nowrap;flex-shrink:0;font-family:{theme::FONT_CODE};",
-                                                        "{type_str}"
-                                                    }
-                                                }
-                                            }
-                                        }
+                                    span {
+                                        style: "font-family:{theme::FONT_CODE};font-size:0.75rem;color:{theme::ON_SURFACE};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                        "{table.name}"
+                                    }
+                                    span {
+                                        style: "font-size:0.5625rem;font-weight:700;letter-spacing:0.04em;color:{BADGE_TEXT_COLOR};background:{badge_color};padding:1px 4px;border-radius:2px;flex-shrink:0;",
+                                        "{label}"
                                     }
                                 }
                             }
