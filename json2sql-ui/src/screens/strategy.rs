@@ -30,6 +30,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     // Buffer for the id_column name when setting NormalizeDynamicKeys.
     let mut normalize_id_col: Signal<String> = use_signal(|| "id".to_string());
     let mut banner_dismissed = use_signal(|| false);
+    let mut multi_select_mode: Signal<bool> = use_signal(|| false);
     // Feedback after save: Some(Ok(path)) or Some(Err(msg))
     let mut save_feedback: Signal<Option<Result<String, String>>> = use_signal(|| None);
 
@@ -74,6 +75,36 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     };
     let selection_count = selected_indices.len();
 
+    // Pre-compute which tables are the last child of their parent — used to pick └─ vs ├─.
+    // For each index, is_last_child[i] is true if no later table has the same parent_table.
+    let is_last_child: Vec<bool> = {
+        let mut result = vec![true; schemas.len()];
+        for i in 0..schemas.len() {
+            if let Some(ref parent) = schemas[i].parent_table {
+                // Any sibling after i with the same parent makes i not-the-last.
+                for j in (i + 1)..schemas.len() {
+                    if schemas[j].parent_table.as_deref() == Some(parent.as_str()) {
+                        result[i] = false;
+                        break;
+                    }
+                }
+            }
+        }
+        result
+    };
+
+    // Pre-compute routing container names so children can inherit the dimmed style.
+    // A routing container is a MultiKeyedPivot table with only generated columns and no user override.
+    let strategy_overrides_snap = state.read().strategy_overrides.clone();
+    let routing_container_names: std::collections::HashSet<&str> = schemas.iter()
+        .filter(|t| {
+            !strategy_overrides_snap.contains_key(&t.name)
+                && matches!(t.wide_strategy, WideStrategy::MultiKeyedPivot(_))
+                && t.columns.iter().all(|c| c.is_generated)
+        })
+        .map(|t| t.name.as_str())
+        .collect();
+
     rsx! {
         div {
             style: "display:flex;flex-direction:column;height:100vh;background:{theme::BG_ROOT};",
@@ -108,6 +139,33 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                 "✗ {msg}"
                             }
                         },
+                    }
+                }
+                // Multi-select toggle
+                {
+                    let is_multi = *multi_select_mode.read();
+                    let btn_style = if is_multi {
+                        format!("font-size:0.8125rem;padding:4px 10px;background:{};color:#0D0D0D;-webkit-text-fill-color:#0D0D0D;border:none;", theme::SECONDARY)
+                    } else {
+                        "font-size:0.8125rem;padding:4px 10px;".to_string()
+                    };
+                    let label = if is_multi { "✓ Multi-select ON" } else { "⊕ Multi-select" };
+                    rsx! {
+                        button {
+                            class: if is_multi { "btn-ghost" } else { "btn-ghost" },
+                            style: "{btn_style}",
+                            onclick: move |_| {
+                                let new_val = !*multi_select_mode.read();
+                                multi_select_mode.set(new_val);
+                                if !new_val {
+                                    // Turning off: collapse to last_selected_idx only
+                                    let mut s = state.write();
+                                    let last = s.last_selected_idx;
+                                    s.selected_table_indices = std::collections::HashSet::from([last]);
+                                }
+                            },
+                            "{label}"
+                        }
                     }
                 }
                 button {
@@ -194,9 +252,14 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             // Pure FK relay tables created by the cascade (MultiKeyedPivot with no
                             // data columns). They exist in SQL but only hold routing FKs; the actual
                             // data lives in the synthetic sibling table referenced by child_routes.
-                            let is_routing_container = !user_overrode
+                            // Children of routing containers are also dimmed — they are structural
+                            // artifacts of the cascade, not independently meaningful tables.
+                            let is_routing_container = (!user_overrode
                                 && matches!(effective, WideStrategy::MultiKeyedPivot(_))
-                                && table.columns.iter().all(|c| c.is_generated);
+                                && table.columns.iter().all(|c| c.is_generated))
+                                || table.parent_table.as_deref()
+                                    .map(|p| routing_container_names.contains(p))
+                                    .unwrap_or(false);
                             // Auto-converted JSONB (overflow guard) shows amber badge;
                             // user-chosen JSONB keeps purple.
                             let is_overflow_jsonb = !user_overrode
@@ -225,15 +288,28 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                 theme::ON_SURFACE
                             };
                             let row_opacity = if is_routing_container { "opacity:0.6;" } else { "" };
+                            // Tree connector: indent the row by parent depth, then show └─/├─ for children.
+                            let parent_indent = table.depth.saturating_sub(1) * 14 + 8;
+                            let connector = if table.depth == 0 {
+                                ""
+                            } else if is_last_child[i] {
+                                "└─"
+                            } else {
+                                "├─"
+                            };
+                            let connector_color = if is_routing_container { theme::ON_SURFACE_DIM } else { "#717680" };
                             rsx! {
                                 div {
                                     key: "{i}",
-                                    style: "display:flex;align-items:center;gap:6px;padding:5px 8px 5px {indent}px;cursor:pointer;{row_bg}{accent}{row_opacity}",
-                                    onclick: move |e| {
+                                    style: "display:flex;align-items:center;gap:4px;padding:5px 8px 5px {parent_indent}px;cursor:pointer;{row_bg}{accent}{row_opacity}",
+                                    onclick: move |_| {
+                                        let is_multi = *multi_select_mode.read();
                                         let mut s = state.write();
-                                        if e.modifiers().ctrl() {
+                                        if is_multi {
                                             if s.selected_table_indices.contains(&i) {
-                                                s.selected_table_indices.remove(&i);
+                                                if s.selected_table_indices.len() > 1 {
+                                                    s.selected_table_indices.remove(&i);
+                                                }
                                             } else {
                                                 s.selected_table_indices.insert(i);
                                                 s.last_selected_idx = i;
@@ -243,6 +319,12 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                             s.last_selected_idx = i;
                                         }
                                     },
+                                    if table.depth > 0 {
+                                        span {
+                                            style: "font-size:0.6875rem;color:{connector_color};flex-shrink:0;line-height:1;",
+                                            "{connector}"
+                                        }
+                                    }
                                     span {
                                         style: "font-family:{theme::FONT_CODE};font-size:0.75rem;color:{name_color};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                         "{table.name}"

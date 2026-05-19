@@ -49,6 +49,22 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
     let strategy_lbl = strategy_label(&selected.wide_strategy);
     let strategy_col = strategy_color(&selected.wide_strategy);
 
+    // Pre-compute last-child status for tree connectors (└─ vs ├─).
+    let is_last_child: Vec<bool> = {
+        let mut result = vec![true; schemas.len()];
+        for i in 0..schemas.len() {
+            if let Some(ref parent) = schemas[i].parent_table {
+                for j in (i + 1)..schemas.len() {
+                    if schemas[j].parent_table.as_deref() == Some(parent.as_str()) {
+                        result[i] = false;
+                        break;
+                    }
+                }
+            }
+        }
+        result
+    };
+
     rsx! {
         div {
             style: "display:flex;flex-direction:column;height:100vh;background:{theme::BG_ROOT};",
@@ -75,20 +91,27 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                     for (i, table) in schemas.iter().enumerate() {
                         {
                             let is_selected = i == idx;
-                            let indent = table.depth * 12;
                             let label = strategy_label(&table.wide_strategy);
                             let badge_color = strategy_color(&table.wide_strategy);
                             let row_bg = if is_selected { format!("background:{};", SELECTED_ROW_BG) } else { "background:transparent;".to_string() };
                             let accent = if is_selected { format!("border-left:2px solid {};", SELECTED_ACCENT_COLOR) } else { "border-left:2px solid transparent;".to_string() };
+                            let parent_indent = table.depth.saturating_sub(1) * 14 + 8;
+                            let connector = if table.depth == 0 { "" } else if is_last_child[i] { "└─" } else { "├─" };
                             rsx! {
                                 div {
                                     key: "{i}",
-                                    style: "display:flex;align-items:center;gap:6px;padding:5px 8px 5px {indent}px;cursor:pointer;{row_bg}{accent}",
+                                    style: "display:flex;align-items:center;gap:4px;padding:5px 8px 5px {parent_indent}px;cursor:pointer;{row_bg}{accent}",
                                     onclick: move |_| {
                                         let mut s = state.write();
                                         s.selected_table_indices = std::collections::HashSet::from([i]);
                                         s.last_selected_idx = i;
                                     },
+                                    if table.depth > 0 {
+                                        span {
+                                            style: "font-size:0.6875rem;color:#717680;flex-shrink:0;line-height:1;",
+                                            "{connector}"
+                                        }
+                                    }
                                     span {
                                         style: "font-family:{theme::FONT_CODE};font-size:0.75rem;color:{theme::ON_SURFACE};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                         "{table.name}"
