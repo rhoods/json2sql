@@ -4,7 +4,6 @@ _Mis à jour automatiquement en fin de session._
 
 ## Prochaines tâches
 
-- **Pass2Flush en temps réel** : les `Pass2Flush` events sont émis en batch à la fin du `flush_task` (runner.rs ~504-513). Si erreur, ils sont perdus → IHM bloquée sur "Waiting for first flush…". Fix : émettre les events depuis l'intérieur du flush_task au moment où chaque COPY se termine (via `ptx_flush`), pas en batch post-await.
 - IHM : bouton "Précédent" sur l'écran Strategy
 - Findings adversariaux mineurs restants : #6 (timing test fragile), #9 (static assert InferredType::ALL.len), #11 (sibling[0] non-déterministe dans large-group Jaccard)
 - Tester Strategy sur des fichiers complexes (wide tables, dynamic keys, pivot)
@@ -16,6 +15,15 @@ _Mis à jour automatiquement en fin de session._
 
 - **SSL/TLS pour connexions PG distantes** : actuellement `NoTls` hardcodé dans `tokio-postgres`. À implémenter si usage cloud (RDS, Supabase, Neon, etc.). Nécessite d'activer `tokio-postgres` avec feature `native-tls` ou `openssl` + dépendance système (`libssl-dev`). Checkbox "Require SSL" dans Setup, propagée au connect dans import.rs et setup.rs.
 - Picker de fichier lent (xdg-portal) : installer `libgtk-3-dev` sur le host puis `features = ["tokio", "gtk3"]` dans rfd
+
+## Ce qui est livré (session 2026-05-19)
+
+- **Pass2Flush en temps réel** : `Pass2Flush { table_name, rows_flushed }` émis après chaque COPY réussi dans les conn workers (plus jamais pré-dispatch)
+- **Hardening merge_copy_to_db** : remove unwrap → expect avec message, debug_assert total_flushed==0, debug_assert homogénéité table_name, commentaire corrigé (flush_to_db incrémente total_flushed)
+- **Tests intégration merge_copy_to_db** : 5 tests (pending-only, spill, multi-sinks, empty-vec, mixed-empty)
+- **Test Pass2Flush timing** : `test_pass2_flush_events_emitted_after_copy` — typed event + requête dynamique sur toutes les tables du schéma
+- **Fix Pass2Log timing** : suppression des Pass2Log pré-dispatch dans flush_task
+- **Suppression test identité mathématique** `per_worker_threshold_bounds_total_disk_usage`
 
 ## Ce qui est livré (session 2026-04-25)
 
