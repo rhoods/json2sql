@@ -65,6 +65,9 @@ fn global_sub(global: &AtomicUsize, n: usize) {
     }
 }
 
+/// Default RAM usage percentage above which workers force-spill all sinks in-place.
+pub const DEFAULT_RAM_PRESSURE_PCT: u8 = 70;
+
 /// Run Pass 2: stream the file into per-worker temp-file buffers, COPY to
 /// PostgreSQL, then add PRIMARY KEY and FOREIGN KEY constraints.
 ///
@@ -78,8 +81,6 @@ fn global_sub(global: &AtomicUsize, n: usize) {
 ///       connections) as they fill up and when workers finish.
 ///   D — `add_constraints()` adds PRIMARY KEY (fatal on error) then
 ///       FOREIGN KEY (failures become `constraint_warnings`).
-/// Default RAM usage percentage above which workers drain all their sinks.
-pub const DEFAULT_RAM_PRESSURE_PCT: u8 = 70;
 
 pub async fn run(
     path: &Path,
@@ -252,14 +253,26 @@ pub async fn run(
                     my_open = 0;
                 }
 
-                // Interim-flush check: drain ALL non-empty sinks when either the
-                // per-worker byte budget is exceeded OR when the dispatch loop has
-                // signalled RAM pressure (RSS > threshold% of total system RAM).
-                // Each sink's pending data is force-spilled to its temp file first so
-                // the in-memory Vec is freed — the flush task only holds a file path.
                 let total_bytes: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
                 let ram_flag = mem_pressure.load(Ordering::Relaxed);
-                if total_bytes > per_worker_flush_threshold || ram_flag {
+
+                if ram_flag {
+                    // RAM pressure: force_spill all sinks in-place — no handoff.
+                    // Pending Vecs are written to each sink's existing temp file
+                    // (append), freeing RAM. Sinks stay in the worker and continue
+                    // accumulating new rows into the same file — no fragmentation.
+                    for sink in sinks.values_mut() {
+                        let was_open = sink.is_open();
+                        sink.force_spill()?;
+                        sink.hibernate()?;
+                        if was_open {
+                            global_sub(&global, 1);
+                            my_open = my_open.saturating_sub(1);
+                        }
+                    }
+                } else if total_bytes > per_worker_flush_threshold {
+                    // Byte budget exceeded: drain all non-empty sinks with handoff.
+                    // (task 2 will replace this with drain-max + force_spill others)
                     let names: Vec<String> = sinks
                         .iter()
                         .filter(|(_, s)| s.bytes_buffered > 0)
@@ -268,8 +281,6 @@ pub async fn run(
                     for name in names {
                         if let Some(mut old_sink) = sinks.remove(&name) {
                             let was_open = old_sink.is_open();
-                            // Push any in-memory pending data to the temp file, then
-                            // close the FD so the sink is purely on-disk before hand-off.
                             let _ = old_sink.force_spill();
                             let _ = old_sink.hibernate();
                             if was_open {
@@ -442,6 +453,9 @@ pub async fn run(
     let stream_start = Instant::now();
     let mut robin = 0usize;
     let mut worker_died = false;
+    // Initial check before any objects are dispatched so workers see the flag
+    // from their very first iteration (important for small files / low threshold).
+    memory_pressure.store(ram_pressure_exceeded(ram_pct), Ordering::Relaxed);
     'dispatch: while let Some(item) = reader.next_raw() {
         let bytes = item?;
         if senders[robin].send(bytes).await.is_err() {
