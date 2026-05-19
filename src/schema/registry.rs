@@ -286,6 +286,10 @@ impl SchemaRegistry {
 
         finalize_cascading(&mut schemas, self.sibling_threshold, self.sibling_jaccard);
         exclude_absorbed_children(&mut schemas);
+        // Re-sort after cascade: finalize_cascading appends synthetic tables at the end of the
+        // Vec without inserting them at their correct depth position. A second sort restores
+        // topological (depth-then-name) order so the UI tree and pass2 flush order are correct.
+        schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
 
         schemas
     }
