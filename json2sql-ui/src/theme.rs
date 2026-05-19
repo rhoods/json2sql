@@ -47,6 +47,7 @@ pub const BADGE_JSONB_INLINE: &str = "#16A085";   // teal    — JSONB inline (c
 pub const BADGE_FLATTEN: &str = "#27AE60";        // green
 pub const BADGE_NORMALIZE: &str = "#E67E22";      // orange
 pub const BADGE_SKIP: &str = "#E74C3C";           // red
+pub const BADGE_ROUTE: &str = "#525A65";          // muted slate — routing container (pure FK relay)
 
 // ---------------------------------------------------------------------------
 // Typography helpers (used as CSS font-family values)

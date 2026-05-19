@@ -51,7 +51,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
         };
     }
 
-    let idx = state.read().selected_table_idx.min(schemas.len().saturating_sub(1));
+    let idx = state.read().last_selected_idx.min(schemas.len().saturating_sub(1));
     let selected: &TableSchema = &schemas[idx];
     let current_strategy = state.read().strategy_overrides
         .get(&selected.name)
@@ -61,6 +61,18 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
     let normalize_id_col_value = normalize_id_col.read().trim().to_string();
     let normalize_id_col_invalid = normalize_id_col_value.is_empty() || selected.columns.iter().any(|col| col.name == normalize_id_col_value);
+    let selected_indices = state.read().selected_table_indices.clone();
+    let multi_select = selected_indices.len() > 1;
+    let common_parent: Option<String> = if multi_select {
+        let parents: std::collections::HashSet<Option<&str>> = selected_indices.iter()
+            .filter_map(|&i| schemas.get(i))
+            .map(|t| t.parent_table.as_deref())
+            .collect();
+        if parents.len() == 1 { parents.into_iter().next().flatten().map(|s| s.to_string()) } else { None }
+    } else {
+        None
+    };
+    let selection_count = selected_indices.len();
 
     rsx! {
         div {
@@ -172,20 +184,31 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                     style: "flex:0 1 25%;min-width:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};overflow-y:auto;padding:4px 0;",
                     for (i, table) in schemas.iter().enumerate() {
                         {
-                            let is_selected = i == idx;
+                            let is_selected = selected_indices.contains(&i);
                             let indent = table.depth * 12;
                             let user_overrode = state.read().strategy_overrides.contains_key(&table.name);
                             let effective = state.read().strategy_overrides
                                 .get(&table.name)
                                 .cloned()
                                 .unwrap_or_else(|| table.wide_strategy.clone());
+                            // Pure FK relay tables created by the cascade (MultiKeyedPivot with no
+                            // data columns). They exist in SQL but only hold routing FKs; the actual
+                            // data lives in the synthetic sibling table referenced by child_routes.
+                            let is_routing_container = !user_overrode
+                                && matches!(effective, WideStrategy::MultiKeyedPivot(_))
+                                && table.columns.iter().all(|c| c.is_generated);
                             // Auto-converted JSONB (overflow guard) shows amber badge;
                             // user-chosen JSONB keeps purple.
                             let is_overflow_jsonb = !user_overrode
                                 && matches!(effective, WideStrategy::Jsonb)
                                 && overflow_table_names.contains(&table.name);
-                            let label = if is_overflow_jsonb { "JSONB ⚠" } else { strategy_label(&effective) };
-                            let badge_color = if is_overflow_jsonb { theme::BADGE_JSONB_OVERFLOW } else { strategy_color(&effective) };
+                            let (label, badge_color) = if is_routing_container {
+                                ("ROUTE", theme::BADGE_ROUTE)
+                            } else if is_overflow_jsonb {
+                                ("JSONB ⚠", theme::BADGE_JSONB_OVERFLOW)
+                            } else {
+                                (strategy_label(&effective), strategy_color(&effective))
+                            };
                             let row_bg = if is_selected {
                                 format!("background:{};", SELECTED_ROW_BG)
                             } else {
@@ -196,13 +219,32 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             } else {
                                 "border-left:2px solid transparent;".to_string()
                             };
+                            let name_color = if is_routing_container {
+                                theme::ON_SURFACE_DIM
+                            } else {
+                                theme::ON_SURFACE
+                            };
+                            let row_opacity = if is_routing_container { "opacity:0.6;" } else { "" };
                             rsx! {
                                 div {
                                     key: "{i}",
-                                    style: "display:flex;align-items:center;gap:6px;padding:5px 8px 5px {indent}px;cursor:pointer;{row_bg}{accent}",
-                                    onclick: move |_| { state.write().selected_table_idx = i; },
+                                    style: "display:flex;align-items:center;gap:6px;padding:5px 8px 5px {indent}px;cursor:pointer;{row_bg}{accent}{row_opacity}",
+                                    onclick: move |e| {
+                                        let mut s = state.write();
+                                        if e.modifiers().ctrl() {
+                                            if s.selected_table_indices.contains(&i) {
+                                                s.selected_table_indices.remove(&i);
+                                            } else {
+                                                s.selected_table_indices.insert(i);
+                                                s.last_selected_idx = i;
+                                            }
+                                        } else {
+                                            s.selected_table_indices = std::collections::HashSet::from([i]);
+                                            s.last_selected_idx = i;
+                                        }
+                                    },
                                     span {
-                                        style: "font-family:{theme::FONT_CODE};font-size:0.75rem;color:{theme::ON_SURFACE};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                        style: "font-family:{theme::FONT_CODE};font-size:0.75rem;color:{name_color};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                         "{table.name}"
                                     }
                                     span {
@@ -263,116 +305,221 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                 // ── Right — strategy configurator (30%) ──────────────────
                 div {
                     style: "flex:0 1 30%;min-width:0;min-height:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};padding:16px;display:flex;flex-direction:column;overflow-y:auto;",
-                    h3 {
-                        style: "color:{theme::ON_SURFACE};font-size:0.875rem;font-weight:600;margin:0 0 4px 0;",
-                        "Strategy"
-                    }
-                    p {
-                        style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;margin:0 0 16px 0;",
-                        "Current: "
-                        span { style: "color:{theme::ON_SURFACE};font-family:{theme::FONT_CODE};", "{current_label}" }
-                    }
 
-                    // Strategy buttons
-                    div {
-                        style: "display:flex;flex-direction:column;gap:6px;margin-bottom:16px;",
-
-                        StrategyButton {
-                            label: "Default (columns)",
-                            active: matches!(current_strategy, WideStrategy::Columns),
-                            color: theme::BADGE_DEFAULT,
-                            onclick: move |_| {
-                                let name = state.read().schemas[idx].name.clone();
-                                state.write().strategy_overrides.remove(&name);
+                    if multi_select {
+                        // ── Multi-select mode ─────────────────────────────
+                        h3 {
+                            style: "color:{theme::ON_SURFACE};font-size:0.875rem;font-weight:600;margin:0 0 4px 0;",
+                            "{selection_count} tables sélectionnées"
+                        }
+                        if let Some(ref parent) = common_parent {
+                            p {
+                                style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;margin:0 0 12px 0;",
+                                "Parent commun : "
+                                span { style: "color:{theme::ON_SURFACE};font-family:{theme::FONT_CODE};", "{parent}" }
+                            }
+                        } else {
+                            p {
+                                style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;margin:0 0 12px 0;",
+                                "Parents variés"
                             }
                         }
-                        StrategyButton {
-                            label: "JSONB séparé (table propre)",
-                            active: matches!(current_strategy, WideStrategy::Jsonb),
-                            color: theme::BADGE_JSONB,
-                            onclick: move |_| {
-                                let name = state.read().schemas[idx].name.clone();
-                                state.write().strategy_overrides.insert(name, WideStrategy::Jsonb);
-                            }
-                        }
-                        StrategyButton {
-                            label: "JSONB inline (colonne parent)",
-                            active: matches!(current_strategy, WideStrategy::JsonbFlatten),
-                            color: theme::BADGE_JSONB_INLINE,
-                            onclick: move |_| {
-                                let name = state.read().schemas[idx].name.clone();
-                                state.write().strategy_overrides.insert(name, WideStrategy::JsonbFlatten);
-                            }
-                        }
-                        StrategyButton {
-                            label: "Pivot (EAV)",
-                            active: matches!(current_strategy, WideStrategy::Pivot),
-                            color: theme::BADGE_NORMALIZE,
-                            onclick: move |_| {
-                                let name = state.read().schemas[idx].name.clone();
-                                state.write().strategy_overrides.insert(name, WideStrategy::Pivot);
-                            }
-                        }
-                        StrategyButton {
-                            label: "Skip (exclude)",
-                            active: matches!(current_strategy, WideStrategy::Ignore),
-                            color: theme::BADGE_SKIP,
-                            onclick: move |_| {
-                                let name = state.read().schemas[idx].name.clone();
-                                state.write().strategy_overrides.insert(name, WideStrategy::Ignore);
-                            }
-                        }
-                    }
-
-                    // NormalizeDynamicKeys — needs an id_column name
-                    div {
-                        style: "border-top:1px solid {BORDER_COLOR_LIGHT};padding-top:12px;margin-bottom:6px;",
                         p {
                             style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.75rem;margin:0 0 8px 0;font-weight:600;",
-                            "Normalize dynamic keys"
+                            "Appliquer à toutes :"
                         }
-                        p {
-                            style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;margin:0 0 8px 0;",
-                            "Each JSON key becomes a row. The key itself is stored in the column named below."
-                        }
-                        input {
-                            class: "input-field",
-                            style: "margin-bottom:8px;",
-                            r#type: "text",
-                            placeholder: "id_column (e.g. image_id)",
-                            value: "{normalize_id_col.read()}",
-                            oninput: move |e| { *normalize_id_col.write() = e.value(); },
-                        }
-                        button {
-                            class: "btn-ghost",
-                            style: "width:100%;",
-                            disabled: normalize_id_col_invalid,
-                            onclick: move |_| {
-                                let col = normalize_id_col.read().trim().to_string();
-                                let id_col = if col.is_empty() { "id".to_string() } else { col };
-                                let name = state.read().schemas[idx].name.clone();
-                                state.write().strategy_overrides.insert(
-                                    name,
-                                    WideStrategy::NormalizeDynamicKeys { id_column: id_col },
-                                );
-                            },
-                            "Apply Normalize"
-                        }
-                        if normalize_id_col_invalid {
-                            p {
-                                style: "color:{theme::ERROR};font-size:0.75rem;margin:8px 0 0 0;",
-                                "Enter a non-empty, unique key column name."
+                        div {
+                            style: "display:flex;flex-direction:column;gap:6px;margin-bottom:16px;",
+                            StrategyButton {
+                                label: "Default (columns)",
+                                active: false,
+                                color: theme::BADGE_DEFAULT,
+                                onclick: move |_| {
+                                    let names: Vec<String> = {
+                                        let s = state.read();
+                                        s.selected_table_indices.iter()
+                                            .filter_map(|&i| s.schemas.get(i).map(|t| t.name.clone()))
+                                            .collect()
+                                    };
+                                    let mut s = state.write();
+                                    for name in names { s.strategy_overrides.remove(&name); }
+                                }
+                            }
+                            StrategyButton {
+                                label: "JSONB séparé",
+                                active: false,
+                                color: theme::BADGE_JSONB,
+                                onclick: move |_| {
+                                    let names: Vec<String> = {
+                                        let s = state.read();
+                                        s.selected_table_indices.iter()
+                                            .filter_map(|&i| s.schemas.get(i).map(|t| t.name.clone()))
+                                            .collect()
+                                    };
+                                    let mut s = state.write();
+                                    for name in names { s.strategy_overrides.insert(name, WideStrategy::Jsonb); }
+                                }
+                            }
+                            StrategyButton {
+                                label: "JSONB inline",
+                                active: false,
+                                color: theme::BADGE_JSONB_INLINE,
+                                onclick: move |_| {
+                                    let names: Vec<String> = {
+                                        let s = state.read();
+                                        s.selected_table_indices.iter()
+                                            .filter_map(|&i| s.schemas.get(i).map(|t| t.name.clone()))
+                                            .collect()
+                                    };
+                                    let mut s = state.write();
+                                    for name in names { s.strategy_overrides.insert(name, WideStrategy::JsonbFlatten); }
+                                }
+                            }
+                            StrategyButton {
+                                label: "Pivot (EAV)",
+                                active: false,
+                                color: theme::BADGE_NORMALIZE,
+                                onclick: move |_| {
+                                    let names: Vec<String> = {
+                                        let s = state.read();
+                                        s.selected_table_indices.iter()
+                                            .filter_map(|&i| s.schemas.get(i).map(|t| t.name.clone()))
+                                            .collect()
+                                    };
+                                    let mut s = state.write();
+                                    for name in names { s.strategy_overrides.insert(name, WideStrategy::Pivot); }
+                                }
+                            }
+                            StrategyButton {
+                                label: "Skip (exclude all)",
+                                active: false,
+                                color: theme::BADGE_SKIP,
+                                onclick: move |_| {
+                                    let names: Vec<String> = {
+                                        let s = state.read();
+                                        s.selected_table_indices.iter()
+                                            .filter_map(|&i| s.schemas.get(i).map(|t| t.name.clone()))
+                                            .collect()
+                                    };
+                                    let mut s = state.write();
+                                    for name in names { s.strategy_overrides.insert(name, WideStrategy::Ignore); }
+                                }
                             }
                         }
-                    }
-
-                    div { style: "flex:1;" }
-
-                    // Bottom note for auto-detected strategies
-                    if matches!(current_strategy, WideStrategy::StructuredPivot(_) | WideStrategy::KeyedPivot(_) | WideStrategy::AutoSplit { .. }) {
+                        div { style: "flex:1;" }
                         p {
-                            style: "color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;margin:0 0 12px 0;font-style:italic;",
-                            "Auto-detected strategy. Override above if needed."
+                            style: "color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;font-style:italic;margin:0;",
+                            "La fusion (Keyed Pivot) nécessite une re-analyse avec un seuil Jaccard ajusté — non disponible via l'IHM."
+                        }
+                    } else {
+                        // ── Single-select mode (existing configurator) ────
+                        h3 {
+                            style: "color:{theme::ON_SURFACE};font-size:0.875rem;font-weight:600;margin:0 0 4px 0;",
+                            "Strategy"
+                        }
+                        p {
+                            style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;margin:0 0 16px 0;",
+                            "Current: "
+                            span { style: "color:{theme::ON_SURFACE};font-family:{theme::FONT_CODE};", "{current_label}" }
+                        }
+
+                        div {
+                            style: "display:flex;flex-direction:column;gap:6px;margin-bottom:16px;",
+                            StrategyButton {
+                                label: "Default (columns)",
+                                active: matches!(current_strategy, WideStrategy::Columns),
+                                color: theme::BADGE_DEFAULT,
+                                onclick: move |_| {
+                                    let name = state.read().schemas[idx].name.clone();
+                                    state.write().strategy_overrides.remove(&name);
+                                }
+                            }
+                            StrategyButton {
+                                label: "JSONB séparé (table propre)",
+                                active: matches!(current_strategy, WideStrategy::Jsonb),
+                                color: theme::BADGE_JSONB,
+                                onclick: move |_| {
+                                    let name = state.read().schemas[idx].name.clone();
+                                    state.write().strategy_overrides.insert(name, WideStrategy::Jsonb);
+                                }
+                            }
+                            StrategyButton {
+                                label: "JSONB inline (colonne parent)",
+                                active: matches!(current_strategy, WideStrategy::JsonbFlatten),
+                                color: theme::BADGE_JSONB_INLINE,
+                                onclick: move |_| {
+                                    let name = state.read().schemas[idx].name.clone();
+                                    state.write().strategy_overrides.insert(name, WideStrategy::JsonbFlatten);
+                                }
+                            }
+                            StrategyButton {
+                                label: "Pivot (EAV)",
+                                active: matches!(current_strategy, WideStrategy::Pivot),
+                                color: theme::BADGE_NORMALIZE,
+                                onclick: move |_| {
+                                    let name = state.read().schemas[idx].name.clone();
+                                    state.write().strategy_overrides.insert(name, WideStrategy::Pivot);
+                                }
+                            }
+                            StrategyButton {
+                                label: "Skip (exclude)",
+                                active: matches!(current_strategy, WideStrategy::Ignore),
+                                color: theme::BADGE_SKIP,
+                                onclick: move |_| {
+                                    let name = state.read().schemas[idx].name.clone();
+                                    state.write().strategy_overrides.insert(name, WideStrategy::Ignore);
+                                }
+                            }
+                        }
+
+                        div {
+                            style: "border-top:1px solid {BORDER_COLOR_LIGHT};padding-top:12px;margin-bottom:6px;",
+                            p {
+                                style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.75rem;margin:0 0 8px 0;font-weight:600;",
+                                "Normalize dynamic keys"
+                            }
+                            p {
+                                style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;margin:0 0 8px 0;",
+                                "Each JSON key becomes a row. The key itself is stored in the column named below."
+                            }
+                            input {
+                                class: "input-field",
+                                style: "margin-bottom:8px;",
+                                r#type: "text",
+                                placeholder: "id_column (e.g. image_id)",
+                                value: "{normalize_id_col.read()}",
+                                oninput: move |e| { *normalize_id_col.write() = e.value(); },
+                            }
+                            button {
+                                class: "btn-ghost",
+                                style: "width:100%;",
+                                disabled: normalize_id_col_invalid,
+                                onclick: move |_| {
+                                    let col = normalize_id_col.read().trim().to_string();
+                                    let id_col = if col.is_empty() { "id".to_string() } else { col };
+                                    let name = state.read().schemas[idx].name.clone();
+                                    state.write().strategy_overrides.insert(
+                                        name,
+                                        WideStrategy::NormalizeDynamicKeys { id_column: id_col },
+                                    );
+                                },
+                                "Apply Normalize"
+                            }
+                            if normalize_id_col_invalid {
+                                p {
+                                    style: "color:{theme::ERROR};font-size:0.75rem;margin:8px 0 0 0;",
+                                    "Enter a non-empty, unique key column name."
+                                }
+                            }
+                        }
+
+                        div { style: "flex:1;" }
+
+                        if matches!(current_strategy, WideStrategy::StructuredPivot(_) | WideStrategy::KeyedPivot(_) | WideStrategy::AutoSplit { .. }) {
+                            p {
+                                style: "color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;margin:0 0 12px 0;font-style:italic;",
+                                "Auto-detected strategy. Override above if needed."
+                            }
                         }
                     }
                 }

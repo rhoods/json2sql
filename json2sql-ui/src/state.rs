@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use urlencoding::encode;
@@ -186,9 +186,11 @@ pub struct AppState {
     /// User-chosen strategy overrides: table_name → WideStrategy.
     /// Applied on top of `schemas` at DDL generation and import time.
     pub strategy_overrides: HashMap<String, WideStrategy>,
-    /// Index of the table currently selected in Strategy / Preview panels.
-    /// Persisted in AppState so the selection survives navigation between the two screens.
-    pub selected_table_idx: usize,
+    /// Set of table indices currently selected in the Strategy panel (Ctrl+click multi-select).
+    /// The Preview panel and right-panel configurator always operate on `last_selected_idx`.
+    pub selected_table_indices: HashSet<usize>,
+    /// Index of the last table clicked — drives the center/right panels in Strategy and Preview.
+    pub last_selected_idx: usize,
 
     // — Pass 1 metadata (also persisted in SchemaSnapshot) —
     pub truncated_names: Vec<TruncatedName>,
@@ -226,7 +228,8 @@ impl Default for AppState {
             schemas: Vec::new(),
             overflow_warnings: Vec::new(),
             strategy_overrides: HashMap::new(),
-            selected_table_idx: 0,
+            selected_table_indices: HashSet::from([0]),
+            last_selected_idx: 0,
             truncated_names: Vec::new(),
             column_collisions: Vec::new(),
             pass1_stats: Vec::new(),
@@ -318,7 +321,8 @@ impl AppState {
         self.pass1_progress.rows_scanned = snapshot.total_rows;
         self.pass1_progress.done = true;
         self.schema_snapshot_loaded = true;
-        self.selected_table_idx = 0;
+        self.selected_table_indices = HashSet::from([0]);
+        self.last_selected_idx = 0;
     }
 
     /// Remove a loaded snapshot and restore the default Pass 1 flow.
@@ -331,7 +335,8 @@ impl AppState {
         self.column_collisions = Vec::new();
         self.pass1_stats = Vec::new();
         self.pass1_progress = Pass1Progress::default();
-        self.selected_table_idx = 0;
+        self.selected_table_indices = HashSet::from([0]);
+        self.last_selected_idx = 0;
         self.schema_snapshot_loaded = false;
     }
 

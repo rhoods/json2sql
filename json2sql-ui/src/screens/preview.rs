@@ -34,7 +34,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
     }
 
     let pg_schema = state.read().pg_schema.clone();
-    let idx = state.read().selected_table_idx.min(schemas.len().saturating_sub(1));
+    let idx = state.read().last_selected_idx.min(schemas.len().saturating_sub(1));
     let selected = &schemas[idx];
 
     // Generate DDL for the selected table with overrides applied.
@@ -84,7 +84,11 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                                 div {
                                     key: "{i}",
                                     style: "display:flex;align-items:center;gap:6px;padding:5px 8px 5px {indent}px;cursor:pointer;{row_bg}{accent}",
-                                    onclick: move |_| { state.write().selected_table_idx = i; },
+                                    onclick: move |_| {
+                                        let mut s = state.write();
+                                        s.selected_table_indices = std::collections::HashSet::from([i]);
+                                        s.last_selected_idx = i;
+                                    },
                                     span {
                                         style: "font-family:{theme::FONT_CODE};font-size:0.75rem;color:{theme::ON_SURFACE};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                         "{table.name}"
