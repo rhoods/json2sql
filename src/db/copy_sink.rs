@@ -373,7 +373,16 @@ pub async fn merge_copy_to_db(sinks: Vec<TempFileSink>, client: &Client) -> Resu
         return Ok(0);
     }
 
-    let first = sinks.iter().find(|s| s.row_count > 0 || s.total_flushed > 0).unwrap();
+    // Invariant: merge_copy_to_db is called on sinks that have never been interim-flushed
+    // to PG (flush_to_db resets total_flushed to 0 and truncates the temp file). If
+    // total_flushed > 0 here, those rows are already in PG and must not be counted again.
+    debug_assert!(
+        sinks.iter().all(|s| s.total_flushed == 0),
+        "merge_copy_to_db: called on sink(s) with total_flushed > 0 — \
+         flush_to_db() must not be called before merging"
+    );
+
+    let Some(first) = sinks.first() else { return Ok(0) };
     let copy_sql = first.copy_sql.clone();
     let table_name = first.table_name.clone();
 
@@ -384,8 +393,8 @@ pub async fn merge_copy_to_db(sinks: Vec<TempFileSink>, client: &Client) -> Resu
     let mut pinned = Box::pin(sink);
 
     for s in sinks {
-        let TempFileSink { row_count, pending, writer, temp_file, .. } = s;
-        if row_count == 0 {
+        let TempFileSink { row_count, total_flushed, pending, writer, temp_file, .. } = s;
+        if row_count == 0 && total_flushed == 0 {
             continue;
         }
         drop(writer);
