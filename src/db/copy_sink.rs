@@ -231,6 +231,13 @@ impl TempFileSink {
         Ok(())
     }
 
+    /// Flush all in-memory `pending` data to the temp file unconditionally,
+    /// even when below [`SPILL_THRESHOLD`]. Frees the `pending` allocation so
+    /// the caller can reclaim that memory. No-op if `pending` is already empty.
+    pub fn force_spill(&mut self) -> Result<()> {
+        self.spill()
+    }
+
     pub fn write_row(&mut self, row: Vec<u8>) -> Result<()> {
         self.bytes_buffered += row.len() as u64;
         self.pending.extend_from_slice(&row);
@@ -583,5 +590,56 @@ mod tests {
 
         sink.hibernate().unwrap();
         assert!(!sink.is_open());
+    }
+
+    // -------------------------------------------------------------------------
+    // force_spill tests
+    // -------------------------------------------------------------------------
+
+    /// force_spill on an empty sink must not create a temp file.
+    #[test]
+    fn force_spill_on_empty_sink_is_noop() {
+        let mut sink = make_sink();
+        sink.force_spill().unwrap();
+        assert!(sink.pending.is_empty());
+        assert!(sink.temp_file.is_none(), "no temp file must be created for empty sink");
+        assert_eq!(sink.row_count, 0);
+    }
+
+    /// force_spill must flush pending to disk even when below SPILL_THRESHOLD.
+    #[test]
+    fn force_spill_below_threshold_clears_pending() {
+        let mut sink = make_sink();
+        sink.write_row(b"row\n".to_vec()).unwrap();
+        assert!(!sink.pending.is_empty(), "pending must hold data before force_spill");
+
+        sink.force_spill().unwrap();
+
+        assert!(sink.pending.is_empty(), "pending must be empty after force_spill");
+        assert!(sink.temp_file.is_some(), "temp file must exist after force_spill");
+        assert_eq!(sink.row_count, 1, "row_count must be preserved");
+    }
+
+    /// force_spill must not alter bytes_buffered.
+    #[test]
+    fn force_spill_preserves_bytes_buffered() {
+        let mut sink = make_sink();
+        let row = b"hello\n".to_vec();
+        let expected = row.len() as u64;
+        sink.write_row(row).unwrap();
+        sink.force_spill().unwrap();
+        assert_eq!(sink.bytes_buffered, expected);
+    }
+
+    /// force_spill opens a FD; a subsequent hibernate must close it.
+    #[test]
+    fn force_spill_then_hibernate_releases_fd() {
+        let mut sink = make_sink();
+        sink.write_row(b"row\n".to_vec()).unwrap();
+        sink.force_spill().unwrap();
+        assert!(sink.is_open(), "force_spill must open a FD");
+        sink.hibernate().unwrap();
+        assert!(!sink.is_open(), "hibernate must close the FD");
+        assert!(sink.pending.is_empty());
     }
 }

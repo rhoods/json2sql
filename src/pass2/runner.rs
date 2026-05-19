@@ -243,23 +243,26 @@ pub async fn run(
                 }
 
                 // Interim-flush check: if this worker's total buffered bytes exceed
-                // the threshold, hand off the largest sink to the main task for a
-                // COPY and replace it with a fresh empty sink. Non-blocking — the
-                // main task drains flush_rx between dispatches.
+                // the threshold, drain ALL non-empty sinks to the flush task.
+                // Each sink's pending data is force-spilled to its temp file first so
+                // the in-memory Vec is freed — the flush task only holds a file path.
+                // This prevents RAM from accumulating across many small tables that
+                // individually never reach per_worker_flush_threshold.
                 let total_bytes: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
                 if total_bytes > per_worker_flush_threshold {
-                    if let Some(name) = sinks
+                    let names: Vec<String> = sinks
                         .iter()
                         .filter(|(_, s)| s.bytes_buffered > 0)
-                        .max_by_key(|(_, s)| s.bytes_buffered)
                         .map(|(k, _)| k.clone())
-                    {
+                        .collect();
+                    for name in names {
                         if let Some(mut old_sink) = sinks.remove(&name) {
-                            // Physically close the FD before handing off to the flush task.
-                            // Sinks may now sit in table_pending for the duration of streaming;
-                            // we must close here rather than relying on copy_to_db to close it.
-                            if old_sink.is_open() {
-                                let _ = old_sink.hibernate();
+                            let was_open = old_sink.is_open();
+                            // Push any in-memory pending data to the temp file, then
+                            // close the FD so the sink is purely on-disk before hand-off.
+                            let _ = old_sink.force_spill();
+                            let _ = old_sink.hibernate();
+                            if was_open {
                                 global_sub(&global, 1);
                                 my_open = my_open.saturating_sub(1);
                             }
@@ -270,7 +273,6 @@ pub async fn run(
                                         sinks.insert(name, new_sink);
                                     }
                                     Err(_) => {
-                                        // Can't create replacement; put old sink back.
                                         sinks.insert(name, old_sink);
                                     }
                                 }
