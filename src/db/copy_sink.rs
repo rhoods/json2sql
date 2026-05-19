@@ -373,16 +373,24 @@ pub async fn merge_copy_to_db(sinks: Vec<TempFileSink>, client: &Client) -> Resu
         return Ok(0);
     }
 
-    // Invariant: merge_copy_to_db is called on sinks that have never been interim-flushed
-    // to PG (flush_to_db resets total_flushed to 0 and truncates the temp file). If
-    // total_flushed > 0 here, those rows are already in PG and must not be counted again.
+    // Invariant: merge_copy_to_db must only be called on sinks that have never been
+    // interim-flushed to PG. flush_to_db() increments total_flushed and truncates the
+    // temp file — so if total_flushed > 0, the data for those rows is gone and cannot
+    // be re-streamed, causing an inflated Ok() count with a silent data gap.
     debug_assert!(
         sinks.iter().all(|s| s.total_flushed == 0),
         "merge_copy_to_db: called on sink(s) with total_flushed > 0 — \
          flush_to_db() must not be called before merging"
     );
 
-    let Some(first) = sinks.first() else { return Ok(0) };
+    // Precondition: all sinks target the same table (same copy_sql). Guaranteed by
+    // flush_task which groups sinks under table_pending[table_name]. total_rows > 0
+    // ensures sinks is non-empty, so first() always succeeds here.
+    let first = sinks.first().expect("sinks non-empty (total_rows > 0)");
+    debug_assert!(
+        sinks.iter().all(|s| s.table_name == first.table_name),
+        "merge_copy_to_db: sinks target different tables — caller must group by table_name"
+    );
     let copy_sql = first.copy_sql.clone();
     let table_name = first.table_name.clone();
 
