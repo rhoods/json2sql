@@ -737,10 +737,10 @@ async fn test_merge_copy_multiple_sinks_same_table() {
     }).await;
 }
 
-/// Pass2Log events must be emitted after each COPY completes and their row
-/// counts must match the data actually in PostgreSQL.
+/// Pass2Flush events must be emitted after each COPY completes and their row
+/// counts must match the data actually in PostgreSQL across all generated tables.
 #[tokio::test]
-async fn test_pass2_log_events_emitted_after_copy() {
+async fn test_pass2_flush_events_emitted_after_copy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.jsonl");
         let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
@@ -750,30 +750,35 @@ async fn test_pass2_log_events_emitted_after_copy() {
         pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 2, None, Some(ptx))
             .await.unwrap();
 
-        // Drain the progress channel and collect all Pass2Log events.
-        let mut copy_log_rows: u64 = 0;
+        // Collect all Pass2Flush events — typed, no string parsing.
+        let mut flush_rows: u64 = 0;
         while let Ok(event) = prx.try_recv() {
-            if let json2sql::io::progress_event::ProgressEvent::Pass2Log(msg) = event {
-                // Each log line has the form "COPY <table> (<N> rows)".
-                if let Some(rest) = msg.strip_prefix("COPY ") {
-                    if let Some(n) = rest
-                        .rsplit_once('(')
-                        .and_then(|(_, tail)| tail.split_once(" rows)"))
-                        .and_then(|(n, _)| n.parse::<u64>().ok())
-                    {
-                        copy_log_rows += n;
-                    }
-                }
+            if let json2sql::io::progress_event::ProgressEvent::Pass2Flush { rows_flushed, .. } = event {
+                flush_rows += rows_flushed;
             }
         }
 
-        let total_pg: i64 = common::row_count(&client, &schema, "users").await
-            + common::row_count(&client, &schema, "users_tags").await
-            + common::row_count(&client, &schema, "users_orders").await;
+        // Sum all rows across every table in the schema — no hardcoded table list.
+        let table_names: Vec<String> = client
+            .query(
+                "SELECT table_name FROM information_schema.tables \
+                 WHERE table_schema = $1 AND table_type = 'BASE TABLE'",
+                &[&schema],
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect();
 
-        assert!(copy_log_rows > 0, "expected at least one Pass2Log COPY event");
-        assert_eq!(copy_log_rows, total_pg as u64,
-            "Pass2Log row counts must match actual PG rows after COPY");
+        let mut total_pg: u64 = 0;
+        for table in &table_names {
+            total_pg += common::row_count(&client, &schema, table).await as u64;
+        }
+
+        assert!(flush_rows > 0, "expected at least one Pass2Flush event");
+        assert_eq!(flush_rows, total_pg,
+            "Pass2Flush row counts must match actual PG rows after COPY");
     }).await;
 }
 
@@ -802,5 +807,31 @@ async fn test_merge_copy_skips_empty_sinks_among_non_empty() {
         let rows = merge_copy_to_db(vec![empty, full], &client).await.unwrap();
         assert_eq!(rows, 1);
         assert_eq!(common::row_count(&client, &schema, "t").await, 1);
+    }).await;
+}
+
+/// When tables don't exist, all COPYs fail: run() must return Err AND emit at
+/// least one Pass2Error event before returning, so the IHM is notified in real time.
+#[tokio::test]
+async fn test_pass2_error_event_emitted_on_copy_failure() {
+    common::with_schema_url(|_client, schema, url| async move {
+        let path = common::fixture("users.jsonl");
+        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+        // Intentionally skip DDL — tables don't exist, every COPY will fail.
+        let fresh = json2sql::db::connection::connect(&url).await.unwrap();
+        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<json2sql::io::progress_event::ProgressEvent>();
+        let result = pass2::runner::run(&path, "users", &p1.schemas, &fresh, &url, &schema, 2, None, Some(ptx))
+            .await;
+
+        assert!(result.is_err(), "expected run() to fail when tables don't exist");
+
+        let mut had_error_event = false;
+        while let Ok(event) = prx.try_recv() {
+            if let json2sql::io::progress_event::ProgressEvent::Pass2Error { .. } = event {
+                had_error_event = true;
+            }
+        }
+        assert!(had_error_event, "expected at least one Pass2Error event when COPY fails");
     }).await;
 }
