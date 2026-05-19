@@ -134,6 +134,34 @@ pub async fn run(
 
     let parallel = parallel.max(1);
 
+    // Pre-flight check: warn if any root tables are already non-empty.
+    // Append is allowed (two files with the same schema), but the user should know.
+    {
+        let mut nonempty: Vec<String> = Vec::new();
+        for s in schemas.iter().filter(|s| s.is_root()) {
+            let sql = format!(
+                r#"SELECT 1 FROM "{}"."{}" LIMIT 1"#,
+                pg_schema.replace('"', "\"\""),
+                s.name.replace('"', "\"\"")
+            );
+            if let Ok(Some(_)) = client.query_opt(&sql, &[]).await {
+                nonempty.push(s.name.clone());
+            }
+        }
+        if !nonempty.is_empty() {
+            let msg = format!(
+                "WARNING: {} root table(s) are non-empty before import: {}. \
+                 Rows will be appended. Drop the schema first if this is unintended.",
+                nonempty.len(),
+                nonempty.join(", ")
+            );
+            eprintln!("{msg}");
+            if let Some(ref tx) = progress_tx {
+                let _ = tx.send(ProgressEvent::Pass2Log(msg));
+            }
+        }
+    }
+
     // Per-worker interim flush threshold: divide the global budget evenly so that
     // total temp-file disk usage stays bounded at ~INTERIM_FLUSH_THRESHOLD regardless
     // of the number of workers. Without this, 32 workers × 512 MiB = 16 GiB on disk.
