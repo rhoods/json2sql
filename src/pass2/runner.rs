@@ -340,12 +340,27 @@ pub async fn run(
                 if sinks.is_empty() { continue; }
                 let name = sinks[0].table_name.clone();
                 let result = merge_copy_to_db(sinks, &conn).await;
-                if let Ok(rows) = &result {
-                    eprintln!("  COPY {} ({} rows) done.", name, rows);
-                    if let Some(ref tx) = ptx_conn {
-                        let _ = tx.send(ProgressEvent::Pass2Log(format!(
-                            "COPY {} ({} rows)", name, rows
-                        )));
+                match &result {
+                    Ok(rows) => {
+                        eprintln!("  COPY {} ({} rows) done.", name, rows);
+                        if let Some(ref tx) = ptx_conn {
+                            let _ = tx.send(ProgressEvent::Pass2Log(format!(
+                                "COPY {} ({} rows)", name, rows
+                            )));
+                            let _ = tx.send(ProgressEvent::Pass2Flush {
+                                table_name: name.clone(),
+                                rows_flushed: *rows,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  COPY {} FAILED: {}", name, e);
+                        if let Some(ref tx) = ptx_conn {
+                            let _ = tx.send(ProgressEvent::Pass2Error {
+                                table_name: name.clone(),
+                                message: e.to_string(),
+                            });
+                        }
                     }
                 }
                 let _ = rtx.send(result.map(|rows| (name, rows)));

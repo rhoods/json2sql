@@ -31,6 +31,11 @@ pub enum ProgressEvent {
         table_name: String,
         rows_flushed: u64,
     },
+    /// A COPY failed for a specific table — emitted in real time before run() returns Err.
+    Pass2Error {
+        table_name: String,
+        message: String,
+    },
     /// A plain-text log message (mirrors what the CLI prints to stderr).
     Pass2Log(String),
     /// Pass 2 finished — all rows imported.
