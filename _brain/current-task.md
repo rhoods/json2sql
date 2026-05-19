@@ -4,6 +4,7 @@ _Mis à jour automatiquement en fin de session._
 
 ## Prochaines tâches
 
+- **Pass2Flush en temps réel** : les `Pass2Flush` events sont émis en batch à la fin du `flush_task` (runner.rs ~504-513). Si erreur, ils sont perdus → IHM bloquée sur "Waiting for first flush…". Fix : émettre les events depuis l'intérieur du flush_task au moment où chaque COPY se termine (via `ptx_flush`), pas en batch post-await.
 - IHM : bouton "Précédent" sur l'écran Strategy
 - Findings adversariaux mineurs restants : #6 (timing test fragile), #9 (static assert InferredType::ALL.len), #11 (sibling[0] non-déterministe dans large-group Jaccard)
 - Tester Strategy sur des fichiers complexes (wide tables, dynamic keys, pivot)

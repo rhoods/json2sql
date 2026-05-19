@@ -3,7 +3,24 @@ mod common;
 // pass2 is used by all async tests in this file; pass1-only test_schema_inference_no_db
 // does not use it but sharing the import avoids per-test redundancy.
 use json2sql::{db, pass1, pass2};
+use json2sql::db::copy_sink::{merge_copy_to_db, TempFileSink};
+use json2sql::schema::table_schema::{ColumnSchema, TableSchema};
+use json2sql::schema::type_tracker::PgType;
 use std::io::Write;
+
+// Build a minimal single-column TableSchema for merge_copy_to_db tests.
+fn single_col_schema(table: &str) -> TableSchema {
+    let mut schema = TableSchema::new(table.to_string(), vec![table.to_string()], 0);
+    schema.columns.push(ColumnSchema {
+        name: "v".to_string(),
+        original_name: "v".to_string(),
+        pg_type: PgType::Text,
+        not_null: false,
+        is_generated: false,
+        is_parent_fk: false,
+    });
+    schema
+}
 
 #[tokio::test]
 async fn test_nested_row_counts_json_array() {
@@ -643,5 +660,147 @@ async fn test_parallel_streaming_matches_sequential() {
         }
         assert_eq!(par.timing.total_ms(), par.timing.streaming_ms + par.timing.copy_ms);
         assert_eq!(par.anomaly_collector.total_anomalies(), 0);
+    }).await;
+}
+
+// ---------------------------------------------------------------------------
+// merge_copy_to_db — integration tests
+// Each test creates a one-column table in a temporary schema and verifies that
+// merge_copy_to_db delivers exactly the expected rows to PostgreSQL.
+// ---------------------------------------------------------------------------
+
+/// Single sink, all rows in pending (no disk spill): all rows must arrive in PG.
+#[tokio::test]
+async fn test_merge_copy_single_sink_pending_only() {
+    common::with_schema(|client, schema| async move {
+        client.execute(&format!("CREATE TABLE \"{schema}\".\"t\" (v TEXT)"), &[]).await.unwrap();
+        let ts = single_col_schema("t");
+        let mut sink = TempFileSink::new(&ts, &schema).unwrap();
+        sink.write_row(b"hello\n".to_vec()).unwrap();
+        sink.write_row(b"world\n".to_vec()).unwrap();
+        sink.write_row(b"rust\n".to_vec()).unwrap();
+
+        let rows = merge_copy_to_db(vec![sink], &client).await.unwrap();
+        assert_eq!(rows, 3);
+        assert_eq!(common::row_count(&client, &schema, "t").await, 3);
+    }).await;
+}
+
+/// Single sink whose pending buffer exceeds SPILL_THRESHOLD (256 KB) before merging:
+/// the spilled data must arrive in PG via the temp file path.
+#[tokio::test]
+async fn test_merge_copy_single_sink_with_spill() {
+    common::with_schema(|client, schema| async move {
+        client.execute(&format!("CREATE TABLE \"{schema}\".\"t\" (v TEXT)"), &[]).await.unwrap();
+        let ts = single_col_schema("t");
+        let mut sink = TempFileSink::new(&ts, &schema).unwrap();
+
+        // Write one row larger than SPILL_THRESHOLD (256 KiB) to force a disk spill,
+        // then a small second row that stays in pending.
+        let mut big: Vec<u8> = vec![b'a'; 260 * 1024];
+        big.push(b'\n');
+        sink.write_row(big).unwrap();
+        sink.write_row(b"small\n".to_vec()).unwrap();
+
+        // After the big write, the sink must have spilled at least once (FD is open).
+        assert!(sink.is_open(), "expected a disk spill before merging");
+
+        let rows = merge_copy_to_db(vec![sink], &client).await.unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(common::row_count(&client, &schema, "t").await, 2);
+    }).await;
+}
+
+/// Multiple sinks for the same table: all rows from every sink must land in PG
+/// via a single COPY session (the core merge behaviour).
+#[tokio::test]
+async fn test_merge_copy_multiple_sinks_same_table() {
+    common::with_schema(|client, schema| async move {
+        client.execute(&format!("CREATE TABLE \"{schema}\".\"t\" (v TEXT)"), &[]).await.unwrap();
+        let ts = single_col_schema("t");
+
+        let mut s1 = TempFileSink::new(&ts, &schema).unwrap();
+        s1.write_row(b"a\n".to_vec()).unwrap();
+        s1.write_row(b"b\n".to_vec()).unwrap();
+
+        let mut s2 = TempFileSink::new(&ts, &schema).unwrap();
+        s2.write_row(b"c\n".to_vec()).unwrap();
+
+        let mut s3 = TempFileSink::new(&ts, &schema).unwrap();
+        s3.write_row(b"d\n".to_vec()).unwrap();
+        s3.write_row(b"e\n".to_vec()).unwrap();
+        s3.write_row(b"f\n".to_vec()).unwrap();
+
+        let rows = merge_copy_to_db(vec![s1, s2, s3], &client).await.unwrap();
+        assert_eq!(rows, 6);
+        assert_eq!(common::row_count(&client, &schema, "t").await, 6);
+    }).await;
+}
+
+/// Pass2Log events must be emitted after each COPY completes and their row
+/// counts must match the data actually in PostgreSQL.
+#[tokio::test]
+async fn test_pass2_log_events_emitted_after_copy() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("users.jsonl");
+        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
+
+        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<json2sql::io::progress_event::ProgressEvent>();
+        pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 2, None, Some(ptx))
+            .await.unwrap();
+
+        // Drain the progress channel and collect all Pass2Log events.
+        let mut copy_log_rows: u64 = 0;
+        while let Ok(event) = prx.try_recv() {
+            if let json2sql::io::progress_event::ProgressEvent::Pass2Log(msg) = event {
+                // Each log line has the form "COPY <table> (<N> rows)".
+                if let Some(rest) = msg.strip_prefix("COPY ") {
+                    if let Some(n) = rest
+                        .rsplit_once('(')
+                        .and_then(|(_, tail)| tail.split_once(" rows)"))
+                        .and_then(|(n, _)| n.parse::<u64>().ok())
+                    {
+                        copy_log_rows += n;
+                    }
+                }
+            }
+        }
+
+        let total_pg: i64 = common::row_count(&client, &schema, "users").await
+            + common::row_count(&client, &schema, "users_tags").await
+            + common::row_count(&client, &schema, "users_orders").await;
+
+        assert!(copy_log_rows > 0, "expected at least one Pass2Log COPY event");
+        assert_eq!(copy_log_rows, total_pg as u64,
+            "Pass2Log row counts must match actual PG rows after COPY");
+    }).await;
+}
+
+/// Empty sink list returns Ok(0) without touching the database.
+#[tokio::test]
+async fn test_merge_copy_empty_sinks_returns_zero() {
+    common::with_schema(|client, schema| async move {
+        client.execute(&format!("CREATE TABLE \"{schema}\".\"t\" (v TEXT)"), &[]).await.unwrap();
+        let rows = merge_copy_to_db(vec![], &client).await.unwrap();
+        assert_eq!(rows, 0);
+        assert_eq!(common::row_count(&client, &schema, "t").await, 0);
+    }).await;
+}
+
+/// Sinks with row_count == 0 (and total_flushed == 0) are skipped transparently.
+#[tokio::test]
+async fn test_merge_copy_skips_empty_sinks_among_non_empty() {
+    common::with_schema(|client, schema| async move {
+        client.execute(&format!("CREATE TABLE \"{schema}\".\"t\" (v TEXT)"), &[]).await.unwrap();
+        let ts = single_col_schema("t");
+
+        let empty = TempFileSink::new(&ts, &schema).unwrap();
+        let mut full = TempFileSink::new(&ts, &schema).unwrap();
+        full.write_row(b"x\n".to_vec()).unwrap();
+
+        let rows = merge_copy_to_db(vec![empty, full], &client).await.unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(common::row_count(&client, &schema, "t").await, 1);
     }).await;
 }
