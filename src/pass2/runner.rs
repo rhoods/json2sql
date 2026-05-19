@@ -51,6 +51,13 @@ pub struct Pass2Result {
 /// and process descriptors.
 const FD_GLOBAL_THRESHOLD: usize = MAX_OPEN_TEMP_FILES * 9 / 10; // 855 with default 950
 
+/// Minimum accumulated bytes in a worker sink before it is eligible for handoff
+/// to the flush task during a byte-budget drain cycle. Sinks below this threshold
+/// are force_spill'd in-place instead — they stay in the worker and keep their
+/// single accumulated temp file, avoiding fragmentation into many tiny COPYs.
+/// Matches `FLUSH_DISPATCH_THRESHOLD` so handoff'd sinks are dispatched immediately.
+const MIN_SINK_HANDOFF_BYTES: u64 = 1024 * 1024; // 1 MiB
+
 /// Saturating subtraction on an `AtomicUsize`.
 ///
 /// Needed because `fetch_sub` wraps on underflow (undefined in usize arithmetic).
@@ -271,14 +278,19 @@ pub async fn run(
                         }
                     }
                 } else if total_bytes > per_worker_flush_threshold {
-                    // Byte budget exceeded: drain all non-empty sinks with handoff.
-                    // (task 2 will replace this with drain-max + force_spill others)
-                    let names: Vec<String> = sinks
+                    // Byte budget exceeded.
+                    // Sinks ≥ MIN_SINK_HANDOFF_BYTES are handed off to the flush
+                    // task for a streaming COPY (paces large tables during import).
+                    // All other non-empty sinks are force_spill'd in-place: their
+                    // pending Vec is written to their existing temp file, freeing
+                    // RAM without creating a new fragmented file per drain cycle.
+                    let handoff_names: Vec<String> = sinks
                         .iter()
-                        .filter(|(_, s)| s.bytes_buffered > 0)
+                        .filter(|(_, s)| s.bytes_buffered >= MIN_SINK_HANDOFF_BYTES)
                         .map(|(k, _)| k.clone())
                         .collect();
-                    for name in names {
+
+                    for name in handoff_names {
                         if let Some(mut old_sink) = sinks.remove(&name) {
                             let was_open = old_sink.is_open();
                             let _ = old_sink.force_spill();
@@ -299,6 +311,19 @@ pub async fn run(
                                 }
                             } else {
                                 sinks.insert(name, old_sink);
+                            }
+                        }
+                    }
+
+                    // force_spill all remaining non-empty sinks in-place.
+                    for sink in sinks.values_mut() {
+                        if sink.bytes_buffered > 0 {
+                            let was_open = sink.is_open();
+                            let _ = sink.force_spill();
+                            let _ = sink.hibernate();
+                            if was_open {
+                                global_sub(&global, 1);
+                                my_open = my_open.saturating_sub(1);
                             }
                         }
                     }
