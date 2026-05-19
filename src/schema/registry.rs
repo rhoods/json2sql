@@ -694,6 +694,15 @@ pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
         return;
     }
 
+    // Tables explicitly registered in any parent's child_routes are active routing
+    // targets for pass2 and must never be excluded, even when their parent_table
+    // points to a KeyedPivot-absorbing parent. This protects synthetic tables created
+    // by cascade waves 1+ whose synthetic parent happens to absorb all children.
+    let route_targets: std::collections::HashSet<&str> = schemas
+        .iter()
+        .flat_map(|s| s.child_routes.values().map(|v| v.as_str()))
+        .collect();
+
     // Single forward pass exploiting topological order: if a parent is an absorber
     // or already excluded, so are its children (transitive).
     let mut excluded: std::collections::HashSet<String> = partial_absorbed
@@ -702,6 +711,9 @@ pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
         .collect();
 
     for schema in schemas.iter() {
+        if route_targets.contains(schema.name.as_str()) {
+            continue; // Protected by child_routes — must survive for pass2 routing.
+        }
         if let Some(ref parent) = schema.parent_table {
             if absorbers.contains(parent.as_str()) || excluded.contains(parent) {
                 excluded.insert(schema.name.clone());

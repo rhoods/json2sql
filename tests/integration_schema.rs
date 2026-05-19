@@ -285,7 +285,9 @@ fn test_sibling_noisy_schema_jaccard_filter() {
 // (sizes, imgid, selected) → child_count = 3 >= threshold = 3 → sans fix :
 // le filtre significant-container les élimine tous → regular vide → pas de collapse.
 //
-// Avec fix : all_pure → bypass du filtre → Jaccard = 1.0 → KeyedPivot.
+// Avec fix all-pure + fix child_routes : wave 0 fusionne uploaded.{1,2,3} en
+// KeyedPivot, waves 1-2 créent les tables fusionnées pour les co-siblings et
+// celles-ci survivent à exclude_absorbed_children via child_routes.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_sibling_all_pure_container_collapse() {
@@ -303,13 +305,93 @@ fn test_sibling_all_pure_container_collapse() {
     assert!(matches!(uploaded.unwrap().wide_strategy, WideStrategy::KeyedPivot(_)),
         "root_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.unwrap().wide_strategy);
 
-    // Les tables individuelles uploaded.N doivent être absorbées.
-    assert!(!names.iter().any(|n| n.starts_with("root_uploaded_")),
-        "root_uploaded_N doivent être absorbés; schemas: {:?}", names);
+    // Les tables sibling individuelles (1, 2, 3) doivent être absorbées.
+    for n in &["root_uploaded_1", "root_uploaded_2", "root_uploaded_3"] {
+        assert!(!names.contains(n),
+            "{} doit être absorbé; schemas: {:?}", n, names);
+    }
 
-    // Seuls root et root_uploaded doivent rester (petits-enfants exclus).
-    assert_eq!(p1.schemas.len(), 2,
-        "attendu 2 schemas (root + root_uploaded), obtenu: {:?}", names);
+    // Les tables de cascade (co-siblings fusionnés) doivent survivre.
+    assert!(names.contains(&"root_uploaded_sizes"),
+        "root_uploaded_sizes doit survivre (wave-1 merge); schemas: {:?}", names);
+    assert!(names.contains(&"root_uploaded_imgid"),
+        "root_uploaded_imgid doit survivre (wave-1 merge); schemas: {:?}", names);
+    assert!(names.contains(&"root_uploaded_selected"),
+        "root_uploaded_selected doit survivre (wave-1 merge); schemas: {:?}", names);
+    assert!(names.contains(&"root_uploaded_sizes_100"),
+        "root_uploaded_sizes_100 doit survivre (wave-2 merge); schemas: {:?}", names);
+
+    // root_uploaded.child_routes doit pointer vers les tables fusionnées.
+    let uploaded = uploaded.unwrap();
+    assert_eq!(
+        uploaded.child_routes.get("sizes").map(|s| s.as_str()),
+        Some("root_uploaded_sizes"),
+        "root_uploaded.child_routes[\"sizes\"] doit pointer vers root_uploaded_sizes"
+    );
+
+    // root + root_uploaded + sizes + imgid + selected + sizes_100 = 6.
+    assert_eq!(p1.schemas.len(), 6,
+        "attendu 6 schemas; obtenu: {:?}", names);
+}
+
+// ---------------------------------------------------------------------------
+// Régression : les tables créées par cascade wave 1+ (co-sibling merge) ne
+// doivent pas être exclues par exclude_absorbed_children même quand leur
+// parent synthétique a KeyedPivot (absorbs_children = true).
+// Les tables enregistrées dans child_routes doivent être protégées.
+//
+// Structure : root.front.{en,fr,de}.sizes = {w, h}
+//   Wave 0 : front.{en,fr,de} → root_front (KeyedPivot)
+//   Wave 1 : front.*.sizes → root_front_sizes (T, via child_routes)
+//   Bug    : T était exclu car root_front.absorbs_children() = true
+// ---------------------------------------------------------------------------
+#[test]
+fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
+    use json2sql::schema::table_schema::WideStrategy;
+
+    let path = common::fixture("cascade_wave1_child_route_survives.jsonl");
+    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+    let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
+
+    // root_front doit avoir KeyedPivot (wave 0 a fusionné en, fr, de).
+    let front = p1.schemas.iter().find(|s| s.name == "root_front");
+    assert!(front.is_some(), "root_front doit exister; schemas: {:?}", names);
+    assert!(
+        matches!(front.unwrap().wide_strategy, WideStrategy::KeyedPivot(_)),
+        "root_front doit avoir KeyedPivot; actual: {:?}", front.unwrap().wide_strategy
+    );
+
+    // root_front_sizes doit survivre (target de child_routes, wave 1).
+    let sizes = p1.schemas.iter().find(|s| s.name == "root_front_sizes");
+    assert!(
+        sizes.is_some(),
+        "root_front_sizes doit survivre (child_route cible); schemas: {:?}", names
+    );
+
+    // root_front_sizes doit avoir les colonnes w et h (union des co-siblings).
+    let sizes = sizes.unwrap();
+    let cols: Vec<&str> = sizes.data_columns().map(|c| c.name.as_str()).collect();
+    assert!(cols.contains(&"w"), "w manquant dans root_front_sizes; cols: {:?}", cols);
+    assert!(cols.contains(&"h"), "h manquant dans root_front_sizes; cols: {:?}", cols);
+
+    // root_front.child_routes["sizes"] doit pointer vers root_front_sizes.
+    let front = front.unwrap();
+    assert_eq!(
+        front.child_routes.get("sizes").map(|s| s.as_str()),
+        Some("root_front_sizes"),
+        "root_front.child_routes[\"sizes\"] doit pointer vers root_front_sizes"
+    );
+
+    // Tables individuelles absorbées.
+    for n in &["root_front_en", "root_front_fr", "root_front_de",
+               "root_front_en_sizes", "root_front_fr_sizes", "root_front_de_sizes"] {
+        assert!(!names.contains(n), "{} doit être absorbé; schemas: {:?}", n, names);
+    }
+
+    // root + root_front + root_front_sizes = 3.
+    assert_eq!(p1.schemas.len(), 3,
+        "attendu 3 schemas; obtenu: {:?}", names);
 }
 
 // ---------------------------------------------------------------------------
@@ -886,5 +968,50 @@ async fn test_ram_pressure_force_spill_in_place() {
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
         assert_eq!(common::row_count(&client, &schema, "users_tags").await, 6);
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+    }).await;
+}
+
+// ---------------------------------------------------------------------------
+// Guard: si des tables racines sont non-vides avant l'import, Pass 2 doit
+// émettre un Pass2Log WARNING et continuer normalement (les données sont appendées).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_warn_on_nonempty_root_table_before_import() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("users.jsonl");
+        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+
+        // Premier import — remplit la table racine "users" avec 3 lignes.
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
+        pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None)
+            .await.unwrap();
+        assert_eq!(common::row_count(&client, &schema, "users").await, 3);
+
+        // Second import — la table racine est non-vide, un warning doit être émis.
+        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<json2sql::io::progress_event::ProgressEvent>();
+        let result = pass2::runner::run(
+            &path, "users", &p1.schemas, &client, &url, &schema, 1, None, Some(ptx), None,
+        ).await;
+
+        // Doit toujours réussir (warning, pas erreur).
+        assert!(result.is_ok(), "Pass 2 doit réussir même si la table racine est non-vide");
+
+        // Doit avoir émis un Pass2Log WARNING mentionnant "users".
+        let mut had_warning = false;
+        while let Ok(event) = prx.try_recv() {
+            if let json2sql::io::progress_event::ProgressEvent::Pass2Log(msg) = event {
+                if msg.contains("WARNING") && msg.contains("users") {
+                    had_warning = true;
+                }
+            }
+        }
+        assert!(had_warning, "expected a Pass2Log WARNING about non-empty root table 'users'");
+
+        // Les données ont été appendées — 6 lignes au total.
+        assert_eq!(
+            common::row_count(&client, &schema, "users").await,
+            6,
+            "rows should be doubled after second import (append, not replace)"
+        );
     }).await;
 }
