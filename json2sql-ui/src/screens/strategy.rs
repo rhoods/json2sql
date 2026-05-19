@@ -93,17 +93,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
         result
     };
 
-    // Pre-compute routing container names so children can inherit the dimmed style.
-    // A routing container is a MultiKeyedPivot table with only generated columns and no user override.
     let strategy_overrides_snap = state.read().strategy_overrides.clone();
-    let routing_container_names: std::collections::HashSet<&str> = schemas.iter()
-        .filter(|t| {
-            !strategy_overrides_snap.contains_key(&t.name)
-                && matches!(t.wide_strategy, WideStrategy::MultiKeyedPivot(_))
-                && t.columns.iter().all(|c| c.is_generated)
-        })
-        .map(|t| t.name.as_str())
-        .collect();
 
     rsx! {
         div {
@@ -252,14 +242,9 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             // Pure FK relay tables created by the cascade (MultiKeyedPivot with no
                             // data columns). They exist in SQL but only hold routing FKs; the actual
                             // data lives in the synthetic sibling table referenced by child_routes.
-                            // Children of routing containers are also dimmed — they are structural
-                            // artifacts of the cascade, not independently meaningful tables.
-                            let is_routing_container = (!user_overrode
+                            let is_routing_container = !user_overrode
                                 && matches!(effective, WideStrategy::MultiKeyedPivot(_))
-                                && table.columns.iter().all(|c| c.is_generated))
-                                || table.parent_table.as_deref()
-                                    .map(|p| routing_container_names.contains(p))
-                                    .unwrap_or(false);
+                                && table.columns.iter().all(|c| c.is_generated);
                             // Auto-converted JSONB (overflow guard) shows amber badge;
                             // user-chosen JSONB keeps purple.
                             let is_overflow_jsonb = !user_overrode
