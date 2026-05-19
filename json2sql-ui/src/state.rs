@@ -417,6 +417,12 @@ impl AppState {
                     total_rows, anomaly_count, constraint_warning_count
                 ));
             }
+            Pass2Error { table_name, message } => {
+                self.pass2_progress.push_log(format!(
+                    "Error in {}: {}",
+                    table_name, message
+                ));
+            }
         }
     }
 }
