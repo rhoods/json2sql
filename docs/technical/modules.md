@@ -32,7 +32,10 @@ Pass 2 : relecture du fichier pour insérer les données.
 
 | Fichier | Rôle |
 |---|---|
-| `runner.rs` | Orchestre la Pass 2 : pour chaque objet, construit les lignes selon la `WideStrategy`, remplit les `TempFileSink`, flush par batch vers PostgreSQL |
+| `runner.rs` | Orchestre la Pass 2 : dispatcher → N workers → flush task → N conn tasks → PostgreSQL COPY |
+| `insert.rs` | `insert_object()` — orchestrateur (~50 lignes). Construit les colonnes générées et délègue à `traversal.rs` selon la `WideStrategy` |
+| `traversal.rs` | Toutes les fonctions `insert_*` privées : traversal du graphe JSON selon les stratégies (`insert_pivot_object`, `insert_jsonb_object`, `insert_flatten`, `insert_array`…) |
+| `sink.rs` | `trait RowSink { write_row() }` — abstraction sur l'écriture de lignes. `TempFileSink` (dans `db/copy_sink.rs`) en est l'implémentation concrète |
 | `coercer.rs` | Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cible. Produit `Ok(CopyEscaped)`, `Null` ou `Anomaly` |
 | `mod.rs` | Déclare le module |
 
@@ -45,14 +48,19 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | Fichier | Rôle |
 |---|---|
 | `table_schema.rs` | Types fondamentaux : `TableSchema`, `ColumnSchema`, `WideStrategy`, `ChildKind`, `KeyShape`, `SuffixSchema`, `SiblingSchema` |
-| `registry.rs` | Cœur de la Pass 1 : `SchemaRegistry` accumule les observations et construit les `TableSchema` via `finalize()` |
 | `type_tracker.rs` | `TypeTracker` : histogramme de types par colonne. `InferredType` et `PgType` avec règles de résolution et d'élargissement |
+| `observer.rs` | `SchemaObserver` : accumule les observations row-by-row via `observe_root()` et `merge()`. Contient `TableEntry` (privé) |
+| `finalizer.rs` | `SchemaFinalizer` : transformations post-stream — construit les `TableSchema`, applique les stratégies, trie topologiquement. Contient `apply_column_limit_guard()`, `exclude_absorbed_children()` |
+| `cascading.rs` | Algorithme de détection et fusion des tables sœurs (`finalize_cascading`, `child_compatibility_score`, `pairwise_jaccard_min`) |
+| `wide_strategies.rs` | Fonctions d'application des stratégies wide : `apply_wide_strategy_columns`, `apply_flatten`, `apply_jsonb_flatten`, `apply_normalize_dynamic_keys`, `build_union_columns`, `classify_key_shape` |
+| `reporter.rs` | Lecture des résultats d'observation : `collect_stats()`, `anomaly_iter()`, `truncated_names()`, `column_collisions()` |
+| `registry.rs` | `SchemaRegistry` : façade publique (~100 lignes prod). Délègue à `observer`, `finalizer` et `reporter` |
 | `naming.rs` | Sanitisation des identifiants PG, déduplication, troncature à 63 bytes avec hash, détection de collisions de noms de colonnes |
 | `suffix_detector.rs` | Détecte les patterns `{base}_{suffixe}` dans les tables larges pour la stratégie `StructuredPivot` |
 | `config.rs` | Parse et applique le fichier TOML de surcharges manuelles (`--schema-config`) |
 | `stats.rs` | Génère le rapport de statistiques de colonnes (types inférés, taux de nullité, colonnes MIXED) |
 | `persistence.rs` | Sérialise/désérialise un résultat Pass 1 en JSON (`SchemaSnapshot`) — utilisé par l'IHM pour séparer Pass 1 et Pass 2 |
-| `mod.rs` | Déclare le module |
+| `mod.rs` | Déclare le module, exporte `PATH_SEP` |
 
 ---
 

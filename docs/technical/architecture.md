@@ -183,7 +183,7 @@ Protocole de communication entre les runners et l'IHM Dioxus.
 
 ### `runner.rs`
 
-Orchestre la Pass 1. Lit le fichier en streaming, appelle `registry.observe_root()` pour chaque objet JSON racine, suit la progression, puis finalise le registre.
+Orchestre la Pass 1. Lit le fichier en streaming, appelle `SchemaObserver::observe_root()` pour chaque objet JSON racine, suit la progression, puis délègue la finalisation à `SchemaFinalizer`.
 
 Retourne `Pass1Result` contenant :
 - `schemas` : liste topologique des `TableSchema`
@@ -195,6 +195,25 @@ Retourne `Pass1Result` contenant :
 ---
 
 ## `src/pass2/`
+
+### `sink.rs`
+
+Abstraction sur l'écriture de lignes, découplant la logique d'insertion du stockage concret.
+
+- **`trait RowSink`** : `write_row(&mut self, row: Vec<u8>) -> Result<()>`. Implémenté par `TempFileSink` (dans `db/copy_sink.rs`) ; une implémentation in-memory peut être fournie pour les tests unitaires.
+
+### `traversal.rs`
+
+Toutes les fonctions `insert_*` privées — traversal du graphe JSON selon les `WideStrategy`.
+
+- `insert_pivot_object()` : une ligne `(parent_id, key, value)` par champ
+- `insert_jsonb_object()` : l'objet entier sérialisé en JSONB
+- `insert_structured_pivot_object()` : une ligne par `(parent_id, base, val_suffixe1…)`
+- `dispatch_child_routes()` : dispatch récursif vers les tables enfants
+- `insert_keyed_pivot_object()` / `insert_keyed_pivot_array_of_objects()` : fusion de tables sœurs
+- `insert_normalize_dynamic_keys()` : clé/valeur normalisée depuis les sous-objets dynamiques
+- `insert_multi_keyed_pivot()` : pivot multiple via tables synthétiques
+- `insert_array()` : tableau de scalaires → table de jonction ; tableau d'objets → `insert_object()` récursif
 
 ### `coercer.rs`
 
@@ -258,16 +277,16 @@ Le `client` est utilisé uniquement pour la Phase D (contraintes). Les COPYs pas
 - **`Pass2Timing { streaming_ms, copy_ms }`** : durée de chaque phase. `total_ms()` retourne la somme.
 - **`Pass2Result { rows_per_table, anomaly_collector, constraint_warnings, timing }`** : résumé complet de la Pass 2.
 
-**`insert_object()`** (dans `insert.rs`) : construit une ligne pour une table selon sa `WideStrategy` :
+**`insert_object()`** (dans `insert.rs`) : orchestrateur principal (~50 lignes). Construit les colonnes générées (UUID, FK parent, j2s_order) puis délègue à `traversal.rs` selon la `WideStrategy` :
   - `Columns` : une colonne par champ JSON
-  - `Pivot` : une ligne `(parent_id, key, value)` par champ
-  - `Jsonb` : l'objet entier sérialisé en JSONB
-  - `StructuredPivot` : une ligne par `(parent_id, base, val_suffixe1, val_suffixe2...)`
-  - `KeyedPivot` : dispatche les sous-objets clé/valeur en lignes (fusion de tables sœurs) ; sérialise l'objet enfant dans `j2s_data JSONB` ; pour ObjectArray, une ligne par élément avec `j2s_order`
+  - `Pivot` : `insert_pivot_object()` — une ligne `(parent_id, key, value)` par champ
+  - `Jsonb` : `insert_jsonb_object()` — l'objet entier sérialisé en JSONB
+  - `StructuredPivot` : `insert_structured_pivot_object()` — une ligne par `(parent_id, base, val_suffixe1...)`
+  - `KeyedPivot` : `insert_keyed_pivot_object()` / `insert_keyed_pivot_array_of_objects()` — fusion de tables sœurs ; sérialise l'objet enfant dans `j2s_data JSONB`
   - `AutoSplit` : colonnes stables → table principale, colonnes médiums → table `_wide` (EAV)
   - `Ignore` : clé supprimée
 
-**`insert_array()`** (dans `insert.rs`) : gère les tableaux JSON. Si tableau d'objets → `insert_object()` récursif. Si tableau de scalaires → ligne de junction `(parent_id, order, value)`.
+**Traversal des tableaux** (dans `traversal.rs`) : `insert_array()` — tableau d'objets → `insert_object()` récursif ; tableau de scalaires → ligne de jonction `(parent_id, order, value)`.
 
 ---
 
@@ -301,17 +320,61 @@ Accumule les observations de type pour un champ JSON.
 - **`InferredType`** : types JSON observés
 - **`PgType`** : types PostgreSQL cibles avec méthode `as_sql()` pour la génération DDL
 
+### `observer.rs`
+
+Observation mutable row-by-row pendant le streaming JSON.
+
+- **`SchemaObserver`** : accumule les observations dans un `IndexMap<String, TableEntry>` indexé par `path_key` (chemin JSON joint par `\x00`)
+- **`TableEntry`** (privé) : état d'observation d'une table (colonnes `IndexMap<String, TypeTracker>`, compteurs, type d'enfants)
+- **`observe_root()`** → **`observe_object()`** → **`observe_array()`** : traversée récursive — enregistre chaque champ JSON dans le `TypeTracker` correspondant
+- **`merge()`** : fusionne deux `SchemaObserver` (parallélisme de la Pass 1)
+
+### `finalizer.rs`
+
+Transformations post-stream sur `Vec<TableSchema>` — après que l'observation est terminée.
+
+- **`SchemaFinalizer`** : configuration (`wide_column_threshold`, `sibling_threshold`, `jaccard_threshold`…)
+- **`run()`** : pipeline complet — construit les `TableSchema`, détecte les tables larges, applique les stratégies via `wide_strategies`, trie topologiquement, délègue la détection de sœurs à `cascading::finalize_cascading()`
+- **`build_entry_schema()`** : convertit un `TableEntry` en `TableSchema` avec résolution des types
+- **`apply_column_limit_guard()`** : détecte les tables dépassant `PG_MAX_COLUMNS` (1 600) et applique Jsonb
+- **`exclude_absorbed_children()`** : supprime les tables enfants absorbées par une stratégie wide (Flatten, NormalizeDynamicKeys…)
+- **`OverflowWarning`** : type retourné quand une table est forcée en Jsonb par le garde-fou
+
+### `cascading.rs`
+
+Algorithme de détection et fusion des tables sœurs (sibling detection).
+
+- **`finalize_cascading()`** : détecte les tables sœurs candidate et les fusionne en `KeyedPivot` ou `MultiKeyedPivot`
+- **`child_compatibility_score()`** : score de compatibilité structurelle entre deux tables sœurs (jaccard sur les colonnes)
+- **`pairwise_jaccard_min()`** : jaccard minimum parmi toutes les paires d'un groupe
+- **`build_parent_child_maps()`**, **`run_sibling_wave()`**, **`process_co_sibling_group()`** : helpers de l'algorithme de fusion par vagues
+
+### `wide_strategies.rs`
+
+Application des stratégies de stockage wide sur les `TableSchema`.
+
+- **`apply_wide_strategy_columns()`** : restructure les colonnes d'une table selon une `WideStrategy` (Pivot, Jsonb, StructuredPivot…)
+- **`apply_structured_pivot_columns()`** : colonnes pour StructuredPivot — `(name TEXT, value <type>, <suffix_col>...)`
+- **`apply_normalize_dynamic_keys()`** : collapse les sous-objets dynamiques d'une table en une seule table normalisée avec colonne d'ID
+- **`apply_flatten()`** : inline les colonnes scalaires d'un enfant dans le parent avec un préfixe
+- **`apply_jsonb_flatten()`** : inline un enfant comme une seule colonne JSONB sur le parent
+- **`build_union_columns()`** : union des colonnes de plusieurs tables sœurs (plus large type par colonne)
+- **`classify_key_shape()`** / **`suggest_wide_strategy()`** : classification des clés et sélection automatique de la stratégie
+
+### `reporter.rs`
+
+Lecture des résultats d'observation après finalisation.
+
+- **`collect_stats()`** : collecte les statistiques de colonnes (`ColumnStats`) depuis l'observer
+- **`anomaly_iter()`** : itérateur sur les anomalies de type détectées
+- **`truncated_names()`** / **`column_collisions()`** : noms tronqués et collisions de colonnes
+
 ### `registry.rs`
 
-Le cœur de la Pass 1. Accumule toutes les observations et construit les `TableSchema`.
+Façade publique (~100 lignes de code prod) qui délègue à `SchemaObserver`, `SchemaFinalizer` et `SchemaReporter`.
 
-- **`SchemaRegistry`** : registre central. `HashMap<String, TableEntry>` indexée par `path_key` (chemin JSON joint par `.`)
-- **`TableEntry`** : état d'observation d'une table (colonnes, compteurs, type d'enfants)
-- **`observe_root()`** → **`observe_object()`** → **`observe_array()`** : traversée récursive
-- **`finalize()`** : construit les `TableSchema`, détecte les tables larges, applique les stratégies, trie topologiquement, déduplique, fusionne les sœurs, exclut les enfants absorbés
-- **`exclude_absorbed_children()`** : fonction publique standalone, appelée après les surcharges TOML
-- **`finalize_siblings()`** : détection et fusion des tables sœurs (KeyedPivot)
-- **`collect_stats()`** : collecte les statistiques de colonnes pour le rapport
+- **`SchemaRegistry`** : agrège observer + finalizer + reporter. Expose `observe_root()`, `merge()`, `finalize()`, `collect_stats()`, `anomaly_iter()`, `truncated_names()`, `column_collisions()`
+- Conservé pour la compatibilité de l'API publique — ne contient plus de logique métier
 
 ### `naming.rs`
 
