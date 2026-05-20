@@ -5,24 +5,21 @@
 ///   center 45% — generated DDL for selected table
 ///   right 30%  — table summary (strategy, columns, FK)
 
-// UI Constants
-const SELECTED_ROW_BG: &str = "#00A57233";
-const SELECTED_ACCENT_COLOR: &str = "#4EDEA3";
-const BORDER_COLOR: &str = "#40475233";
-const BADGE_TEXT_COLOR: &str = "#0D0D0D";
-
 use dioxus::prelude::*;
 
 use json2sql::db::ddl::generate_ddl_preview;
 use json2sql::schema::table_schema::WideStrategy;
 
-use crate::screens::{strategy_color, strategy_label};
+use crate::screens::{strategy_color, strategy_label, TableListPanel, TableRowEntry};
 use crate::state::{AppScreen, AppState};
 use crate::theme;
 
 #[component]
 pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
-    let schemas = state.read().build_effective_schemas();
+    let schemas = {
+        let s = state.read();
+        crate::screens::build_effective_schemas(&s.schemas, &s.strategy_overrides)
+    };
 
     if schemas.is_empty() {
         return rsx! {
@@ -49,24 +46,9 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
     let strategy_lbl = strategy_label(&selected.wide_strategy);
     let strategy_col = strategy_color(&selected.wide_strategy);
 
-    // Pre-compute last-child status for tree connectors (└─ vs ├─).
-    let is_last_child: Vec<bool> = {
-        let mut result = vec![true; schemas.len()];
-        for i in 0..schemas.len() {
-            if let Some(ref parent) = schemas[i].parent_table {
-                for j in (i + 1)..schemas.len() {
-                    if schemas[j].parent_table.as_deref() == Some(parent.as_str()) {
-                        result[i] = false;
-                        break;
-                    }
-                }
-            }
-        }
-        result
-    };
+    let is_last_child = crate::screens::compute_last_child(&schemas);
 
-    // Exclude tables that produce no DDL: Skip (Ignore) and pure routing containers
-    // (MultiKeyedPivot where every column is a generated FK — no data columns).
+    // Exclude tables that produce no DDL: Skip (Ignore) and pure routing containers.
     let visible_schemas: Vec<_> = schemas.iter()
         .enumerate()
         .filter(|(_, t)| {
@@ -75,6 +57,20 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                  && t.columns.iter().all(|c| c.is_generated))
         })
         .collect();
+
+    // Pre-compute display entries for TableListPanel.
+    let table_entries: Vec<TableRowEntry> = visible_schemas.iter().map(|&(orig_i, table)| {
+        TableRowEntry {
+            index: orig_i,
+            name: table.name.clone(),
+            depth: table.depth,
+            is_last_child: is_last_child[orig_i],
+            is_selected: orig_i == idx,
+            badge_label: strategy_label(&table.wide_strategy),
+            badge_color: strategy_color(&table.wide_strategy),
+            dim: false,
+        }
+    }).collect();
 
     rsx! {
         div {
@@ -97,43 +93,13 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                 style: "display:flex;flex:1;overflow:hidden;min-height:0;min-width:0;",
 
                 // ── Left — table tree (25%) ──────────────────────────────
-                div {
-                    style: "flex:0 1 25%;min-width:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};overflow-y:auto;padding:4px 0;",
-                    for &(orig_i, table) in &visible_schemas {
-                        {
-                            let is_selected = orig_i == idx;
-                            let (label, badge_color) = (strategy_label(&table.wide_strategy), strategy_color(&table.wide_strategy));
-                            let row_bg = if is_selected { format!("background:{};", SELECTED_ROW_BG) } else { "background:transparent;".to_string() };
-                            let accent = if is_selected { format!("border-left:2px solid {};", SELECTED_ACCENT_COLOR) } else { "border-left:2px solid transparent;".to_string() };
-                            let parent_indent = table.depth.saturating_sub(1) * 14 + 8;
-                            let connector = if table.depth == 0 { "" } else if is_last_child[orig_i] { "└─" } else { "├─" };
-                            rsx! {
-                                div {
-                                    key: "{orig_i}",
-                                    style: "display:flex;align-items:center;gap:4px;padding:5px 8px 5px {parent_indent}px;cursor:pointer;{row_bg}{accent}",
-                                    onclick: move |_| {
-                                        let mut s = state.write();
-                                        s.selected_table_indices = std::collections::HashSet::from([orig_i]);
-                                        s.last_selected_idx = orig_i;
-                                    },
-                                    if table.depth > 0 {
-                                        span {
-                                            style: "font-size:0.6875rem;color:#717680;flex-shrink:0;line-height:1;",
-                                            "{connector}"
-                                        }
-                                    }
-                                    span {
-                                        style: "font-family:{theme::FONT_CODE};font-size:0.75rem;color:{theme::ON_SURFACE};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-                                        "{table.name}"
-                                    }
-                                    span {
-                                        style: "font-size:0.5625rem;font-weight:700;letter-spacing:0.04em;color:{BADGE_TEXT_COLOR};background:{badge_color};padding:1px 4px;border-radius:2px;flex-shrink:0;",
-                                        "{label}"
-                                    }
-                                }
-                            }
-                        }
-                    }
+                TableListPanel {
+                    entries: table_entries,
+                    on_select: move |orig_i: usize| {
+                        let mut s = state.write();
+                        s.selected_table_indices = std::collections::HashSet::from([orig_i]);
+                        s.last_selected_idx = orig_i;
+                    },
                 }
 
                 // ── Center — DDL preview (45%) ────────────────────────────
@@ -157,10 +123,10 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
 
                     // Strategy badge
                     div {
-                        style: "display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #40475233;",
+                        style: "display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid {theme::OUTLINE_FAINT};",
                         span { style: "color:{theme::ON_SURFACE_DIM};font-size:0.8125rem;", "Strategy" }
                         span {
-                            style: "font-size:0.6875rem;font-weight:700;color:{BADGE_TEXT_COLOR};background:{strategy_col};padding:2px 6px;border-radius:2px;",
+                            style: "font-size:0.6875rem;font-weight:700;color:{theme::ON_PRIMARY};background:{strategy_col};padding:2px 6px;border-radius:2px;",
                             "{strategy_lbl}"
                         }
                     }
@@ -233,7 +199,7 @@ fn SummaryRow(label: &'static str, value: String, mono: bool) -> Element {
 
     rsx! {
         div {
-            style: "display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid {BORDER_COLOR};",
+            style: "display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid {theme::OUTLINE_FAINT};",
             span { style: "color:{theme::ON_SURFACE_DIM};font-size:0.8125rem;", "{label}" }
             span { style: "{value_style}", "{value}" }
         }

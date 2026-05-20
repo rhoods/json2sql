@@ -34,6 +34,10 @@ pub const ERROR: &str = "#FFB4AB";          // error / failure
 
 // Borders — semi-transparent; used as-is in CSS, not as base + opacity.
 pub const OUTLINE_VARIANT: &str = "#40475266"; // #404752 at ~40% opacity
+pub const OUTLINE_FAINT: &str = "#40475233";   // #404752 at ~20% opacity — subtle row separators
+
+// Selection state
+pub const SELECTED_BG: &str = "#00A57233";     // secondary at ~20% opacity — selected row background
 
 // Ghost button hover background: primary at 8% opacity (pre-computed — CSS
 // cannot do rgba(var(--primary-rgb), 0.08) without a separate rgb channel var).

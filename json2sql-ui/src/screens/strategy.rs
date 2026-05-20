@@ -5,19 +5,13 @@
 ///   center 45% — column list for selected table
 ///   right 30%  — strategy configurator
 
-// UI constants
-const SELECTED_ROW_BG: &str = "#00A57233";
-const SELECTED_ACCENT_COLOR: &str = "#4EDEA3";
-const BORDER_COLOR_LIGHT: &str = "#40475266";
-const BORDER_COLOR_MEDIUM: &str = "#40475233";
-const BADGE_TEXT_COLOR: &str = "#0D0D0D";
-
 use dioxus::prelude::*;
 
-use json2sql::schema::registry::OverflowWarning;
+use json2sql::schema::finalizer::OverflowWarning;
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 
-use crate::screens::{pick_save_file_zenity, strategy_color, strategy_label, PickResult};
+use crate::screens::{pick_save_file_zenity, strategy_color, strategy_label, PickResult, TableListPanel, TableRowEntry};
+use crate::screens::strategy_configurator::StrategyConfigurator;
 use crate::state::{AppScreen, AppState};
 use crate::theme;
 
@@ -27,8 +21,6 @@ use crate::theme;
 
 #[component]
 pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
-    // Buffer for the id_column name when setting NormalizeDynamicKeys.
-    let mut normalize_id_col: Signal<String> = use_signal(|| "id".to_string());
     let mut banner_dismissed = use_signal(|| false);
     let mut multi_select_mode: Signal<bool> = use_signal(|| false);
     // Feedback after save: Some(Ok(path)) or Some(Err(msg))
@@ -58,10 +50,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
         .get(&selected.name)
         .cloned()
         .unwrap_or_else(|| selected.wide_strategy.clone());
-    let current_label = strategy_label(&current_strategy);
 
-    let normalize_id_col_value = normalize_id_col.read().trim().to_string();
-    let normalize_id_col_invalid = normalize_id_col_value.is_empty() || selected.columns.iter().any(|col| col.name == normalize_id_col_value);
     let selected_indices = state.read().selected_table_indices.clone();
     let multi_select = selected_indices.len() > 1;
     let common_parent: Option<String> = if multi_select {
@@ -75,25 +64,38 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     };
     let selection_count = selected_indices.len();
 
-    // Pre-compute which tables are the last child of their parent — used to pick └─ vs ├─.
-    // For each index, is_last_child[i] is true if no later table has the same parent_table.
-    let is_last_child: Vec<bool> = {
-        let mut result = vec![true; schemas.len()];
-        for i in 0..schemas.len() {
-            if let Some(ref parent) = schemas[i].parent_table {
-                // Any sibling after i with the same parent makes i not-the-last.
-                for j in (i + 1)..schemas.len() {
-                    if schemas[j].parent_table.as_deref() == Some(parent.as_str()) {
-                        result[i] = false;
-                        break;
-                    }
-                }
-            }
-        }
-        result
-    };
-
+    let is_last_child = crate::screens::compute_last_child(&schemas);
     let strategy_overrides_snap = state.read().strategy_overrides.clone();
+
+    // Pre-compute display entries for TableListPanel.
+    let table_entries: Vec<TableRowEntry> = schemas.iter().enumerate().map(|(i, table)| {
+        let user_overrode = strategy_overrides_snap.contains_key(&table.name);
+        let effective = strategy_overrides_snap.get(&table.name).cloned()
+            .unwrap_or_else(|| table.wide_strategy.clone());
+        let is_routing_container = !user_overrode
+            && matches!(effective, WideStrategy::MultiKeyedPivot(_))
+            && table.columns.iter().all(|c| c.is_generated);
+        let is_overflow_jsonb = !user_overrode
+            && matches!(effective, WideStrategy::Jsonb)
+            && overflow_table_names.contains(&table.name);
+        let (badge_label, badge_color) = if is_routing_container {
+            ("ROUTE", theme::BADGE_ROUTE)
+        } else if is_overflow_jsonb {
+            ("JSONB ⚠", theme::BADGE_JSONB_OVERFLOW)
+        } else {
+            (strategy_label(&effective), strategy_color(&effective))
+        };
+        TableRowEntry {
+            index: i,
+            name: table.name.clone(),
+            depth: table.depth,
+            is_last_child: is_last_child[i],
+            is_selected: selected_indices.contains(&i),
+            badge_label,
+            badge_color,
+            dim: is_routing_container,
+        }
+    }).collect();
 
     rsx! {
         div {
@@ -135,7 +137,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                 {
                     let is_multi = *multi_select_mode.read();
                     let btn_style = if is_multi {
-                        format!("font-size:0.8125rem;padding:4px 10px;background:{};color:#0D0D0D;-webkit-text-fill-color:#0D0D0D;border:none;", theme::SECONDARY)
+                        format!("font-size:0.8125rem;padding:4px 10px;background:{};color:{};-webkit-text-fill-color:{};border:none;", theme::SECONDARY, theme::ON_PRIMARY, theme::ON_PRIMARY)
                     } else {
                         "font-size:0.8125rem;padding:4px 10px;".to_string()
                     };
@@ -228,100 +230,25 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                 style: "display:flex;flex:1;overflow:hidden;min-height:0;min-width:0;",
 
                 // ── Left — table list (25%) ───────────────────────────────
-                div {
-                    style: "flex:0 1 25%;min-width:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};overflow-y:auto;padding:4px 0;",
-                    for (i, table) in schemas.iter().enumerate() {
-                        {
-                            let is_selected = selected_indices.contains(&i);
-                            let indent = table.depth * 12;
-                            let user_overrode = state.read().strategy_overrides.contains_key(&table.name);
-                            let effective = state.read().strategy_overrides
-                                .get(&table.name)
-                                .cloned()
-                                .unwrap_or_else(|| table.wide_strategy.clone());
-                            // Pure FK relay tables created by the cascade (MultiKeyedPivot with no
-                            // data columns). They exist in SQL but only hold routing FKs; the actual
-                            // data lives in the synthetic sibling table referenced by child_routes.
-                            let is_routing_container = !user_overrode
-                                && matches!(effective, WideStrategy::MultiKeyedPivot(_))
-                                && table.columns.iter().all(|c| c.is_generated);
-                            // Auto-converted JSONB (overflow guard) shows amber badge;
-                            // user-chosen JSONB keeps purple.
-                            let is_overflow_jsonb = !user_overrode
-                                && matches!(effective, WideStrategy::Jsonb)
-                                && overflow_table_names.contains(&table.name);
-                            let (label, badge_color) = if is_routing_container {
-                                ("ROUTE", theme::BADGE_ROUTE)
-                            } else if is_overflow_jsonb {
-                                ("JSONB ⚠", theme::BADGE_JSONB_OVERFLOW)
-                            } else {
-                                (strategy_label(&effective), strategy_color(&effective))
-                            };
-                            let row_bg = if is_selected {
-                                format!("background:{};", SELECTED_ROW_BG)
-                            } else {
-                                "background:transparent;".to_string()
-                            };
-                            let accent = if is_selected {
-                                format!("border-left:2px solid {};", SELECTED_ACCENT_COLOR)
-                            } else {
-                                "border-left:2px solid transparent;".to_string()
-                            };
-                            let name_color = if is_routing_container {
-                                theme::ON_SURFACE_DIM
-                            } else {
-                                theme::ON_SURFACE
-                            };
-                            let row_opacity = if is_routing_container { "opacity:0.6;" } else { "" };
-                            // Tree connector: indent the row by parent depth, then show └─/├─ for children.
-                            let parent_indent = table.depth.saturating_sub(1) * 14 + 8;
-                            let connector = if table.depth == 0 {
-                                ""
-                            } else if is_last_child[i] {
-                                "└─"
-                            } else {
-                                "├─"
-                            };
-                            let connector_color = if is_routing_container { theme::ON_SURFACE_DIM } else { "#717680" };
-                            rsx! {
-                                div {
-                                    key: "{i}",
-                                    style: "display:flex;align-items:center;gap:4px;padding:5px 8px 5px {parent_indent}px;cursor:pointer;{row_bg}{accent}{row_opacity}",
-                                    onclick: move |_| {
-                                        let is_multi = *multi_select_mode.read();
-                                        let mut s = state.write();
-                                        if is_multi {
-                                            if s.selected_table_indices.contains(&i) {
-                                                if s.selected_table_indices.len() > 1 {
-                                                    s.selected_table_indices.remove(&i);
-                                                }
-                                            } else {
-                                                s.selected_table_indices.insert(i);
-                                                s.last_selected_idx = i;
-                                            }
-                                        } else {
-                                            s.selected_table_indices = std::collections::HashSet::from([i]);
-                                            s.last_selected_idx = i;
-                                        }
-                                    },
-                                    if table.depth > 0 {
-                                        span {
-                                            style: "font-size:0.6875rem;color:{connector_color};flex-shrink:0;line-height:1;",
-                                            "{connector}"
-                                        }
-                                    }
-                                    span {
-                                        style: "font-family:{theme::FONT_CODE};font-size:0.75rem;color:{name_color};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-                                        "{table.name}"
-                                    }
-                                    span {
-                                        style: "font-size:0.5625rem;font-weight:700;letter-spacing:0.04em;color:#0D0D0D;background:{badge_color};padding:1px 4px;border-radius:2px;flex-shrink:0;",
-                                        "{label}"
-                                    }
+                TableListPanel {
+                    entries: table_entries,
+                    on_select: move |i: usize| {
+                        let is_multi = *multi_select_mode.read();
+                        let mut s = state.write();
+                        if is_multi {
+                            if s.selected_table_indices.contains(&i) {
+                                if s.selected_table_indices.len() > 1 {
+                                    s.selected_table_indices.remove(&i);
                                 }
+                            } else {
+                                s.selected_table_indices.insert(i);
+                                s.last_selected_idx = i;
                             }
+                        } else {
+                            s.selected_table_indices = std::collections::HashSet::from([i]);
+                            s.last_selected_idx = i;
                         }
-                    }
+                    },
                 }
 
                 // ── Center — column list (45%) ────────────────────────────
@@ -342,8 +269,8 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                     div {
                         style: "display:grid;grid-template-columns:1fr auto;gap:0;",
                         // Header row
-                        span { style: "font-size:0.6875rem;text-transform:uppercase;letter-spacing:0.05em;color:{theme::ON_SURFACE_DIM};padding:4px 0;border-bottom:1px solid {BORDER_COLOR_LIGHT};", "Column" }
-                        span { style: "font-size:0.6875rem;text-transform:uppercase;letter-spacing:0.05em;color:{theme::ON_SURFACE_DIM};padding:4px 0;border-bottom:1px solid {BORDER_COLOR_LIGHT};text-align:right;", "Type" }
+                        span { style: "font-size:0.6875rem;text-transform:uppercase;letter-spacing:0.05em;color:{theme::ON_SURFACE_DIM};padding:4px 0;border-bottom:1px solid {theme::OUTLINE_VARIANT};", "Column" }
+                        span { style: "font-size:0.6875rem;text-transform:uppercase;letter-spacing:0.05em;color:{theme::ON_SURFACE_DIM};padding:4px 0;border-bottom:1px solid {theme::OUTLINE_VARIANT};text-align:right;", "Type" }
                         // Data rows
                         for col in selected.columns.iter() {
                             {
@@ -356,11 +283,11 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                 rsx! {
                                     span {
                                         key: "{col.name}",
-                                        style: "font-family:{theme::FONT_CODE};font-size:0.8125rem;color:{name_color};padding:4px 0;border-bottom:1px solid {BORDER_COLOR_MEDIUM};",
+                                        style: "font-family:{theme::FONT_CODE};font-size:0.8125rem;color:{name_color};padding:4px 0;border-bottom:1px solid {theme::OUTLINE_FAINT};",
                                         "{col.name}"
                                     }
                                     span {
-                                        style: "font-family:{theme::FONT_CODE};font-size:0.8125rem;color:{theme::TERTIARY};padding:4px 0;border-bottom:1px solid {BORDER_COLOR_MEDIUM};text-align:right;",
+                                        style: "font-family:{theme::FONT_CODE};font-size:0.8125rem;color:{theme::TERTIARY};padding:4px 0;border-bottom:1px solid {theme::OUTLINE_FAINT};text-align:right;",
                                         "{type_str}"
                                     }
                                 }
@@ -370,225 +297,13 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                 }
 
                 // ── Right — strategy configurator (30%) ──────────────────
-                div {
-                    style: "flex:0 1 30%;min-width:0;min-height:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};padding:16px;display:flex;flex-direction:column;overflow-y:auto;",
-
-                    if multi_select {
-                        // ── Multi-select mode ─────────────────────────────
-                        h3 {
-                            style: "color:{theme::ON_SURFACE};font-size:0.875rem;font-weight:600;margin:0 0 4px 0;",
-                            "{selection_count} tables sélectionnées"
-                        }
-                        if let Some(ref parent) = common_parent {
-                            p {
-                                style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;margin:0 0 12px 0;",
-                                "Parent commun : "
-                                span { style: "color:{theme::ON_SURFACE};font-family:{theme::FONT_CODE};", "{parent}" }
-                            }
-                        } else {
-                            p {
-                                style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;margin:0 0 12px 0;",
-                                "Parents variés"
-                            }
-                        }
-                        p {
-                            style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.75rem;margin:0 0 8px 0;font-weight:600;",
-                            "Appliquer à toutes :"
-                        }
-                        div {
-                            style: "display:flex;flex-direction:column;gap:6px;margin-bottom:16px;",
-                            StrategyButton {
-                                label: "Default (columns)",
-                                active: false,
-                                color: theme::BADGE_DEFAULT,
-                                onclick: move |_| {
-                                    let names: Vec<String> = {
-                                        let s = state.read();
-                                        s.selected_table_indices.iter()
-                                            .filter_map(|&i| s.schemas.get(i).map(|t| t.name.clone()))
-                                            .collect()
-                                    };
-                                    let mut s = state.write();
-                                    for name in names { s.strategy_overrides.remove(&name); }
-                                }
-                            }
-                            StrategyButton {
-                                label: "JSONB séparé",
-                                active: false,
-                                color: theme::BADGE_JSONB,
-                                onclick: move |_| {
-                                    let names: Vec<String> = {
-                                        let s = state.read();
-                                        s.selected_table_indices.iter()
-                                            .filter_map(|&i| s.schemas.get(i).map(|t| t.name.clone()))
-                                            .collect()
-                                    };
-                                    let mut s = state.write();
-                                    for name in names { s.strategy_overrides.insert(name, WideStrategy::Jsonb); }
-                                }
-                            }
-                            StrategyButton {
-                                label: "JSONB inline",
-                                active: false,
-                                color: theme::BADGE_JSONB_INLINE,
-                                onclick: move |_| {
-                                    let names: Vec<String> = {
-                                        let s = state.read();
-                                        s.selected_table_indices.iter()
-                                            .filter_map(|&i| s.schemas.get(i).map(|t| t.name.clone()))
-                                            .collect()
-                                    };
-                                    let mut s = state.write();
-                                    for name in names { s.strategy_overrides.insert(name, WideStrategy::JsonbFlatten); }
-                                }
-                            }
-                            StrategyButton {
-                                label: "Pivot (EAV)",
-                                active: false,
-                                color: theme::BADGE_NORMALIZE,
-                                onclick: move |_| {
-                                    let names: Vec<String> = {
-                                        let s = state.read();
-                                        s.selected_table_indices.iter()
-                                            .filter_map(|&i| s.schemas.get(i).map(|t| t.name.clone()))
-                                            .collect()
-                                    };
-                                    let mut s = state.write();
-                                    for name in names { s.strategy_overrides.insert(name, WideStrategy::Pivot); }
-                                }
-                            }
-                            StrategyButton {
-                                label: "Skip (exclude all)",
-                                active: false,
-                                color: theme::BADGE_SKIP,
-                                onclick: move |_| {
-                                    let names: Vec<String> = {
-                                        let s = state.read();
-                                        s.selected_table_indices.iter()
-                                            .filter_map(|&i| s.schemas.get(i).map(|t| t.name.clone()))
-                                            .collect()
-                                    };
-                                    let mut s = state.write();
-                                    for name in names { s.strategy_overrides.insert(name, WideStrategy::Ignore); }
-                                }
-                            }
-                        }
-                        div { style: "flex:1;" }
-                        p {
-                            style: "color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;font-style:italic;margin:0;",
-                            "La fusion (Keyed Pivot) nécessite une re-analyse avec un seuil Jaccard ajusté — non disponible via l'IHM."
-                        }
-                    } else {
-                        // ── Single-select mode (existing configurator) ────
-                        h3 {
-                            style: "color:{theme::ON_SURFACE};font-size:0.875rem;font-weight:600;margin:0 0 4px 0;",
-                            "Strategy"
-                        }
-                        p {
-                            style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;margin:0 0 16px 0;",
-                            "Current: "
-                            span { style: "color:{theme::ON_SURFACE};font-family:{theme::FONT_CODE};", "{current_label}" }
-                        }
-
-                        div {
-                            style: "display:flex;flex-direction:column;gap:6px;margin-bottom:16px;",
-                            StrategyButton {
-                                label: "Default (columns)",
-                                active: matches!(current_strategy, WideStrategy::Columns),
-                                color: theme::BADGE_DEFAULT,
-                                onclick: move |_| {
-                                    let name = state.read().schemas[idx].name.clone();
-                                    state.write().strategy_overrides.remove(&name);
-                                }
-                            }
-                            StrategyButton {
-                                label: "JSONB séparé (table propre)",
-                                active: matches!(current_strategy, WideStrategy::Jsonb),
-                                color: theme::BADGE_JSONB,
-                                onclick: move |_| {
-                                    let name = state.read().schemas[idx].name.clone();
-                                    state.write().strategy_overrides.insert(name, WideStrategy::Jsonb);
-                                }
-                            }
-                            StrategyButton {
-                                label: "JSONB inline (colonne parent)",
-                                active: matches!(current_strategy, WideStrategy::JsonbFlatten),
-                                color: theme::BADGE_JSONB_INLINE,
-                                onclick: move |_| {
-                                    let name = state.read().schemas[idx].name.clone();
-                                    state.write().strategy_overrides.insert(name, WideStrategy::JsonbFlatten);
-                                }
-                            }
-                            StrategyButton {
-                                label: "Pivot (EAV)",
-                                active: matches!(current_strategy, WideStrategy::Pivot),
-                                color: theme::BADGE_NORMALIZE,
-                                onclick: move |_| {
-                                    let name = state.read().schemas[idx].name.clone();
-                                    state.write().strategy_overrides.insert(name, WideStrategy::Pivot);
-                                }
-                            }
-                            StrategyButton {
-                                label: "Skip (exclude)",
-                                active: matches!(current_strategy, WideStrategy::Ignore),
-                                color: theme::BADGE_SKIP,
-                                onclick: move |_| {
-                                    let name = state.read().schemas[idx].name.clone();
-                                    state.write().strategy_overrides.insert(name, WideStrategy::Ignore);
-                                }
-                            }
-                        }
-
-                        div {
-                            style: "border-top:1px solid {BORDER_COLOR_LIGHT};padding-top:12px;margin-bottom:6px;",
-                            p {
-                                style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.75rem;margin:0 0 8px 0;font-weight:600;",
-                                "Normalize dynamic keys"
-                            }
-                            p {
-                                style: "color:{theme::ON_SURFACE_DIM};font-size:0.75rem;margin:0 0 8px 0;",
-                                "Each JSON key becomes a row. The key itself is stored in the column named below."
-                            }
-                            input {
-                                class: "input-field",
-                                style: "margin-bottom:8px;",
-                                r#type: "text",
-                                placeholder: "id_column (e.g. image_id)",
-                                value: "{normalize_id_col.read()}",
-                                oninput: move |e| { *normalize_id_col.write() = e.value(); },
-                            }
-                            button {
-                                class: "btn-ghost",
-                                style: "width:100%;",
-                                disabled: normalize_id_col_invalid,
-                                onclick: move |_| {
-                                    let col = normalize_id_col.read().trim().to_string();
-                                    let id_col = if col.is_empty() { "id".to_string() } else { col };
-                                    let name = state.read().schemas[idx].name.clone();
-                                    state.write().strategy_overrides.insert(
-                                        name,
-                                        WideStrategy::NormalizeDynamicKeys { id_column: id_col },
-                                    );
-                                },
-                                "Apply Normalize"
-                            }
-                            if normalize_id_col_invalid {
-                                p {
-                                    style: "color:{theme::ERROR};font-size:0.75rem;margin:8px 0 0 0;",
-                                    "Enter a non-empty, unique key column name."
-                                }
-                            }
-                        }
-
-                        div { style: "flex:1;" }
-
-                        if matches!(current_strategy, WideStrategy::StructuredPivot(_) | WideStrategy::KeyedPivot(_) | WideStrategy::AutoSplit { .. }) {
-                            p {
-                                style: "color:{theme::ON_SURFACE_DIM};font-size:0.6875rem;margin:0 0 12px 0;font-style:italic;",
-                                "Auto-detected strategy. Override above if needed."
-                            }
-                        }
-                    }
+                StrategyConfigurator {
+                    state,
+                    idx,
+                    current_strategy,
+                    multi_select,
+                    selection_count,
+                    common_parent,
                 }
             }
 
@@ -607,39 +322,3 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Sub-component: strategy toggle button
-// ---------------------------------------------------------------------------
-
-#[component]
-fn StrategyButton(
-    label: &'static str,
-    active: bool,
-    color: &'static str,
-    onclick: EventHandler<MouseEvent>,
-) -> Element {
-    let style = if active {
-        format!(
-            "background:{c};color:{t};-webkit-text-fill-color:{t};\
-             border:none;border-radius:2px;padding:7px 12px;\
-             font-size:0.8125rem;font-weight:600;cursor:pointer;text-align:left;width:100%;",
-            c = color, t = BADGE_TEXT_COLOR
-        )
-    } else {
-        format!(
-            "background:transparent;color:{c};-webkit-text-fill-color:{c};\
-             border:1px solid {c}66;border-radius:2px;padding:7px 12px;\
-             font-size:0.8125rem;cursor:pointer;text-align:left;width:100%;",
-            c = color
-        )
-    };
-
-    rsx! {
-        button {
-            style: "{style}",
-            aria_label: "{label}",
-            onclick: move |e| onclick.call(e),
-            "{label}"
-        }
-    }
-}

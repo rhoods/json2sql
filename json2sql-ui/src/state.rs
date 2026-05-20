@@ -5,7 +5,7 @@ use urlencoding::encode;
 use zeroize::{Zeroize, Zeroizing};
 use json2sql::io::progress_event::ProgressEvent;
 use json2sql::schema::naming::{ColumnCollision, TruncatedName};
-use json2sql::schema::registry::OverflowWarning;
+use json2sql::schema::finalizer::OverflowWarning;
 use json2sql::schema::stats::ColumnStats;
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 
@@ -246,69 +246,6 @@ impl Default for AppState {
 }
 
 impl AppState {
-    /// Build a copy of schemas with all user strategy overrides applied.
-    ///
-    /// The original `self.schemas` is never mutated — this produces a fresh
-    /// Vec ready for DDL generation and pass2 import.
-    pub fn build_effective_schemas(&self) -> Vec<json2sql::schema::table_schema::TableSchema> {
-        use json2sql::schema::registry::{apply_jsonb_flatten, apply_normalize_dynamic_keys, apply_wide_strategy_columns};
-
-        let mut schemas = self.schemas.clone();
-
-        // Pass 1: apply overrides that operate on a single table at a time.
-        for (table_name, strategy) in &self.strategy_overrides {
-            if let Some(s) = schemas.iter_mut().find(|s| &s.name == table_name) {
-                match strategy {
-                    WideStrategy::NormalizeDynamicKeys { .. } => {} // handled in pass 2
-                    WideStrategy::JsonbFlatten => {}                // handled in pass 3
-                    other => apply_wide_strategy_columns(s, other.clone()),
-                }
-            }
-        }
-
-        // Pass 2: apply NormalizeDynamicKeys (needs full schemas vec + removes child tables).
-        let normalize_targets: Vec<(String, String)> = self.strategy_overrides
-            .iter()
-            .filter_map(|(name, strategy)| {
-                if let WideStrategy::NormalizeDynamicKeys { id_column } = strategy {
-                    Some((name.clone(), id_column.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for (table_name, id_column) in normalize_targets {
-            if let Err(e) = apply_normalize_dynamic_keys(&mut schemas, &table_name, id_column) {
-                eprintln!("WARNING: {e}");
-            }
-        }
-
-        // Pass 3: apply JsonbFlatten (needs full schemas vec + removes child table).
-        let jsonb_flatten_targets: Vec<String> = self.strategy_overrides
-            .iter()
-            .filter_map(|(name, strategy)| {
-                if matches!(strategy, WideStrategy::JsonbFlatten) {
-                    Some(name.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for table_name in jsonb_flatten_targets {
-            if let Err(e) = apply_jsonb_flatten(&mut schemas, &table_name) {
-                eprintln!("WARNING: {e}");
-            }
-        }
-
-        // Remove tables explicitly skipped by the user.
-        schemas.retain(|s| {
-            !matches!(self.strategy_overrides.get(&s.name), Some(WideStrategy::Ignore))
-        });
-
-        schemas
-    }
 
     /// Populate AppState from a loaded SchemaSnapshot.
     /// Sets schema_snapshot_loaded = true so Setup screen can adapt its UI.
