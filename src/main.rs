@@ -273,7 +273,7 @@ async fn run(cli: Cli) -> Result<()> {
         schema::config::apply_group_overrides(&mut pass1.schemas, &config);
         // Re-run exclusion: strategy overrides may have changed Columns → Jsonb/Pivot on a parent,
         // which should now suppress all its child tables (they'd receive no data anyway).
-        schema::registry::exclude_absorbed_children(&mut pass1.schemas);
+        schema::finalizer::exclude_absorbed_children(&mut pass1.schemas);
         eprintln!(
             "Schema after overrides: {} tables",
             pass1.schemas.len()

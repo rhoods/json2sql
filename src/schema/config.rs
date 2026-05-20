@@ -4,7 +4,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::error::{J2sError, Result};
-use crate::schema::registry::{
+use crate::schema::wide_strategies::{
     apply_flatten, apply_normalize_dynamic_keys, apply_structured_pivot_columns,
     apply_wide_strategy_columns, build_union_columns,
 };

@@ -1,0 +1,191 @@
+use indexmap::IndexMap;
+use serde_json::Value;
+
+use super::PATH_SEP;
+use super::table_schema::ChildKind;
+use super::type_tracker::TypeTracker;
+
+/// One entry per table discovered during Pass 1 observation, keyed by PATH_SEP-joined path.
+#[derive(Debug)]
+pub(crate) struct TableEntry {
+    pub(crate) path_key: String,
+    pub(crate) path: Vec<String>,
+    pub(crate) parent_key: String,
+    pub(crate) columns: IndexMap<String, TypeTracker>,
+    pub(crate) child_kind: Option<ChildKind>,
+    /// For scalar junction tables, the element type tracker.
+    pub(crate) scalar_tracker: Option<TypeTracker>,
+    /// Element type trackers for scalar arrays stored as PG array columns (array_as_pg_array mode).
+    pub(crate) array_columns: IndexMap<String, TypeTracker>,
+    pub(crate) row_count: u64,
+}
+
+impl TableEntry {
+    fn new(path: Vec<String>, parent_key: String, child_kind: Option<ChildKind>) -> Self {
+        let path_key = path.join(&PATH_SEP.to_string());
+        Self {
+            path_key,
+            path,
+            parent_key,
+            columns: IndexMap::new(),
+            child_kind,
+            scalar_tracker: None,
+            array_columns: IndexMap::new(),
+            row_count: 0,
+        }
+    }
+
+    pub(crate) fn merge(&mut self, other: TableEntry) {
+        self.row_count += other.row_count;
+        for (name, tracker) in other.columns {
+            if let Some(existing) = self.columns.get_mut(&name) {
+                existing.merge(&tracker);
+            } else {
+                self.columns.insert(name, tracker);
+            }
+        }
+        for (name, tracker) in other.array_columns {
+            if let Some(existing) = self.array_columns.get_mut(&name) {
+                existing.merge(&tracker);
+            } else {
+                self.array_columns.insert(name, tracker);
+            }
+        }
+        match (&mut self.scalar_tracker, other.scalar_tracker) {
+            (Some(a), Some(b)) => a.merge(&b),
+            (None, Some(b))    => self.scalar_tracker = Some(b),
+            _                  => {}
+        }
+    }
+
+    fn observe_field(&mut self, field: &str, value: &Value, text_threshold: u32) {
+        if let Some(tracker) = self.columns.get_mut(field) {
+            tracker.observe(value);
+        } else {
+            self.columns
+                .entry(field.to_string())
+                .or_insert_with(|| TypeTracker::new(text_threshold))
+                .observe(value);
+        }
+    }
+}
+
+/// Accumulates raw JSON observations row-by-row during Pass 1 streaming.
+///
+/// Responsible for: table discovery, column type tracking, scalar/array routing.
+/// Does not finalize, name, or transform schemas — that is `SchemaFinalizer`'s job (T2).
+pub struct SchemaObserver {
+    pub(crate) tables: IndexMap<String, TableEntry>,
+    pub(crate) text_threshold: u32,
+    array_as_pg_array: bool,
+}
+
+impl SchemaObserver {
+    pub fn new(text_threshold: u32, array_as_pg_array: bool) -> Self {
+        Self {
+            tables: IndexMap::new(),
+            text_threshold,
+            array_as_pg_array,
+        }
+    }
+
+    /// Observe a single root-level JSON object.
+    ///
+    /// Uses an explicit heap stack instead of recursion to handle arbitrarily
+    /// deep nesting without risk of stack overflow.
+    pub fn observe_root(&mut self, root_name: &str, obj: &serde_json::Map<String, Value>) {
+        self.ensure_table_key(root_name, "", None);
+
+        let mut stack: Vec<(String, &serde_json::Map<String, Value>)> =
+            vec![(root_name.to_string(), obj)];
+
+        while let Some((path_key, map)) = stack.pop() {
+            if let Some(entry) = self.tables.get_mut(&path_key) {
+                entry.row_count += 1;
+            }
+
+            for (field, value) in map {
+                match value {
+                    Value::Object(nested) => {
+                        let child_key = format!("{}{}{}", path_key, PATH_SEP, field);
+                        self.ensure_table_key(&child_key, &path_key, Some(ChildKind::Object));
+                        stack.push((child_key, nested));
+                    }
+                    Value::Array(arr) => {
+                        if arr.is_empty() {
+                            continue;
+                        }
+                        let child_key = format!("{}{}{}", path_key, PATH_SEP, field);
+                        let first_is_object = arr.iter().any(|v| matches!(v, Value::Object(_)));
+
+                        if first_is_object {
+                            self.ensure_table_key(&child_key, &path_key, Some(ChildKind::ObjectArray));
+                            let mut objs: Vec<&serde_json::Map<String, Value>> = arr
+                                .iter()
+                                .filter_map(|v| if let Value::Object(o) = v { Some(o) } else { None })
+                                .collect();
+                            if let Some(last) = objs.pop() {
+                                for obj in objs {
+                                    stack.push((child_key.clone(), obj));
+                                }
+                                stack.push((child_key, last));
+                            }
+                        } else if self.array_as_pg_array {
+                            let threshold = self.text_threshold;
+                            let entry = self.tables.get_mut(&path_key).expect("invariant: path_key was popped from stack, must exist in tables");
+                            if let Some(tracker) = entry.array_columns.get_mut(field.as_str()) {
+                                for item in arr {
+                                    tracker.observe(item);
+                                }
+                            } else {
+                                let tracker = entry
+                                    .array_columns
+                                    .entry(field.to_string())
+                                    .or_insert_with(|| TypeTracker::new(threshold));
+                                for item in arr {
+                                    tracker.observe(item);
+                                }
+                            }
+                        } else {
+                            self.ensure_table_key(&child_key, &path_key, Some(ChildKind::ScalarArray));
+                            let threshold = self.text_threshold;
+                            let entry = self.tables.get_mut(&child_key).expect("invariant: child_key just inserted by ensure_table_key");
+                            let tracker = entry
+                                .scalar_tracker
+                                .get_or_insert_with(|| TypeTracker::new(threshold));
+                            for item in arr {
+                                tracker.observe(item);
+                            }
+                        }
+                    }
+                    scalar => {
+                        let threshold = self.text_threshold;
+                        self.tables
+                            .get_mut(&path_key)
+                            .expect("invariant: path_key was popped from stack, must exist in tables")
+                            .observe_field(field, scalar, threshold);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Merge all observations from `other` into `self`.
+    /// Used after parallel Pass 1: each worker builds its own observer, then they are merged.
+    pub fn merge(&mut self, other: SchemaObserver) {
+        for (key, other_entry) in other.tables {
+            if let Some(entry) = self.tables.get_mut(&key) {
+                entry.merge(other_entry);
+            } else {
+                self.tables.insert(key, other_entry);
+            }
+        }
+    }
+
+    fn ensure_table_key(&mut self, key: &str, parent_key: &str, child_kind: Option<ChildKind>) {
+        self.tables.entry(key.to_string()).or_insert_with(|| {
+            let path: Vec<String> = key.split(PATH_SEP).map(|s| s.to_string()).collect();
+            TableEntry::new(path, parent_key.to_string(), child_kind)
+        });
+    }
+}

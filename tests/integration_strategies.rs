@@ -1,7 +1,7 @@
 mod common;
 
 use json2sql::{db, pass1, pass2};
-use json2sql::schema::registry::{apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys, apply_structured_pivot_columns, apply_wide_strategy_columns};
+use json2sql::schema::wide_strategies::{apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys, apply_structured_pivot_columns, apply_wide_strategy_columns};
 use json2sql::schema::table_schema::{SiblingSchema, SuffixColumn, SuffixSchema, WideStrategy};
 use json2sql::schema::type_tracker::PgType;
 

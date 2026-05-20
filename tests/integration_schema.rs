@@ -624,7 +624,7 @@ async fn test_column_limit_guard_jsonb_non_root_with_children() {
 
         // Force Jsonb sur "root_middle" (non-racine — a un parent_table = "root").
         {
-            use json2sql::schema::registry::apply_wide_strategy_columns;
+            use json2sql::schema::wide_strategies::apply_wide_strategy_columns;
             use json2sql::schema::table_schema::WideStrategy;
             if let Some(mid) = p1.schemas.iter_mut().find(|s| s.name == "root_middle") {
                 apply_wide_strategy_columns(mid, WideStrategy::Jsonb);

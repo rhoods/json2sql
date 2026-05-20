@@ -9,7 +9,8 @@ use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonReader};
 use crate::schema::naming::{ColumnCollision, TruncatedName};
-use crate::schema::registry::{apply_column_limit_guard, OverflowWarning, SchemaRegistry};
+use crate::schema::finalizer::{apply_column_limit_guard, OverflowWarning};
+use crate::schema::registry::SchemaRegistry;
 use crate::schema::stats::ColumnStats;
 use crate::schema::table_schema::TableSchema;
 
