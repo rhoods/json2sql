@@ -28,6 +28,7 @@ Point d'entrée unique. Chaque entrée indique **quand consulter** le document.
 | Document | Consulter pour... |
 |---|---|
 | [ui/design-system.md](ui/design-system.md) | Tokens, palette, typographie, règles visuelles du design system "The Architectural Logic" |
+| [ui/architecture.md](ui/architecture.md) | Structure des composants, AppState, écrans, composants partagés (TableListPanel, StrategyConfigurator), règles d'architecture |
 | [ui/ihm-design-prompt.md](ui/ihm-design-prompt.md) | Prompt Stitch pour (re)générer les maquettes des 5 écrans |
 
 ---
