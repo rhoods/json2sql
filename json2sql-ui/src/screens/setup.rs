@@ -4,7 +4,7 @@
 /// Transitions to Screen 2 (Analysis) when both source and target are configured.
 use dioxus::prelude::*;
 
-use crate::screens::{pick_file_zenity, pick_folder_zenity, PickResult};
+use crate::screens::{pick_file, pick_folder, PickResult};
 use crate::state::{format_bytes, AppScreen, AppState};
 use crate::theme;
 
@@ -19,13 +19,25 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "No file selected".to_string());
-    // File size for display — computed once per render from already-known path.
-    let source_size_bytes: Option<u64> = source_path.as_ref()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| m.len());
-    let source_size_label: Option<String> = source_size_bytes.map(format_bytes);
+
+    // File size — fetched async when source_path changes, never blocks the render.
+    let mut source_size_bytes: Signal<Option<u64>> = use_signal(|| None);
+    use_effect(move || {
+        let path = state.read().source_file.clone();
+        spawn(async move {
+            let size = tokio::task::spawn_blocking(move || {
+                path.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len())
+            })
+            .await
+            .ok()
+            .flatten();
+            source_size_bytes.set(size);
+        });
+    });
+    let cached_size: Option<u64> = *source_size_bytes.read();
+    let source_size_label: Option<String> = cached_size.map(format_bytes);
     // Warn if > 5 GB — analysis may be slow.
-    let source_large = source_size_bytes.map(|b| b > 5 * 1_073_741_824).unwrap_or(false);
+    let source_large = cached_size.map(|b| b > 5 * 1_073_741_824).unwrap_or(false);
 
     let pg_ok = state.read().pg_ok;
     let pg_testing = state.read().pg_testing;
@@ -53,12 +65,10 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let pg_password = state.read().pg.password.clone();
     let test_btn_label = if pg_testing { "Testing…" } else { "Test connection" };
 
-    // Guards against concurrent picks — zenity is blocking (spawn_blocking),
-    // a second click while the dialog is open is silently ignored.
+    // Guards against concurrent picks — a second click while the dialog is open is silently ignored.
     let mut picking_source  = use_signal(|| false);
     let mut picking_anomaly = use_signal(|| false);
     let mut picking_schema  = use_signal(|| false);
-    // Set to Some(msg) when zenity is not installed; displayed near the Browse button.
     let mut picker_error: Signal<Option<String>> = use_signal(|| None);
     // Error message when schema load fails.
     let mut load_error: Signal<Option<String>> = use_signal(|| None);
@@ -108,7 +118,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                 if picking_source() { return; }
                                 picking_source.set(true);
                                 picker_error.set(None);
-                                let result = pick_file_zenity(&[
+                                let result = pick_file(&[
                                     ("JSON / JSONL", "*.json *.jsonl *.ndjson"),
                                 ]).await;
                                 picking_source.set(false);
@@ -116,7 +126,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                     PickResult::Selected(path) => { state.write().source_file = Some(path); }
                                     PickResult::Cancelled => {}
                                     PickResult::NotAvailable => {
-                                        picker_error.set(Some("zenity not found — install it: sudo apt install zenity".to_string()));
+                                        picker_error.set(Some("File picker unavailable".to_string()));
                                     }
                                 }
                             },
@@ -389,13 +399,13 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                             onclick: move |_| async move {
                                 if picking_anomaly() { return; }
                                 picking_anomaly.set(true);
-                                let result = pick_folder_zenity().await;
+                                let result = pick_folder().await;
                                 picking_anomaly.set(false);
                                 match result {
                                     PickResult::Selected(dir) => { state.write().anomaly_dir = Some(dir); }
                                     PickResult::Cancelled => {}
                                     PickResult::NotAvailable => {
-                                        picker_error.set(Some("zenity not found — install it: sudo apt install zenity".to_string()));
+                                        picker_error.set(Some("File picker unavailable".to_string()));
                                     }
                                 }
                             },
@@ -458,7 +468,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                             if picking_schema() { return; }
                             picking_schema.set(true);
                             load_error.set(None);
-                            let result = pick_file_zenity(&[
+                            let result = pick_file(&[
                                 ("Schema snapshot", "*.json"),
                             ]).await;
                             match result {
@@ -483,7 +493,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                 PickResult::Cancelled => { picking_schema.set(false); }
                                 PickResult::NotAvailable => {
                                     picking_schema.set(false);
-                                    load_error.set(Some("zenity not found — install it: sudo apt install zenity".to_string()));
+                                    load_error.set(Some("File picker unavailable".to_string()));
                                 }
                             }
                         },

@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 use json2sql::schema::finalizer::OverflowWarning;
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 
-use crate::screens::{pick_save_file_zenity, strategy_color, strategy_label, PickResult, TableListPanel, TableRowEntry};
+use crate::screens::{pick_save_file, strategy_color, strategy_label, PickResult, TableListPanel, TableRowEntry};
 use crate::screens::strategy_configurator::StrategyConfigurator;
 use crate::state::{AppScreen, AppState};
 use crate::theme;
@@ -174,7 +174,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                         drop(s);
                         let mut fb = save_feedback.clone();
                         spawn(async move {
-                            match pick_save_file_zenity("schema.json").await {
+                            match pick_save_file("schema.json").await {
                                 PickResult::Selected(path) => {
                                     let result = json2sql::schema::persistence::save_with_overrides(
                                         &schemas, total_rows, &truncated, &collisions, &stats, &overrides, &path,
@@ -191,7 +191,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                 }
                                 PickResult::Cancelled => {}
                                 PickResult::NotAvailable => {
-                                    fb.set(Some(Err("zenity not available".to_string())));
+                                    fb.set(Some(Err("File picker unavailable".to_string())));
                                 }
                             }
                         });

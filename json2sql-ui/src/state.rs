@@ -472,4 +472,31 @@ mod tests {
             .unwrap_or(4);
         assert_eq!(s.pass2_parallel, cpus.min(8));
     }
+
+    // --- format_bytes ---
+
+    #[test]
+    fn format_bytes_gigabytes() {
+        assert_eq!(format_bytes(2_000_000_000), "2.0 GB");
+    }
+
+    #[test]
+    fn format_bytes_megabytes() {
+        assert_eq!(format_bytes(500_000_000), "500 MB");
+    }
+
+    #[test]
+    fn format_bytes_kilobytes() {
+        assert_eq!(format_bytes(500_000), "500 KB");
+    }
+
+    #[test]
+    fn format_bytes_sub_mb_shows_kb() {
+        assert_eq!(format_bytes(50_000), "50 KB");
+    }
+
+    #[test]
+    fn format_bytes_gb_boundary() {
+        assert_eq!(format_bytes(1_000_000_000), "1.0 GB");
+    }
 }

@@ -13,74 +13,59 @@ use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 use crate::theme;
 
 // ---------------------------------------------------------------------------
-// Shared zenity helpers (used by multiple screens)
+// Shared file picker helpers (rfd — native OS dialog, cross-platform)
 // ---------------------------------------------------------------------------
 
-/// Result of a zenity picker invocation.
+/// Result of a file picker invocation.
 pub enum PickResult {
     Selected(std::path::PathBuf),
     Cancelled,
+    /// Never returned by rfd (compiled-in library); kept for exhaustive matches.
     NotAvailable,
 }
 
-/// Run zenity with the given args.
-pub async fn run_zenity(args: Vec<String>) -> PickResult {
-    let output = tokio::task::spawn_blocking(move || {
-        // Force X11 backend so zenity uses XWayland instead of connecting to the
-        // Wayland compositor directly. Without this, zenity's Wayland connection
-        // teardown disrupts the parent process's compositor session on exit.
-        std::process::Command::new("zenity")
-            .env("GDK_BACKEND", "x11")
-            .args(&args)
-            .output()
-    })
-    .await;
-
-    let output = match output {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => return PickResult::NotAvailable,
-        _ => return PickResult::Cancelled,
-    };
-
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if path.is_empty() {
-            PickResult::Cancelled
-        } else {
-            PickResult::Selected(std::path::PathBuf::from(path))
-        }
-    } else {
-        PickResult::Cancelled
+fn option_to_pick_result(opt: Option<std::path::PathBuf>) -> PickResult {
+    match opt {
+        Some(path) => PickResult::Selected(path),
+        None => PickResult::Cancelled,
     }
 }
 
-pub async fn pick_file_zenity(filters: &[(&str, &str)]) -> PickResult {
-    let mut args = vec!["--file-selection".to_string(), "--title=Select file".to_string()];
-    for (_, glob) in filters {
-        args.push(format!("--file-filter={}", glob));
+/// Parse a glob pattern string like `"*.json *.jsonl"` into rfd extension list `["json", "jsonl"]`.
+fn parse_ext(pattern: &str) -> Vec<String> {
+    pattern
+        .split_whitespace()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_start_matches("*.").to_string())
+        .collect()
+}
+
+pub async fn pick_file(filters: &[(&str, &str)]) -> PickResult {
+    let mut dialog = rfd::AsyncFileDialog::new().set_title("Select file");
+    for (name, pattern) in filters {
+        let exts = parse_ext(pattern);
+        dialog = dialog.add_filter(*name, &exts);
     }
-    run_zenity(args).await
+    let handle = dialog.pick_file().await;
+    option_to_pick_result(handle.map(|h| h.path().to_path_buf()))
 }
 
-pub async fn pick_folder_zenity() -> PickResult {
-    run_zenity(vec![
-        "--file-selection".to_string(),
-        "--directory".to_string(),
-        "--title=Select folder".to_string(),
-    ])
-    .await
+pub async fn pick_folder() -> PickResult {
+    let handle = rfd::AsyncFileDialog::new()
+        .set_title("Select folder")
+        .pick_folder()
+        .await;
+    option_to_pick_result(handle.map(|h| h.path().to_path_buf()))
 }
 
-pub async fn pick_save_file_zenity(default_name: &str) -> PickResult {
-    run_zenity(vec![
-        "--file-selection".to_string(),
-        "--save".to_string(),
-        "--confirm-overwrite".to_string(),
-        format!("--title=Save schema as"),
-        format!("--filename={}", default_name),
-        "--file-filter=*.json".to_string(),
-    ])
-    .await
+pub async fn pick_save_file(default_name: &str) -> PickResult {
+    let handle = rfd::AsyncFileDialog::new()
+        .set_title("Save schema as")
+        .set_file_name(default_name)
+        .add_filter("JSON", &["json"])
+        .save_file()
+        .await;
+    option_to_pick_result(handle.map(|h| h.path().to_path_buf()))
 }
 
 pub fn strategy_label(s: &WideStrategy) -> &'static str {
@@ -205,7 +190,45 @@ pub fn build_effective_schemas(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use json2sql::schema::table_schema::TableSchema;
+
+    // --- picker helpers ---
+
+    #[test]
+    fn none_maps_to_cancelled() {
+        assert!(matches!(option_to_pick_result(None), PickResult::Cancelled));
+    }
+
+    #[test]
+    fn some_path_maps_to_selected() {
+        let path = PathBuf::from("/tmp/test.json");
+        assert!(matches!(
+            option_to_pick_result(Some(path.clone())),
+            PickResult::Selected(p) if p == path
+        ));
+    }
+
+    #[test]
+    fn parse_ext_single() {
+        assert_eq!(parse_ext("*.json"), vec!["json"]);
+    }
+
+    #[test]
+    fn parse_ext_multiple() {
+        assert_eq!(parse_ext("*.json *.jsonl *.ndjson"), vec!["json", "jsonl", "ndjson"]);
+    }
+
+    #[test]
+    fn parse_ext_no_star_prefix() {
+        assert_eq!(parse_ext("json"), vec!["json"]);
+    }
+
+    #[test]
+    fn parse_ext_empty_string() {
+        let result = parse_ext("");
+        assert!(result.is_empty());
+    }
 
     fn make_table(name: &str, parent: Option<&str>) -> TableSchema {
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
