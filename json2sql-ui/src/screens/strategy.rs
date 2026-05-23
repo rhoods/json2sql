@@ -9,7 +9,8 @@ use dioxus::prelude::*;
 
 use json2sql::schema::table_schema::WideStrategy;
 
-use crate::screens::{pick_save_file, strategy_badge, strategy_label, PickResult};
+use crate::screens::{build_table_rows, pick_save_file, strategy_badge, strategy_label, PickResult};
+use crate::screens::table_list::TableListPanel;
 use crate::state::{AppScreen, AppState};
 
 // ---------------------------------------------------------------------------
@@ -234,96 +235,29 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
                             // table rows
                             div { class: "pane-body no-pad",
-                                table { class: "t",
-                                    thead {
-                                        tr {
-                                            th { "name" }
-                                            th { class: "ta-r", "cols" }
-                                            th { "strategy" }
-                                            th { "⚠" }
-                                        }
-                                    }
-                                    tbody {
-                                        for (i, table) in schemas.iter().enumerate() {
-                                            {
-                                                let user_overrode = overrides_snap.contains_key(&table.name);
-                                                let effective = overrides_snap.get(&table.name).cloned()
-                                                    .unwrap_or_else(|| table.wide_strategy.clone());
-                                                let is_overflow = !user_overrode
-                                                    && matches!(effective, WideStrategy::Jsonb)
-                                                    && overflow_names.contains(&table.name);
-                                                let is_routing = !user_overrode
-                                                    && matches!(effective, WideStrategy::MultiKeyedPivot(_))
-                                                    && table.columns.iter().all(|c| c.is_generated);
-                                                let has_warn = is_overflow || is_routing;
-
-                                                let skip = (show_warn && !has_warn)
-                                                    || (!filter.is_empty() && !table.name.to_lowercase().contains(&*filter));
-                                                if skip { return rsx! {}; }
-
-                                                let (badge_cls, badge_lbl) = if is_routing {
-                                                    ("muted", "ROUTE")
-                                                } else if is_overflow {
-                                                    ("warn", "JSONB ⚠")
-                                                } else {
-                                                    strategy_badge(&effective)
-                                                };
-                                                let is_sel = selected_indices.contains(&i);
-                                                let col_count = table.columns.len();
-                                                let is_wide = col_count > 100;
-                                                let col_style = if is_wide {
-                                                    "color:var(--warning);font-weight:600;"
-                                                } else {
-                                                    "color:var(--fg-2);"
-                                                };
-                                                let is_indented = table.depth > 0;
-                                                let row_cls = if is_sel { "sel" } else if is_routing { "muted" } else { "" };
-
-                                                rsx! {
-                                                    tr {
-                                                        key: "{table.name}",
-                                                        class: "{row_cls}",
-                                                        style: "cursor:pointer;",
-                                                        onclick: move |_| {
-                                                            let is_m = *multi_select.read();
-                                                            let mut s = state.write();
-                                                            if is_m {
-                                                                if s.schema.selected_table_indices.contains(&i) {
-                                                                    if s.schema.selected_table_indices.len() > 1 {
-                                                                        s.schema.selected_table_indices.remove(&i);
-                                                                    }
-                                                                } else {
-                                                                    s.schema.selected_table_indices.insert(i);
-                                                                    s.schema.last_selected_idx = i;
-                                                                }
-                                                            } else {
-                                                                s.schema.selected_table_indices = std::collections::HashSet::from([i]);
-                                                                s.schema.last_selected_idx = i;
-                                                            }
-                                                        },
-                                                        td {
-                                                            div { class: "row gap-sm",
-                                                                span { class: if is_sel { "chk on" } else { "chk" } }
-                                                                span { class: "mono",
-                                                                    if is_indented {
-                                                                        span { style: "color:var(--fg-4);", "└ " }
-                                                                    }
-                                                                    "{table.name}"
-                                                                }
-                                                            }
-                                                        }
-                                                        td { class: "ta-r mono", style: "{col_style}", "{col_count}" }
-                                                        td { span { class: "badge {badge_cls}", "{badge_lbl}" } }
-                                                        td {
-                                                            if has_warn {
-                                                                span { class: "badge warn sq", style: "height:16px;font-size:10px;", "⚠" }
-                                                            }
-                                                        }
-                                                    }
+                                TableListPanel {
+                                    rows: build_table_rows(
+                                        &schemas, &overrides_snap, &overflow_names,
+                                        &selected_indices, &filter, show_warn,
+                                    ),
+                                    show_checkboxes: true,
+                                    on_select: move |i| {
+                                        let is_m = *multi_select.read();
+                                        let mut s = state.write();
+                                        if is_m {
+                                            if s.schema.selected_table_indices.contains(&i) {
+                                                if s.schema.selected_table_indices.len() > 1 {
+                                                    s.schema.selected_table_indices.remove(&i);
                                                 }
+                                            } else {
+                                                s.schema.selected_table_indices.insert(i);
+                                                s.schema.last_selected_idx = i;
                                             }
+                                        } else {
+                                            s.schema.selected_table_indices = std::collections::HashSet::from([i]);
+                                            s.schema.last_selected_idx = i;
                                         }
-                                    }
+                                    },
                                 }
 
                                 // multi-select sticky footer

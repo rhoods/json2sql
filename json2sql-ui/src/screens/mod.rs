@@ -7,7 +7,7 @@ pub mod table_list;
 pub mod strategy_configurator;
 
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 use crate::theme;
@@ -35,6 +35,112 @@ where
         }
     });
     elapsed_secs
+}
+
+// ---------------------------------------------------------------------------
+// TableRowViewModel — presentation data for one row in the table list panel
+// ---------------------------------------------------------------------------
+
+/// Pre-computed display data for one table row.
+/// Built by [`build_table_rows`] from raw schema + state. Contains no RSX — purely testable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRowViewModel {
+    pub index:       usize,
+    pub name:        String,
+    // badge
+    pub badge_cls:   &'static str,
+    pub badge_lbl:   &'static str,
+    // columns
+    pub col_count:   usize,
+    pub is_wide:     bool,           // col_count > PASS1_WIDE_COLUMN_THRESHOLD
+    // tree
+    pub depth:       usize,
+    pub connector:   &'static str,   // "" | "├─ " | "└─ "
+    pub indent_px:   usize,          // depth * 12
+    // state
+    pub is_selected: bool,
+    pub is_routing:  bool,
+    pub has_warn:    bool,
+    pub row_cls:     &'static str,   // "sel" | "muted" | ""
+    // visibility
+    pub visible:     bool,
+}
+
+/// Build the view-model for every table row.
+///
+/// - Computes badge, overflow/routing flags, tree connectors and indentation.
+/// - Filters rows according to `filter` (substring match on name) and `show_warn_only`.
+/// - `visible: false` rows are excluded from rendering but retained for index stability.
+/// - `overflow_names`: tables auto-promoted to Jsonb by Pass 1 without user override.
+/// - `selected_indices`: set of selected row indices (empty → all unselected).
+pub fn build_table_rows(
+    schemas:         &[TableSchema],
+    overrides:       &HashMap<String, WideStrategy>,
+    overflow_names:  &HashSet<String>,
+    selected_indices: &HashSet<usize>,
+    filter:          &str,
+    show_warn_only:  bool,
+) -> Vec<TableRowViewModel> {
+    let is_last = compute_last_child(schemas);
+    let filter_lc = filter.to_lowercase();
+
+    schemas.iter().enumerate().map(|(i, table)| {
+        let user_overrode = overrides.contains_key(&table.name);
+        let effective = overrides.get(&table.name).cloned()
+            .unwrap_or_else(|| table.wide_strategy.clone());
+
+        let is_overflow = !user_overrode
+            && matches!(effective, WideStrategy::Jsonb)
+            && overflow_names.contains(&table.name);
+
+        let is_routing = !user_overrode
+            && matches!(effective, WideStrategy::MultiKeyedPivot(_))
+            && table.columns.iter().all(|c| c.is_generated);
+
+        let has_warn = is_overflow || is_routing;
+
+        let (badge_cls, badge_lbl) = if is_routing {
+            ("muted", "ROUTE")
+        } else if is_overflow {
+            ("warn", "JSONB ⚠")
+        } else {
+            strategy_badge(&effective)
+        };
+
+        let col_count = table.columns.len();
+        let is_wide   = col_count > crate::state::PASS1_WIDE_COLUMN_THRESHOLD;
+
+        let connector: &'static str = if table.depth == 0 {
+            ""
+        } else if is_last[i] {
+            "└─ "
+        } else {
+            "├─ "
+        };
+
+        let is_selected = selected_indices.contains(&i);
+        let row_cls: &'static str = if is_selected { "sel" } else if is_routing { "muted" } else { "" };
+
+        let visible = !(show_warn_only && !has_warn)
+            && (filter_lc.is_empty() || table.name.to_lowercase().contains(&filter_lc));
+
+        TableRowViewModel {
+            index: i,
+            name: table.name.clone(),
+            badge_cls,
+            badge_lbl,
+            col_count,
+            is_wide,
+            depth: table.depth,
+            connector,
+            indent_px: table.depth * 12,
+            is_selected,
+            is_routing,
+            has_warn,
+            row_cls,
+            visible,
+        }
+    }).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -367,5 +473,190 @@ mod tests {
         overrides.insert("a".to_string(), WideStrategy::Ignore);
         let _ = build_effective_schemas(&schemas, &overrides);
         assert_eq!(schemas.len(), original_len, "original slice must not be mutated");
+    }
+
+    // --- build_table_rows helpers ---
+
+    fn make_table_depth(name: &str, parent: Option<&str>, depth: usize) -> TableSchema {
+        let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], depth);
+        t.parent_table = parent.map(|s| s.to_string());
+        t
+    }
+
+    fn make_routing_table(name: &str) -> TableSchema {
+        use json2sql::schema::table_schema::{ColumnSchema, KeyShape, SiblingGroup, SiblingSchema};
+        use json2sql::schema::type_tracker::PgType;
+        let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
+        t.wide_strategy = WideStrategy::MultiKeyedPivot(vec![SiblingGroup {
+            pivot_table: format!("{name}_pivot"),
+            key_is_numeric: false,
+            sibling_schema: SiblingSchema {
+                key_col_name: "key".to_string(),
+                key_shape: KeyShape::Slug,
+                array_children: false,
+                data_col_name: "data".to_string(),
+            },
+            absorbed_names: vec![],
+        }]);
+        t.columns.push(ColumnSchema {
+            name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
+            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false,
+        });
+        t
+    }
+
+    fn make_overflow_table(name: &str) -> TableSchema {
+        let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
+        t.wide_strategy = WideStrategy::Jsonb;
+        t
+    }
+
+    fn make_wide_table(name: &str, col_count: usize) -> TableSchema {
+        use json2sql::schema::table_schema::ColumnSchema;
+        use json2sql::schema::type_tracker::PgType;
+        let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
+        for i in 0..col_count {
+            t.columns.push(ColumnSchema {
+                name: format!("col_{i}"), original_name: format!("col_{i}"),
+                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+            });
+        }
+        t
+    }
+
+    fn empty_rows(schemas: &[TableSchema]) -> Vec<TableRowViewModel> {
+        build_table_rows(schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), "", false)
+    }
+
+    // --- build_table_rows tests ---
+
+    #[test]
+    fn normal_table_has_correct_badge_and_visible() {
+        let schemas = vec![make_table("orders", None)];
+        let rows = empty_rows(&schemas);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "orders");
+        assert!(rows[0].visible);
+        assert!(!rows[0].has_warn);
+        assert!(!rows[0].is_routing);
+    }
+
+    #[test]
+    fn overflow_without_override_sets_warn_badge() {
+        let schemas = vec![make_overflow_table("big")];
+        let overflow = HashSet::from(["big".to_string()]);
+        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), "", false);
+        assert!(rows[0].has_warn);
+        assert_eq!(rows[0].badge_cls, "warn");
+        assert_eq!(rows[0].badge_lbl, "JSONB ⚠");
+    }
+
+    #[test]
+    fn overflow_with_user_override_suppresses_warn() {
+        let schemas = vec![make_overflow_table("big")];
+        let overflow = HashSet::from(["big".to_string()]);
+        let mut overrides = HashMap::new();
+        overrides.insert("big".to_string(), WideStrategy::Jsonb);
+        let rows = build_table_rows(&schemas, &overrides, &overflow, &HashSet::new(), "", false);
+        assert!(!rows[0].has_warn, "user override must suppress overflow flag");
+        assert_ne!(rows[0].badge_cls, "warn");
+    }
+
+    #[test]
+    fn routing_container_detected() {
+        let schemas = vec![make_routing_table("products_pivot")];
+        let rows = empty_rows(&schemas);
+        assert!(rows[0].is_routing);
+        assert_eq!(rows[0].badge_cls, "muted");
+        assert_eq!(rows[0].badge_lbl, "ROUTE");
+        assert!(rows[0].has_warn);
+    }
+
+    #[test]
+    fn filter_text_hides_non_matching() {
+        let schemas = vec![make_table("orders", None), make_table("users", None)];
+        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), "user", false);
+        assert!(!rows[0].visible, "orders should be hidden");
+        assert!(rows[1].visible, "users should match");
+    }
+
+    #[test]
+    fn empty_filter_shows_all() {
+        let schemas = vec![make_table("a", None), make_table("b", None)];
+        let rows = empty_rows(&schemas);
+        assert!(rows.iter().all(|r| r.visible));
+    }
+
+    #[test]
+    fn show_warn_only_hides_clean_rows() {
+        let schemas = vec![make_table("clean", None), make_overflow_table("big")];
+        let overflow = HashSet::from(["big".to_string()]);
+        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), "", true);
+        assert!(!rows[0].visible, "clean table must be hidden");
+        assert!(rows[1].visible,  "warn table must be visible");
+    }
+
+    #[test]
+    fn selected_row_has_sel_class() {
+        let schemas = vec![make_table("a", None), make_table("b", None)];
+        let selected = HashSet::from([1usize]);
+        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &selected, "", false);
+        assert_eq!(rows[0].row_cls, "");
+        assert_eq!(rows[1].row_cls, "sel");
+        assert!(rows[1].is_selected);
+    }
+
+    #[test]
+    fn connector_root_table_is_empty() {
+        let schemas = vec![make_table_depth("root", None, 0)];
+        let rows = empty_rows(&schemas);
+        assert_eq!(rows[0].connector, "");
+        assert_eq!(rows[0].indent_px, 0);
+    }
+
+    #[test]
+    fn connector_last_child_is_corner() {
+        let schemas = vec![
+            make_table_depth("parent", None, 0),
+            make_table_depth("child", Some("parent"), 1),
+        ];
+        let rows = empty_rows(&schemas);
+        assert_eq!(rows[1].connector, "└─ ");
+        assert_eq!(rows[1].indent_px, 12);
+    }
+
+    #[test]
+    fn connector_non_last_child_is_tee() {
+        let schemas = vec![
+            make_table_depth("parent", None, 0),
+            make_table_depth("c1", Some("parent"), 1),
+            make_table_depth("c2", Some("parent"), 1),
+        ];
+        let rows = empty_rows(&schemas);
+        assert_eq!(rows[1].connector, "├─ ", "c1 has a sibling after it");
+        assert_eq!(rows[2].connector, "└─ ", "c2 is last");
+    }
+
+    #[test]
+    fn wide_table_is_flagged() {
+        let schemas = vec![make_wide_table("fat", 101)];
+        let rows = empty_rows(&schemas);
+        assert!(rows[0].is_wide);
+    }
+
+    #[test]
+    fn non_wide_table_not_flagged() {
+        let schemas = vec![make_wide_table("slim", 50)];
+        let rows = empty_rows(&schemas);
+        assert!(!rows[0].is_wide);
+    }
+
+    #[test]
+    fn index_matches_position() {
+        let schemas = vec![make_table("a", None), make_table("b", None), make_table("c", None)];
+        let rows = empty_rows(&schemas);
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(row.index, i);
+        }
     }
 }

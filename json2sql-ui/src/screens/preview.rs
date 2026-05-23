@@ -9,7 +9,8 @@ use dioxus::prelude::*;
 
 use json2sql::db::ddl::generate_ddl_preview;
 
-use crate::screens::{build_effective_schemas, compute_last_child, strategy_badge};
+use crate::screens::{build_effective_schemas, build_table_rows, strategy_badge};
+use crate::screens::table_list::TableListPanel;
 use crate::state::{AppScreen, AppState};
 
 // ---------------------------------------------------------------------------
@@ -46,8 +47,6 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
         .fold((0usize, 0usize), |(d, g), col| {
             if col.is_generated { (d, g + 1) } else { (d + 1, g) }
         });
-
-    let is_last_child = compute_last_child(&schemas);
 
     // Strategy diff — tables whose override changed the strategy type.
     let diffs: Vec<DiffEntry> = schemas_orig.iter()
@@ -127,44 +126,19 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                     }
 
                     div { class: "pane-body no-pad",
-                        table { class: "t", style: "width:100%;",
-                            tbody {
-                                for i in 0..schemas.len() {
-                                    {
-                                        let table       = &schemas[i];
-                                        let depth       = table.depth;
-                                        let is_last     = is_last_child[i];
-                                        let connector   = if depth == 0 { "" } else if is_last { "└─ " } else { "├─ " };
-                                        let indent      = depth * 12;
-                                        let (bcls, blbl) = strategy_badge(&table.wide_strategy);
-                                        let is_sel      = i == idx;
-                                        let has_warn    = table.columns.len() > 100;
-                                        let tname       = table.name.clone();
-                                        rsx! {
-                                            tr {
-                                                key: "{tname}",
-                                                class: if is_sel { "sel" } else { "" },
-                                                onclick: move |_| {
-                                                    let mut s = state.write();
-                                                    s.schema.selected_table_indices =
-                                                        std::collections::HashSet::from([i]);
-                                                    s.schema.last_selected_idx = i;
-                                                },
-                                                td { style: "padding-left:{indent}px;font-family:var(--font-code);font-size:var(--fs-xs);white-space:nowrap;",
-                                                    span { style: "color:var(--fg-4);", "{connector}" }
-                                                    "{tname}"
-                                                }
-                                                td { style: "white-space:nowrap;text-align:right;",
-                                                    span { class: "badge {bcls}", "{blbl}" }
-                                                    if has_warn {
-                                                        span { class: "badge warn", style: "margin-left:4px;", "⚠" }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        TableListPanel {
+                            rows: build_table_rows(
+                                &schemas, &strategy_overrides,
+                                &std::collections::HashSet::new(),
+                                &std::collections::HashSet::from([idx]),
+                                "", false,
+                            ),
+                            show_checkboxes: false,
+                            on_select: move |i| {
+                                let mut s = state.write();
+                                s.schema.selected_table_indices = std::collections::HashSet::from([i]);
+                                s.schema.last_selected_idx = i;
+                            },
                         }
                     }
 

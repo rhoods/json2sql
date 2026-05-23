@@ -1,72 +1,95 @@
-/// Shared left-panel component: hierarchical table list with strategy badges.
+/// Shared left-panel component: table list with strategy badges.
 ///
-/// Each caller pre-computes `Vec<TableRowEntry>` from its own data (schemas,
-/// strategy overrides, overflow warnings, etc.) and passes it here for rendering.
-/// The component is display-only — selection logic lives in the caller's `on_select`.
+/// Purely presentational — all selection logic lives in the caller.
+/// Build rows with [`crate::screens::build_table_rows`] first, then pass them here.
+///
+/// Two layout modes controlled by `show_checkboxes`:
+///   - `true`  (Strategy screen): 4 cols — [chk]name | cols | badge | warn
+///   - `false` (Preview screen):  2 cols — [connector]name | badge+warn
 use dioxus::prelude::*;
-use crate::theme;
-
-/// Display-ready description of one row in the table list.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TableRowEntry {
-    /// Index into the original schemas slice — used as the key and returned via on_select.
-    pub index: usize,
-    pub name: String,
-    pub depth: usize,
-    pub is_last_child: bool,
-    pub is_selected: bool,
-    pub badge_label: &'static str,
-    pub badge_color: &'static str,
-    /// True for routing containers (MultiKeyedPivot with no data columns) — renders dimmed.
-    pub dim: bool,
-}
+use crate::screens::TableRowViewModel;
 
 #[component]
-pub fn TableListPanel(entries: Vec<TableRowEntry>, on_select: EventHandler<usize>) -> Element {
+pub fn TableListPanel(
+    rows: Vec<TableRowViewModel>,
+    on_select: EventHandler<usize>,
+    /// true = interactive (checkboxes, col count, thead); false = read-only (tree indent)
+    show_checkboxes: bool,
+) -> Element {
     rsx! {
-        div {
-            style: "flex:0 1 25%;min-width:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};overflow-y:auto;padding:4px 0;",
-            for entry in entries {
-                {
-                    let idx = entry.index;
-                    let row_bg = if entry.is_selected {
-                        format!("background:{};", theme::SELECTED_BG)
-                    } else {
-                        "background:transparent;".to_string()
-                    };
-                    let accent = if entry.is_selected {
-                        format!("border-left:2px solid {};", theme::SECONDARY)
-                    } else {
-                        "border-left:2px solid transparent;".to_string()
-                    };
-                    let parent_indent = entry.depth.saturating_sub(1) * 14 + 8;
-                    let connector = if entry.depth == 0 {
-                        ""
-                    } else if entry.is_last_child {
-                        "└─"
-                    } else {
-                        "├─"
-                    };
-                    let opacity = if entry.dim { "opacity:0.6;" } else { "" };
-                    let name_color = if entry.dim { theme::ON_SURFACE_DIM } else { theme::ON_SURFACE };
-                    rsx! {
-                        div {
-                            key: "{idx}",
-                            style: "display:flex;align-items:center;gap:4px;padding:5px 8px 5px {parent_indent}px;cursor:pointer;{row_bg}{accent}{opacity}",
-                            onclick: move |_| on_select.call(idx),
-                            if entry.depth > 0 {
-                                span {
-                                    style: "font-size:0.6875rem;color:{theme::ON_SURFACE_DIM};flex-shrink:0;line-height:1;",
-                                    "{connector}"
+        table { class: "t", style: "width:100%;",
+            if show_checkboxes {
+                thead {
+                    tr {
+                        th { "name" }
+                        th { class: "ta-r", "cols" }
+                        th { "strategy" }
+                        th { "⚠" }
+                    }
+                }
+            }
+            tbody {
+                for row in rows {
+                    if row.visible {
+                        {
+                            let i       = row.index;
+                            let name    = row.name.clone();
+                            let cls     = row.row_cls;
+                            let indent  = row.indent_px;
+                            let conn    = row.connector;
+                            let is_sel  = row.is_selected;
+                            let is_wide = row.is_wide;
+                            let cnt     = row.col_count;
+                            let bcls    = row.badge_cls;
+                            let blbl    = row.badge_lbl;
+                            let warn    = row.has_warn;
+                            rsx! {
+                                tr {
+                                    key: "{name}",
+                                    class: "{cls}",
+                                    style: "cursor:pointer;",
+                                    onclick: move |_| on_select.call(i),
+                                    if show_checkboxes {
+                                        // Interactive layout: 4 columns
+                                        td { style: "padding-left:{indent}px;",
+                                            div { class: "row gap-sm",
+                                                span { class: if is_sel { "chk on" } else { "chk" } }
+                                                span { class: "mono",
+                                                    if !conn.is_empty() {
+                                                        span { style: "color:var(--fg-4);", "{conn}" }
+                                                    }
+                                                    "{name}"
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            class: "ta-r mono",
+                                            style: if is_wide { "color:var(--warning);font-weight:600;" } else { "color:var(--fg-2);" },
+                                            "{cnt}"
+                                        }
+                                        td { span { class: "badge {bcls}", "{blbl}" } }
+                                        td {
+                                            if warn {
+                                                span { class: "badge warn sq", style: "height:16px;font-size:10px;", "⚠" }
+                                            }
+                                        }
+                                    } else {
+                                        // Read-only layout: 2 columns
+                                        td {
+                                            style: "padding-left:{indent}px;font-family:var(--font-code);font-size:var(--fs-xs);white-space:nowrap;",
+                                            if !conn.is_empty() {
+                                                span { style: "color:var(--fg-4);", "{conn}" }
+                                            }
+                                            "{name}"
+                                        }
+                                        td { style: "white-space:nowrap;text-align:right;",
+                                            span { class: "badge {bcls}", "{blbl}" }
+                                            if warn {
+                                                span { class: "badge warn", style: "margin-left:4px;", "⚠" }
+                                            }
+                                        }
+                                    }
                                 }
-                            }
-                            span {
-                                style: "font-family:{theme::FONT_CODE};font-size:0.75rem;color:{name_color};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-                                "{entry.name}"
-                            }
-                            span {
-                                style: "font-size:0.5625rem;font-weight:700;letter-spacing:0.04em;color:{theme::ON_PRIMARY};background:{entry.badge_color};padding:1px 4px;border-radius:2px;flex-shrink:0;",
-                                "{entry.badge_label}"
                             }
                         }
                     }
