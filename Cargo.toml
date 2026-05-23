@@ -52,6 +52,9 @@ csv = "1"
 # Temp files for pass2 buffering
 tempfile = "3"
 
+# MPMC channel for parallel pass1 workers (avoids Arc<Mutex<Receiver>>)
+crossbeam-channel = "0.5"
+
 # Futures utilities (SinkExt etc.)
 futures-util = "0.3"
 

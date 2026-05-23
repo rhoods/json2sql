@@ -106,6 +106,7 @@ mod tests {
     use crate::schema::finalizer::*;
     use crate::schema::table_schema::{ChildKind, ColumnSchema, TableSchema, WideStrategy};
     use crate::schema::type_tracker::PgType;
+    use crate::schema::wide_strategies::{apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys};
     use serde_json::json;
 
     fn make_root(value: &Value) -> &serde_json::Map<String, Value> {

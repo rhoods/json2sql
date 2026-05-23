@@ -1,6 +1,6 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
+use crossbeam_channel;
 use serde_json::Value;
 use simd_json;
 
@@ -234,27 +234,24 @@ pub fn run_parallel(
         None
     };
 
-    // Bounded channel — backpressure prevents unbounded RAM growth on fast readers.
-    // Sends raw JSON bytes; workers parse in parallel (no single-threaded serde bottleneck).
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(num_workers * 4);
-    let rx = Arc::new(Mutex::new(rx));
+    // Bounded MPMC channel — crossbeam Receiver is Clone+Send, no Mutex needed.
+    // Capacity: 4 slots per worker gives the reader a small lead without unbounded buffering.
+    // At typical JSON object sizes (~1–100 KB), peak buffer ≈ num_workers × 4 × object_size.
+    let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(num_workers * 4);
 
     // Spawn worker threads, each with its own SchemaRegistry.
     let root_table_owned = root_table.to_string();
     let worker_handles: Vec<std::thread::JoinHandle<crate::error::Result<SchemaRegistry>>> = (0..num_workers)
         .map(|_| {
-            let rx = Arc::clone(&rx);
+            let rx = rx.clone();
             let root = root_table_owned.clone();
             let mut reg = SchemaRegistry::new(
                 text_threshold, array_as_pg_array, wide_column_threshold,
                 sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold,
             );
             std::thread::spawn(move || {
-                loop {
-                    let mut bytes = match rx.lock().unwrap().recv() {
-                        Ok(b) => b,
-                        Err(_) => break, // channel closed — reader finished
-                    };
+                while let Ok(mut bytes) = rx.recv() {
+                    // simd_json mutates the slice in-place (zero-copy parsing); bytes is owned here.
                     match simd_json::from_slice::<serde_json::Value>(&mut bytes) {
                         Ok(serde_json::Value::Object(obj)) => reg.observe_root(&root, &obj),
                         Ok(other) => return Err(crate::error::J2sError::InvalidInput(format!(
@@ -269,6 +266,8 @@ pub fn run_parallel(
             })
         })
         .collect();
+    // Reader thread doesn't consume from the channel — drop our Receiver clone now.
+    drop(rx);
 
     // Reader: current thread finds object boundaries and sends raw bytes to workers.
     let mut total_rows = 0u64;
@@ -279,7 +278,7 @@ pub fn run_parallel(
     while let Some(item) = reader.next_raw() {
         match item {
             Ok(bytes) => {
-                // sync_channel::send blocks when the channel is full (backpressure).
+                // Blocks when the channel is full (backpressure).
                 if tx.send(bytes).is_err() {
                     break; // all workers died — stop reading
                 }
@@ -309,23 +308,37 @@ pub fn run_parallel(
     // Signal workers that reading is done.
     drop(tx);
 
-    // Collect and merge all worker registries — propagate the first worker error if any.
+    // Join ALL worker handles before propagating any error.
+    // Using ? inside the loop would detach remaining threads on the first panic.
+    let join_results: Vec<_> = worker_handles.into_iter().map(|h| h.join()).collect();
+
     let mut merged = SchemaRegistry::new(
         text_threshold, array_as_pg_array, wide_column_threshold,
         sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold,
     );
-    let mut worker_err: Option<crate::error::J2sError> = None;
-    for handle in worker_handles {
-        match handle.join().expect("Pass 1 worker thread panicked") {
-            Ok(reg) => { if worker_err.is_none() { merged.merge(reg); } }
-            Err(e)  => { if worker_err.is_none() { worker_err = Some(e); } }
+    let mut worker_errors: Vec<String> = Vec::new();
+    for join_result in join_results {
+        match join_result.map_err(|_| crate::error::J2sError::Schema(
+            "Pass 1 worker thread panicked unexpectedly".to_string()
+        )) {
+            Err(e)      => worker_errors.push(e.to_string()),
+            Ok(Ok(reg)) => { if worker_errors.is_empty() { merged.merge(reg); } }
+            Ok(Err(e))  => worker_errors.push(e.to_string()),
         }
     }
+    let worker_err = if worker_errors.is_empty() {
+        None
+    } else {
+        Some(crate::error::J2sError::InvalidInput(worker_errors.join(" | ")))
+    };
 
     if let Some(ref bar) = progress {
         bar.finish();
     }
 
+    // Reader errors take priority: an I/O failure is the most actionable signal.
+    // total_rows reflects only successfully dispatched rows; if workers died mid-run
+    // and tx.send() failed, unprocessed rows are excluded from the count.
     if let Some(e) = reader_err { return Err(e); }
     if let Some(e) = worker_err { return Err(e); }
 
@@ -422,6 +435,108 @@ mod tests {
         let path = fixture("users.jsonl"); // 3 rows
         let result = run_inspect(&path, "users", 256, 1000).unwrap();
         assert_eq!(result.sampled_objects.len(), 3);
+    }
+
+    // ── run_parallel tests ──────────────────────────────────────────────────
+
+    fn run_parallel_default(path: &std::path::PathBuf, workers: usize) -> crate::error::Result<Pass1Result> {
+        run_parallel(
+            path,
+            "users",
+            256,        // text_threshold
+            false,      // array_as_pg_array
+            usize::MAX, // wide_column_threshold: disabled
+            usize::MAX, // sibling_threshold: disabled
+            1.0,        // sibling_jaccard: disabled
+            0.0,
+            0.0,
+            None,       // progress_tx
+            workers,
+        )
+    }
+
+    #[test]
+    fn test_parallel_single_worker_correct_row_count() {
+        let path = fixture("users.jsonl");
+        let result = run_parallel_default(&path, 1).unwrap();
+        assert_eq!(result.total_rows, 3);
+    }
+
+    #[test]
+    fn test_parallel_multi_worker_correct_row_count() {
+        let path = fixture("users.jsonl");
+        let result = run_parallel_default(&path, 4).unwrap();
+        assert_eq!(result.total_rows, 3);
+    }
+
+    #[test]
+    fn test_parallel_produces_root_table() {
+        let path = fixture("users.jsonl");
+        let result = run_parallel_default(&path, 2).unwrap();
+        assert!(!result.schemas.is_empty());
+        assert!(result.schemas.iter().any(|s| s.name == "users"), "root table must be present");
+    }
+
+    #[test]
+    fn test_parallel_worker_count_zero_treated_as_one() {
+        let path = fixture("users.jsonl");
+        let result = run_parallel_default(&path, 0).unwrap();
+        assert_eq!(result.total_rows, 3);
+    }
+
+    #[test]
+    fn test_parallel_error_with_many_workers_returns_err_cleanly() {
+        // All worker handles must be joined before propagating — no detached threads.
+        // Uses many workers to stress the join-before-propagate path.
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"[{\"a\": 1}, 42, {\"b\": 2}]").unwrap();
+        f.flush().unwrap();
+        let result = run_parallel(
+            f.path(), "root", 256, false, usize::MAX, usize::MAX, 1.0, 0.0, 0.0, None, 8,
+        );
+        assert!(result.is_err(), "must return Err for non-object root element");
+    }
+
+    #[test]
+    fn test_parallel_multiple_worker_errors_aggregated_in_message() {
+        // When multiple workers encounter errors, all error messages must appear
+        // in the final Err — not just the first worker's error.
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        // 8 non-object root elements — with 4 workers each will see at least one error.
+        f.write_all(b"[42, 43, 44, 45, 46, 47, 48, 49]").unwrap();
+        f.flush().unwrap();
+        let result = run_parallel(
+            f.path(), "root", 256, false, usize::MAX, usize::MAX, 1.0, 0.0, 0.0, None, 4,
+        );
+        match result {
+            Err(crate::error::J2sError::InvalidInput(msg)) => {
+                // With 4 workers and 8 bad elements, each worker sees ≥1 error.
+                // Aggregation must produce a message with ≥2 "root level" occurrences.
+                let count = msg.matches("root level").count();
+                assert!(count >= 2, "expected ≥2 errors aggregated in message, got {}: {}", count, msg);
+            }
+            Err(e) => panic!("expected InvalidInput, got: {}", e),
+            Ok(_)  => panic!("expected Err"),
+        }
+    }
+
+    #[test]
+    fn test_parallel_non_object_root_returns_invalid_input_error() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"[{\"a\": 1}, 42]").unwrap();
+        f.flush().unwrap();
+        let result = run_parallel(
+            f.path(), "root", 256, false, usize::MAX, usize::MAX, 1.0, 0.0, 0.0, None, 1,
+        );
+        match result {
+            Err(crate::error::J2sError::InvalidInput(msg)) =>
+                assert!(msg.contains("root level"), "error must mention root level: {}", msg),
+            Err(e) => panic!("expected InvalidInput, got: {}", e),
+            Ok(_)  => panic!("expected Err for non-object root element"),
+        };
     }
 
     use super::effective_workers;

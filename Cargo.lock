@@ -2588,6 +2588,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "crossbeam-channel",
  "csv",
  "futures-util",
  "indexmap 2.13.0",
