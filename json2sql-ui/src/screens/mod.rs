@@ -4,7 +4,6 @@ pub mod strategy;
 pub mod preview;
 pub mod import;
 pub mod table_list;
-pub mod strategy_configurator;
 
 
 use std::collections::{HashMap, HashSet};

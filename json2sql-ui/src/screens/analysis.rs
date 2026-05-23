@@ -33,8 +33,13 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
     // ── Elapsed timer ─────────────────────────────────────────────────────
     let elapsed_secs = crate::screens::use_elapsed_timer(move || state.read().schema.pass1_progress.done);
 
-    // ── Pass 1 runner (unchanged logic from original) ─────────────────────
+    // ── Pass 1 runner ────────────────────────────────────────────────────
+    // once-flag: set synchronously (before first await) to prevent double-launch
+    // if Dioxus remounts this component before abort_handle is written.
+    let once = use_signal(|| false);
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
+        if *once.peek() { return; }
+        once.clone().set(true);
         if state.read().abort_handle.is_some() { return; }
         state.write().schema.pass1_progress = crate::state::Pass1Progress::default();
 

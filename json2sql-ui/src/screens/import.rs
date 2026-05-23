@@ -21,8 +21,11 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     // ── Elapsed timer ─────────────────────────────────────────────────────
     let elapsed_secs = crate::screens::use_elapsed_timer(move || state.read().import.pass2_progress.done);
 
-    // ── Pass 2 runner ─────────────────────────────────────────────────────
+    // ── Pass 2 runner ────────────────────────────────────────────────────
+    let once = use_signal(|| false);
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
+        if *once.peek() { return; }
+        once.clone().set(true);
         if state.read().abort_handle.is_some() {
             return;
         }
