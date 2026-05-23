@@ -1,12 +1,11 @@
 use indexmap::IndexMap;
 use rayon::prelude::*;
 
-use crate::error::{J2sError, Result};
 use super::naming::{ColumnCollision, ColumnNameRegistry, NamingRegistry};
 use super::observer::TableEntry;
 use super::suffix_detector::detect_suffix_schema;
-use super::table_schema::{ChildKind, ColumnSchema, KeyShape, SiblingSchema, SuffixSchema, TableSchema, WideStrategy};
-use super::type_tracker::{widen_pg_types, InferredType, PgType, TypeTracker};
+use super::table_schema::{ChildKind, ColumnSchema, TableSchema, WideStrategy};
+use super::type_tracker::{widen_pg_types, PgType};
 use super::cascading::finalize_cascading;
 use super::wide_strategies::{apply_structured_pivot_columns, apply_wide_strategy_columns, suggest_wide_strategy};
 
@@ -102,16 +101,6 @@ impl SchemaFinalizer {
 
         (schemas, all_collisions)
     }
-}
-
-pub(crate) fn type_histogram(tracker: &TypeTracker) -> Vec<(String, u64)> {
-    let mut hist: Vec<(String, u64)> = tracker
-        .iter_types()
-        .filter(|(t, _)| !matches!(t, InferredType::Object | InferredType::Array))
-        .map(|(t, n)| (format!("{:?}", t), n))
-        .collect();
-    hist.sort_by(|a, b| b.1.cmp(&a.1));
-    hist
 }
 
 /// Build the `TableSchema` for a single `TableEntry`.

@@ -23,6 +23,7 @@ use crate::pass2::insert::insert_object;
 use crate::schema::table_schema::TableSchema;
 
 /// Wall-clock breakdown of the two main phases of Pass 2.
+#[allow(dead_code)]
 pub struct Pass2Timing {
     /// Time spent streaming the JSON file and writing rows to temp files.
     pub streaming_ms: u64,
@@ -31,12 +32,14 @@ pub struct Pass2Timing {
 }
 
 impl Pass2Timing {
+    #[allow(dead_code)]
     pub fn total_ms(&self) -> u64 {
         self.streaming_ms + self.copy_ms
     }
 }
 
 /// Pass 2 result summary.
+#[allow(dead_code)]
 pub struct Pass2Result {
     pub rows_per_table: HashMap<String, u64>,
     pub anomaly_collector: AnomalyCollector,
@@ -473,7 +476,7 @@ pub async fn run(
 
             // Dispatch remaining accumulated sinks — one merged COPY per table.
             // Replaces up to N per-worker COPYs with a single COPY for each table.
-            for (table_name, sinks) in table_pending {
+            for (_table_name, sinks) in table_pending {
                 let total_rows: u64 = sinks.iter().map(|s| s.total_flushed + s.row_count).sum();
                 if total_rows == 0 { continue; }
                 if conn_senders[robin].send(sinks).await.is_err() { break; }

@@ -3,8 +3,7 @@ use indexmap::IndexMap;
 use crate::error::{J2sError, Result};
 use super::finalizer::exclude_absorbed_children;
 use super::observer::TableEntry;
-use super::suffix_detector::detect_suffix_schema;
-use super::table_schema::{ChildKind, ColumnSchema, KeyShape, SiblingSchema, SuffixSchema, TableSchema, WideStrategy};
+use super::table_schema::{ChildKind, ColumnSchema, KeyShape, SuffixSchema, TableSchema, WideStrategy};
 use super::type_tracker::{widen_pg_types, PgType};
 
 /// Fraction of keys that must be numeric (or ISO-language codes) to classify a key shape as
@@ -147,8 +146,6 @@ pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: S
     }
     schema.wide_strategy = WideStrategy::StructuredPivot(suffix_schema);
 }
-
-use super::cascading::finalize_cascading;
 
 pub fn build_union_columns(children: &[&TableSchema]) -> Vec<ColumnSchema> {
     let mut col_map: IndexMap<String, (String, PgType)> = IndexMap::new();
@@ -351,6 +348,7 @@ pub fn apply_flatten(
 /// Inline a child table as a single JSONB column on the parent table.
 /// The child table is removed from the schema; the parent gains `{child_table_name} JSONB`.
 /// Used for WideStrategy::JsonbFlatten (IHM override "JSONB inline").
+#[allow(dead_code)]
 pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &str) -> Result<()> {
     let (parent_name, field_name) = {
         let child = schemas.iter().find(|s| s.name == child_table_name)

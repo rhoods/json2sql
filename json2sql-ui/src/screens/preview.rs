@@ -55,11 +55,10 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
             if std::mem::discriminant(ov) == std::mem::discriminant(&orig.wide_strategy) {
                 return None;
             }
-            let (from_cls, from_lbl) = strategy_badge(&orig.wide_strategy);
-            let (to_cls,   to_lbl)   = strategy_badge(ov);
+            let (_from_cls, from_lbl) = strategy_badge(&orig.wide_strategy);
+            let (to_cls,    to_lbl)   = strategy_badge(ov);
             Some(DiffEntry {
                 table_name: orig.name.clone(),
-                from_cls,
                 from_lbl,
                 to_cls,
                 to_lbl,
@@ -347,7 +346,6 @@ fn tokenize_ddl(line: &str) -> Vec<DdlToken> {
 
 struct DiffEntry {
     table_name: String,
-    from_cls:   &'static str,
     from_lbl:   &'static str,
     to_cls:     &'static str,
     to_lbl:     &'static str,

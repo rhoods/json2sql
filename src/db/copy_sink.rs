@@ -251,6 +251,7 @@ impl TempFileSink {
     /// Send all buffered rows to PostgreSQL, then reset the sink for reuse.
     /// Data may be split between the temp file (previous spills) and `pending`
     /// (rows accumulated since the last spill).
+    #[allow(dead_code)]
     pub async fn flush_to_db(&mut self, client: &Client) -> Result<u64> {
         if self.row_count == 0 {
             return Ok(0);
@@ -310,6 +311,7 @@ impl TempFileSink {
 
     /// Flush all remaining rows to PostgreSQL.
     /// Returns total rows sent (periodic flushes + this final call).
+    #[allow(dead_code)]
     pub async fn copy_to_db(self, client: &Client) -> Result<u64> {
         // Destructure — TempFileSink has no Drop; TempFilePath (in temp_file) does.
         let TempFileSink {

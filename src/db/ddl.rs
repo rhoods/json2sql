@@ -12,74 +12,7 @@ fn pg_err(context: &str, e: tokio_postgres::Error) -> J2sError {
     J2sError::DbContext(format!("{}: {}", context, detail))
 }
 
-/// Generate and execute CREATE TABLE statements for all schemas.
-/// Tables are created in topological order (parents first).
-///
-/// - `drop_existing = true`  → DROP CASCADE then CREATE (destructive, clean slate)
-/// - `drop_existing = false` → CREATE IF NOT EXISTS (append mode, safe for reruns)
-pub async fn create_tables(
-    client: &Client,
-    schemas: &[TableSchema],
-    pg_schema: &str,
-    drop_existing: bool,
-) -> Result<()> {
-    for schema in schemas {
-        if drop_existing {
-            let drop_sql = format!(
-                "DROP TABLE IF EXISTS {}.{} CASCADE",
-                quote_ident(pg_schema),
-                quote_ident(&schema.name)
-            );
-            client
-                .execute(&drop_sql, &[])
-                .await
-                .map_err(|e| pg_err(&format!("DROP TABLE {}", schema.name), e))?;
-        }
 
-        let create_sql = generate_create_table(schema, pg_schema, drop_existing);
-        client
-            .execute(&create_sql, &[])
-            .await
-            .map_err(|e| pg_err(&format!("CREATE TABLE {}", schema.name), e))?;
-
-        eprintln!("Created table: {}.{}", pg_schema, schema.name);
-    }
-
-    // Add foreign key constraints after all tables exist.
-    // Wrapped in a DO block so reruns skip constraints that already exist
-    // (PostgreSQL has no ADD CONSTRAINT IF NOT EXISTS syntax).
-    for schema in schemas {
-        if let Some(ref parent_name) = schema.parent_table {
-            let fk_col = schema
-                .columns
-                .iter()
-                .find(|c| c.is_parent_fk)
-                .map(|c| c.name.as_str())
-                .unwrap_or("j2s_parent_id");
-            let constraint_name = format!("fk_{}_parent", schema.name);
-            let fk_sql = format!(
-                "DO $$ BEGIN \
-                    ALTER TABLE {schema_q}.{table_q} \
-                    ADD CONSTRAINT {constraint_name} \
-                    FOREIGN KEY ({fk_col_q}) \
-                    REFERENCES {schema_q}.{parent_q} (j2s_id); \
-                 EXCEPTION WHEN duplicate_object THEN NULL; \
-                 END $$",
-                schema_q = quote_ident(pg_schema),
-                table_q = quote_ident(&schema.name),
-                constraint_name = quote_ident(&constraint_name),
-                fk_col_q = quote_ident(fk_col),
-                parent_q = quote_ident(parent_name),
-            );
-            client
-                .execute(&fk_sql, &[])
-                .await
-                .map_err(|e| pg_err(&format!("ADD CONSTRAINT fk_{}_parent", schema.name), e))?;
-        }
-    }
-
-    Ok(())
-}
 
 /// Generate the CREATE TABLE SQL for a single schema.
 /// Uses `IF NOT EXISTS` when `drop_existing` is false (append / rerun mode).
@@ -205,12 +138,14 @@ pub async fn create_tables_no_constraints(
 #[derive(Debug, Clone)]
 pub struct ConstraintWarning {
     pub table: String,
+    #[allow(dead_code)]
     pub constraint_type: ConstraintKind,
     pub message: String,
 }
 
 #[derive(Debug, Clone)]
 pub enum ConstraintKind {
+    #[allow(dead_code)]
     PrimaryKey,
     ForeignKey,
 }
@@ -257,6 +192,7 @@ pub async fn add_constraints(
 
 /// Generate a human-readable DDL preview for a single schema, including the FK constraint inline.
 /// This is for display only — execution uses `generate_create_table` + a separate ALTER TABLE.
+#[allow(dead_code)]
 pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
     let mut col_defs = Vec::new();
 

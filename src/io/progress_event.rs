@@ -4,6 +4,7 @@
 /// The IHM creates the channel, passes the sender to the runners, and consumes events
 /// in a Dioxus coroutine to update the UI.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum ProgressEvent {
     // ── Pass 1 ───────────────────────────────────────────────────────────────
     /// Periodic scan progress during schema inference.

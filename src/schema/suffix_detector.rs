@@ -22,7 +22,7 @@ const MIN_BASES: usize = 2;
 pub fn detect_suffix_schema(
     columns: &IndexMap<String, TypeTracker>,
     coverage_threshold: f64,
-    text_threshold: u32,
+    _text_threshold: u32,
 ) -> Option<SuffixSchema> {
     let all_keys: Vec<&str> = columns.keys().map(|s| s.as_str()).collect();
     let key_set: HashSet<&str> = all_keys.iter().copied().collect();

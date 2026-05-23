@@ -1,8 +1,6 @@
-use std::collections::HashMap;
-
 use super::wide_strategies::{build_union_columns, classify_key_shape};
 use super::table_schema::{ChildKind, ColumnSchema, KeyShape, SiblingSchema, TableSchema, WideStrategy};
-use super::type_tracker::{widen_pg_types, PgType};
+use super::type_tracker::PgType;
 
 // ---------------------------------------------------------------------------
 // Sibling table detection — helpers
@@ -449,7 +447,6 @@ fn run_sibling_wave(
                 }
                 let suffix = if key_is_numeric { "num" } else { "key" };
                 let groups = vec![make_subgroup(&parent_name, &regular, key_is_numeric, suffix)];
-                let kind_label = if *array_children { "ObjectArray" } else { "Object" };
                 let log_msg = format!(
                     "  Synthetic pivot for parent with data/sig-containers: {} ({} tables → 1)",
                     parent_name, regular.len(),
@@ -676,7 +673,7 @@ fn run_sibling_wave(
 /// Returns new `CoSiblingGroup`s for the next wave (grandchildren level).
 fn process_co_sibling_group(
     schemas: &mut Vec<TableSchema>,
-    threshold: usize,
+    _threshold: usize,
     min_jaccard: f64,
     group: CoSiblingGroup,
 ) -> Vec<CoSiblingGroup> {

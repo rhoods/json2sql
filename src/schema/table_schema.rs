@@ -263,6 +263,7 @@ impl TableSchema {
     }
 
     /// Return all column names in order (for COPY FROM STDIN header).
+    #[allow(dead_code)]
     pub fn column_names(&self) -> Vec<&str> {
         self.columns.iter().map(|c| c.name.as_str()).collect()
     }
@@ -275,6 +276,7 @@ impl TableSchema {
 
 impl WideStrategy {
     /// Returns true if this strategy changes the default column-per-key layout.
+    #[allow(dead_code)]
     pub fn is_wide(&self) -> bool {
         !matches!(self, WideStrategy::Columns)
     }

@@ -129,6 +129,7 @@ impl NamingRegistry {
 
     /// Convert a hierarchical path (e.g. ["users", "orders", "items"]) to a
     /// safe PostgreSQL table name (<= 63 bytes, lowercase, no special chars).
+    #[allow(dead_code)]
     pub fn table_name(&mut self, path: &[String]) -> String {
         let key = path.join(&PATH_SEP.to_string());
         if let Some(cached) = self.cache.get(&key) {
@@ -158,6 +159,7 @@ impl NamingRegistry {
     /// Read-only lookup of a pre-registered path. Must be called only after
     /// `table_name()` has been called for this path (i.e. after the pre-registration
     /// phase in `finalize()`). Safe to call from multiple threads.
+    #[allow(dead_code)]
     pub fn table_name_lookup(&self, path: &[String]) -> String {
         let key = path.join(&PATH_SEP.to_string());
         self.cache.get(&key).cloned().unwrap_or_else(|| {

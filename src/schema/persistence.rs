@@ -52,6 +52,7 @@ pub fn save(
 }
 
 /// Save a schema snapshot including user strategy overrides.
+#[allow(dead_code)]
 pub fn save_with_overrides(
     schemas: &[TableSchema],
     total_rows: u64,

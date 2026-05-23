@@ -1,6 +1,7 @@
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 pub struct ProgressTracker {
+    #[allow(dead_code)]
     pub multi: MultiProgress,
     pub bytes_bar: ProgressBar,
     pub rows_bar: ProgressBar,
@@ -34,6 +35,7 @@ impl ProgressTracker {
         }
     }
 
+    #[allow(dead_code)]
     pub fn inc_bytes(&self, n: u64) {
         self.bytes_bar.inc(n);
     }

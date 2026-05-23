@@ -269,6 +269,7 @@ impl AnomalyCollector {
     }
 
     /// Paths of NDJSON files produced so far (one per table with anomalies).
+    #[allow(dead_code)]
     pub fn written_paths(&self) -> &HashMap<String, PathBuf> {
         &self.written_files
     }

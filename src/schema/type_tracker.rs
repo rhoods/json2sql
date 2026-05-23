@@ -153,6 +153,7 @@ impl TypeTracker {
     }
 
     /// The dominant (most frequent) non-null type.
+    #[allow(dead_code)]
     pub fn dominant_type(&self) -> InferredType {
         InferredType::ALL
             .iter()
@@ -164,6 +165,7 @@ impl TypeTracker {
     }
 
     /// Fraction of rows where type differs from the dominant type (anomaly rate).
+    #[allow(dead_code)]
     pub fn anomaly_rate(&self) -> f64 {
         if self.total_count == 0 {
             return 0.0;
@@ -350,11 +352,6 @@ fn is_timestamp(s: &str) -> bool {
         return false;
     }
     is_date_bytes(&b[..10]) && (b[10] == b'T' || b[10] == b' ') && is_digit(b[11]) && is_digit(b[12]) && b[13] == b':' && is_digit(b[14]) && is_digit(b[15])
-}
-
-fn is_date(s: &str) -> bool {
-    let b = s.as_bytes();
-    b.len() == 10 && is_date_bytes(b)
 }
 
 fn is_date_bytes(b: &[u8]) -> bool {
