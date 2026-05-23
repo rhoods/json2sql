@@ -95,32 +95,133 @@ On n'utilise pas de drop-shadows pour indiquer la hauteur : on utilise la lumiè
 
 ---
 
-## 5. Composants CSS (classes globales)
+## 5. Sources CSS
 
-Les classes sont définies dans `theme::css()` et injectées une seule fois au démarrage. Elles référencent les variables CSS (`var(--token)`), pas de hex codé en dur.
+| Source | Chargée par | Contenu |
+|---|---|---|
+| `assets/styles.css` | `theme::design_css()` → `include_str!` | Design system complet (1046 lignes) — layouts, composants, utilitaires |
+| `theme::css()` | inline | Variables CSS `:root`, `.btn-primary`, `.btn-ghost`, `.input-field`, `.progress-track`, `.log-panel`, overrides webkit |
 
-### `.btn-primary`
-Dégradé `PRIMARY → PRIMARY_DARK` à 135°, `border-radius:2px`, texte `ON_PRIMARY`.  
-`:hover` → `filter:brightness(1.08)` | `[disabled]` → `opacity:0.4`.
-
-### `.btn-ghost`
-Fond transparent, texte `PRIMARY`, bordure `OUTLINE_VARIANT`.  
-`:hover` → fond `PRIMARY_ALPHA_08` | variante compacte : `.btn-ghost--sm`.
-
-### `.input-field`
-Fond `BG_INPUT`, bordure basse uniquement (`OUTLINE_VARIANT`), `border-radius:2px 2px 0 0`.  
-Override webkit-autofill inclus pour forcer le fond sombre.
-
-### `.progress-track` / `.progress-bar`
-Track : fond `BG_INPUT`, height 6px, `border-radius:3px`.  
-Bar : dégradé `SECONDARY → SECONDARY_DARK` horizontal, **pas de border-radius** (style "Brutalist").
-
-### `.log-panel`
-Fond `BG_EDITOR`, `FONT_CODE`, couleur `ON_SURFACE_VARIANT`. Utilisé dans Analysis et Import.
+Les deux sont injectées dans un `<style>` unique dans le `<head>` du webview au démarrage. `assets/styles.css` est la source à éditer pour tout nouveau composant.
 
 ---
 
-## 6. Règles d'application
+## 6. Composants CSS — `assets/styles.css`
+
+### Layouts
+
+#### `.split-3`
+Layout trois panneaux flex avec splitters drag-and-drop.  
+Panneaux enfants : `.pane` (largeur fixe) ou `.pane.fluid` (flex:1). Dernier `.pane` sans bordure droite.  
+`.pane.collapsed` → repli avec `.collapsed-strip` (bande verticale avec label rotaté).
+
+#### `.split-60-40`
+Layout deux panneaux 60/40 fixe. Utilisé par Analysis et Import.  
+Panneaux : `.pane` (fond `--bg-sidebar`).
+
+#### `.pane`
+Conteneur de panneau : flex column, `overflow:hidden`, bordure droite `--bd`.  
+En-tête : `.pane-head` (hauteur 36px, flex, fond `--bg-2`). Corps : `.pane-body` (overflow auto, padding 12px) ou `.pane-body.no-pad`.
+
+#### `.subbar`
+Barre de navigation secondaire sous le titlebar. Contient `.crumb` (breadcrumb), `.crumb .step`, `.crumb .step.active`, et `.stat-row`.
+
+### Écran 1 — Wizard
+
+#### `.step-card`
+Carte d'étape accordion. États : `.done` (bordure verte), `.active` (bordure accent + glow, corps visible), `.todo` (opacity 0.85, corps masqué).  
+`.step-head` (en-tête cliquable) + `.step-body` (corps masqué par défaut, visible si `.active`).
+
+### Écran 2 — Analysis
+
+#### `.stat-tile`
+Tuile de statistique. `.lbl` (label ALL-CAPS), `.val` (valeur monospace 28px), `.sub` (sous-label monospace xs).  
+Variantes : `.stat-tile.warn` (valeur orange), `.stat-tile.acc` (valeur bleue).
+
+### Écrans 3 & 4 — Strategy / Preview
+
+#### `.strat-list` / `.strat-btn`
+Liste et boutons de sélection de stratégie (flex column, gap 4px).  
+`.strat-btn` : fond `--bg`, bordure `--bd`, radius `--r-md`, flex row.  
+`.strat-btn.on` : fond accent alpha, bordure accent — état sélectionné.  
+`.strat-btn .nm` (label flex:1) + `.strat-btn .dsc` (description secondaire) + `.strat-btn .radio` (indicateur rond).
+
+#### `table.t`
+Table de données dense. `thead th` : texte xs ALL-CAPS, `--fg-3`, fond `--bg-2`, sticky.  
+`tbody td` : texte xs, bordure basse `--bd`, padding `5px 10px`.  
+`tr:hover` → `--bg-2` | `tr.sel` → fond accent alpha + `box-shadow inset 2px` accent gauche.
+
+#### `.badge`
+Badge inline. Fond translucide + bordure colorée selon variante.  
+Variantes sémantiques : `.badge.default`, `.badge.jsonb`, `.badge.jsonbi`, `.badge.flatten`, `.badge.normalize`, `.badge.pivot`, `.badge.skip`.  
+Variantes état : `.badge.warn`, `.badge.danger`, `.badge.success`, `.badge.info`, `.badge.muted`, `.badge.acc`.  
+Variante forme : `.badge.sq` (border-radius réduit).
+
+### Écrans 2 & 5 — Logs
+
+#### `.log`
+Panneau de log monospace. Fond `--bg-editor`, `overflow-y:auto`.  
+Colorisation des lignes :  
+- `.log .ts` → gris faint (timestamp)  
+- `.log .warn` → orange  
+- `.log .err` → rouge  
+- `.log .ok` → vert  
+- `.log .keyw` → bleu info  
+- `.log .num` → accent
+
+### Écrans 2 & 5 — Progress
+
+#### `.prog`
+Barre de progression. Hauteur 6px, fond `--bg-3`, dégradé vert `--success → --success-dark` (enfant `i`).  
+`.prog.thick` → hauteur 10px.  
+`.prog.indeterminate` → animation de balayage gauche→droite.  
+`.prog.warn` → dégradé orange | `.prog.danger` → dégradé rouge.
+
+### Écran 4 — DDL Preview
+
+#### `pre.code` / `.code`
+Bloc code monospace, fond `--bg-editor`, `white-space:pre-wrap`.  
+Tokens DDL SQL :  
+- `.code .kw` → violet (`#b48cf0`, bold) — mots-clés SQL (`CREATE`, `TABLE`, `NOT NULL`, etc.)  
+- `.code .ty` → cyan (`#4dd0c9`) — types PG (`TEXT`, `INTEGER`, `JSONB`, etc.)  
+- `.code .pn` → blanc bold — noms de tables/colonnes  
+- `.code .num` → orange — littéraux numériques  
+- `.code .str` → vert — littéraux chaîne  
+- `.code .com` → gris italique — commentaires
+
+### Utilitaires
+
+| Classe | Rôle |
+|---|---|
+| `.row` | flex row, gap 8px, align center |
+| `.col` | flex column, gap 8px |
+| `.grow` | flex:1 |
+| `.gap-sm/md/lg/xl` | gap 4/8/14/20px |
+| `.fg-2/3/4` | couleurs texte secondaires |
+| `.fs-xs/sm/lg` | tailles de police |
+| `.w-100` | width:100% |
+| `.mt/mb-sm/md/lg` | marges top/bottom |
+| `.ta-r/.ta-c` | alignement texte |
+| `.divider` | séparateur horizontal 1px `--bd` |
+| `.divider-v` | séparateur vertical 1px `--bd` |
+| `.cdot` | indicateur de statut rond — `.cdot.ok` (vert), `.cdot.warn` (orange), `.cdot.err` (rouge) |
+| `.mono` | force JetBrains Mono |
+
+### Héritage — `theme::css()`
+
+Classes historiques encore utilisées dans les composants inline :
+
+| Classe | Rôle |
+|---|---|
+| `.btn-primary` | Dégradé `PRIMARY → PRIMARY_DARK`, texte `ON_PRIMARY` |
+| `.btn-ghost` / `.btn-ghost--sm` | Fond transparent, texte `PRIMARY`, bordure ghost |
+| `.input-field` | Fond `BG_INPUT`, bordure basse uniquement, override webkit-autofill |
+| `.progress-track` / `.progress-bar` | Track 6px + bar dégradé vert |
+| `.log-panel` | Fond `BG_EDITOR`, FONT_CODE |
+
+---
+
+## 7. Règles d'application
 
 **À faire :**
 - Utiliser les tiers `BG_*` pour grouper des éléments liés sans boîtes ni lignes.

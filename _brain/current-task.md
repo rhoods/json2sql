@@ -16,8 +16,6 @@ _Mis à jour automatiquement en fin de session._
 - Tester Strategy sur des fichiers complexes (wide tables, dynamic keys, pivot)
 - Tester import à grande échelle avec OpenFoodFacts + `--anomaly-dir`
 - IHM : compteur d'anomalies par table dans Strategy/Preview (nécessite extension du protocole `ProgressEvent` — ajouter `Pass2AnomalyUpdate { table, count }`)
-- IHM : double lancement runner si remontage rapide d'écran (#9 — partiellement mitigé par reset progress, mais `use_coroutine` peut encore lancer deux instances si Dioxus remonte le composant ; solution propre = guard `use_signal` + `once` flag)
-
 ## Backlog (non urgent)
 
 - **SSL/TLS pour connexions PG distantes** : actuellement `NoTls` hardcodé dans `tokio-postgres`. À implémenter si usage cloud (RDS, Supabase, Neon, etc.). Nécessite d'activer `tokio-postgres` avec feature `native-tls` ou `openssl` + dépendance système (`libssl-dev`). Checkbox "Require SSL" dans Setup, propagée au connect dans import.rs et setup.rs.

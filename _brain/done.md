@@ -8,6 +8,16 @@ Description courte de ce qui a été fait.
 
 Ajouter toujours EN HAUT du fichier. -->
 
+## 2026-05-23 — IHM — Refacto SOLID (T-A, T-B) dead code + double-launch fix
+
+- **T-A** : suppression de `strategy_configurator.rs` (282 lignes) jamais utilisé depuis la refonte E1-E5 ; retire `pub mod strategy_configurator` de `screens/mod.rs`
+- **T-B** : once-flag `use_signal<bool>` ajouté en tête de `use_coroutine` dans `analysis.rs` et `import.rs` — élimine la race condition issue #9 (double-launch si Dioxus remonte le composant avant que `abort_handle` soit écrit)
+
+## 2026-05-23 — IHM — Refacto SOLID (T5–T6)
+
+- **T5** `TableRowViewModel` + `build_table_rows` : pure function extraite dans `screens/mod.rs`, 14 tests unitaires
+- **T6** `TableListPanel` unifié : composant partagé par Strategy et Preview via `show_checkboxes: bool`
+
 ## 2026-05-23 — IHM — Refacto SOLID (T1–T4)
 
 Quatre tâches de maintenabilité préparatoires aux prochaines modifications UX.
