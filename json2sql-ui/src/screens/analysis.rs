@@ -1,114 +1,80 @@
-/// Screen 2 — Schema Analysis (Pass 1)
+/// Screen 2 — Schema Analysis (Pass 1) — dashboard cards style.
 ///
-/// Split layout: left 60% log panel, right 40% live stats.
-/// Launches the Pass 1 runner on mount via a Dioxus coroutine.
+/// Layout:
+///   subbar + breadcrumb + pulsing dot
+///   4-up stat tiles (tables · columns · records · log lines)
+///   large progress card
+///   two-column grid: schema overview | latest events log
+///   bottom bar: Cancel · Continue →
 
-// Pass 1 configuration constants
-const TEXT_THRESHOLD: u32 = 256;
-const WIDE_COLUMN_THRESHOLD: usize = 100;
-const SIBLING_THRESHOLD: usize = 3;
-const SIBLING_JACCARD: f64 = 0.5;
-const STABLE_THRESHOLD: f64 = 0.10;
-const RARE_THRESHOLD: f64 = 0.001;
 use dioxus::prelude::*;
 
 use json2sql::io::progress_event::ProgressEvent;
 
-use crate::state::{AppScreen, AppState};
-use crate::theme;
+use crate::screens::strategy_badge;
+use crate::state::{
+    format_bytes, AppState, AppScreen,
+    PASS1_TEXT_THRESHOLD, PASS1_WIDE_COLUMN_THRESHOLD, PASS1_SIBLING_THRESHOLD,
+    PASS1_SIBLING_JACCARD, PASS1_STABLE_THRESHOLD, PASS1_RARE_THRESHOLD,
+};
+
+fn format_count(n: u64) -> String {
+    if n >= 1_000_000 { format!("{:.1}M rec/s", n as f64 / 1_000_000.0) }
+    else if n >= 1_000 { format!("{:.1}K rec/s", n as f64 / 1_000.0) }
+    else { format!("{n} rec/s") }
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 #[component]
 pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
-    let progress = state.read().pass1_progress.clone();
-    let pct = if progress.done {
-        100
-    } else if progress.total_bytes > 0 {
-        (progress.bytes_read as f64 / progress.total_bytes as f64 * 100.0) as u32
-    } else if progress.rows_scanned > 0 {
-        // total_bytes unknown — show monotonically increasing fake progress capped at 89%.
-        // Increments by 1% per 1 000 rows scanned; never oscillates, never reaches 100.
-        ((progress.rows_scanned / 1_000) as u32).min(89)
-    } else {
-        0
-    };
+    // ── Elapsed timer ─────────────────────────────────────────────────────
+    let elapsed_secs = crate::screens::use_elapsed_timer(move || state.read().schema.pass1_progress.done);
 
-    // Determine status text based on current state
-    let status_text = if progress.done {
-        "Schema ready"
-    } else if progress.rows_scanned == 0 && progress.bytes_read == 0 {
-        "Starting analysis..."
-    } else {
-        "Analyzing schema..."
-    };
-
-    // Launch Pass 1 once on mount. The coroutine runs until the component unmounts.
+    // ── Pass 1 runner (unchanged logic from original) ─────────────────────
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
-        // Guard: abort_handle is Some while a runner is in flight.
-        // If it is already set, a previous coroutine instance is still active
-        // (Dioxus can re-run use_coroutine on component remount); bail out
-        // immediately to avoid running two Pass 1 instances concurrently.
-        if state.read().abort_handle.is_some() {
-            return;
-        }
+        if state.read().abort_handle.is_some() { return; }
+        state.write().schema.pass1_progress = crate::state::Pass1Progress::default();
 
-        // Reset progress only after confirming no runner is active.
-        state.write().pass1_progress = crate::state::Pass1Progress::default();
-
-        // Derive root table name from file stem (same logic as CLI).
         let (source_file, root_table, workers) = {
-            let source_file_opt = state.read().source_file.clone();
+            let source_file_opt = state.read().project.source_file.clone();
             let Some(path) = source_file_opt else {
-                // Should never happen — Setup disables "Start" when no file is selected.
                 state.write().cancel();
                 return;
             };
-            let root = path
-                .file_stem()
+            let root = path.file_stem()
                 .and_then(|s| s.to_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "root".to_string());
-            let workers = state.read().workers;
+            let workers = state.read().project.workers;
             (path, root, workers)
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
-
-        // Clamp workers to available CPUs.
         let (workers, capped) = json2sql::pass1::runner::effective_workers(workers);
         if let Some(cap) = capped {
-            state.write().pass1_progress.push_log(format!(
-                "WARNING: workers clamped to {} (requested value exceeds available CPUs)",
-                cap
+            state.write().schema.pass1_progress.push_log(format!(
+                "WARNING: workers clamped to {cap} (requested value exceeds available CPUs)"
             ));
         }
 
-        // Run Pass 1 in a blocking thread — it's CPU/IO bound.
         let handle = tokio::task::spawn_blocking(move || {
             if workers > 1 {
                 json2sql::pass1::runner::run_parallel(
-                    &source_file,
-                    &root_table,
-                    TEXT_THRESHOLD,
-                    false, // array_as_pg_array
-                    WIDE_COLUMN_THRESHOLD,
-                    SIBLING_THRESHOLD,
-                    SIBLING_JACCARD,
-                    STABLE_THRESHOLD,
-                    RARE_THRESHOLD,
-                    Some(tx),
-                    workers,
+                    &source_file, &root_table,
+                    PASS1_TEXT_THRESHOLD, false,
+                    PASS1_WIDE_COLUMN_THRESHOLD, PASS1_SIBLING_THRESHOLD, PASS1_SIBLING_JACCARD,
+                    PASS1_STABLE_THRESHOLD, PASS1_RARE_THRESHOLD,
+                    Some(tx), workers,
                 )
             } else {
                 json2sql::pass1::runner::run(
-                    &source_file,
-                    &root_table,
-                    TEXT_THRESHOLD,
-                    false, // array_as_pg_array
-                    WIDE_COLUMN_THRESHOLD,
-                    SIBLING_THRESHOLD,
-                    SIBLING_JACCARD,
-                    STABLE_THRESHOLD,
-                    RARE_THRESHOLD,
+                    &source_file, &root_table,
+                    PASS1_TEXT_THRESHOLD, false,
+                    PASS1_WIDE_COLUMN_THRESHOLD, PASS1_SIBLING_THRESHOLD, PASS1_SIBLING_JACCARD,
+                    PASS1_STABLE_THRESHOLD, PASS1_RARE_THRESHOLD,
                     Some(tx),
                 )
             }
@@ -116,112 +82,355 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
 
         state.write().abort_handle = Some(handle.abort_handle());
 
-        // Drain progress events into AppState — drives the UI reactively.
         while let Some(event) = rx.recv().await {
             let done = matches!(event, ProgressEvent::Pass1Done { .. });
             state.write().apply_progress_event(event);
-            if done {
-                break;
-            }
+            if done { break; }
         }
 
-        // Retrieve schemas from the completed result.
         match handle.await {
             Ok(Ok(result)) => {
                 let mut s = state.write();
-                s.schemas = result.schemas;
-                s.overflow_warnings = result.overflow_warnings;
-                s.truncated_names = result.truncated_names;
-                s.column_collisions = result.column_collisions;
-                s.pass1_stats = result.stats;
-                s.schema_snapshot_loaded = false;
+                s.schema.schemas = result.schemas;
+                s.schema.overflow_warnings = result.overflow_warnings;
+                s.schema.truncated_names = result.truncated_names;
+                s.schema.column_collisions = result.column_collisions;
+                s.schema.pass1_stats = result.stats;
+                s.schema.schema_snapshot_loaded = false;
             }
             Ok(Err(e)) => {
-                state
-                    .write()
-                    .pass1_progress
-                    .push_log(format!("Pass 1 error: {e}"));
+                state.write().schema.pass1_progress.push_log(format!("Pass 1 error: {e}"));
             }
-            Err(_) => {
-                // Task was aborted (Cancel button) — state already reset by cancel().
-            }
+            Err(_) => {}
         }
 
         state.write().abort_handle = None;
     });
 
-    rsx! {
-        div {
-            style: "display:flex;flex-direction:column;height:100vh;background:{theme::BG_ROOT};",
+    // ── Derived values ────────────────────────────────────────────────────
+    let progress  = state.read().schema.pass1_progress.clone();
+    let schemas   = state.read().schema.schemas.clone();
+    let done      = progress.done;
+    let elapsed   = *elapsed_secs.read();
+    let workers   = state.read().project.workers;
 
-            // Header
-            div {
-                style: "padding:16px 24px;background:{theme::BG_WORKSPACE};",
-                span {
-                    style: "color:{theme::ON_SURFACE};font-size:1rem;font-weight:600;",
-                    "{status_text}"
+    let pct: u32 = if done { 100 }
+        else if progress.total_bytes > 0 {
+            (progress.bytes_read as f64 / progress.total_bytes as f64 * 100.0) as u32
+        } else if progress.rows_scanned > 0 {
+            ((progress.rows_scanned / 1_000) as u32).min(89)
+        } else { 0 };
+
+    let rate = if elapsed > 0 { progress.rows_scanned / elapsed as u64 } else { 0 };
+    let eta_str = if pct > 0 && pct < 100 && elapsed > 0 {
+        let remaining = elapsed as u64 * (100 - pct as u64) / pct as u64;
+        format!("~{:02}:{:02}", remaining / 60, remaining % 60)
+    } else if done { "done".to_string() } else { "—".to_string() };
+
+    let elapsed_str = format!("{:02}:{:02}", elapsed / 60, elapsed % 60);
+    let rows_str = if progress.rows_scanned > 0 {
+        let n = progress.rows_scanned;
+        if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
+        else if n >= 1_000 { format!("{}K", n / 1_000) }
+        else { n.to_string() }
+    } else { "0".to_string() };
+
+    let file_pct_str = if progress.total_bytes > 0 {
+        format!("{}", format_bytes(progress.bytes_read))
+    } else { String::new() };
+
+    let status_label = if done { "Schema ready" } else { "Analyzing schema" };
+    let scanning_label = if done { "Pass 1 complete" } else { "Pass 1 · scanning" };
+
+    let cols_str = if progress.columns_count >= 1_000_000 {
+        format!("{:.1}M", progress.columns_count as f64 / 1_000_000.0)
+    } else if progress.columns_count >= 1_000 {
+        format!("{:.1}K", progress.columns_count as f64 / 1_000.0)
+    } else {
+        progress.columns_count.to_string()
+    };
+    let cols_avg_str = if progress.tables_count > 0 {
+        format!("avg {} / table", progress.columns_count / progress.tables_count.max(1))
+    } else {
+        "—".to_string()
+    };
+    let rate_str = if rate > 0 {
+        format_count(rate as u64)
+    } else {
+        "—".to_string()
+    };
+
+    // ── Render ────────────────────────────────────────────────────────────
+    rsx! {
+        div { style: "display:flex;flex-direction:column;height:100vh;background:var(--bg);",
+
+            // ── Subbar ────────────────────────────────────────────────────
+            div { class: "subbar",
+                div { class: "crumb",
+                    button {
+                        class: "step",
+                        onclick: move |_| { state.write().cancel(); },
+                        "Setup"
+                    }
+                    span { class: "sep", "›" }
+                    button { class: "step active", "Analysis" }
+                    span { class: "sep", "›" }
+                    button { class: "step", style: "color:var(--fg-4)", "Strategy" }
+                    span { class: "sep", "›" }
+                    button { class: "step", style: "color:var(--fg-4)", "SQL Preview" }
+                }
+                span { class: "grow" }
+                span { class: "row gap-sm fs-xs fg-3",
+                    if !done {
+                        span { class: "pulse-dot" }
+                    }
+                    span { style: "color:var(--acc);font-weight:600;", "{scanning_label}" }
+                    span { class: "mono", "— elapsed {elapsed_str}" }
                 }
             }
 
-            // Main split area
-            div {
-                style: "display:flex;flex:1;overflow:hidden;min-height:0;min-width:0;",
+            // ── Scrollable body ───────────────────────────────────────────
+            div { style: "flex:1;overflow:auto;padding:18px 24px 24px;background:var(--bg);",
 
-                // Left — log panel (60%)
-                div {
-                    class: "log-panel",
-                    style: "flex:0 1 60%;min-width:0;box-sizing:border-box;",
-                    for line in progress.log_lines.iter() {
-                        p { style: "margin:2px 0;", "{line}" }
+                // Header row
+                div { class: "row gap-md mb-sm", style: "margin-bottom:14px;",
+                    h2 { style: "margin:0;font-size:18px;font-weight:600;color:var(--fg);",
+                        "{status_label}"
                     }
-                }
-
-                // Right — live counters (40%)
-                div {
-                    style: "flex:0 1 40%;min-width:0;min-height:0;box-sizing:border-box;background:{theme::BG_SIDEBAR};padding:24px;",
-                    {
-                        let detecting = progress.rows_scanned > 0 && !progress.done;
-                        let tables_str = if detecting && progress.tables_count == 0 {
-                            "Detecting…".to_string()
-                        } else {
-                            progress.tables_count.to_string()
-                        };
-                        let cols_str = if detecting && progress.columns_count == 0 {
-                            "Detecting…".to_string()
-                        } else {
-                            progress.columns_count.to_string()
-                        };
-                        rsx! {
-                            p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0 0 8px 0;", "Tables detected: {tables_str}" }
-                            p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0 0 8px 0;", "Columns total: {cols_str}" }
-                            p { style: "color:{theme::ON_SURFACE_VARIANT};font-size:0.875rem;margin:0;", "Records scanned: {progress.rows_scanned}" }
+                    span { class: "badge info", style: "height:22px;", "PASS 1 / 2" }
+                    span { class: "grow" }
+                    if !done {
+                        button {
+                            class: "btn danger sm",
+                            onclick: move |_| { state.write().cancel(); },
+                            "✕ Cancel"
                         }
                     }
                 }
-            }
 
-            // Bottom bar — progress + buttons
-            div {
-                style: "padding:16px 24px;background:{theme::BG_WORKSPACE};",
-                div { class: "progress-track", style: "margin-bottom:12px;",
-                    div { class: "progress-bar", style: "width:{pct}%;", "" }
-                }
-                div { style: "display:flex;justify-content:space-between;",
-                    button {
-                        class: "btn-ghost",
-                        onclick: move |_| { state.write().cancel(); },
-                        "Cancel"
+                // ── 4-up stat tiles ───────────────────────────────────────
+                div { style: "display:grid;grid-template-columns:repeat(4,1fr);gap:14px;",
+
+                    // Tables detected
+                    div { class: "stat-tile", style: "position:relative;",
+                        span { class: "lbl", "Tables detected" }
+                        span { class: "val", "{progress.tables_count}" }
+                        span { class: "sub",
+                            if done { "analysis complete" } else { "discovering…" }
+                        }
+                        svg {
+                            class: "spark",
+                            width: "60", height: "20", view_box: "0 0 60 20",
+                            polyline {
+                                points: "0,18 10,16 20,14 30,11 40,8 50,5 60,2",
+                                fill: "none", stroke: "var(--info)", stroke_width: "1.5"
+                            }
+                        }
                     }
-                    button {
-                        class: "btn-primary",
-                        disabled: !progress.done,
-                        onclick: move |_| {
-                            state.write().screen = AppScreen::Strategy;
-                        },
-                        "Continue to Schema Review →"
+
+                    // Columns total
+                    div { class: "stat-tile", style: "position:relative;",
+                        span { class: "lbl", "Columns total" }
+                        span { class: "val", "{cols_str}" }
+                        span { class: "sub", "{cols_avg_str}" }
+                        svg {
+                            class: "spark",
+                            width: "60", height: "20", view_box: "0 0 60 20",
+                            polyline {
+                                points: "0,18 10,15 20,12 30,9 40,6 50,3 60,1",
+                                fill: "none", stroke: "var(--info)", stroke_width: "1.5"
+                            }
+                        }
+                    }
+
+                    // Records scanned
+                    div { class: "stat-tile acc", style: "position:relative;",
+                        span { class: "lbl", "Records scanned" }
+                        span { class: "val",
+                            "{rows_str}"
+                            if !file_pct_str.is_empty() {
+                                span { class: "u", " / {file_pct_str}" }
+                            }
+                        }
+                        span { class: "sub", "{rate_str}" }
+                        svg {
+                            class: "spark",
+                            width: "60", height: "20", view_box: "0 0 60 20",
+                            polyline {
+                                points: "0,18 10,14 20,11 30,8 40,5 50,3 60,1",
+                                fill: "none", stroke: "var(--acc)", stroke_width: "1.5"
+                            }
+                        }
+                    }
+
+                    // Log events (proxy for activity)
+                    div { class: "stat-tile", style: "position:relative;",
+                        span { class: "lbl", "Log events" }
+                        span { class: "val", "{progress.log_lines.len()}" }
+                        span { class: "sub",
+                            if done { "analysis complete" } else { "streaming…" }
+                        }
+                        svg {
+                            class: "spark",
+                            width: "60", height: "20", view_box: "0 0 60 20",
+                            polyline {
+                                points: "0,18 10,16 20,13 30,10 40,8 50,5 60,3",
+                                fill: "none", stroke: "var(--fg-3)", stroke_width: "1.5"
+                            }
+                        }
                     }
                 }
-            }
+
+                // ── Progress card ─────────────────────────────────────────
+                div { class: "card mt-lg", style: "padding:14px 18px;",
+                    div { class: "row", style: "justify-content:space-between;margin-bottom:8px;",
+                        span { style: "font-weight:600;font-size:var(--fs-md);color:var(--fg);",
+                            "Pass 1 — schema discovery"
+                        }
+                        span { class: "mono fs-sm fg-2",
+                            "{pct}%"
+                            if rate > 0 { " · {rate_str}" }
+                            " · ETA {eta_str}"
+                        }
+                    }
+                    div { class: "prog thick",
+                        i { style: "width:{pct}%;" }
+                    }
+                    div { class: "row mt-sm fs-xs fg-3",
+                        span { "{elapsed_str} elapsed" }
+                        span { class: "grow" }
+                        if progress.total_bytes > 0 {
+                            span {
+                                "{format_bytes(progress.bytes_read)} / {format_bytes(progress.total_bytes)}"
+                            }
+                        }
+                    }
+                }
+
+                // ── Two-column grid ───────────────────────────────────────
+                div { style: "display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px;",
+
+                    // Left: schema overview
+                    div { class: "card",
+                        div { class: "card-head",
+                            span { class: "ti", "⬡ Schema overview" }
+                            span { class: "count", "{schemas.len()}" }
+                            span { class: "grow" }
+                            span { class: "fs-xs fg-3 mono",
+                                if done { "complete" } else { "live" }
+                            }
+                        }
+                        div { class: "card-body", style: "padding:0;overflow-y:auto;max-height:360px;",
+                            if schemas.is_empty() {
+                                div { style: "padding:16px;text-align:center;",
+                                    span { class: "fs-xs fg-3",
+                                        if done { "No tables detected" } else { "Scanning…" }
+                                    }
+                                }
+                            } else {
+                                for table in schemas.iter() {
+                                    {
+                                        let (badge_cls, badge_lbl) = strategy_badge(&table.wide_strategy);
+                                        let is_wide = table.columns.len() > PASS1_WIDE_COLUMN_THRESHOLD;
+                                        let col_count = table.columns.len();
+                                        let col_style = if is_wide {
+                                            "font-family:'JetBrains Mono',monospace;font-size:var(--fs-xs);color:var(--warning);font-weight:600;"
+                                        } else {
+                                            "font-family:'JetBrains Mono',monospace;font-size:var(--fs-xs);color:var(--fg-3);"
+                                        };
+                                        rsx! {
+                                            div {
+                                                key: "{table.name}",
+                                                style: "padding:8px 12px;border-bottom:1px solid rgba(38,45,58,.5);display:flex;align-items:center;gap:8px;",
+                                                span {
+                                                    style: "font-family:'JetBrains Mono',monospace;font-size:var(--fs-sm);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg);",
+                                                    "{table.name}"
+                                                }
+                                                span { style: "{col_style}", "{col_count}" }
+                                                span { class: "badge {badge_cls}", "{badge_lbl}" }
+                                                if is_wide { span { "⚠" } }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Right: latest events log
+                    div { class: "card",
+                        div { class: "card-head",
+                            span { class: "ti", "Latest events" }
+                            span { class: "grow" }
+                            span { class: "fs-xs fg-3 mono", "{progress.log_lines.len()} lines" }
+                        }
+                        div { class: "card-body", style: "padding:0;",
+                            div {
+                                class: "log",
+                                style: "border:none;border-radius:0;padding:10px 14px;max-height:360px;overflow-y:auto;line-height:1.6;",
+                                for line in progress.log_lines.iter() {
+                                    {
+                                        let is_warn = line.contains("WARNING") || line.contains('⚠');
+                                        let is_ok   = line.contains("complete") || line.contains("done");
+                                        let line_class = if is_warn { "warn" } else if is_ok { "ok" } else { "" };
+                                        rsx! {
+                                            div {
+                                                key: "{line}",
+                                                class: "{line_class}",
+                                                "{line}"
+                                            }
+                                        }
+                                    }
+                                }
+                                if !done {
+                                    div { style: "color:var(--success);", "▌" }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Bottom bar ────────────────────────────────────────────
+                div { class: "row mt-lg", style: "justify-content:space-between;padding-top:8px;",
+                    div { class: "row gap-md fs-xs fg-3",
+                        span {
+                            b { class: "fg-2", "Workers" }
+                            " "
+                            span { class: "mono", "{workers} active" }
+                        }
+                        if progress.tables_count > 0 {
+                            span { "·" }
+                            span {
+                                b { class: "fg-2", "Tables" }
+                                " "
+                                span { class: "mono", "{progress.tables_count}" }
+                            }
+                        }
+                        if progress.columns_count > 0 {
+                            span { "·" }
+                            span {
+                                b { class: "fg-2", "Columns" }
+                                " "
+                                span { class: "mono", "{progress.columns_count}" }
+                            }
+                        }
+                    }
+                    div { class: "row gap-md",
+                        button {
+                            class: "btn ghost",
+                            onclick: move |_| { state.write().cancel(); },
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn primary",
+                            disabled: !done,
+                            onclick: move |_| { state.write().screen = AppScreen::Strategy; },
+                            "Review schema ›"
+                        }
+                    }
+                }
+
+            } // scrollable body
         }
     }
 }

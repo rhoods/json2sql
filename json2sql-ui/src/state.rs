@@ -100,6 +100,23 @@ pub fn format_bytes(b: u64) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Pass 1 runner defaults
+// ---------------------------------------------------------------------------
+
+/// Maximum byte length before a JSON string value is inferred as TEXT (vs VARCHAR).
+pub const PASS1_TEXT_THRESHOLD: u32 = 256;
+/// Column count above which a table is flagged as "wide" and triggers overflow warnings.
+pub const PASS1_WIDE_COLUMN_THRESHOLD: usize = 100;
+/// Minimum number of sibling tables required to attempt a sibling-group collapse.
+pub const PASS1_SIBLING_THRESHOLD: usize = 3;
+/// Minimum pairwise Jaccard similarity for a sibling group to be collapsed.
+pub const PASS1_SIBLING_JACCARD: f64 = 0.5;
+/// Frequency threshold above which a key is considered "stable" (kept as a column).
+pub const PASS1_STABLE_THRESHOLD: f64 = 0.10;
+/// Frequency threshold below which a key is considered "rare" (excluded entirely).
+pub const PASS1_RARE_THRESHOLD: f64 = 0.001;
+
+// ---------------------------------------------------------------------------
 // Pass 1 progress (fed by ProgressEvent stream)
 // ---------------------------------------------------------------------------
 
@@ -151,20 +168,16 @@ impl Pass2Progress {
 }
 
 // ---------------------------------------------------------------------------
-// Root application state
+// ProjectState — Screen 1 (Setup) + global project config
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-pub struct AppState {
-    pub screen: AppScreen,
-
-    // — Screen 1 —
+pub struct ProjectState {
     pub source_file: Option<PathBuf>,
     pub pg: PgConfig,
     /// Target PostgreSQL schema (default: "public").
     pub pg_schema: String,
     /// Drop and recreate tables before import (destructive — clean slate).
-    /// False = CREATE IF NOT EXISTS (safe for reruns, may accumulate data).
     pub drop_existing: bool,
     /// Optional directory where anomaly NDJSON files are streamed during Pass 2.
     pub anomaly_dir: Option<PathBuf>,
@@ -174,48 +187,15 @@ pub struct AppState {
     pub pg_ok: Option<bool>,
     /// Connection error details when the PG health check fails.
     pub pg_error: Option<String>,
-
-    // — Screen 2 —
-    pub pass1_progress: Pass1Progress,
-
-    // — Screen 3 / 4 —
-    /// Original schemas from pass1 — never mutated after being set.
-    pub schemas: Vec<TableSchema>,
-    /// Tables that were auto-converted to JSONB because they exceeded the 1600-column PG limit.
-    pub overflow_warnings: Vec<OverflowWarning>,
-    /// User-chosen strategy overrides: table_name → WideStrategy.
-    /// Applied on top of `schemas` at DDL generation and import time.
-    pub strategy_overrides: HashMap<String, WideStrategy>,
-    /// Set of table indices currently selected in the Strategy panel (Ctrl+click multi-select).
-    /// The Preview panel and right-panel configurator always operate on `last_selected_idx`.
-    pub selected_table_indices: HashSet<usize>,
-    /// Index of the last table clicked — drives the center/right panels in Strategy and Preview.
-    pub last_selected_idx: usize,
-
-    // — Pass 1 metadata (also persisted in SchemaSnapshot) —
-    pub truncated_names: Vec<TruncatedName>,
-    pub column_collisions: Vec<ColumnCollision>,
-    pub pass1_stats: Vec<ColumnStats>,
-    /// True when schemas were loaded from a saved snapshot rather than a live Pass 1 run.
-    pub schema_snapshot_loaded: bool,
-
-    // — Screen 5 —
-    pub pass2_progress: Pass2Progress,
-
-    /// Handle to the currently running Pass 1 or Pass 2 task.
-    /// Set by the screen that spawns the task; cleared by `cancel()`.
-    pub abort_handle: Option<tokio::task::AbortHandle>,
-
     /// Number of worker threads for Pass 1 schema inference (1 = sequential).
     pub workers: usize,
-    /// Number of parallel PostgreSQL connections for Pass 2 COPY (default: min(cpus, 8)).
+    /// Number of parallel PostgreSQL connections for Pass 2 COPY.
     pub pass2_parallel: usize,
 }
 
-impl Default for AppState {
+impl Default for ProjectState {
     fn default() -> Self {
         Self {
-            screen: AppScreen::default(),
             source_file: None,
             pg: PgConfig::default(),
             pg_schema: "public".to_string(),
@@ -224,6 +204,51 @@ impl Default for AppState {
             pg_testing: false,
             pg_ok: None,
             pg_error: None,
+            workers: 1,
+            pass2_parallel: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(8),
+        }
+    }
+}
+
+impl ProjectState {
+    pub fn is_complete(&self) -> bool {
+        self.source_file.is_some()
+            && self.pg.is_complete()
+            && !self.pg_schema.is_empty()
+            && self.pg_schema.chars().all(|c| c.is_alphanumeric() || c == '_')
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SchemaState — Screens 2, 3, 4 (Analysis, Strategy, Preview)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct SchemaState {
+    pub pass1_progress: Pass1Progress,
+    /// Original schemas from pass1 — never mutated after being set.
+    pub schemas: Vec<TableSchema>,
+    /// Tables auto-converted to JSONB (exceeded PostgreSQL 1600-column limit).
+    pub overflow_warnings: Vec<OverflowWarning>,
+    /// User-chosen strategy overrides: table_name → WideStrategy.
+    pub strategy_overrides: HashMap<String, WideStrategy>,
+    /// Set of table indices currently selected in the Strategy panel.
+    pub selected_table_indices: HashSet<usize>,
+    /// Index of the last table clicked — drives center/right panels.
+    pub last_selected_idx: usize,
+    pub truncated_names: Vec<TruncatedName>,
+    pub column_collisions: Vec<ColumnCollision>,
+    pub pass1_stats: Vec<ColumnStats>,
+    /// True when schemas were loaded from a saved snapshot rather than a live Pass 1 run.
+    pub schema_snapshot_loaded: bool,
+}
+
+impl Default for SchemaState {
+    fn default() -> Self {
+        Self {
             pass1_progress: Pass1Progress::default(),
             schemas: Vec::new(),
             overflow_warnings: Vec::new(),
@@ -234,78 +259,110 @@ impl Default for AppState {
             column_collisions: Vec::new(),
             pass1_stats: Vec::new(),
             schema_snapshot_loaded: false,
-            pass2_progress: Pass2Progress::default(),
-            abort_handle: None,
-            workers: 1,
-            pass2_parallel: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-                .min(8),
         }
     }
 }
 
-impl AppState {
-
-    /// Populate AppState from a loaded SchemaSnapshot.
-    /// Sets schema_snapshot_loaded = true so Setup screen can adapt its UI.
-    pub fn load_snapshot(&mut self, snapshot: json2sql::schema::persistence::SchemaSnapshot) {
-        self.schemas = snapshot.schemas;
-        self.truncated_names = snapshot.truncated_names;
-        self.column_collisions = snapshot.column_collisions;
-        self.pass1_stats = snapshot.stats;
-        self.strategy_overrides = snapshot.strategy_overrides;
-        self.pass1_progress.rows_scanned = snapshot.total_rows;
-        self.pass1_progress.done = true;
-        self.schema_snapshot_loaded = true;
-        self.selected_table_indices = HashSet::from([0]);
-        self.last_selected_idx = 0;
-    }
-
-    /// Remove a loaded snapshot and restore the default Pass 1 flow.
-    /// Preserves source_file, pg config, and pg_schema — only clears schema data.
-    pub fn clear_snapshot(&mut self) {
-        self.schemas = Vec::new();
-        self.overflow_warnings = Vec::new();
-        self.strategy_overrides = std::collections::HashMap::new();
-        self.truncated_names = Vec::new();
-        self.column_collisions = Vec::new();
-        self.pass1_stats = Vec::new();
-        self.pass1_progress = Pass1Progress::default();
-        self.selected_table_indices = HashSet::from([0]);
-        self.last_selected_idx = 0;
-        self.schema_snapshot_loaded = false;
-    }
-
-    /// Convenience: true when both source file and PG config are ready.
-    pub fn ready_to_start(&self) -> bool {
-        self.source_file.is_some()
-            && self.pg.is_complete()
-            && !self.pg_schema.is_empty()
-            && self.pg_schema.chars().all(|c| c.is_alphanumeric() || c == '_')
-    }
-
-    /// Abort the running task (if any), reset all transient state, and return to Setup.
-    /// Preserves `source_file` and `pg` (user preferences).
-    /// `drop_existing` is intentionally reset — it is a destructive flag that must be
-    /// re-enabled explicitly on each import.
-    pub fn cancel(&mut self) {
-        if let Some(handle) = self.abort_handle.take() {
-            handle.abort();
-        }
-        self.pass1_progress = Pass1Progress::default();
-        self.pass2_progress = Pass2Progress::default();
+impl SchemaState {
+    fn clear(&mut self) {
         self.schemas = Vec::new();
         self.overflow_warnings = Vec::new();
         self.strategy_overrides = HashMap::new();
         self.truncated_names = Vec::new();
         self.column_collisions = Vec::new();
         self.pass1_stats = Vec::new();
+        self.pass1_progress = Pass1Progress::default();
+        self.selected_table_indices = HashSet::from([0]);
+        self.last_selected_idx = 0;
         self.schema_snapshot_loaded = false;
-        self.pg_testing = false;
-        self.pg_ok = None;
-        self.pg_error = None;
-        self.drop_existing = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ImportState — Screen 5 (Import / Pass 2)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Default)]
+pub struct ImportState {
+    pub pass2_progress: Pass2Progress,
+}
+
+// ---------------------------------------------------------------------------
+// UiState — persisted pane widths + collapse states (populated in F3)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Default)]
+pub struct UiState {
+    // Future: pane_widths: HashMap<ScreenId, SplitPaneConfig>
+}
+
+// ---------------------------------------------------------------------------
+// Root application state
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct AppState {
+    pub screen: AppScreen,
+    pub project: ProjectState,
+    pub schema: SchemaState,
+    pub import: ImportState,
+    pub ui: UiState,
+    /// Handle to the currently running Pass 1 or Pass 2 task.
+    pub abort_handle: Option<tokio::task::AbortHandle>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            screen: AppScreen::default(),
+            project: ProjectState::default(),
+            schema: SchemaState::default(),
+            import: ImportState::default(),
+            ui: UiState::default(),
+            abort_handle: None,
+        }
+    }
+}
+
+impl AppState {
+    /// Populate AppState from a loaded SchemaSnapshot.
+    pub fn load_snapshot(&mut self, snapshot: json2sql::schema::persistence::SchemaSnapshot) {
+        self.schema.schemas = snapshot.schemas;
+        self.schema.truncated_names = snapshot.truncated_names;
+        self.schema.column_collisions = snapshot.column_collisions;
+        self.schema.pass1_stats = snapshot.stats;
+        self.schema.strategy_overrides = snapshot.strategy_overrides;
+        self.schema.pass1_progress.rows_scanned = snapshot.total_rows;
+        self.schema.pass1_progress.done = true;
+        self.schema.schema_snapshot_loaded = true;
+        self.schema.selected_table_indices = HashSet::from([0]);
+        self.schema.last_selected_idx = 0;
+    }
+
+    /// Remove a loaded snapshot and restore the default Pass 1 flow.
+    /// Preserves source_file, pg config, and pg_schema — only clears schema data.
+    pub fn clear_snapshot(&mut self) {
+        self.schema.clear();
+    }
+
+    /// Convenience: true when both source file and PG config are ready.
+    pub fn ready_to_start(&self) -> bool {
+        self.project.is_complete()
+    }
+
+    /// Abort the running task (if any), reset all transient state, and return to Setup.
+    /// Preserves `project.source_file` and `project.pg` (user preferences).
+    pub fn cancel(&mut self) {
+        if let Some(handle) = self.abort_handle.take() {
+            handle.abort();
+        }
+        self.schema.clear();
+        self.import.pass2_progress = Pass2Progress::default();
+        self.project.pg_testing = false;
+        self.project.pg_ok = None;
+        self.project.pg_error = None;
+        // drop_existing is reset intentionally — it is destructive and must be re-enabled explicitly.
+        self.project.drop_existing = false;
         self.screen = AppScreen::Setup;
     }
 
@@ -314,10 +371,10 @@ impl AppState {
         use ProgressEvent::*;
         match event {
             Pass1Progress { rows_scanned, bytes_read, total_bytes } => {
-                self.pass1_progress.rows_scanned = rows_scanned;
-                self.pass1_progress.bytes_read = bytes_read;
-                self.pass1_progress.total_bytes = total_bytes;
-                self.pass1_progress.push_log(format!(
+                self.schema.pass1_progress.rows_scanned = rows_scanned;
+                self.schema.pass1_progress.bytes_read = bytes_read;
+                self.schema.pass1_progress.total_bytes = total_bytes;
+                self.schema.pass1_progress.push_log(format!(
                     "Scanned {} records ({} / {})",
                     rows_scanned,
                     format_bytes(bytes_read),
@@ -325,42 +382,42 @@ impl AppState {
                 ));
             }
             Pass1Done { total_rows, tables_count, columns_count } => {
-                self.pass1_progress.rows_scanned = total_rows;
-                self.pass1_progress.tables_count = tables_count;
-                self.pass1_progress.columns_count = columns_count;
-                self.pass1_progress.done = true;
-                self.pass1_progress.push_log(format!(
+                self.schema.pass1_progress.rows_scanned = total_rows;
+                self.schema.pass1_progress.tables_count = tables_count;
+                self.schema.pass1_progress.columns_count = columns_count;
+                self.schema.pass1_progress.done = true;
+                self.schema.pass1_progress.push_log(format!(
                     "Schema complete: {} tables, {} columns",
                     tables_count, columns_count
                 ));
             }
             Pass2Progress { rows_processed, bytes_read, total_bytes } => {
-                self.pass2_progress.rows_processed = rows_processed;
-                self.pass2_progress.bytes_read = bytes_read;
-                self.pass2_progress.total_bytes = total_bytes;
+                self.import.pass2_progress.rows_processed = rows_processed;
+                self.import.pass2_progress.bytes_read = bytes_read;
+                self.import.pass2_progress.total_bytes = total_bytes;
             }
             Pass2Flush { table_name, rows_flushed } => {
-                *self.pass2_progress.rows_per_table.entry(table_name.clone()).or_default() += rows_flushed;
-                self.pass2_progress.push_log(format!(
+                *self.import.pass2_progress.rows_per_table.entry(table_name.clone()).or_default() += rows_flushed;
+                self.import.pass2_progress.push_log(format!(
                     "flush {} ({} rows)",
                     table_name, rows_flushed
                 ));
             }
             Pass2Log(msg) => {
-                self.pass2_progress.push_log(msg);
+                self.import.pass2_progress.push_log(msg);
             }
             Pass2Done { total_rows, anomaly_count, constraint_warning_count } => {
-                self.pass2_progress.rows_processed = total_rows;
-                self.pass2_progress.total_anomalies = anomaly_count;
-                self.pass2_progress.constraint_warning_count = constraint_warning_count;
-                self.pass2_progress.done = true;
-                self.pass2_progress.push_log(format!(
+                self.import.pass2_progress.rows_processed = total_rows;
+                self.import.pass2_progress.total_anomalies = anomaly_count;
+                self.import.pass2_progress.constraint_warning_count = constraint_warning_count;
+                self.import.pass2_progress.done = true;
+                self.import.pass2_progress.push_log(format!(
                     "Import complete: {} rows, {} anomalies, {} FK warnings",
                     total_rows, anomaly_count, constraint_warning_count
                 ));
             }
             Pass2Error { table_name, message } => {
-                self.pass2_progress.push_log(format!(
+                self.import.pass2_progress.push_log(format!(
                     "Error in {}: {}",
                     table_name, message
                 ));
@@ -373,14 +430,62 @@ impl AppState {
 mod tests {
     use super::*;
 
+    // --- Sub-struct defaults ---
+
     #[test]
-    fn clear_snapshot_resets_schema_fields_but_keeps_pg_and_source() {
+    fn project_state_default_has_expected_values() {
+        let p = ProjectState::default();
+        assert_eq!(p.pg.host, "localhost");
+        assert_eq!(p.pg.port, 5432);
+        assert!(!p.drop_existing);
+        assert_eq!(p.workers, 1);
+        assert!(p.source_file.is_none());
+        assert!(p.anomaly_dir.is_none());
+        assert!(!p.pg_testing);
+        assert!(p.pg_ok.is_none());
+        assert!(p.pg_error.is_none());
+    }
+
+    #[test]
+    fn schema_state_is_empty_by_default() {
+        let s = SchemaState::default();
+        assert!(s.schemas.is_empty());
+        assert!(!s.schema_snapshot_loaded);
+        assert_eq!(s.last_selected_idx, 0);
+        assert_eq!(s.selected_table_indices.len(), 1);
+        assert!(s.selected_table_indices.contains(&0));
+        assert!(s.truncated_names.is_empty());
+        assert!(s.column_collisions.is_empty());
+        assert!(s.pass1_stats.is_empty());
+        assert!(!s.pass1_progress.done);
+    }
+
+    #[test]
+    fn import_state_is_empty_by_default() {
+        let i = ImportState::default();
+        assert!(!i.pass2_progress.done);
+        assert_eq!(i.pass2_progress.rows_processed, 0);
+        assert_eq!(i.pass2_progress.total_anomalies, 0);
+    }
+
+    #[test]
+    fn app_state_delegates_to_sub_states() {
+        let s = AppState::default();
+        assert_eq!(s.project.pg.host, "localhost");
+        assert!(s.schema.schemas.is_empty());
+        assert!(!s.import.pass2_progress.done);
+        assert!(s.abort_handle.is_none());
+    }
+
+    // --- AppState methods with updated field paths ---
+
+    #[test]
+    fn clear_snapshot_resets_schema_fields_but_keeps_project() {
         use json2sql::schema::persistence::SchemaSnapshot;
-        use std::collections::HashMap;
 
         let mut s = AppState::default();
-        s.source_file = Some(std::path::PathBuf::from("/tmp/data.json"));
-        s.pg.host = "myhost".to_string();
+        s.project.source_file = Some(std::path::PathBuf::from("/tmp/data.json"));
+        s.project.pg.host = "myhost".to_string();
         s.load_snapshot(SchemaSnapshot {
             version: 1,
             total_rows: 10,
@@ -393,19 +498,18 @@ mod tests {
 
         s.clear_snapshot();
 
-        assert!(!s.schema_snapshot_loaded);
-        assert!(s.schemas.is_empty());
-        assert!(s.strategy_overrides.is_empty());
-        assert!(!s.pass1_progress.done);
-        // source_file and pg are preserved
-        assert!(s.source_file.is_some());
-        assert_eq!(s.pg.host, "myhost");
+        assert!(!s.schema.schema_snapshot_loaded);
+        assert!(s.schema.schemas.is_empty());
+        assert!(s.schema.strategy_overrides.is_empty());
+        assert!(!s.schema.pass1_progress.done);
+        // project fields preserved
+        assert!(s.project.source_file.is_some());
+        assert_eq!(s.project.pg.host, "myhost");
     }
 
     #[test]
-    fn load_snapshot_populates_state_and_sets_flag() {
+    fn load_snapshot_populates_schema_state_and_sets_flag() {
         use json2sql::schema::persistence::SchemaSnapshot;
-        use std::collections::HashMap;
 
         let snapshot = SchemaSnapshot {
             version: 1,
@@ -416,7 +520,7 @@ mod tests {
             stats: vec![],
             strategy_overrides: {
                 let mut m = HashMap::new();
-                m.insert("t".to_string(), json2sql::schema::table_schema::WideStrategy::Jsonb);
+                m.insert("t".to_string(), WideStrategy::Jsonb);
                 m
             },
         };
@@ -424,44 +528,61 @@ mod tests {
         let mut s = AppState::default();
         s.load_snapshot(snapshot);
 
-        assert!(s.schema_snapshot_loaded);
-        assert_eq!(s.pass1_progress.rows_scanned, 42);
+        assert!(s.schema.schema_snapshot_loaded);
+        assert_eq!(s.schema.pass1_progress.rows_scanned, 42);
         assert!(matches!(
-            s.strategy_overrides.get("t"),
-            Some(json2sql::schema::table_schema::WideStrategy::Jsonb)
+            s.schema.strategy_overrides.get("t"),
+            Some(WideStrategy::Jsonb)
         ));
     }
 
     #[test]
-    fn snapshot_fields_default_to_empty_and_false() {
+    fn schema_state_fields_default_to_empty_and_false() {
         let s = AppState::default();
-        assert!(!s.schema_snapshot_loaded);
-        assert!(s.truncated_names.is_empty());
-        assert!(s.column_collisions.is_empty());
-        assert!(s.pass1_stats.is_empty());
+        assert!(!s.schema.schema_snapshot_loaded);
+        assert!(s.schema.truncated_names.is_empty());
+        assert!(s.schema.column_collisions.is_empty());
+        assert!(s.schema.pass1_stats.is_empty());
     }
 
     #[test]
-    fn cancel_resets_snapshot_fields() {
+    fn cancel_resets_schema_and_import_but_keeps_project_source() {
         let mut s = AppState::default();
-        s.schema_snapshot_loaded = true;
-        s.truncated_names.push(json2sql::schema::naming::TruncatedName {
+        s.project.source_file = Some(PathBuf::from("/tmp/data.json"));
+        s.project.pg.host = "myhost".to_string();
+        s.schema.schema_snapshot_loaded = true;
+        s.schema.truncated_names.push(json2sql::schema::naming::TruncatedName {
             original_path: "a.b".to_string(),
             full_name: "a_b_long".to_string(),
             pg_name: "a_b".to_string(),
         });
+        s.import.pass2_progress.rows_processed = 42;
         s.cancel();
-        assert!(!s.schema_snapshot_loaded);
-        assert!(s.truncated_names.is_empty());
-        assert!(s.column_collisions.is_empty());
-        assert!(s.pass1_stats.is_empty());
+
+        assert!(!s.schema.schema_snapshot_loaded);
+        assert!(s.schema.truncated_names.is_empty());
+        assert_eq!(s.import.pass2_progress.rows_processed, 0);
+        assert!(!s.project.drop_existing, "drop_existing reset on cancel");
+        // source_file and pg preserved
+        assert!(s.project.source_file.is_some());
+        assert_eq!(s.project.pg.host, "myhost");
+    }
+
+    #[test]
+    fn ready_to_start_delegates_to_project_is_complete() {
+        let mut s = AppState::default();
+        assert!(!s.ready_to_start(), "incomplete project should not be ready");
+        s.project.source_file = Some(PathBuf::from("/tmp/data.json"));
+        s.project.pg.database = "mydb".to_string();
+        s.project.pg.username = "user".to_string();
+        assert!(s.ready_to_start());
     }
 
     #[test]
     fn pass2_parallel_default_is_in_valid_range() {
         let s = AppState::default();
-        assert!(s.pass2_parallel >= 1, "pass2_parallel must be at least 1");
-        assert!(s.pass2_parallel <= 32, "pass2_parallel should not exceed 32");
+        assert!(s.project.pass2_parallel >= 1, "pass2_parallel must be at least 1");
+        assert!(s.project.pass2_parallel <= 32, "pass2_parallel should not exceed 32");
     }
 
     #[test]
@@ -470,7 +591,7 @@ mod tests {
         let cpus = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        assert_eq!(s.pass2_parallel, cpus.min(8));
+        assert_eq!(s.project.pass2_parallel, cpus.min(8));
     }
 
     // --- format_bytes ---

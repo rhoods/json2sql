@@ -28,3 +28,7 @@ urlencoding = "2"
 
 # Zeroize sensitive data (password) on drop
 zeroize = "1"
+
+# Config persistence
+directories-next = "2"
+toml = "0.8"

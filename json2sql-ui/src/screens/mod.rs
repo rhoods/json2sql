@@ -6,11 +6,36 @@ pub mod import;
 pub mod table_list;
 pub mod strategy_configurator;
 
-pub use table_list::{TableListPanel, TableRowEntry};
 
 use std::collections::HashMap;
+use dioxus::prelude::*;
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 use crate::theme;
+
+// ---------------------------------------------------------------------------
+// Shared hook: elapsed timer
+// ---------------------------------------------------------------------------
+
+/// Increments a seconds counter every second until `is_done()` returns true.
+/// Returns the `Signal<u32>` so the caller can display elapsed time.
+pub fn use_elapsed_timer<F>(is_done: F) -> Signal<u32>
+where
+    F: Fn() -> bool + Clone + 'static,
+{
+    let mut elapsed_secs: Signal<u32> = use_signal(|| 0);
+    use_coroutine(move |_: UnboundedReceiver<()>| {
+        let is_done = is_done.clone();
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if is_done() { break; }
+                let e = *elapsed_secs.read();
+                if e < u32::MAX { *elapsed_secs.write() = e + 1; }
+            }
+        }
+    });
+    elapsed_secs
+}
 
 // ---------------------------------------------------------------------------
 // Shared file picker helpers (rfd — native OS dialog, cross-platform)
@@ -99,6 +124,23 @@ pub fn compute_last_child(schemas: &[json2sql::schema::table_schema::TableSchema
         }
     }
     result
+}
+
+/// Returns (css_badge_class_suffix, short_label) for the new design-system `.badge` classes.
+pub fn strategy_badge(s: &WideStrategy) -> (&'static str, &'static str) {
+    match s {
+        WideStrategy::Columns                     => ("default",   "default"),
+        WideStrategy::Jsonb                       => ("jsonb",     "jsonb"),
+        WideStrategy::JsonbFlatten                => ("jsonbi",    "flatten"),
+        WideStrategy::Pivot                       => ("pivot",     "pivot"),
+        WideStrategy::NormalizeDynamicKeys { .. } => ("normalize", "normalize"),
+        WideStrategy::Ignore                      => ("skip",      "skip"),
+        WideStrategy::Flatten { .. }              => ("flatten",   "flatten"),
+        WideStrategy::StructuredPivot(_)          => ("pivot",     "struct pivot"),
+        WideStrategy::KeyedPivot(_)               => ("pivot",     "keyed pivot"),
+        WideStrategy::MultiKeyedPivot(_)          => ("pivot",     "multi pivot"),
+        WideStrategy::AutoSplit { .. }            => ("normalize", "auto split"),
+    }
 }
 
 pub fn strategy_color(s: &WideStrategy) -> &'static str {
