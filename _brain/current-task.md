@@ -4,6 +4,13 @@ _Mis à jour automatiquement en fin de session._
 
 ## Prochaines tâches
 
+### UX panneau de sélection (voir `_brain/ux-todo.md` pour le détail complet)
+- T1 `TableSelectionPanel` : indentation correcte + multi-select implicite + Shift+click + "Select children" + "Select all visible"
+- T2 Score Jaccard sur sélection multi (exposer `pairwise_jaccard_min` en `pub`)
+- T3 Fusion manuelle de tables sœurs (feature backend + UI)
+
+### Autres
+
 - IHM : bouton "Précédent" sur l'écran Strategy
 - Findings adversariaux mineurs restants : #6 (timing test fragile), #9 (static assert InferredType::ALL.len), #11 (sibling[0] non-déterministe dans large-group Jaccard)
 - Tester Strategy sur des fichiers complexes (wide tables, dynamic keys, pivot)
@@ -15,6 +22,15 @@ _Mis à jour automatiquement en fin de session._
 
 - **SSL/TLS pour connexions PG distantes** : actuellement `NoTls` hardcodé dans `tokio-postgres`. À implémenter si usage cloud (RDS, Supabase, Neon, etc.). Nécessite d'activer `tokio-postgres` avec feature `native-tls` ou `openssl` + dépendance système (`libssl-dev`). Checkbox "Require SSL" dans Setup, propagée au connect dans import.rs et setup.rs.
 - Picker de fichier lent (xdg-portal) : installer `libgtk-3-dev` sur le host puis `features = ["tokio", "gtk3"]` dans rfd
+
+## Ce qui est livré (session 2026-05-22)
+
+- **F3** : persistance TOML `~/.config/json2sql/last_project.toml` (config.rs, password exclu)
+- **E1–E5** : refonte complète des 5 écrans — design system CSS (`.split-3`, `.split-60-40`, `.pane`, `.subbar`, `table.t`, `pre.code`, `.badge`, `.strat-btn`, `.prog`, `.log`, `.stat-tile`, `.step-card`)
+- `DdlLine` component + tokenizer SQL pour highlighting DDL (`.kw`, `.ty`, `.pn`)
+- Diff summary overrides dans PreviewScreen (from/to strategy badges)
+- Log colorization dans ImportScreen (`.warn`, `.err`, `.ok`)
+- Zéro erreur Rust `cargo check` sur tous les écrans
 
 ## Ce qui est livré (session 2026-05-19)
 

@@ -8,6 +8,25 @@ Description courte de ce qui a été fait.
 
 Ajouter toujours EN HAUT du fichier. -->
 
+## 2026-05-23 — IHM — Refacto SOLID (T1–T4)
+
+Quatre tâches de maintenabilité préparatoires aux prochaines modifications UX.
+- **T1** `strategy_configurator.rs` : 10 boutons copier-collé → boucle sur `strategy_options()` + helper `apply_strategy_override` (pur, testé). Ajouter une stratégie = 1 ligne.
+- **T2** Timer coroutine : `use_elapsed_timer<F>` hook extrait dans `screens/mod.rs`, partagé par `analysis.rs` et `import.rs`.
+- **T3** Constantes Pass1 : `TEXT_THRESHOLD` etc. déplacées de `analysis.rs` vers `state.rs` (6 `pub const PASS1_*` avec doc comments).
+- **T4** `PgConnectionForm` : ~145 lignes extraites de `SetupScreen` — inputs PG + test connexion encapsulés dans un sous-composant dédié.
+
+## 2026-05-22 — IHM Dioxus — refonte design system (E1–E5 complet)
+
+Refonte complète des 5 écrans avec le design system CSS (styles.css 1046 lignes).
+- **F3** : persistance TOML via `directories-next` (config.rs, password exclu, load on startup)
+- **E1 SetupScreen** : wizard 4 étapes accordion (`.step-card`, file picker rfd, test connexion `.cdot`, parallelism cards, try_save sur chaque write)
+- **E2 AnalysisScreen** : dashboard 4-up `.stat-tile` + `pre.code` log colorisé + elapsed timer coroutine
+- **E3 StrategyScreen** : `.split-3` + `.pane` collapsibles + `table.t` filtrable + `.strat-list`/`.strat-btn` + multi-select + save schema
+- **E4 PreviewScreen** : `.split-3` + `pre.code` DDL avec tokenizer SQL (`.kw`/`.ty`/`.pn`) + diff summary overrides
+- **E5 ImportScreen** : `.split-60-40` + `.log` colorisé + `table.t` per-table rows + `.prog.thick` + success banner
+Suppression de `TableListPanel`, `SummaryRow`, `strategy_configurator.rs` usage. Zéro erreur Rust.
+
 ## 2026-04-12 — IHM Dioxus — implémentation complète
 5 écrans entièrement câblés. Setup (file picker rfd + formulaire PG + test connexion),
 Analysis (Pass 1 runner via use_coroutine + spawn_blocking), Strategy (éditeur de stratégie
