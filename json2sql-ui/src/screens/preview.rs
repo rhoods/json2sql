@@ -83,7 +83,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                         "Setup"
                     }
                     span { class: "sep", "›" }
-                    button { class: "step", style: "color:var(--fg-4);", "Analysis" }
+                    button { class: "step fg-4", "Analysis" }
                     span { class: "sep", "›" }
                     button {
                         class: "step",

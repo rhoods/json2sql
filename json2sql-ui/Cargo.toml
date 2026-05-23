@@ -11,6 +11,9 @@ path = "src/main.rs"
 # Shared types from the CLI
 json2sql = { path = ".." }
 
+# Compile-time CSS class constants (generated from assets/styles.css)
+json2sql-css-macro = { path = "../json2sql-css-macro" }
+
 # Desktop UI
 dioxus = { version = "0.6", features = ["desktop"] }
 rfd = { version = "0.14", default-features = false, features = ["tokio", "xdg-portal"] }

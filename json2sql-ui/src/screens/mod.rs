@@ -9,7 +9,6 @@ pub mod table_list;
 use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
-use crate::theme;
 
 // ---------------------------------------------------------------------------
 // Shared hook: elapsed timer
@@ -248,21 +247,6 @@ pub fn strategy_badge(s: &WideStrategy) -> (&'static str, &'static str) {
     }
 }
 
-pub fn strategy_color(s: &WideStrategy) -> &'static str {
-    match s {
-        WideStrategy::Columns                     => theme::BADGE_DEFAULT,
-        WideStrategy::Pivot                       => theme::BADGE_NORMALIZE,
-        WideStrategy::Jsonb                       => theme::BADGE_JSONB,
-        WideStrategy::JsonbFlatten                => theme::BADGE_JSONB_INLINE,
-        WideStrategy::StructuredPivot(_)          => theme::BADGE_FLATTEN,
-        WideStrategy::KeyedPivot(_)               => theme::BADGE_FLATTEN,
-        WideStrategy::MultiKeyedPivot(_)          => theme::BADGE_FLATTEN,
-        WideStrategy::AutoSplit { .. }            => theme::BADGE_NORMALIZE,
-        WideStrategy::Ignore                      => theme::BADGE_SKIP,
-        WideStrategy::NormalizeDynamicKeys { .. } => theme::BADGE_NORMALIZE,
-        WideStrategy::Flatten { .. }              => theme::BADGE_FLATTEN,
-    }
-}
 
 /// Apply all user strategy overrides to a copy of `schemas`.
 ///

@@ -180,9 +180,9 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                     span { class: "sep", "›" }
                     button { class: "step active", "Analysis" }
                     span { class: "sep", "›" }
-                    button { class: "step", style: "color:var(--fg-4)", "Strategy" }
+                    button { class: "step fg-4", "Strategy" }
                     span { class: "sep", "›" }
-                    button { class: "step", style: "color:var(--fg-4)", "SQL Preview" }
+                    button { class: "step fg-4", "SQL Preview" }
                 }
                 span { class: "grow" }
                 span { class: "row gap-sm fs-xs fg-3",

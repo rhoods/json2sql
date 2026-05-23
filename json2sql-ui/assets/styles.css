@@ -1044,3 +1044,33 @@ body.dragging-col * { cursor: col-resize !important; user-select: none !importan
 /* icon helper */
 .ic { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; }
 .ic-lg { width: 18px; height: 18px; }
+
+/* ============ WEBKIT2GTK OVERRIDES ============
+   GTK system theme overrides input/textarea colors. These rules force the
+   design system values on all form controls in the webkit2gtk webview.     */
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+textarea, select {
+  -webkit-appearance: none;
+  -webkit-text-fill-color: var(--fg) !important;
+  background-color: var(--bg-input) !important;
+  color: var(--fg) !important;
+  caret-color: var(--fg);
+}
+input:not([type="checkbox"]):not([type="radio"])::placeholder,
+textarea::placeholder {
+  -webkit-text-fill-color: var(--fg-4) !important;
+  opacity: 1;
+}
+input:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 100px var(--bg-input) inset !important;
+  -webkit-text-fill-color: var(--fg) !important;
+}
+input[type="checkbox"], input[type="radio"] {
+  -webkit-appearance: auto !important;
+  appearance: auto !important;
+  background-color: transparent !important;
+  min-height: unset !important;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}

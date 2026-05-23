@@ -102,13 +102,13 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                 div { class: "crumb",
                     button { class: "step active", "Setup" }
                     span { class: "sep", "›" }
-                    button { class: "step", style: "color:var(--fg-4)", "Analysis" }
+                    button { class: "step fg-4", "Analysis" }
                     span { class: "sep", "›" }
-                    button { class: "step", style: "color:var(--fg-4)", "Strategy" }
+                    button { class: "step fg-4", "Strategy" }
                     span { class: "sep", "›" }
-                    button { class: "step", style: "color:var(--fg-4)", "SQL Preview" }
+                    button { class: "step fg-4", "SQL Preview" }
                     span { class: "sep", "›" }
-                    button { class: "step", style: "color:var(--fg-4)", "Import" }
+                    button { class: "step fg-4", "Import" }
                 }
                 span { class: "grow" }
             }
@@ -166,7 +166,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                             span { class: "badge muted sq", "{sz}" }
                                         }
                                     } else {
-                                        span { style: "color:var(--fg-4);", "not set" }
+                                        span { class: "fg-4", "not set" }
                                     }
                                 }
                                 span { class: "caret", "›" }
@@ -175,8 +175,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                 div { class: "field-row",
                                     label { "File" }
                                     input {
-                                        class: "input",
-                                        style: "flex:1;",
+                                        class: "input grow",
                                         r#type: "text",
                                         readonly: true,
                                         value: "{source_label}",
@@ -246,13 +245,13 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                     if anomaly_dir.is_some() {
                                         span { "{anomaly_label}" }
                                     } else {
-                                        span { style: "color:var(--fg-4);", "no anomaly folder" }
+                                        span { class: "fg-4", "no anomaly folder" }
                                     }
                                     span { class: "fg-4", "·" }
                                     if snapshot_loaded {
                                         span { class: "badge success sq", "schema loaded" }
                                     } else {
-                                        span { style: "color:var(--fg-4);", "no snapshot" }
+                                        span { class: "fg-4", "no snapshot" }
                                     }
                                 }
                                 span { class: "caret", "›" }
@@ -262,8 +261,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                 div { class: "field-row",
                                     label { "Anomaly folder" }
                                     input {
-                                        class: "input",
-                                        style: "flex:1;",
+                                        class: "input grow",
                                         r#type: "text",
                                         readonly: true,
                                         value: "{anomaly_label}",
@@ -304,8 +302,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                 div { class: "field-row mt-sm",
                                     label { "Schema snapshot" }
                                     input {
-                                        class: "input",
-                                        style: "flex:1;",
+                                        class: "input grow",
                                         r#type: "text",
                                         readonly: true,
                                         placeholder: "— none —",
@@ -403,7 +400,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                             "{pg_host}:{state.read().project.pg.port}/{pg_db}"
                                         }
                                     } else {
-                                        span { style: "color:var(--fg-4);", "not configured" }
+                                        span { class: "fg-4", "not configured" }
                                     }
                                 }
                                 span { class: "caret", "›" }

@@ -1,4 +1,5 @@
 mod config;
+pub mod css;
 mod screens;
 mod state;
 mod theme;
@@ -16,31 +17,15 @@ use screens::{
 
 
 fn main() {
-    // CSS + JS injected into the webkit2gtk webview head.
-    //
-    // Design approach:
-    //   - CSS variables on :root for all design tokens
-    //   - Semantic classes (.btn-primary, .btn-ghost, .input-field, …) for components
-    //   - Webkit-specific overrides needed because webkit2gtk applies the GTK system
-    //     theme to form controls, overriding inline `color:` with its own text colour.
-    //     `-webkit-text-fill-color` takes precedence over `color` in webkit and must
-    //     be set explicitly on every interactive element.
-    //   - JS focus patch: webkit2gtk receives the native mousedown but doesn't route
-    //     keyboard focus to the DOM target — force focus() after each mousedown.
-    // All CSS lives in theme::css() — theme.rs is the single source of truth.
-    // The JS focus patch is webkit2gtk-specific behaviour, not a design concern,
-    // so it stays here alongside the Dioxus launch configuration.
-    // Layer 1: Google Fonts — Inter (UI) + JetBrains Mono (code/data).
-    // Falls back gracefully to system-ui / monospace when offline.
     let fonts_link = r#"<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">"#;
 
-    // Layer 2: design system (tokens + primitives + layouts from Claude Design handoff).
-    // Layer 3: webkit2gtk overrides + legacy tokens (existing screens still use these).
+    // JS focus patch: webkit2gtk receives mousedown but doesn't route keyboard
+    // focus to the DOM target — force focus() on each mousedown on form elements.
     let head = format!(
         "{fonts_link}\n\
-<style>{design}\n{legacy}</style>\n\
+<style>{css}</style>\n\
 <script>\n\
 document.addEventListener('DOMContentLoaded', function () {{\n\
     document.addEventListener('mousedown', function (e) {{\n\
@@ -52,8 +37,7 @@ document.addEventListener('DOMContentLoaded', function () {{\n\
 }});\n\
 </script>",
         fonts_link = fonts_link,
-        design = theme::design_css(),
-        legacy = theme::css(),
+        css = theme::design_css(),
     );
 
     dioxus::LaunchBuilder::new()
@@ -85,7 +69,7 @@ fn App() -> Element {
     let screen = state.read().screen.clone();
 
     rsx! {
-        div { style: "background:var(--bg-root);color:var(--on-surface);font-family:var(--font-ui);height:100vh;overflow:hidden;",
+        div { style: "background:var(--bg);color:var(--fg);height:100vh;overflow:hidden;",
             match screen {
                 AppScreen::Setup    => rsx! { SetupScreen    { state } },
                 AppScreen::Analysis => rsx! { AnalysisScreen { state } },

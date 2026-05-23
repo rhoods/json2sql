@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "json2sql-ui"]
+members = [".", "json2sql-ui", "json2sql-css-macro"]
 resolver = "2"
 
 [package]

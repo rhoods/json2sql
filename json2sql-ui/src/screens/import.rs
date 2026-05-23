@@ -159,7 +159,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                         "Setup"
                     }
                     span { class: "sep", "›" }
-                    button { class: "step", style: "color:var(--fg-4);", "Analysis" }
+                    button { class: "step fg-4", "Analysis" }
                     span { class: "sep", "›" }
                     button {
                         class: "step",
@@ -209,7 +209,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             }
 
             // ── Split 60 / 40 ─────────────────────────────────────────────
-            div { class: "split-60-40", style: "flex:1;",
+            div { class: "split-60-40 grow",
 
                 // ── Left pane — import log ────────────────────────────────
                 div { class: "pane",

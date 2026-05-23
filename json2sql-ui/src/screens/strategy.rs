@@ -75,11 +75,11 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                         "Setup"
                     }
                     span { class: "sep", "›" }
-                    button { class: "step", style: "color:var(--fg-4)", "Analysis" }
+                    button { class: "step fg-4", "Analysis" }
                     span { class: "sep", "›" }
                     button { class: "step active", "Strategy editor" }
                     span { class: "sep", "›" }
-                    button { class: "step", style: "color:var(--fg-4)", "SQL Preview" }
+                    button { class: "step fg-4", "SQL Preview" }
                 }
                 span { class: "grow" }
                 div { class: "row gap-md",
@@ -213,8 +213,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             // filter bar
                             div { style: "padding:6px 10px;border-bottom:1px solid var(--bd);display:flex;gap:8px;align-items:center;",
                                 input {
-                                    class: "input sm",
-                                    style: "flex:1;",
+                                    class: "input sm grow",
                                     placeholder: "filter…",
                                     value: "{filter_text.read()}",
                                     oninput: move |e| { *filter_text.write() = e.value(); },
@@ -330,7 +329,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                             rsx! {
                                                                 tr { key: "{t.name}",
                                                                     td { class: "mono",
-                                                                        if is_indented { span { style: "color:var(--fg-4);", "└ " } }
+                                                                        if is_indented { span { class: "fg-4", "└ " } }
                                                                         "{t.name}"
                                                                     }
                                                                     td { class: "ta-r mono fg-2", "{t.columns.len()}" }

@@ -56,7 +56,7 @@ pub fn TableListPanel(
                                                 span { class: if is_sel { "chk on" } else { "chk" } }
                                                 span { class: "mono",
                                                     if !conn.is_empty() {
-                                                        span { style: "color:var(--fg-4);", "{conn}" }
+                                                        span { class: "fg-4", "{conn}" }
                                                     }
                                                     "{name}"
                                                 }
@@ -78,7 +78,7 @@ pub fn TableListPanel(
                                         td {
                                             style: "padding-left:{indent}px;font-family:var(--font-code);font-size:var(--fs-xs);white-space:nowrap;",
                                             if !conn.is_empty() {
-                                                span { style: "color:var(--fg-4);", "{conn}" }
+                                                span { class: "fg-4", "{conn}" }
                                             }
                                             "{name}"
                                         }
