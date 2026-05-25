@@ -7,9 +7,11 @@
 
 use dioxus::prelude::*;
 
+use dioxus::prelude::Modifiers;
 use json2sql::schema::table_schema::WideStrategy;
 
 use crate::screens::{build_table_rows, pick_save_file, strategy_badge, strategy_label, PickResult};
+use crate::state::select_children_visible;
 use crate::screens::table_list::TableListPanel;
 use crate::state::{AppScreen, AppState};
 
@@ -23,10 +25,10 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let mut right_collapsed: Signal<bool>            = use_signal(|| false);
     let mut filter_text:     Signal<String>          = use_signal(|| String::new());
     let mut warn_only:       Signal<bool>            = use_signal(|| false);
-    let mut multi_select:    Signal<bool>            = use_signal(|| false);
     let mut normalize_col:   Signal<String>          = use_signal(|| "id".to_string());
     let save_feedback:   Signal<Option<Result<String, String>>> = use_signal(|| None);
     let mut banner_dismissed: Signal<bool>           = use_signal(|| false);
+    let mut anchor_idx:      Signal<usize>           = use_signal(|| 0);
 
     // ── Derived snapshot ──────────────────────────────────────────────────
     let schemas           = state.read().schema.schemas.clone();
@@ -55,12 +57,23 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
         .get(&selected_table.name).cloned()
         .unwrap_or_else(|| selected_table.wide_strategy.clone());
 
-    let is_multi = *multi_select.read() && selected_indices.len() > 1;
+    let is_multi = selected_indices.len() > 1;
     let selection_count = selected_indices.len();
 
     // Table list — filtered
     let filter   = filter_text.read().to_lowercase();
     let show_warn = *warn_only.read();
+
+    // Pre-compute rows and visible index list so the Shift+click handler can capture it.
+    let table_rows = build_table_rows(
+        &schemas, &overrides_snap, &overflow_names, &selected_indices, &filter, show_warn,
+    );
+    let visible_indices: Vec<usize> = table_rows.iter()
+        .filter(|r| r.visible)
+        .map(|r| r.index)
+        .collect();
+    let vi_all      = visible_indices.clone();
+    let vi_children = visible_indices.clone();
 
     // ── Render ────────────────────────────────────────────────────────────
     rsx! {
@@ -87,32 +100,6 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                     span { class: "badge muted sq", "{columns_count} cols" }
                     if overflow_count > 0 {
                         span { class: "badge warn sq", "⚠ {overflow_count} overflow" }
-                    }
-                    // Multi-select toggle
-                    {
-                        let is_on = *multi_select.read();
-                        let lbl = if is_on { "✓ Multi-select" } else { "⊕ Multi-select" };
-                        let style = if is_on {
-                            "font-size:var(--fs-xs);background:var(--acc);color:#0a1416;border-color:var(--acc);"
-                        } else {
-                            "font-size:var(--fs-xs);"
-                        };
-                        rsx! {
-                            button {
-                                class: "btn sm",
-                                style: "{style}",
-                                onclick: move |_| {
-                                    let new_val = !*multi_select.read();
-                                    multi_select.set(new_val);
-                                    if !new_val {
-                                        let last = state.read().schema.last_selected_idx;
-                                        state.write().schema.selected_table_indices =
-                                            std::collections::HashSet::from([last]);
-                                    }
-                                },
-                                "{lbl}"
-                            }
-                        }
                     }
                     // Save schema
                     button {
@@ -230,31 +217,49 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                         "⚠"
                                     }
                                 }
+                                button {
+                                    class: "btn ghost sq",
+                                    style: "font-size:10px;padding:1px 6px;height:22px;",
+                                    title: "Select all visible",
+                                    onclick: move |_| {
+                                        let mut s = state.write();
+                                        s.schema.selected_table_indices =
+                                            vi_all.iter().copied().collect();
+                                        if let Some(&last) = vi_all.last() {
+                                            s.schema.last_selected_idx = last;
+                                        }
+                                    },
+                                    "⊕ all"
+                                }
                             }
 
                             // table rows
                             div { class: "pane-body no-pad",
                                 TableListPanel {
-                                    rows: build_table_rows(
-                                        &schemas, &overrides_snap, &overflow_names,
-                                        &selected_indices, &filter, show_warn,
-                                    ),
+                                    rows: table_rows,
                                     show_checkboxes: true,
-                                    on_select: move |i| {
-                                        let is_m = *multi_select.read();
-                                        let mut s = state.write();
-                                        if is_m {
-                                            if s.schema.selected_table_indices.contains(&i) {
-                                                if s.schema.selected_table_indices.len() > 1 {
-                                                    s.schema.selected_table_indices.remove(&i);
-                                                }
-                                            } else {
-                                                s.schema.selected_table_indices.insert(i);
-                                                s.schema.last_selected_idx = i;
-                                            }
-                                        } else {
-                                            s.schema.selected_table_indices = std::collections::HashSet::from([i]);
+                                    on_select_children: move |i| {
+                                        let s = state.read();
+                                        let children = select_children_visible(
+                                            &s.schema.schemas, i, &vi_children,
+                                        );
+                                        drop(s);
+                                        if !children.is_empty() {
+                                            let mut s = state.write();
+                                            s.schema.selected_table_indices = children;
                                             s.schema.last_selected_idx = i;
+                                        }
+                                    },
+                                    on_select: move |(i, modifiers): (usize, Modifiers)| {
+                                        let shift = modifiers.contains(Modifiers::SHIFT);
+                                        let ctrl  = modifiers.contains(Modifiers::CONTROL)
+                                            || modifiers.contains(Modifiers::META);
+                                        if shift {
+                                            let anchor = *anchor_idx.read();
+                                            state.write().schema.apply_shift_click(i, anchor, &visible_indices);
+                                        } else {
+                                            state.write().schema.apply_click(i, ctrl);
+                                            anchor_idx.set(i);
                                         }
                                     },
                                 }
@@ -718,7 +723,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                             span { class: "kbd", "⇧" }
                                             " to range-select or "
                                             span { class: "kbd", "⌃" }
-                                            "+click to toggle. Enable multi-select in the subbar for bulk operations."
+                                            "+click to add to selection."
                                         }
                                     }
                                 }

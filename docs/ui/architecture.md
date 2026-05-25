@@ -12,7 +12,7 @@ json2sql-ui/src/
 ├── main.rs                        # Point d'entrée, injection CSS/JS, routage racine, chargement config
 ├── config.rs                      # Persistance TOML ~/.config/json2sql/last_project.toml (password exclu)
 ├── theme.rs                       # Source de vérité : tokens couleur + CSS legacy inline
-├── state.rs                       # AppState — conteneur de données pur + constantes PASS1_*
+├── state.rs                       # AppState — conteneur de données pur + constantes PASS1_* + logique sélection
 └── screens/
     ├── mod.rs                     # Utilitaires partagés + hook use_elapsed_timer + helpers rfd + tests
     ├── setup.rs                   # Écran 1 — Configuration (wizard accordion + PgConnectionForm)
@@ -20,7 +20,7 @@ json2sql-ui/src/
     ├── strategy.rs                # Écran 3 — Éditeur de stratégies
     ├── preview.rs                 # Écran 4 — Aperçu SQL
     ├── import.rs                  # Écran 5 — Import (Pass 2)
-    ├── table_list.rs              # [legacy] TableListPanel — défini mais non utilisé par les écrans actuels
+    ├── table_list.rs              # Composant partagé : TableListPanel (liste tables + sélection)
     └── strategy_configurator.rs   # Composant partagé : panneau config stratégie
 
 json2sql-ui/assets/
@@ -53,6 +53,13 @@ Méthodes de lifecycle :
 - `cancel()` — avorte la tâche en cours, remet à zéro l'état transitoire, retourne à Setup
 - `apply_progress_event(ProgressEvent)` — applique un événement de progression Pass 1 ou Pass 2
 - `load_snapshot()` / `clear_snapshot()` — charge/efface un schéma sauvegardé
+
+Méthodes de sélection (sur `SchemaState`, champ `schema: SchemaState`) :
+- `apply_click(i, ctrl)` — clic simple ou Ctrl+clic : sélectionne `i` seul, ou toggle dans la sélection existante
+- `apply_shift_click(i, anchor, visible_indices)` — Shift+clic : remplace la sélection par la plage `[anchor..i]` restreinte aux indices visibles
+
+Fonction libre :
+- `select_children_visible(schemas, parent_idx, visible_indices) -> HashSet<usize>` — retourne les indices des tables dont `parent_table` correspond au nom de la table `parent_idx`, filtrés aux visibles
 
 La logique de construction de schéma effectif (`build_effective_schemas`) vit dans `screens/mod.rs`.
 
@@ -101,6 +108,16 @@ Appelé par `preview.rs`, `import.rs`, et `strategy.rs`.
 Pour chaque table, indique si aucune table ultérieure ne partage le même parent.  
 Utilisé pour choisir les connecteurs d'arbre (`└─` vs `├─`).
 
+### `build_table_rows(schemas, overrides, overflow_names, selected_indices, filter, show_warn) -> Vec<TableRowViewModel>`
+Construit la liste de lignes prête à l'affichage pour `TableListPanel`. Chaque `TableRowViewModel` contient :
+- `index`, `name`, `visible`, `indent_px`, `connector` — position et arbre
+- `is_selected`, `row_cls` — état sélection
+- `badge_cls`, `badge_lbl`, `has_warn`, `is_wide` — indicateurs de stratégie
+- `col_count` — nombre de colonnes
+- `has_children` — `true` si au moins une table référence cette table comme parent (pré-calculé par `build_table_rows`)
+
+Appelé par `strategy.rs` et `preview.rs`. Doit être appelé **avant** `rsx!` quand des closures capturent `visible_indices`.
+
 ### `strategy_label` / `strategy_badge` / `strategy_color`
 Mappings `WideStrategy → texte`, `WideStrategy → (css_suffix, short_label)`, `WideStrategy → couleur hex`.  
 Source unique pour Strategy, Preview, et StrategyConfigurator.
@@ -147,9 +164,26 @@ PgConnectionForm { state: Signal<AppState> }
 
 Utilisé à l'étape 3 du wizard de `SetupScreen`. Gère ses propres lectures de `state` en local — `SetupScreen` conserve uniquement les signaux utilisés dans les en-têtes d'accordion (`pg_ok`, `pg_testing`, `pg_host`, `pg_db`, `pg_schema`, `schema_invalid`).
 
-### `TableListPanel` (`table_list.rs`) — legacy
+### `TableListPanel` (`table_list.rs`)
 
-Défini mais non utilisé par les écrans actuels : `strategy.rs` et `preview.rs` ont leur propre rendu inline de la liste de tables. Candidat pour une suppression ou une réactivation lors des futurs travaux UX (voir `_brain/ux-todo.md`).
+Composant partagé de liste de tables avec sélection. Utilisé par `strategy.rs` (mode interactif) et `preview.rs` (mode lecture seule).
+
+```rust
+TableListPanel {
+    rows: Vec<TableRowViewModel>,          // construit par build_table_rows
+    show_checkboxes: bool,                 // true = interactif, false = lecture seule
+    on_select: EventHandler<(usize, Modifiers)>,
+    on_select_children: EventHandler<usize>,
+}
+```
+
+Deux modes selon `show_checkboxes` :
+- **`true` — interactif (Strategy)** : 4 colonnes — checkbox + nom | nb colonnes | badge stratégie | avertissement.  
+  Au survol d'une ligne parente (`has_children`), affiche le bouton inline **"⊕ children"** (avec `stop_propagation`).
+- **`false` — lecture seule (Preview)** : 2 colonnes — connecteur + nom | badge + avertissement.
+
+Le composant maintient un signal local `hovered: Signal<Option<usize>>` pour l'état de survol.  
+Les clics transmettent les `Modifiers` du `MouseEvent` pour permettre Ctrl+clic et Shift+clic au niveau du parent.
 
 ---
 
@@ -166,11 +200,21 @@ Progress bar + bouton "Continue to Strategy →" activé quand `pass1_progress.d
 
 ### Écran 3 — Strategy Editor (`strategy.rs`)
 Layout trois panneaux `.split-3` (25/45/30) :
-- Gauche : liste inline des tables avec badges de stratégie, connecteurs d'arbre, multi-select.
+- Gauche : `TableListPanel` en mode interactif (`show_checkboxes: true`).
 - Centre : liste des colonnes de la table sélectionnée (`table.t`, 2 colonnes : nom / type).
 - Droite : `StrategyConfigurator`.
 
 Top bar `.subbar` : breadcrumb + stats + bouton "Save schema" (rfd).
+
+**Sélection de tables** (multi-select implicite — actif dès 2 tables sélectionnées) :
+- **Clic simple** — sélectionne la table seule, met à jour l'ancre Shift.
+- **Ctrl+clic / ⌘+clic** — toggle la table dans la sélection (ne peut pas désélectionner la dernière).
+- **Shift+clic** — sélectionne la plage `[ancre..cible]` sur les lignes **visibles uniquement** (les tables filtrées sont ignorées).
+- **Bouton "⊕ children"** (au survol d'une table parente) — sélectionne toutes les tables enfants visibles.
+- **Bouton "⊕ all"** (dans la barre de filtre) — sélectionne toutes les tables visibles.
+
+L'ancre Shift est un `Signal<usize>` local à `StrategyScreen` (non persisté dans `AppState`).  
+`build_table_rows` est appelé avant `rsx!` pour que `visible_indices: Vec<usize>` soit capturable par les trois handlers.
 
 ### Écran 4 — SQL Preview (`preview.rs`)
 Layout trois panneaux `.split-3` (25/45/30), read-only :
@@ -199,7 +243,7 @@ Setup ──► Analysis ──► Strategy ──► Preview ──► Import
 
 ## Règles d'architecture
 
-1. **`AppState` = données pures.** Pas de logique de transformation de schéma dans `AppState`. Toute logique de construction de schéma va dans `screens/mod.rs`.
+1. **`AppState` = données + sélection.** Pas de logique de transformation de schéma dans `AppState`. Toute logique de construction de schéma effectif va dans `screens/mod.rs`. La logique de sélection UI (`apply_click`, `apply_shift_click`) vit dans `AppState` car elle opère sur `SchemaState` et est testée unitairement sans Dioxus.
 2. **Composants = présentation pure.** Les overrides, la détection routing container, les badges overflow sont résolus dans `strategy.rs`, pas dans les composants.
 3. **`theme.rs` = source unique des tokens.** Aucune valeur hex dans les composants. Toujours `theme::CONSTANTE`.
 4. **`assets/styles.css` = source unique des classes.** Toute nouvelle classe CSS y est définie, pas dans `theme::css()` (legacy).

@@ -133,7 +133,8 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                                 "", false,
                             ),
                             show_checkboxes: false,
-                            on_select: move |i| {
+                            on_select_children: move |_| {},
+                            on_select: move |(i, _): (usize, _)| {
                                 let mut s = state.write();
                                 s.schema.selected_table_indices = std::collections::HashSet::from([i]);
                                 s.schema.last_selected_idx = i;

@@ -62,6 +62,7 @@ pub struct TableRowViewModel {
     pub row_cls:     &'static str,   // "sel" | "muted" | ""
     // visibility
     pub visible:     bool,
+    pub has_children: bool,
 }
 
 /// Build the view-model for every table row.
@@ -81,6 +82,9 @@ pub fn build_table_rows(
 ) -> Vec<TableRowViewModel> {
     let is_last = compute_last_child(schemas);
     let filter_lc = filter.to_lowercase();
+    let parent_names: HashSet<&str> = schemas.iter()
+        .filter_map(|t| t.parent_table.as_deref())
+        .collect();
 
     schemas.iter().enumerate().map(|(i, table)| {
         let user_overrode = overrides.contains_key(&table.name);
@@ -137,6 +141,7 @@ pub fn build_table_rows(
             has_warn,
             row_cls,
             visible,
+            has_children: parent_names.contains(table.name.as_str()),
         }
     }).collect()
 }
