@@ -1002,5 +1002,91 @@ mod tests {
             assert_eq!(groups.len(), 3, "must produce 3 groups (num + front + ingr), got {}", groups.len());
         }
     }
+
+    /// Post-pass: after the BFS cascade, Columns children of a KeyedPivot parent that
+    /// are numerous enough and sufficiently similar must be fused into a sub-pivot.
+    ///
+    /// Structure: `selected.{type}.{lang} = {imgid, rev}`
+    /// Wave 0: selected absorbs {front, nutrition} → KeyedPivot (key = image type).
+    /// Cascade wave 1: creates one T table per shared lang code
+    ///   (root_selected_fr, root_selected_en, root_selected_de).
+    /// Post-pass: those 3 Columns children of the KeyedPivot → merged into root_selected_key.
+    #[test]
+    fn test_keyed_pivot_orphan_children_merged_by_post_pass() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let obj = json!({
+            "selected": {
+                "front": {
+                    "fr": { "imgid": "1", "rev": "2" },
+                    "en": { "imgid": "3", "rev": "4" },
+                    "de": { "imgid": "5", "rev": "6" }
+                },
+                "nutrition": {
+                    "fr": { "imgid": "7",  "rev": "8"  },
+                    "en": { "imgid": "9",  "rev": "10" },
+                    "de": { "imgid": "11", "rev": "12" }
+                }
+            }
+        });
+        reg.observe_root("root", make_root(&obj));
+        let schemas = reg.finalize();
+
+        let selected = schemas.iter().find(|s| s.name == "root_selected").unwrap();
+        assert!(
+            matches!(selected.wide_strategy, WideStrategy::KeyedPivot(_)),
+            "root_selected must remain KeyedPivot (type key), got: {:?}",
+            selected.wide_strategy
+        );
+
+        // Post-pass must create a KeyedPivot sub-table directly under root_selected.
+        let sub_pivot = schemas.iter().find(|s| {
+            s.parent_table.as_deref() == Some("root_selected")
+                && matches!(s.wide_strategy, WideStrategy::KeyedPivot(_))
+        });
+        assert!(
+            sub_pivot.is_some(),
+            "post-pass must create a KeyedPivot child of root_selected for the 3 lang T tables;\n\
+             schemas: {:?}",
+            schemas.iter().map(|s| (&s.name, &s.parent_table)).collect::<Vec<_>>()
+        );
+
+        // The 3 individual T tables must be absorbed — no Columns orphan remains.
+        let columns_orphans = schemas
+            .iter()
+            .filter(|s| {
+                s.parent_table.as_deref() == Some("root_selected")
+                    && matches!(s.wide_strategy, WideStrategy::Columns)
+            })
+            .count();
+        assert_eq!(
+            columns_orphans, 0,
+            "all Columns children of the KeyedPivot must be absorbed by the sub-pivot"
+        );
+    }
+
+    /// Below threshold: if the cascade produces fewer orphan T tables than `threshold`,
+    /// the post-pass must NOT fire.
+    #[test]
+    fn test_keyed_pivot_orphan_children_not_merged_below_threshold() {
+        // threshold = 3, but only 2 lang codes → 2 T tables → no sub-pivot
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let obj = json!({
+            "selected": {
+                "front":     { "fr": { "imgid": "1", "rev": "2" }, "en": { "imgid": "3", "rev": "4" } },
+                "nutrition": { "fr": { "imgid": "5", "rev": "6" }, "en": { "imgid": "7", "rev": "8" } }
+            }
+        });
+        reg.observe_root("root", make_root(&obj));
+        let schemas = reg.finalize();
+
+        let sub_pivot = schemas.iter().find(|s| {
+            s.parent_table.as_deref() == Some("root_selected")
+                && matches!(s.wide_strategy, WideStrategy::KeyedPivot(_))
+        });
+        assert!(
+            sub_pivot.is_none(),
+            "with threshold=3, only 2 orphan T tables must NOT create a sub-pivot"
+        );
+    }
 }
 
