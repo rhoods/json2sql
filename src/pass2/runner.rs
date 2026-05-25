@@ -595,18 +595,6 @@ pub async fn run(
         Err(e) => return Err(J2sError::InvalidInput(format!("flush task panic: {e}"))),
     };
 
-    // Send Pass2Flush progress events now that all counts are final.
-    for (name, &count) in &rows_per_table {
-        if count > 0 {
-            if let Some(ref tx) = progress_tx {
-                let _ = tx.send(ProgressEvent::Pass2Flush {
-                    table_name: name.clone(),
-                    rows_flushed: count,
-                });
-            }
-        }
-    }
-
     // -------------------------------------------------------------------------
     // Phase D — Constraints: PK (fatal on error), FK (failures → warnings)
     // -------------------------------------------------------------------------

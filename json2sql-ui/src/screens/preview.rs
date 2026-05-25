@@ -251,13 +251,13 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
             // ── Bottom bar ─────────────────────────────────────────────────
             div { class: "subbar",
                 button {
-                    class: "btn-ghost",
+                    class: "btn ghost",
                     onclick: move |_| { state.write().screen = AppScreen::Strategy; },
                     "← Back to Strategies"
                 }
                 span { class: "grow" }
                 button {
-                    class: "btn-primary",
+                    class: "btn primary",
                     onclick: move |_| { state.write().screen = AppScreen::Import; },
                     "Start Import →"
                 }

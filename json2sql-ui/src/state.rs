@@ -620,4 +620,38 @@ mod tests {
     fn format_bytes_gb_boundary() {
         assert_eq!(format_bytes(1_000_000_000), "1.0 GB");
     }
+
+    #[test]
+    fn pass2_flush_accumulates_once_per_table() {
+        // Each Pass2Flush event adds to the per-table count.
+        // Runner must emit exactly one Pass2Flush per table per run —
+        // a second emit (duplicate) would double the displayed count.
+        let mut s = AppState::default();
+        s.apply_progress_event(ProgressEvent::Pass2Flush {
+            table_name: "orders".to_string(),
+            rows_flushed: 120,
+        });
+        assert_eq!(s.import.pass2_progress.rows_per_table["orders"], 120);
+    }
+
+    #[test]
+    fn pass2_flush_duplicate_emit_doubles_count() {
+        // Regression test: if runner.rs emits Pass2Flush twice for the same table,
+        // the UI count doubles. This test documents the bug — runner.rs must not
+        // emit the final batch (lines 598-607) alongside the per-COPY events (line 429).
+        let mut s = AppState::default();
+        s.apply_progress_event(ProgressEvent::Pass2Flush {
+            table_name: "orders".to_string(),
+            rows_flushed: 120,
+        });
+        s.apply_progress_event(ProgressEvent::Pass2Flush {
+            table_name: "orders".to_string(),
+            rows_flushed: 120,
+        });
+        assert_eq!(
+            s.import.pass2_progress.rows_per_table["orders"],
+            240,
+            "two identical Pass2Flush events double the count — runner must not emit both"
+        );
+    }
 }
