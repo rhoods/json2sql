@@ -1,5 +1,4 @@
 mod config;
-pub mod css;
 mod screens;
 mod state;
 mod theme;
