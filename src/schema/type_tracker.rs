@@ -42,6 +42,17 @@ impl InferredType {
     ];
 }
 
+// COUNT must equal ALL.len(), and each variant must sit at its own discriminant index.
+// Adding a variant without updating ALL (or reordering) is a compile-time error here.
+const _: () = {
+    assert!(InferredType::ALL.len() == InferredType::COUNT);
+    let mut i = 0;
+    while i < InferredType::ALL.len() {
+        assert!(InferredType::ALL[i] as usize == i);
+        i += 1;
+    }
+};
+
 /// The resolved PostgreSQL type for a column.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PgType {

@@ -11,7 +11,7 @@ _Mis à jour automatiquement en fin de session._
 ### Autres
 
 - IHM : bouton "Précédent" sur l'écran Strategy
-- Findings adversariaux mineurs restants : #6 (timing test fragile), #9 (static assert InferredType::ALL.len), #11 (sibling[0] non-déterministe dans large-group Jaccard)
+- ~~Findings adversariaux mineurs restants : #6 (timing test fragile), #9 (static assert InferredType::ALL.len), #11 (sibling[0] non-déterministe dans large-group Jaccard)~~ ✅ livré 2026-05-25
 - Tester Strategy sur des fichiers complexes (wide tables, dynamic keys, pivot)
 - Tester import à grande échelle avec OpenFoodFacts + `--anomaly-dir`
 - IHM : compteur d'anomalies par table dans Strategy/Preview (nécessite extension du protocole `ProgressEvent` — ajouter `Pass2AnomalyUpdate { table, count }`)

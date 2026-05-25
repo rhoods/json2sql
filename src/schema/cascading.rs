@@ -843,6 +843,12 @@ pub fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
         return 1.0;
     }
 
+    // Sort by name so col_sets[0] is always the alphabetically-first sibling —
+    // deterministic regardless of call-site ordering.
+    let mut sorted: Vec<usize> = indices.to_vec();
+    sorted.sort_unstable_by_key(|&i| &schemas[i].name);
+    let indices = sorted.as_slice();
+
     // Fast path 1: pure containers — every sibling has no data columns.
     // Check before allocating col_sets to skip HashSet construction entirely.
     if indices.iter().all(|&i| schemas[i].data_columns().next().is_none()) {
@@ -1221,6 +1227,51 @@ mod tests {
         let mut absorbed = r.absorbed_names.clone();
         absorbed.sort();
         assert_eq!(absorbed, vec!["x_a", "x_b", "x_c"]);
+    }
+
+    // Large-group fast path (>200) uses col_sets[0] as Jaccard reference.
+    // Without sorting indices by name first, the reference changes with call-site order,
+    // producing different approximations for the same schema set.
+    //
+    // Scenario: 200 typical siblings {a,b,c,d,e} + alpha {a,b} + bravo {a,b,c}.
+    // - alpha-typical Jaccard = 2/5 = 0.4  (true minimum)
+    // - bravo-typical Jaccard = 3/5 = 0.6
+    // bravo-first (before fix): col_sets[0]={a,b,c} → min=0.6 (misses the 0.4 pair)
+    // alpha-first  (before fix): col_sets[0]={a,b}  → min=0.4
+    // After fix (sort by name): alpha is always [0] → min=0.4 for both orderings.
+    #[test]
+    fn test_pairwise_jaccard_large_group_order_independent() {
+        let mut schemas: Vec<TableSchema> = vec![
+            make_parent("root"),
+            make_sibling("alpha", "root", &["a", "b"]),          // index 1
+            make_sibling("bravo", "root", &["a", "b", "c"]),     // index 2
+        ];
+        for i in 0..200_usize {
+            schemas.push(make_sibling(
+                &format!("typical_{i:03}"),
+                "root",
+                &["a", "b", "c", "d", "e"],
+            ));
+        }
+        // 203 schemas: root(0), alpha(1), bravo(2), typical_000..typical_199(3..202).
+
+        // alpha_first: the reference is alpha → min = Jaccard(alpha, typical) = 2/5 = 0.4
+        let alpha_first: Vec<usize> = std::iter::once(1)
+            .chain(std::iter::once(2))
+            .chain(3..schemas.len())
+            .collect();
+        // bravo_first: reference is bravo → without sort fix, min = Jaccard(bravo, typical) = 3/5 = 0.6
+        let bravo_first: Vec<usize> = std::iter::once(2)
+            .chain(std::iter::once(1))
+            .chain(3..schemas.len())
+            .collect();
+
+        let j_alpha = pairwise_jaccard_min(&schemas, &alpha_first);
+        let j_bravo = pairwise_jaccard_min(&schemas, &bravo_first);
+        assert_eq!(
+            j_alpha, j_bravo,
+            "pairwise_jaccard_min must be order-independent: alpha_first={j_alpha:.4}, bravo_first={j_bravo:.4}"
+        );
     }
 }
 

@@ -701,7 +701,10 @@ async fn test_pass2_timing_fields_populated() {
         let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None)
             .await.unwrap();
 
+        // Identity sanity — total_ms() is defined as the sum of both phases.
         assert_eq!(p2.timing.total_ms(), p2.timing.streaming_ms + p2.timing.copy_ms);
+        // Fields must be populated: a real COPY to PostgreSQL always takes ≥ 1 ms.
+        assert!(p2.timing.copy_ms > 0, "copy_ms must be > 0 after a real COPY to PostgreSQL");
     }).await;
 }
 
