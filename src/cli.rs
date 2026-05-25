@@ -141,7 +141,7 @@ pub struct Cli {
     /// Minimum number of sibling child tables required to trigger automatic KeyedPivot merging.
     /// Sibling tables share the same parent and have similar column schemas (see --sibling-jaccard).
     /// Set to 0 to disable automatic sibling detection.
-    #[arg(long, default_value_t = 3, value_name = "N")]
+    #[arg(long, default_value_t = 2, value_name = "N")]
     pub sibling_threshold: usize,
 
     /// Minimum Jaccard similarity (0.0–1.0) between sibling table column sets required for merging.

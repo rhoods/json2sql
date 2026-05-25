@@ -365,7 +365,17 @@ fn run_sibling_wave(
             let num_ok = num_ok && child_compatibility_score(schemas, &numeric_idx, &parent_to_object_children, &parent_to_array_children) >= min_jaccard;
             let non_ok = non_ok && child_compatibility_score(schemas, &non_num_regular, &parent_to_object_children, &parent_to_array_children) >= min_jaccard;
 
-            if !num_ok && !non_ok {
+            // ── Schema-based clustering for non-numeric group when Jaccard fails ──
+            let non_num_clusters: Vec<Vec<usize>> = if !non_ok && !non_num_regular.is_empty() {
+                greedy_schema_clusters(schemas, &non_num_regular, min_jaccard, threshold)
+                    .into_iter()
+                    .filter(|c| pairwise_jaccard_min(schemas, c) >= min_jaccard)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            if !num_ok && !non_ok && non_num_clusters.is_empty() {
                 continue;
             }
 
@@ -378,6 +388,17 @@ fn run_sibling_wave(
             if non_ok {
                 all_absorbed.extend_from_slice(&non_num_regular);
                 groups.push(make_subgroup(&parent_name, &non_num_regular, false, "key"));
+            }
+            for (i, cluster) in non_num_clusters.iter().enumerate() {
+                let prefix = siblings_key_prefix(schemas, cluster);
+                let desired = if prefix.is_empty() {
+                    format!("cluster_{}", i)
+                } else {
+                    format!("{}_key", prefix)
+                };
+                let suffix = unique_cluster_suffix(&parent_name, &desired, schemas);
+                all_absorbed.extend_from_slice(cluster);
+                groups.push(make_subgroup(&parent_name, cluster, false, &suffix));
             }
 
             let kind_label = if *array_children { "ObjectArray" } else { "Object" };
@@ -430,6 +451,45 @@ fn run_sibling_wave(
                 }
             };
             if actual_jaccard < min_jaccard {
+                // ── Schema-based greedy clustering fallback ─────────────────
+                // When the global Jaccard fails, try to find homogeneous sub-groups
+                // (e.g. front_* vs ingredients_* in an images dict).
+                let has_sig = regular.len() < child_indices.len();
+                if !parent_has_data && !has_sig {
+                    let raw_clusters =
+                        greedy_schema_clusters(schemas, &regular, min_jaccard, threshold);
+                    let valid_clusters: Vec<Vec<usize>> = raw_clusters
+                        .into_iter()
+                        .filter(|c| pairwise_jaccard_min(schemas, c) >= min_jaccard)
+                        .collect();
+                    if valid_clusters.len() >= 2 {
+                        let mut groups = Vec::new();
+                        let mut all_absorbed = Vec::new();
+                        for cluster in &valid_clusters {
+                            let prefix = siblings_key_prefix(schemas, cluster);
+                            let desired = if prefix.is_empty() {
+                                format!("cluster_{}", groups.len())
+                            } else {
+                                format!("{}_key", prefix)
+                            };
+                            let suffix = unique_cluster_suffix(&parent_name, &desired, schemas);
+                            all_absorbed.extend_from_slice(cluster);
+                            groups.push(make_subgroup(&parent_name, cluster, false, &suffix));
+                        }
+                        collapses.push(Collapse {
+                            parent_idx,
+                            array_children: *array_children,
+                            log_msg: format!(
+                                "  Schema-cluster MultiKeyedPivot: {} ({} tables → {} clusters)",
+                                parent_name,
+                                regular.len(),
+                                groups.len()
+                            ),
+                            kind: CollapseKind::Multi { groups },
+                            absorbed_indices: all_absorbed,
+                        });
+                    }
+                }
                 continue;
             }
 
@@ -807,6 +867,94 @@ fn process_co_sibling_group(
                 .insert(child_key, child_name);
         }
         Vec::new()
+    }
+}
+
+/// Greedy schema clustering: partition `indices` into groups where every member
+/// has Jaccard ≥ `min_jaccard` against the cluster seed (first unassigned sibling).
+/// Only clusters with at least `min_size` members are returned.
+/// Indices are sorted by table name before processing for determinism.
+fn greedy_schema_clusters(
+    schemas: &[TableSchema],
+    indices: &[usize],
+    min_jaccard: f64,
+    min_size: usize,
+) -> Vec<Vec<usize>> {
+    let mut unassigned: Vec<usize> = indices.to_vec();
+    unassigned.sort_unstable_by_key(|&i| &schemas[i].name);
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+
+    while !unassigned.is_empty() {
+        let seed = unassigned.remove(0);
+        let seed_cols: std::collections::HashSet<&str> = schemas[seed]
+            .data_columns()
+            .map(|c| c.original_name.as_str())
+            .collect();
+        let seed_pure = seed_cols.is_empty();
+
+        let mut cluster = vec![seed];
+        let mut remaining = Vec::new();
+        for &i in &unassigned {
+            let other_cols: std::collections::HashSet<&str> = schemas[i]
+                .data_columns()
+                .map(|c| c.original_name.as_str())
+                .collect();
+            let j = if seed_pure && other_cols.is_empty() {
+                1.0
+            } else if seed_pure || other_cols.is_empty() {
+                0.0
+            } else {
+                let inter = seed_cols.iter().filter(|&&c| other_cols.contains(c)).count();
+                let union = seed_cols.len() + other_cols.len() - inter;
+                if union == 0 { 1.0 } else { inter as f64 / union as f64 }
+            };
+            if j >= min_jaccard { cluster.push(i); } else { remaining.push(i); }
+        }
+        unassigned = remaining;
+        if cluster.len() >= min_size {
+            clusters.push(cluster);
+        }
+    }
+    clusters
+}
+
+/// Returns the longest common prefix of the last JSON path segment across `indices`,
+/// with trailing underscores and digits stripped.
+fn siblings_key_prefix(schemas: &[TableSchema], indices: &[usize]) -> String {
+    let keys: Vec<&[u8]> = indices
+        .iter()
+        .filter_map(|&i| schemas[i].path.last())
+        .map(|s| s.as_bytes())
+        .collect();
+    if keys.is_empty() {
+        return String::new();
+    }
+    let min_len = keys.iter().map(|b| b.len()).min().unwrap_or(0);
+    let prefix_len = (0..min_len)
+        .take_while(|&i| keys.iter().all(|k| k[i] == keys[0][i]))
+        .count();
+    let raw = std::str::from_utf8(&keys[0][..prefix_len]).unwrap_or("");
+    raw.trim_end_matches(|c: char| c == '_' || c.is_ascii_digit()).to_string()
+}
+
+/// Returns a suffix guaranteed not to produce a name collision with existing schemas.
+/// Tries `desired_suffix`, then `desired_suffix_2`, `desired_suffix_3`, … until unique.
+fn unique_cluster_suffix(
+    parent_name: &str,
+    desired_suffix: &str,
+    schemas: &[TableSchema],
+) -> String {
+    let taken = |suffix: &str| schemas.iter().any(|s| s.name == format!("{}_{}", parent_name, suffix));
+    if !taken(desired_suffix) {
+        return desired_suffix.to_string();
+    }
+    let mut n = 2usize;
+    loop {
+        let try_suffix = format!("{}_{}", desired_suffix, n);
+        if !taken(&try_suffix) {
+            return try_suffix;
+        }
+        n += 1;
     }
 }
 

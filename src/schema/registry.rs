@@ -911,5 +911,96 @@ mod tests {
         let rev = run(&fields_rev);
         assert_eq!(fwd, rev, "schema names must be identical regardless of observation order");
     }
+
+    /// With threshold=2, a pair of 2 identical siblings must be auto-merged into a KeyedPivot.
+    #[test]
+    fn test_sibling_threshold_two_detects_pair() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let obj = json!({ "nutriscore": {
+            "2021": { "grade": "b", "score": 45 },
+            "2023": { "grade": "b", "score": 45 }
+        }});
+        reg.observe_root("products", make_root(&obj));
+        let schemas = reg.finalize();
+        let nutriscore = schemas.iter().find(|s| s.name == "products_nutriscore").unwrap();
+        assert!(
+            matches!(nutriscore.wide_strategy, WideStrategy::KeyedPivot(_)),
+            "2 identical siblings with threshold=2 must become KeyedPivot, got: {:?}",
+            nutriscore.wide_strategy
+        );
+    }
+
+    /// With threshold=3, a pair of only 2 siblings must NOT be auto-merged.
+    #[test]
+    fn test_sibling_threshold_three_does_not_detect_pair() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let obj = json!({ "nutriscore": {
+            "2021": { "grade": "b", "score": 45 },
+            "2023": { "grade": "b", "score": 45 }
+        }});
+        reg.observe_root("products", make_root(&obj));
+        let schemas = reg.finalize();
+        let nutriscore = schemas.iter().find(|s| s.name == "products_nutriscore").unwrap();
+        assert!(
+            !matches!(nutriscore.wide_strategy, WideStrategy::KeyedPivot(_)),
+            "2 siblings with threshold=3 must NOT become KeyedPivot"
+        );
+    }
+
+    /// Non-mixed group with 2 disjoint sub-schemas → greedy clustering produces MultiKeyedPivot.
+    /// Without clustering this would fall through (global pairwise Jaccard = 0).
+    #[test]
+    fn test_schema_clustering_non_mixed_two_groups() {
+        // threshold=2, min_jaccard=0.5
+        // "front_*" siblings have {imgid, rev}, "ingr_*" have {angle, x} → disjoint
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let obj = json!({
+            "dict": {
+                "front_fr": { "imgid": "1", "rev": "3" },
+                "front_en": { "imgid": "2", "rev": "4" },
+                "ingr_fr":  { "angle": 10, "x": 100 },
+                "ingr_en":  { "angle": 20, "x": 200 }
+            }
+        });
+        reg.observe_root("root", make_root(&obj));
+        let schemas = reg.finalize();
+        let dict = schemas.iter().find(|s| s.name == "root_dict").unwrap();
+        assert!(
+            matches!(dict.wide_strategy, WideStrategy::MultiKeyedPivot(_)),
+            "heterogeneous non-numeric group with 2 homogeneous clusters must produce MultiKeyedPivot, got: {:?}",
+            dict.wide_strategy
+        );
+        if let WideStrategy::MultiKeyedPivot(groups) = &dict.wide_strategy {
+            assert_eq!(groups.len(), 2, "must produce exactly 2 pivot groups (front + ingr)");
+        }
+    }
+
+    /// Mixed group: numeric ok + non-numeric heterogeneous → numeric merged + clusters for non-numeric.
+    #[test]
+    fn test_schema_clustering_mixed_numeric_plus_clusters() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let obj = json!({
+            "images": {
+                "1": { "uploader": "u1", "uploaded_t": 123 },
+                "2": { "uploader": "u2", "uploaded_t": 456 },
+                "front_fr": { "imgid": "1", "rev": "3" },
+                "front_en": { "imgid": "2", "rev": "4" },
+                "ingr_fr":  { "angle": 10, "x": 100 },
+                "ingr_en":  { "angle": 20, "x": 200 }
+            }
+        });
+        reg.observe_root("root", make_root(&obj));
+        let schemas = reg.finalize();
+        let images = schemas.iter().find(|s| s.name == "root_images").unwrap();
+        assert!(
+            matches!(images.wide_strategy, WideStrategy::MultiKeyedPivot(_)),
+            "mixed group with clusterable non-numeric siblings must produce MultiKeyedPivot, got: {:?}",
+            images.wide_strategy
+        );
+        if let WideStrategy::MultiKeyedPivot(groups) = &images.wide_strategy {
+            // numeric group + 2 non-numeric clusters = 3 total
+            assert_eq!(groups.len(), 3, "must produce 3 groups (num + front + ingr), got {}", groups.len());
+        }
+    }
 }
 
