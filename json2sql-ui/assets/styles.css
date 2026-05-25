@@ -339,26 +339,6 @@ button { font-family: inherit; }
 .toggle.on .sw { background: var(--acc); }
 .toggle.on .sw::after { transform: translateX(12px); }
 
-.chk {
-  width: 14px; height: 14px;
-  border: 1.5px solid var(--bd-3);
-  border-radius: 3px;
-  display: inline-grid;
-  place-items: center;
-  flex-shrink: 0;
-  background: var(--bg-input);
-}
-.chk.on {
-  background: var(--acc);
-  border-color: var(--acc);
-}
-.chk.on::after {
-  content: "";
-  width: 8px; height: 4px;
-  border-left: 1.5px solid #0a1416;
-  border-bottom: 1.5px solid #0a1416;
-  transform: rotate(-45deg) translate(1px, -1px);
-}
 
 .kbd {
   display: inline-block;
@@ -523,6 +503,45 @@ table.t tbody tr.sel  { background: var(--acc-bg); }
 table.t tbody tr.sel:hover { background: var(--acc-bg); }
 table.t tbody tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--acc); }
 table.t tbody tr.muted td { color: var(--fg-3); }
+
+/* ── tree connector (.tc) ─────────────────────────────────────────── */
+/* Flex sibling of the name span — never inside inline text. Row-h = 28px. */
+.tc {
+  position: relative;
+  display: inline-block;
+  width: 12px;
+  height: 28px;
+  flex-shrink: 0;
+}
+/* Horizontal arm at vertical midpoint */
+.tc::after {
+  content: "";
+  position: absolute;
+  top: 14px;
+  left: 0;
+  width: 12px;
+  height: 1px;
+  background: var(--fg-4);
+}
+/* Vertical segment: last child stops at midpoint, mid child spans full height */
+.tc-last::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 14px;
+  width: 1px;
+  background: var(--fg-4);
+}
+.tc-mid::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 28px;
+  width: 1px;
+  background: var(--fg-4);
+}
 
 /* tree (some screens still use it) */
 .tree { font-size: var(--fs-sm); }

@@ -77,6 +77,7 @@ pub fn build_table_rows(
     overrides:       &HashMap<String, WideStrategy>,
     overflow_names:  &HashSet<String>,
     selected_indices: &HashSet<usize>,
+    absorbed_names:  &HashSet<String>,
     filter:          &str,
     show_warn_only:  bool,
 ) -> Vec<TableRowViewModel> {
@@ -101,7 +102,11 @@ pub fn build_table_rows(
 
         let has_warn = is_overflow || is_routing;
 
-        let (badge_cls, badge_lbl) = if is_routing {
+        let is_absorbed = absorbed_names.contains(&table.name);
+
+        let (badge_cls, badge_lbl) = if is_absorbed {
+            ("muted", "merged")
+        } else if is_routing {
             ("muted", "ROUTE")
         } else if is_overflow {
             ("warn", "JSONB ⚠")
@@ -121,7 +126,7 @@ pub fn build_table_rows(
         };
 
         let is_selected = selected_indices.contains(&i);
-        let row_cls: &'static str = if is_selected { "sel" } else if is_routing { "muted" } else { "" };
+        let row_cls: &'static str = if is_selected { "sel" } else if is_routing || is_absorbed { "muted" } else { "" };
 
         let visible = !(show_warn_only && !has_warn)
             && (filter_lc.is_empty() || table.name.to_lowercase().contains(&filter_lc));
@@ -513,7 +518,7 @@ mod tests {
     }
 
     fn empty_rows(schemas: &[TableSchema]) -> Vec<TableRowViewModel> {
-        build_table_rows(schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), "", false)
+        build_table_rows(schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &HashSet::new(), "", false)
     }
 
     // --- build_table_rows tests ---
@@ -533,7 +538,7 @@ mod tests {
     fn overflow_without_override_sets_warn_badge() {
         let schemas = vec![make_overflow_table("big")];
         let overflow = HashSet::from(["big".to_string()]);
-        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), "", false);
+        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), &HashSet::new(), "", false);
         assert!(rows[0].has_warn);
         assert_eq!(rows[0].badge_cls, "warn");
         assert_eq!(rows[0].badge_lbl, "JSONB ⚠");
@@ -545,7 +550,7 @@ mod tests {
         let overflow = HashSet::from(["big".to_string()]);
         let mut overrides = HashMap::new();
         overrides.insert("big".to_string(), WideStrategy::Jsonb);
-        let rows = build_table_rows(&schemas, &overrides, &overflow, &HashSet::new(), "", false);
+        let rows = build_table_rows(&schemas, &overrides, &overflow, &HashSet::new(), &HashSet::new(), "", false);
         assert!(!rows[0].has_warn, "user override must suppress overflow flag");
         assert_ne!(rows[0].badge_cls, "warn");
     }
@@ -563,7 +568,7 @@ mod tests {
     #[test]
     fn filter_text_hides_non_matching() {
         let schemas = vec![make_table("orders", None), make_table("users", None)];
-        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), "user", false);
+        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &HashSet::new(), "user", false);
         assert!(!rows[0].visible, "orders should be hidden");
         assert!(rows[1].visible, "users should match");
     }
@@ -579,7 +584,7 @@ mod tests {
     fn show_warn_only_hides_clean_rows() {
         let schemas = vec![make_table("clean", None), make_overflow_table("big")];
         let overflow = HashSet::from(["big".to_string()]);
-        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), "", true);
+        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), &HashSet::new(), "", true);
         assert!(!rows[0].visible, "clean table must be hidden");
         assert!(rows[1].visible,  "warn table must be visible");
     }
@@ -588,7 +593,7 @@ mod tests {
     fn selected_row_has_sel_class() {
         let schemas = vec![make_table("a", None), make_table("b", None)];
         let selected = HashSet::from([1usize]);
-        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &selected, "", false);
+        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &selected, &HashSet::new(), "", false);
         assert_eq!(rows[0].row_cls, "");
         assert_eq!(rows[1].row_cls, "sel");
         assert!(rows[1].is_selected);
@@ -646,5 +651,34 @@ mod tests {
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(row.index, i);
         }
+    }
+
+    #[test]
+    fn absorbed_table_shows_merged_badge() {
+        let schemas = vec![
+            make_table("parent", None),
+            make_table("child_a", Some("parent")),
+            make_table("child_b", Some("parent")),
+        ];
+        let absorbed = HashSet::from(["child_a".to_string(), "child_b".to_string()]);
+        let rows = build_table_rows(
+            &schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &absorbed, "", false,
+        );
+        assert!(rows[0].visible,                    "parent must be visible");
+        assert!(rows[1].visible,                    "absorbed child_a must remain visible");
+        assert_eq!(rows[1].badge_lbl, "merged",     "absorbed must show merged badge");
+        assert_eq!(rows[1].row_cls,   "muted",      "absorbed must be muted");
+        assert_eq!(rows[2].badge_lbl, "merged");
+    }
+
+    #[test]
+    fn non_absorbed_table_has_normal_badge() {
+        let schemas = vec![make_table("standalone", None)];
+        let absorbed: HashSet<String> = HashSet::new();
+        let rows = build_table_rows(
+            &schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &absorbed, "", false,
+        );
+        assert!(rows[0].visible);
+        assert_ne!(rows[0].badge_lbl, "merged");
     }
 }

@@ -4,8 +4,8 @@
 /// Build rows with [`crate::screens::build_table_rows`] first, then pass them here.
 ///
 /// Two layout modes controlled by `show_checkboxes`:
-///   - `true`  (Strategy screen): 4 cols — [chk]name | cols | badge | warn
-///   - `false` (Preview screen):  2 cols — [connector]name | badge+warn
+///   - `true`  (Strategy screen): 4 cols — name | cols | badge | warn
+///   - `false` (Preview screen):  2 cols — name | badge+warn
 use dioxus::prelude::*;
 use crate::screens::TableRowViewModel;
 
@@ -15,7 +15,7 @@ pub fn TableListPanel(
     on_select: EventHandler<(usize, Modifiers)>,
     /// Called with the parent row index when the "Select children" hover-button is clicked.
     on_select_children: EventHandler<usize>,
-    /// true = interactive (checkboxes, col count, thead); false = read-only (tree indent)
+    /// true = interactive (col count, thead); false = read-only (tree indent)
     show_checkboxes: bool,
 ) -> Element {
     let mut hovered: Signal<Option<usize>> = use_signal(|| None);
@@ -41,7 +41,7 @@ pub fn TableListPanel(
                             let cls          = row.row_cls;
                             let indent       = row.indent_px;
                             let conn         = row.connector;
-                            let is_sel       = row.is_selected;
+                            let tc_cls       = if conn.starts_with('└') { "tc tc-last" } else { "tc tc-mid" };
                             let is_wide      = row.is_wide;
                             let cnt          = row.col_count;
                             let bcls         = row.badge_cls;
@@ -53,21 +53,18 @@ pub fn TableListPanel(
                                 tr {
                                     key: "{name}",
                                     class: "{cls}",
-                                    style: "cursor:pointer;position:relative;",
+                                    style: "cursor:pointer;",
                                     onclick: move |evt: MouseEvent| on_select.call((i, evt.modifiers())),
                                     onmouseenter: move |_| hovered.set(Some(i)),
                                     onmouseleave: move |_| hovered.set(None),
                                     if show_checkboxes {
                                         // Interactive layout: 4 columns
                                         td { style: "padding-left:{indent}px;",
-                                            div { class: "row gap-sm",
-                                                span { class: if is_sel { "chk on" } else { "chk" } }
-                                                span { class: "mono",
-                                                    if !conn.is_empty() {
-                                                        span { class: "fg-4", "{conn}" }
-                                                    }
-                                                    "{name}"
+                                            div { class: "row gap-xs",
+                                                if !conn.is_empty() {
+                                                    span { class: "{tc_cls}" }
                                                 }
+                                                span { class: "mono", "{name}" }
                                                 if has_children && is_hovered {
                                                     button {
                                                         class: "btn ghost sq",
@@ -96,11 +93,11 @@ pub fn TableListPanel(
                                     } else {
                                         // Read-only layout: 2 columns
                                         td {
-                                            style: "padding-left:{indent}px;font-family:var(--font-code);font-size:var(--fs-xs);white-space:nowrap;",
+                                            style: "padding-left:{indent}px;display:flex;align-items:center;gap:4px;font-family:var(--font-code);font-size:var(--fs-xs);white-space:nowrap;",
                                             if !conn.is_empty() {
-                                                span { class: "fg-4", "{conn}" }
+                                                span { class: "{tc_cls}" }
                                             }
-                                            "{name}"
+                                            span { "{name}" }
                                         }
                                         td { style: "white-space:nowrap;text-align:right;",
                                             span { class: "badge {bcls}", "{blbl}" }

@@ -37,6 +37,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let overrides_snap    = state.read().schema.strategy_overrides.clone();
     let overflow_warnings = state.read().schema.overflow_warnings.clone();
     let selected_indices  = state.read().schema.selected_table_indices.clone();
+    let absorbed_names    = state.read().schema.absorbed_names.clone();
 
     let overflow_names: std::collections::HashSet<String> =
         overflow_warnings.iter().map(|w| w.table_name.clone()).collect();
@@ -89,7 +90,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
     // Pre-compute rows and visible index list so the Shift+click handler can capture it.
     let table_rows = build_table_rows(
-        &schemas, &overrides_snap, &overflow_names, &selected_indices, &filter, show_warn,
+        &schemas, &overrides_snap, &overflow_names, &selected_indices, &absorbed_names, &filter, show_warn,
     );
     let visible_indices: Vec<usize> = table_rows.iter()
         .filter(|r| r.visible)

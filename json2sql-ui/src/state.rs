@@ -244,6 +244,8 @@ pub struct SchemaState {
     pub pass1_stats: Vec<ColumnStats>,
     /// True when schemas were loaded from a saved snapshot rather than a live Pass 1 run.
     pub schema_snapshot_loaded: bool,
+    /// Tables absorbed by a manual sibling merge — hidden from the table list.
+    pub absorbed_names: HashSet<String>,
 }
 
 impl Default for SchemaState {
@@ -259,6 +261,7 @@ impl Default for SchemaState {
             column_collisions: Vec::new(),
             pass1_stats: Vec::new(),
             schema_snapshot_loaded: false,
+            absorbed_names: HashSet::new(),
         }
     }
 }
@@ -275,6 +278,7 @@ impl SchemaState {
         self.selected_table_indices = HashSet::from([0]);
         self.last_selected_idx = 0;
         self.schema_snapshot_loaded = false;
+        self.absorbed_names = HashSet::new();
     }
 
     /// Apply a Shift+click range-select.
@@ -529,7 +533,8 @@ impl SchemaState {
         let parent_idx = self.schemas.iter().position(|s| s.name == result.parent_name).unwrap_or(0);
         self.strategy_overrides.insert(result.parent_name, result.strategy);
         for name in result.absorbed_names {
-            self.strategy_overrides.insert(name, WideStrategy::Ignore);
+            self.strategy_overrides.insert(name.clone(), WideStrategy::Ignore);
+            self.absorbed_names.insert(name);
         }
         self.selected_table_indices = HashSet::from([parent_idx]);
         self.last_selected_idx = parent_idx;
@@ -986,6 +991,22 @@ mod tests {
         s.apply_sibling_merge("key").unwrap();
         assert_eq!(s.selected_table_indices, HashSet::from([0]));
         assert_eq!(s.last_selected_idx, 0);
+    }
+
+    #[test]
+    fn apply_sibling_merge_populates_absorbed_names() {
+        let schemas = vec![
+            make_schema("img", None),
+            make_schema_with_cols("img_front", Some("img"), &["url"]),
+            make_schema_with_cols("img_back",  Some("img"), &["url"]),
+        ];
+        let mut s = SchemaState::default();
+        s.schemas = schemas;
+        s.selected_table_indices = HashSet::from([1, 2]);
+        s.apply_sibling_merge("key").unwrap();
+        assert!(s.absorbed_names.contains("img_front"), "img_front must be in absorbed_names");
+        assert!(s.absorbed_names.contains("img_back"),  "img_back must be in absorbed_names");
+        assert!(!s.absorbed_names.contains("img"),      "parent must not be in absorbed_names");
     }
 
     #[test]

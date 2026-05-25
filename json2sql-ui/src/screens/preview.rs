@@ -130,6 +130,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                                 &schemas, &strategy_overrides,
                                 &std::collections::HashSet::new(),
                                 &std::collections::HashSet::from([idx]),
+                                &state.read().schema.absorbed_names,
                                 "", false,
                             ),
                             show_checkboxes: false,
