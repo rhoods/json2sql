@@ -51,7 +51,7 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | `type_tracker.rs` | `TypeTracker` : histogramme de types par colonne. `InferredType` et `PgType` avec règles de résolution et d'élargissement |
 | `observer.rs` | `SchemaObserver` : accumule les observations row-by-row via `observe_root()` et `merge()`. Contient `TableEntry` (privé) |
 | `finalizer.rs` | `SchemaFinalizer` : transformations post-stream — construit les `TableSchema`, applique les stratégies, trie topologiquement. Contient `apply_column_limit_guard()`, `exclude_absorbed_children()` |
-| `cascading.rs` | Algorithme de détection et fusion des tables sœurs (`finalize_cascading`, `child_compatibility_score`, `pairwise_jaccard_min`) |
+| `cascading.rs` | Algorithme de détection et fusion des tables sœurs (`finalize_cascading`, `child_compatibility_score`, `pairwise_jaccard_min`). Builder manuel : `build_keyed_pivot_from_siblings(&[TableSchema], &[usize], key_col_name) -> Result<MergeResult, MergeError>` — produit `KeyedPivot` ou `MultiKeyedPivot` depuis une sélection utilisateur. |
 | `wide_strategies.rs` | Fonctions d'application des stratégies wide : `apply_wide_strategy_columns`, `apply_flatten`, `apply_jsonb_flatten`, `apply_normalize_dynamic_keys`, `build_union_columns`, `classify_key_shape` |
 | `reporter.rs` | Lecture des résultats d'observation : `collect_stats()`, `anomaly_iter()`, `truncated_names()`, `column_collisions()` |
 | `registry.rs` | `SchemaRegistry` : façade publique (~100 lignes prod). Délègue à `observer`, `finalizer` et `reporter` |

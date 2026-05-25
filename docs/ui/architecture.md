@@ -57,9 +57,11 @@ Méthodes de lifecycle :
 Méthodes de sélection (sur `SchemaState`, champ `schema: SchemaState`) :
 - `apply_click(i, ctrl)` — clic simple ou Ctrl+clic : sélectionne `i` seul, ou toggle dans la sélection existante
 - `apply_shift_click(i, anchor, visible_indices)` — Shift+clic : remplace la sélection par la plage `[anchor..i]` restreinte aux indices visibles
+- `apply_sibling_merge(key_col_name)` — appelle `build_keyed_pivot_from_siblings` sur la sélection courante, écrit `KeyedPivot`/`MultiKeyedPivot` sur le parent et `Ignore` sur les siblings absorbés, reset la sélection sur le parent
 
-Fonction libre :
+Fonctions libres :
 - `select_children_visible(schemas, parent_idx, visible_indices) -> HashSet<usize>` — retourne les indices des tables dont `parent_table` correspond au nom de la table `parent_idx`, filtrés aux visibles
+- `compute_jaccard_display(schemas, indices) -> JaccardDisplay` — score Jaccard min pairwise + ratio colonnes communes/union + `same_parent` pour le panneau Strategy multi-select
 
 La logique de construction de schéma effectif (`build_effective_schemas`) vit dans `screens/mod.rs`.
 
