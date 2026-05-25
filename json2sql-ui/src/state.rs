@@ -464,6 +464,79 @@ impl AppState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Jaccard display info (multi-select panel)
+// ---------------------------------------------------------------------------
+
+/// Display data for the Jaccard similarity section in the Strategy right panel.
+pub struct JaccardDisplay {
+    /// Minimum pairwise Jaccard score across all selected table pairs.
+    pub score: f64,
+    /// Number of data-column names present in ALL selected tables (intersection).
+    pub common: usize,
+    /// Total distinct data-column names across all selected tables (union).
+    pub union_count: usize,
+    /// True when all selected tables share the same non-None parent_table.
+    pub same_parent: bool,
+    /// The common parent name when `same_parent` is true.
+    pub parent_name: Option<String>,
+}
+
+/// Compute Jaccard display info for the given selection.
+/// Returns defaults (score=1.0, empty counts) when fewer than 2 tables are selected.
+pub fn compute_jaccard_display(schemas: &[TableSchema], indices: &[usize]) -> JaccardDisplay {
+    use json2sql::schema::cascading::pairwise_jaccard_min;
+    use std::collections::HashSet as HS;
+
+    if indices.len() < 2 {
+        return JaccardDisplay { score: 1.0, common: 0, union_count: 0, same_parent: false, parent_name: None };
+    }
+
+    let tables: Vec<&TableSchema> = indices.iter().filter_map(|&i| schemas.get(i)).collect();
+
+    // Column name sets (data columns only).
+    let col_sets: Vec<HS<&str>> = tables.iter()
+        .map(|t| t.data_columns().map(|c| c.original_name.as_str()).collect())
+        .collect();
+
+    let union_cols: HS<&str> = col_sets.iter().flatten().copied().collect();
+    let union_count = union_cols.len();
+    let common = if col_sets.is_empty() { 0 } else {
+        union_cols.iter().filter(|&&c| col_sets.iter().all(|s| s.contains(c))).count()
+    };
+
+    let score = pairwise_jaccard_min(schemas, indices);
+
+    let parents: Vec<Option<&str>> = tables.iter().map(|t| t.parent_table.as_deref()).collect();
+    let same_parent = parents[0].is_some() && parents.iter().all(|p| *p == parents[0]);
+    let parent_name = if same_parent { parents[0].map(|s| s.to_string()) } else { None };
+
+    JaccardDisplay { score, common, union_count, same_parent, parent_name }
+}
+
+// ---------------------------------------------------------------------------
+
+impl SchemaState {
+    /// Apply a manual sibling merge for the current selection.
+    /// Sets `KeyedPivot` or `MultiKeyedPivot` on the parent, marks absorbed siblings as `Ignore`,
+    /// and resets the selection to the parent table.
+    pub fn apply_sibling_merge(&mut self, key_col_name: &str) -> Result<(), json2sql::schema::cascading::MergeError> {
+        use json2sql::schema::cascading::build_keyed_pivot_from_siblings;
+
+        let indices: Vec<usize> = self.selected_table_indices.iter().copied().collect();
+        let result = build_keyed_pivot_from_siblings(&self.schemas, &indices, key_col_name)?;
+
+        let parent_idx = self.schemas.iter().position(|s| s.name == result.parent_name).unwrap_or(0);
+        self.strategy_overrides.insert(result.parent_name, result.strategy);
+        for name in result.absorbed_names {
+            self.strategy_overrides.insert(name, WideStrategy::Ignore);
+        }
+        self.selected_table_indices = HashSet::from([parent_idx]);
+        self.last_selected_idx = parent_idx;
+        Ok(())
+    }
+}
+
 /// Return the indices of direct children of `schemas[parent_idx]` that are in `visible_indices`.
 pub fn select_children_visible(
     schemas: &[TableSchema],
@@ -814,6 +887,105 @@ mod tests {
             rows_flushed: 120,
         });
         assert_eq!(s.import.pass2_progress.rows_per_table["orders"], 120);
+    }
+
+    // --- jaccard_info + apply_sibling_merge ---
+
+    fn make_schema_with_cols(name: &str, parent: Option<&str>, data_keys: &[&str]) -> json2sql::schema::table_schema::TableSchema {
+        use json2sql::schema::table_schema::ColumnSchema;
+        use json2sql::schema::type_tracker::PgType;
+        let mut s = make_schema(name, parent);
+        s.columns.push(ColumnSchema { name: "j2s_id".to_string(), original_name: "j2s_id".to_string(), pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false });
+        for &k in data_keys {
+            s.columns.push(ColumnSchema { name: k.to_string(), original_name: k.to_string(), pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false });
+        }
+        s
+    }
+
+    #[test]
+    fn jaccard_display_identical_siblings_score_one() {
+        let schemas = vec![
+            make_schema_with_cols("img_front", Some("img"), &["url", "width"]),
+            make_schema_with_cols("img_back",  Some("img"), &["url", "width"]),
+        ];
+        let d = compute_jaccard_display(&schemas, &[0, 1]);
+        assert!((d.score - 1.0).abs() < 1e-9);
+        assert_eq!(d.common, 2);
+        assert_eq!(d.union_count, 2);
+        assert!(d.same_parent);
+        assert_eq!(d.parent_name.as_deref(), Some("img"));
+    }
+
+    #[test]
+    fn jaccard_display_different_parents() {
+        let schemas = vec![
+            make_schema_with_cols("a_1", Some("a"), &["x"]),
+            make_schema_with_cols("b_1", Some("b"), &["x"]),
+        ];
+        let d = compute_jaccard_display(&schemas, &[0, 1]);
+        assert!(!d.same_parent);
+        assert!(d.parent_name.is_none());
+    }
+
+    #[test]
+    fn jaccard_display_partial_overlap() {
+        let schemas = vec![
+            make_schema_with_cols("p_a", Some("p"), &["x", "y", "z"]),
+            make_schema_with_cols("p_b", Some("p"), &["x", "y", "w"]),
+        ];
+        let d = compute_jaccard_display(&schemas, &[0, 1]);
+        // intersection {x,y} = 2, union {x,y,z,w} = 4 → 0.5
+        assert_eq!(d.common, 2);
+        assert_eq!(d.union_count, 4);
+        assert!((d.score - 0.5).abs() < 1e-9);
+        assert!(d.same_parent);
+    }
+
+    #[test]
+    fn apply_sibling_merge_sets_parent_strategy() {
+        use json2sql::schema::table_schema::WideStrategy;
+        let schemas = vec![
+            make_schema("img", None),
+            make_schema_with_cols("img_front", Some("img"), &["url"]),
+            make_schema_with_cols("img_back",  Some("img"), &["url"]),
+        ];
+        let mut s = SchemaState::default();
+        s.schemas = schemas;
+        s.selected_table_indices = HashSet::from([1, 2]);
+        s.last_selected_idx = 1;
+        s.apply_sibling_merge("img_key").unwrap();
+        assert!(matches!(s.strategy_overrides.get("img"), Some(WideStrategy::KeyedPivot(_))));
+    }
+
+    #[test]
+    fn apply_sibling_merge_absorbed_marked_ignore() {
+        use json2sql::schema::table_schema::WideStrategy;
+        let schemas = vec![
+            make_schema("img", None),
+            make_schema_with_cols("img_front", Some("img"), &["url"]),
+            make_schema_with_cols("img_back",  Some("img"), &["url"]),
+        ];
+        let mut s = SchemaState::default();
+        s.schemas = schemas;
+        s.selected_table_indices = HashSet::from([1, 2]);
+        s.apply_sibling_merge("key").unwrap();
+        assert!(matches!(s.strategy_overrides.get("img_front"), Some(WideStrategy::Ignore)));
+        assert!(matches!(s.strategy_overrides.get("img_back"),  Some(WideStrategy::Ignore)));
+    }
+
+    #[test]
+    fn apply_sibling_merge_resets_selection_to_parent() {
+        let schemas = vec![
+            make_schema("img", None),
+            make_schema_with_cols("img_front", Some("img"), &["url"]),
+            make_schema_with_cols("img_back",  Some("img"), &["url"]),
+        ];
+        let mut s = SchemaState::default();
+        s.schemas = schemas;
+        s.selected_table_indices = HashSet::from([1, 2]);
+        s.apply_sibling_merge("key").unwrap();
+        assert_eq!(s.selected_table_indices, HashSet::from([0]));
+        assert_eq!(s.last_selected_idx, 0);
     }
 
     #[test]

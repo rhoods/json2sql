@@ -11,7 +11,7 @@ use dioxus::prelude::Modifiers;
 use json2sql::schema::table_schema::WideStrategy;
 
 use crate::screens::{build_table_rows, pick_save_file, strategy_badge, strategy_label, PickResult};
-use crate::state::select_children_visible;
+use crate::state::{compute_jaccard_display, select_children_visible};
 use crate::screens::table_list::TableListPanel;
 use crate::state::{AppScreen, AppState};
 
@@ -29,6 +29,8 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let save_feedback:   Signal<Option<Result<String, String>>> = use_signal(|| None);
     let mut banner_dismissed: Signal<bool>           = use_signal(|| false);
     let mut anchor_idx:      Signal<usize>           = use_signal(|| 0);
+    let mut merge_key_col:   Signal<String>          = use_signal(|| "key".to_string());
+    let mut merge_error:     Signal<Option<String>>  = use_signal(|| None);
 
     // ── Derived snapshot ──────────────────────────────────────────────────
     let schemas           = state.read().schema.schemas.clone();
@@ -59,6 +61,27 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
     let is_multi = selected_indices.len() > 1;
     let selection_count = selected_indices.len();
+
+    // Jaccard info + derived display strings — computed only when multi-select is active.
+    let jaccard = if is_multi {
+        let idx_vec: Vec<usize> = selected_indices.iter().copied().collect();
+        compute_jaccard_display(&schemas, &idx_vec)
+    } else {
+        crate::state::JaccardDisplay { score: 1.0, common: 0, union_count: 0, same_parent: false, parent_name: None }
+    };
+    let jaccard_score_pct   = format!("{:.0}%", jaccard.score * 100.0);
+    let jaccard_ratio_txt   = if jaccard.union_count == 0 {
+        "no data cols".to_string()
+    } else {
+        format!("{} / {} cols", jaccard.common, jaccard.union_count)
+    };
+    let (jaccard_color, jaccard_label) = if jaccard.score >= 0.7 {
+        ("var(--success)", "High similarity")
+    } else if jaccard.score >= 0.5 {
+        ("var(--warning)", "Medium similarity")
+    } else {
+        ("var(--danger)", "Low similarity")
+    };
 
     // Table list — filtered
     let filter   = filter_text.read().to_lowercase();
@@ -472,6 +495,79 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             // pane body
                             div { class: "pane-body",
                                 if is_multi {
+                                    // ── Jaccard similarity ────────────────
+                                    div { style: "padding:12px 14px;border-bottom:1px solid var(--bd);",
+                                        div { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px;",
+                                            span { style: "font-size:var(--fs-xs);color:var(--fg-3);font-weight:600;text-transform:uppercase;letter-spacing:.05em;",
+                                                "Jaccard similarity"
+                                            }
+                                            span { style: "font-size:var(--fs-sm);font-weight:700;color:{jaccard_color};margin-left:auto;",
+                                                "{jaccard_score_pct}"
+                                            }
+                                        }
+                                        div { style: "height:6px;border-radius:3px;background:var(--bg-2);overflow:hidden;",
+                                            div { style: "height:100%;border-radius:3px;background:{jaccard_color};width:{jaccard_score_pct};transition:width .2s;" }
+                                        }
+                                        div { style: "display:flex;justify-content:space-between;margin-top:5px;",
+                                            span { style: "font-size:var(--fs-xs);color:var(--fg-4);", "{jaccard_label}" }
+                                            span { style: "font-size:var(--fs-xs);color:var(--fg-3);font-family:'JetBrains Mono',monospace;",
+                                                "{jaccard_ratio_txt}"
+                                            }
+                                        }
+                                        if jaccard.same_parent {
+                                            div { style: "margin-top:12px;padding:10px 12px;background:var(--bg-2);border:1px solid var(--bd);border-radius:var(--r-md);",
+                                                h4 { style: "font-size:var(--fs-xs);color:var(--fg-2);margin:0 0 8px;font-weight:600;",
+                                                    "⇢ Merge as siblings"
+                                                }
+                                                p { style: "font-size:var(--fs-xs);color:var(--fg-4);margin:0 0 8px;line-height:1.5;",
+                                                    "Collapse these tables under their shared parent "
+                                                    span { style: "font-family:'JetBrains Mono',monospace;color:var(--fg-2);",
+                                                        "{jaccard.parent_name.as_deref().unwrap_or(\"\")}"
+                                                    }
+                                                    "."
+                                                }
+                                                if jaccard.score < 0.5 {
+                                                    p { style: "font-size:var(--fs-xs);color:var(--warning);margin:0 0 8px;",
+                                                        "⚠ Low similarity — the tables may have incompatible schemas."
+                                                    }
+                                                }
+                                                div { class: "field",
+                                                    label { style: "font-size:var(--fs-xs);color:var(--fg-3);margin-bottom:3px;display:block;",
+                                                        "Key column name"
+                                                    }
+                                                    input {
+                                                        class: "input sm",
+                                                        r#type: "text",
+                                                        placeholder: "key",
+                                                        value: "{merge_key_col.read()}",
+                                                        oninput: move |e| { *merge_key_col.write() = e.value(); },
+                                                    }
+                                                }
+                                                if let Some(ref err) = *merge_error.read() {
+                                                    p { style: "font-size:var(--fs-xs);color:var(--danger);margin:6px 0 0;", "{err}" }
+                                                }
+                                                div { style: "margin-top:8px;",
+                                                    button {
+                                                        class: "btn primary sm",
+                                                        onclick: move |_| {
+                                                            let col = merge_key_col.read().trim().to_string();
+                                                            let key = if col.is_empty() { "key".to_string() } else { col };
+                                                            match state.write().schema.apply_sibling_merge(&key) {
+                                                                Ok(()) => { merge_error.set(None); }
+                                                                Err(e)  => { merge_error.set(Some(e.to_string())); }
+                                                            }
+                                                        },
+                                                        "Merge siblings"
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            p { style: "margin-top:8px;font-size:var(--fs-xs);color:var(--fg-4);",
+                                                "⚠ Tables have different parents — merge not available."
+                                            }
+                                        }
+                                    }
+
                                     // ── Bulk strategy ─────────────────────
                                     div { class: "section",
                                         h4 { "Bulk strategy" }

@@ -8,6 +8,12 @@ Description courte de ce qui a été fait.
 
 Ajouter toujours EN HAUT du fichier. -->
 
+## 2026-05-25 — T2+T3 Jaccard similarity + Merge as siblings (Strategy panel)
+
+- **Backend** : `pairwise_jaccard_min` → `pub` dans `cascading.rs` ; `build_keyed_pivot_from_siblings(&[TableSchema], &[usize], key_col_name) -> Result<MergeResult, MergeError>` — valide la sélection (≥2 tables, même parent, pas de routing table), extrait les clés depuis les suffixes de noms, produit `KeyedPivot` (clés homogènes) ou `MultiKeyedPivot` (clés mixtes num+txt) ; `extract_key_suffixes` privée ; 8 tests unitaires
+- **State** : `JaccardDisplay`, `compute_jaccard_display` (score + ratio common/union + same_parent check) ; `SchemaState::apply_sibling_merge` (appelle builder, écrit overrides, reset sélection sur parent) ; 6 tests
+- **UI** : panneau droit Strategy en mode multi-select — barre Jaccard colorée (rouge/orange/vert) + ratio colonnes + bloc "Merge as siblings" conditionnel (visible si même parent) avec champ key_col_name, warning low similarity, feedback d'erreur
+
 ## 2026-05-23 — IHM — Refacto SOLID (T-A, T-B) dead code + double-launch fix
 
 - **T-A** : suppression de `strategy_configurator.rs` (282 lignes) jamais utilisé depuis la refonte E1-E5 ; retire `pub mod strategy_configurator` de `screens/mod.rs`

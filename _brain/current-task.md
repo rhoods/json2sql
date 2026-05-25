@@ -5,9 +5,8 @@ _Mis à jour automatiquement en fin de session._
 ## Prochaines tâches
 
 ### UX panneau de sélection (voir `_brain/ux-todo.md` pour le détail complet)
-- T1 `TableSelectionPanel` : indentation correcte + multi-select implicite + Shift+click + "Select children" + "Select all visible"
-- T2 Score Jaccard sur sélection multi (exposer `pairwise_jaccard_min` en `pub`)
-- T3 Fusion manuelle de tables sœurs (feature backend + UI)
+- ~~T1 `TableSelectionPanel` : multi-select implicite + Ctrl+clic + Shift+click (visibles) + "⊕ children" + "⊕ all"~~ ✅ livré 2026-05-25
+- ~~T2+T3 Jaccard score coloré + Merge as siblings~~ ✅ livré 2026-05-25
 
 ### Autres
 
@@ -20,6 +19,13 @@ _Mis à jour automatiquement en fin de session._
 
 - **SSL/TLS pour connexions PG distantes** : actuellement `NoTls` hardcodé dans `tokio-postgres`. À implémenter si usage cloud (RDS, Supabase, Neon, etc.). Nécessite d'activer `tokio-postgres` avec feature `native-tls` ou `openssl` + dépendance système (`libssl-dev`). Checkbox "Require SSL" dans Setup, propagée au connect dans import.rs et setup.rs.
 - Picker de fichier lent (xdg-portal) : installer `libgtk-3-dev` sur le host puis `features = ["tokio", "gtk3"]` dans rfd
+
+## Ce qui est livré (session 2026-05-25)
+
+- **T1 multi-sélection tables (Strategy)** : Ctrl+clic toggle, Shift+clic plage sur visibles, bouton "⊕ children" au survol, bouton "⊕ all" dans filter bar
+- `TableListPanel` refactorisé en composant partagé (`on_select` passe les `Modifiers`, prop `on_select_children`)
+- `apply_click` / `apply_shift_click` / `select_children_visible` testés unitairement dans `state.rs`
+- `docs/ui/architecture.md` mis à jour
 
 ## Ce qui est livré (session 2026-05-22)
 
