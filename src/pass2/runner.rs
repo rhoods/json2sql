@@ -54,12 +54,30 @@ pub struct Pass2Result {
 /// and process descriptors.
 const FD_GLOBAL_THRESHOLD: usize = MAX_OPEN_TEMP_FILES * 9 / 10; // 855 with default 950
 
-/// Minimum accumulated bytes in a worker sink before it is eligible for handoff
-/// to the flush task during a byte-budget drain cycle. Sinks below this threshold
-/// are force_spill'd in-place instead — they stay in the worker and keep their
-/// single accumulated temp file, avoiding fragmentation into many tiny COPYs.
-/// Matches `FLUSH_DISPATCH_THRESHOLD` so handoff'd sinks are dispatched immediately.
+/// Minimum bytes physically on disk in a worker sink before it is handed off to
+/// the flush task during a drain cycle. Keyed on `bytes_on_disk` (not
+/// `bytes_buffered`) so a table that only accumulates a small amount per drain
+/// cycle still gets handed off once its temp file reaches this size, bounding
+/// per-table disk usage across the full streaming run.
+/// Sinks below this threshold are force_spill'd in-place; they accumulate
+/// until they cross the threshold on a future drain cycle.
+/// Peak worker disk ≈ parallel × N_tables × MIN_SINK_HANDOFF_BYTES.
 const MIN_SINK_HANDOFF_BYTES: u64 = 1024 * 1024; // 1 MiB
+
+/// Returns true if a sink should be handed off to the flush task during a drain cycle.
+/// Keyed on bytes_on_disk (not bytes_buffered) — see MIN_SINK_HANDOFF_BYTES.
+fn sink_eligible_for_handoff(sink: &crate::db::copy_sink::TempFileSink) -> bool {
+    sink.bytes_on_disk >= MIN_SINK_HANDOFF_BYTES
+}
+
+fn validate_run_params(parallel: usize) -> Result<()> {
+    if parallel == 0 {
+        return Err(J2sError::InvalidInput(
+            "parallel must be >= 1 (0 would produce an empty connection pool)".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 /// Saturating subtraction on an `AtomicUsize`.
 ///
@@ -104,6 +122,7 @@ pub async fn run(
     progress_tx: Option<ProgressTx>,
     ram_pressure_pct: Option<u8>,
 ) -> Result<Pass2Result> {
+    validate_run_params(parallel)?;
     let total_bytes = file_size(path)?;
     let progress = if progress_tx.is_none() {
         Some(ProgressTracker::new(total_bytes, "Pass 2"))
@@ -317,7 +336,7 @@ pub async fn run(
                     // RAM without creating a new fragmented file per drain cycle.
                     let handoff_names: Vec<String> = sinks
                         .iter()
-                        .filter(|(_, s)| s.bytes_buffered >= MIN_SINK_HANDOFF_BYTES)
+                        .filter(|(_, s)| sink_eligible_for_handoff(s))
                         .map(|(k, _)| k.clone())
                         .collect();
 
@@ -386,11 +405,13 @@ pub async fn run(
     // The dispatcher (flush_task) groups sinks by table name. Small tables wait
     // until flush_rx closes and are dispatched as one merged COPY per table
     // (N worker sinks → 1 COPY). Large tables are dispatched early when their
-    // accumulated bytes_buffered exceeds FLUSH_DISPATCH_THRESHOLD.
+    // accumulated bytes_on_disk exceeds flush_dispatch_threshold (= parallel × MIN_SINK_HANDOFF_BYTES).
     // -------------------------------------------------------------------------
 
-    // Dispatch early if a table's accumulated in-memory bytes exceed 1 MB.
-    const FLUSH_DISPATCH_THRESHOLD: u64 = 1024 * 1024;
+    // Dispatch a table once it accumulates parallel × MIN_SINK_HANDOFF_BYTES.
+    // This merges one sink per worker into a single COPY, reducing transaction
+    // count while bounding flush-task queue depth to ~1 sink per table per worker.
+    let flush_dispatch_threshold: u64 = parallel as u64 * MIN_SINK_HANDOFF_BYTES;
 
     let (result_tx, mut result_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<(String, u64)>>();
@@ -467,7 +488,7 @@ pub async fn run(
 
                 // Early dispatch for large tables: don't wait for end-of-streaming.
                 let total_bytes: u64 = entry.iter().map(|s| s.bytes_buffered).sum();
-                if total_bytes >= FLUSH_DISPATCH_THRESHOLD {
+                if total_bytes >= flush_dispatch_threshold {
                     let sinks = table_pending.remove(&table_name).unwrap();
                     if conn_senders[robin].send(sinks).await.is_err() { break; }
                     robin = (robin + 1) % conn_senders.len();
@@ -646,7 +667,10 @@ pub async fn run(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{global_sub, Pass2Timing};
+    use super::{global_sub, Pass2Timing, MIN_SINK_HANDOFF_BYTES, sink_eligible_for_handoff, validate_run_params};
+    use crate::db::copy_sink::TempFileSink;
+    use crate::schema::table_schema::{ColumnSchema, TableSchema};
+    use crate::schema::type_tracker::PgType;
 
     #[test]
     fn pass2_timing_total_ms_is_sum() {
@@ -681,6 +705,19 @@ mod tests {
         assert_eq!(g.load(Ordering::Relaxed), 0);
     }
 
+    #[test]
+    fn run_params_parallel_zero_is_invalid() {
+        assert!(matches!(
+            validate_run_params(0),
+            Err(crate::error::J2sError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn run_params_parallel_one_is_valid() {
+        assert!(validate_run_params(1).is_ok());
+    }
+
     // INTERIM_FLUSH_THRESHOLD divided by parallel must never be zero,
     // so the per-worker flush threshold remains a meaningful bound.
     #[test]
@@ -690,6 +727,96 @@ mod tests {
             let per_worker = INTERIM_FLUSH_THRESHOLD / parallel as u64;
             assert!(per_worker > 0, "threshold must be > 0 for parallel={parallel}");
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Drain cycle handoff filter — bytes_on_disk >= MIN_SINK_HANDOFF_BYTES
+    //
+    // These tests guard the critical semantic change in the drain cycle filter:
+    // handoff is keyed on bytes_on_disk (bytes physically on disk since last PG
+    // flush), NOT bytes_buffered (total bytes written since last PG flush). A
+    // regression back to bytes_buffered would let sinks with large pending buffers
+    // get handed off prematurely, before they have meaningful data on disk.
+    // -------------------------------------------------------------------------
+
+    // TempFileSink auto-spills when pending.len() >= 256 KiB (copy_sink internal).
+    const TEST_SPILL_SIZE: usize = 256 * 1024;
+
+    fn make_test_sink() -> TempFileSink {
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        schema.columns.push(ColumnSchema {
+            name: "col".to_string(),
+            original_name: "col".to_string(),
+            pg_type: PgType::Text,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
+        });
+        TempFileSink::new(&schema, "public").unwrap()
+    }
+
+    /// A sink with pending data but no spill must not pass the handoff filter.
+    /// bytes_buffered > 0 is insufficient — bytes_on_disk must reach the threshold.
+    #[test]
+    fn drain_filter_not_triggered_before_spill() {
+        let mut sink = make_test_sink();
+        sink.write_row(vec![b'x'; TEST_SPILL_SIZE - 1]).unwrap();
+        assert!(sink.bytes_buffered > 0, "precondition: bytes_buffered must be non-zero");
+        assert_eq!(sink.bytes_on_disk, 0, "no spill yet → bytes_on_disk must be 0");
+        assert!(!sink_eligible_for_handoff(&sink), "must not pass handoff filter");
+    }
+
+    /// A sink that has spilled but accumulated less than MIN_SINK_HANDOFF_BYTES on
+    /// disk must not pass the handoff filter.
+    #[test]
+    fn drain_filter_not_triggered_below_threshold() {
+        let mut sink = make_test_sink();
+        // 3 × 256 KiB = 768 KiB < 1 MiB = MIN_SINK_HANDOFF_BYTES
+        for _ in 0..3 {
+            sink.write_row(vec![b'x'; TEST_SPILL_SIZE]).unwrap();
+        }
+        assert!(sink.bytes_on_disk > 0, "precondition: some bytes must be on disk");
+        assert!(!sink_eligible_for_handoff(&sink), "must not pass handoff filter");
+    }
+
+    /// A sink that has accumulated >= MIN_SINK_HANDOFF_BYTES on disk must pass the filter.
+    #[test]
+    fn drain_filter_triggered_at_threshold() {
+        let mut sink = make_test_sink();
+        // 4 × 256 KiB = 1 MiB = MIN_SINK_HANDOFF_BYTES
+        for _ in 0..4 {
+            sink.write_row(vec![b'x'; TEST_SPILL_SIZE]).unwrap();
+        }
+        assert!(sink_eligible_for_handoff(&sink), "must pass handoff filter at 4 × SPILL_SIZE");
+    }
+
+    /// Regression guard: a large bytes_buffered must not trigger handoff when
+    /// bytes_on_disk is still below the threshold. This is the exact failure mode
+    /// of the old bytes_buffered-based filter.
+    ///
+    /// Uses chunks just below SPILL_THRESHOLD so auto-spill is never triggered;
+    /// force_spill is called manually to accumulate bytes_on_disk in a controlled way.
+    /// After 4 force_spill cycles: bytes_on_disk = 4×(SPILL_SIZE-1) = 1 048 572 < threshold.
+    /// A 5th write (no spill) brings bytes_buffered to 5×(SPILL_SIZE-1) = 1 310 715 > threshold.
+    #[test]
+    fn drain_filter_large_bytes_buffered_insufficient_without_enough_spill() {
+        let mut sink = make_test_sink();
+        let chunk = vec![b'x'; TEST_SPILL_SIZE - 1]; // below auto-spill trigger
+        for _ in 0..4 {
+            sink.write_row(chunk.clone()).unwrap();
+            sink.force_spill().unwrap();
+        }
+        // One more write (no spill) pushes bytes_buffered past the threshold.
+        sink.write_row(chunk.clone()).unwrap();
+        assert!(sink.bytes_buffered >= MIN_SINK_HANDOFF_BYTES,
+            "precondition: bytes_buffered ({}) must exceed threshold ({})",
+            sink.bytes_buffered, MIN_SINK_HANDOFF_BYTES);
+        assert!(sink.bytes_on_disk < MIN_SINK_HANDOFF_BYTES,
+            "bytes_on_disk ({}) must still be below threshold ({})",
+            sink.bytes_on_disk, MIN_SINK_HANDOFF_BYTES);
+        // sink_eligible_for_handoff uses bytes_on_disk — the old bytes_buffered filter
+        // would have returned true here, this is the exact regression being guarded.
+        assert!(!sink_eligible_for_handoff(&sink), "must not pass handoff filter");
     }
 
 }

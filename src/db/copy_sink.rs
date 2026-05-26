@@ -140,6 +140,11 @@ pub struct TempFileSink {
     /// Raw bytes written since the last flush. Used by the runner to decide
     /// when to trigger an interim COPY to bound per-worker disk usage.
     pub bytes_buffered: u64,
+    /// Bytes physically written to the temp file since the last flush to PG.
+    /// Incremented on every spill, reset to 0 after flush_to_db(). Used by the
+    /// runner to decide when to hand off a sink regardless of per-drain-cycle size,
+    /// bounding the maximum temp-file size on disk.
+    pub bytes_on_disk: u64,
     /// In-memory row data. Survives hibernation. Spilled to disk when it grows
     /// past SPILL_THRESHOLD.
     pending: Vec<u8>,
@@ -171,6 +176,7 @@ impl TempFileSink {
             row_count: 0,
             total_flushed: 0,
             bytes_buffered: 0,
+            bytes_on_disk: 0,
             pending: Vec::new(),
             writer: None,
             temp_file: None,
@@ -226,6 +232,7 @@ impl TempFileSink {
         // so we extract pending first. On write failure the data is lost, but
         // an I/O error on a temp file is already fatal to the import.
         let data = std::mem::take(&mut self.pending);
+        self.bytes_on_disk += data.len() as u64;
         let file = self.ensure_file()?;
         file.write_all(&data).map_err(J2sError::Io)?;
         Ok(())
@@ -306,6 +313,7 @@ impl TempFileSink {
         self.total_flushed += flushed;
         self.row_count = 0;
         self.bytes_buffered = 0;
+        self.bytes_on_disk = 0;
         Ok(flushed)
     }
 
@@ -318,6 +326,7 @@ impl TempFileSink {
             row_count,
             total_flushed,
             bytes_buffered: _,
+            bytes_on_disk: _,
             pending,
             writer,
             temp_file,
@@ -668,5 +677,62 @@ mod tests {
         // force_spill must fail: FD is closed, file is gone → OpenOptions::open → NotFound.
         let result = sink.force_spill();
         assert!(result.is_err(), "force_spill must propagate IO error when temp file is deleted");
+    }
+
+    // -------------------------------------------------------------------------
+    // bytes_on_disk tests
+    // -------------------------------------------------------------------------
+
+    /// bytes_on_disk must be zero before any spill occurs (data only in pending).
+    #[test]
+    fn bytes_on_disk_zero_before_spill() {
+        let mut sink = make_sink();
+        sink.write_row(b"row\n".to_vec()).unwrap();
+        assert_eq!(sink.bytes_on_disk, 0, "no spill yet → bytes_on_disk must be 0");
+    }
+
+    /// bytes_on_disk must reflect bytes written to disk after an auto-spill
+    /// (triggered when pending exceeds SPILL_THRESHOLD).
+    #[test]
+    fn bytes_on_disk_increments_after_auto_spill() {
+        let mut sink = make_sink();
+        let row = vec![b'x'; SPILL_THRESHOLD + 1];
+        let expected = row.len() as u64;
+        sink.write_row(row).unwrap();
+        assert_eq!(sink.bytes_on_disk, expected, "auto-spill must update bytes_on_disk");
+    }
+
+    /// bytes_on_disk must reflect bytes written after an explicit force_spill
+    /// even when below SPILL_THRESHOLD.
+    #[test]
+    fn bytes_on_disk_increments_after_force_spill() {
+        let mut sink = make_sink();
+        let row = b"row\n".to_vec();
+        let expected = row.len() as u64;
+        sink.write_row(row).unwrap();
+        assert_eq!(sink.bytes_on_disk, 0, "no spill yet");
+        sink.force_spill().unwrap();
+        assert_eq!(sink.bytes_on_disk, expected, "force_spill must update bytes_on_disk");
+    }
+
+    /// bytes_on_disk must accumulate across multiple force_spill drain cycles,
+    /// simulating repeated in-place spills as a worker drains small sinks.
+    #[test]
+    fn bytes_on_disk_accumulates_across_force_spills() {
+        let mut sink = make_sink();
+        let row = b"row\n".to_vec();
+        let row_len = row.len() as u64;
+
+        sink.write_row(row.clone()).unwrap();
+        sink.force_spill().unwrap();
+        assert_eq!(sink.bytes_on_disk, row_len);
+
+        sink.write_row(row.clone()).unwrap();
+        sink.force_spill().unwrap();
+        assert_eq!(sink.bytes_on_disk, row_len * 2, "must accumulate across drain cycles");
+
+        sink.write_row(row.clone()).unwrap();
+        sink.force_spill().unwrap();
+        assert_eq!(sink.bytes_on_disk, row_len * 3);
     }
 }
