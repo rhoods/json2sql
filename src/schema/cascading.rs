@@ -285,9 +285,37 @@ fn run_sibling_wave(
             None => continue,
         };
 
-        if !matches!(schemas[parent_idx].wide_strategy, WideStrategy::Columns) {
+        // Skip parents managed by the post-pass (KeyedPivot / MultiKeyedPivot).
+        if matches!(
+            schemas[parent_idx].wide_strategy,
+            WideStrategy::KeyedPivot(_) | WideStrategy::MultiKeyedPivot(_)
+        ) {
             continue;
         }
+        // Only Columns and AutoSplit parents produce dynamic-key children worth evaluating.
+        if !matches!(
+            schemas[parent_idx].wide_strategy,
+            WideStrategy::Columns | WideStrategy::AutoSplit { .. }
+        ) {
+            continue;
+        }
+        // For AutoSplit parents, filter out the companion _wide table (WideStrategy::Pivot)
+        // — it is a synthetic artifact, not a dynamic-key sibling.
+        let wide_filtered: Vec<usize>;
+        let child_indices: &Vec<usize> =
+            if matches!(schemas[parent_idx].wide_strategy, WideStrategy::AutoSplit { .. }) {
+                wide_filtered = child_indices
+                    .iter()
+                    .copied()
+                    .filter(|&i| !matches!(schemas[i].wide_strategy, WideStrategy::Pivot))
+                    .collect();
+                if wide_filtered.len() < threshold {
+                    continue;
+                }
+                &wide_filtered
+            } else {
+                child_indices
+            };
 
         let parent_has_data = schemas[parent_idx].data_columns().next().is_some();
 
@@ -471,7 +499,11 @@ fn run_sibling_wave(
                 // When the global Jaccard fails, try to find homogeneous sub-groups
                 // (e.g. front_* vs ingredients_* in an images dict).
                 let has_sig = regular.len() < child_indices.len();
-                if !parent_has_data && !has_sig {
+                let is_autosplit = matches!(
+                    schemas[parent_idx].wide_strategy,
+                    WideStrategy::AutoSplit { .. }
+                );
+                if (!parent_has_data && !has_sig) || is_autosplit {
                     let raw_clusters =
                         greedy_schema_clusters(schemas, &regular, min_jaccard, threshold);
                     let valid_clusters: Vec<Vec<usize>> = raw_clusters

@@ -7,22 +7,29 @@
 - IHM Leptos bancale — à consolider (visualisation du schéma)
 - Log des flush périodiques (`flush tablename (N rows)`)
 
-## Backlog sibling detection — options non implémentées (2026-05-25)
+## Backlog sibling detection — analyse sur schema_261_tables.json (2026-05-26)
 
 ### Option A — Assouplir le child-compat gate
-**Cas pertinent** : des frères ont un Jaccard propre élevé (≥ 0.9) mais leur child-compat
-échoue parce que certains n'ont des sous-enfants que dans un sous-ensemble de produits.
-Exemple concret : `images_selected_af_generation` (6 cols) vs `images_selected_nutrition_aa_generation`
-(1 col `angle` seulement) bloque la fusion de leurs parents malgré un Jaccard parent = 100%.
+**Cas pertinent** : `nutriscore_2021` vs `nutriscore_2023` — Jaccard propre = 1.0 mais
+child-compat bloque car `nutriscore_2021_data` et `nutriscore_2023_data` ont des schémas
+différents (formule nutriscore différente entre 2021 et 2023).
 Fix : bypass le child-compat quand Jaccard propre ≥ seuil_haut (ex. 0.9).
-Code : `src/schema/cascading.rs`, fonction `run_sibling_wave`, après le check Jaccard (ligne ~496).
+Code : `src/schema/cascading.rs`, fonction `run_sibling_wave`, branche non-mixed, après
+le check `child_compatibility_score` (ligne ~530).
 
-### Option C — Clustering glouton dans `process_co_sibling_group`
-**Cas pertinent** : des co-frères (enfants d'un groupe de frères absorbé) ont des schémas
-hétérogènes entre eux. Exemple concret : après absorption de `{front, nutrition, packaging}`
-dans `images_selected`, les co-frères `generation` ont 2 schémas distincts (1 col vs 6 cols).
-Actuellement ils sont re-parentés individuellement → N tables orphelines.
-Fix : appliquer le clustering glouton (même algo que T2 de la session 2026-05-25) dans
-`process_co_sibling_group` quand Jaccard < min_jaccard, pour créer N pivots-clusters
-au lieu de N tables individuelles.
-Code : `src/schema/cascading.rs`, fonction `process_co_sibling_group`, branche `else` (ligne ~851).
+### Option B — Second passage de run_sibling_wave après le cascade BFS
+**Cas pertinent** : `cluster_0_sizes` et `cluster_1_sizes` — les tables `100`, `200`, `400`,
+`full`, `num` sont créées par `process_co_sibling_group` APRÈS que `run_sibling_wave` a
+tourné. Le post-pass (`run_keyed_pivot_children_wave`) ne les voit pas car il ne cible que
+les parents `KeyedPivot`, or `cluster_X_sizes` a `WideStrategy::Columns`.
+Fix : appeler `run_sibling_wave` une seconde fois après le cascade BFS (avant le post-pass),
+ou étendre `run_keyed_pivot_children_wave` aux parents `Columns` ayant des enfants similaires.
+Code : `src/schema/cascading.rs`, fonction `finalize_cascading`, après les deux loops BFS.
+
+### Option C — ScalarArray inclus dans la détection de frères
+**Cas pertinent** : `nova_groups_markers` (tables 2, 3, 4 — toutes `['value']`) et
+`ingredients_analysis` (9 tables hash — toutes `['value']`) ont `child_kind=ScalarArray`.
+Dans `build_parent_child_maps`, le match `_ => {}` exclut ScalarArray → jamais évalués.
+Fix : ajouter `Some(ChildKind::ScalarArray) => arr_map.entry(...).push(i)` (ou obj_map)
+dans `build_parent_child_maps`.
+Code : `src/schema/cascading.rs`, fonction `build_parent_child_maps`, ligne ~134.
