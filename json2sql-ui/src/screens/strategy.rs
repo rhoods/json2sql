@@ -89,8 +89,10 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let show_warn = *warn_only.read();
 
     // Pre-compute rows and visible index list so the Shift+click handler can capture it.
+    let anomaly_counts = state.read().import.pass2_progress.anomaly_counts_per_table.clone();
     let table_rows = build_table_rows(
         &schemas, &overrides_snap, &overflow_names, &selected_indices, &absorbed_names, &filter, show_warn,
+        &anomaly_counts,
     );
     let visible_indices: Vec<usize> = table_rows.iter()
         .filter(|r| r.visible)
@@ -190,7 +192,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
             }
 
             // ── split-3 ───────────────────────────────────────────────────
-            div { class: "split-3",
+            div { class: "split-3", style: "flex:1;min-height:0;",
 
                 // ── LEFT — table list ─────────────────────────────────────
                 {
@@ -473,17 +475,25 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                     }
                                 }
                                 span { class: "grow" }
-                                if !is_multi {
-                                    // Reset override
-                                    button {
-                                        class: "btn ghost sm",
-                                        title: "Reset to auto-detected",
-                                        onclick: move |_| {
-                                            let name = state.read().schema.schemas[idx].name.clone();
-                                            state.write().schema.strategy_overrides.remove(&name);
-                                        },
-                                        "↩"
-                                    }
+                                button {
+                                    class: "btn ghost sm",
+                                    title: if is_multi { "Reset all selected to auto-detected" } else { "Reset to auto-detected" },
+                                    onclick: move |_| {
+                                        let mut s = state.write();
+                                        if is_multi {
+                                            let names: Vec<String> = s.schema.selected_table_indices
+                                                .iter()
+                                                .filter_map(|&i| s.schema.schemas.get(i).map(|t| t.name.clone()))
+                                                .collect();
+                                            for name in names {
+                                                s.schema.strategy_overrides.remove(&name);
+                                            }
+                                        } else {
+                                            let name = s.schema.schemas[idx].name.clone();
+                                            s.schema.strategy_overrides.remove(&name);
+                                        }
+                                    },
+                                    "↩"
                                 }
                                 button {
                                     class: "collapse-btn",
@@ -847,6 +857,11 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                     }
                 }
                 div { class: "row gap-md",
+                    button {
+                        class: "btn secondary",
+                        onclick: move |_| { state.write().screen = AppScreen::Analysis; },
+                        "‹ Analysis"
+                    }
                     button {
                         class: "btn primary",
                         onclick: move |_| { state.write().screen = AppScreen::Preview; },

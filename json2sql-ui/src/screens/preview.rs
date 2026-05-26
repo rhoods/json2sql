@@ -132,6 +132,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                                 &std::collections::HashSet::from([idx]),
                                 &state.read().schema.absorbed_names,
                                 "", false,
+                                &state.read().import.pass2_progress.anomaly_counts_per_table,
                             ),
                             show_checkboxes: false,
                             on_select_children: move |_| {},

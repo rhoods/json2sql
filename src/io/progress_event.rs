@@ -37,6 +37,11 @@ pub enum ProgressEvent {
         table_name: String,
         message: String,
     },
+    /// Per-table anomaly count, emitted once per table after all workers complete.
+    Pass2AnomalyUpdate {
+        table_name: String,
+        count: u64,
+    },
     /// A plain-text log message (mirrors what the CLI prints to stderr).
     Pass2Log(String),
     /// Pass 2 finished — all rows imported.

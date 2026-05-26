@@ -214,6 +214,15 @@ impl AnomalyCollector {
         self.total_count
     }
 
+    /// Per-table anomaly totals (sum across all columns). O(n_columns).
+    pub fn per_table_anomaly_counts(&self) -> HashMap<String, u64> {
+        let mut out: HashMap<String, u64> = HashMap::new();
+        for ((table, _col), cs) in &self.stats {
+            *out.entry(table.clone()).or_default() += cs.count;
+        }
+        out
+    }
+
     /// Per-(table, column) summaries including capped examples.
     /// O(n_columns) — not O(n_anomalies).
     pub fn summaries(&self) -> Vec<AnomalySummary> {
@@ -413,5 +422,17 @@ mod tests {
         c.record("t", "x", "r1", "integer", "bad", "string").unwrap();
         c.record("t", "x", "r2", "integer", "bad", "string").unwrap();
         assert!((c.overall_anomaly_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn per_table_anomaly_counts_aggregates_columns() {
+        let mut c = AnomalyCollector::new(None);
+        c.record("orders", "price", "r1", "float8", "bad", "string").unwrap();
+        c.record("orders", "qty",   "r2", "int4",   "bad", "string").unwrap();
+        c.record("users",  "age",   "r3", "int4",   "bad", "string").unwrap();
+        let counts = c.per_table_anomaly_counts();
+        assert_eq!(counts.get("orders").copied().unwrap_or(0), 2);
+        assert_eq!(counts.get("users").copied().unwrap_or(0),  1);
+        assert_eq!(counts.len(), 2);
     }
 }

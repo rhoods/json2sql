@@ -154,6 +154,8 @@ pub struct Pass2Progress {
     pub log_lines: VecDeque<String>,
     pub done: bool,
     pub total_anomalies: u64,
+    /// Per-table anomaly counts populated from Pass2AnomalyUpdate events.
+    pub anomaly_counts_per_table: std::collections::HashMap<String, u64>,
     /// FK constraints that failed after import (non-fatal; PK failures are errors).
     pub constraint_warning_count: u64,
 }
@@ -444,6 +446,10 @@ impl AppState {
                     "flush {} ({} rows)",
                     table_name, rows_flushed
                 ));
+            }
+            Pass2AnomalyUpdate { table_name, count } => {
+                self.import.pass2_progress.anomaly_counts_per_table
+                    .insert(table_name, count);
             }
             Pass2Log(msg) => {
                 self.import.pass2_progress.push_log(msg);
@@ -1028,5 +1034,21 @@ mod tests {
             240,
             "two identical Pass2Flush events double the count — runner must not emit both"
         );
+    }
+
+    #[test]
+    fn apply_pass2_anomaly_update_stores_per_table_count() {
+        let mut s = AppState::default();
+        s.apply_progress_event(ProgressEvent::Pass2AnomalyUpdate {
+            table_name: "orders".to_string(),
+            count: 5,
+        });
+        s.apply_progress_event(ProgressEvent::Pass2AnomalyUpdate {
+            table_name: "users".to_string(),
+            count: 2,
+        });
+        assert_eq!(s.import.pass2_progress.anomaly_counts_per_table["orders"], 5);
+        assert_eq!(s.import.pass2_progress.anomaly_counts_per_table["users"],  2);
+        assert_eq!(s.import.pass2_progress.anomaly_counts_per_table.len(),     2);
     }
 }

@@ -614,6 +614,9 @@ pub async fn run(
     }
 
     if let Some(ref tx) = progress_tx {
+        for (table_name, count) in merged_anomalies.per_table_anomaly_counts() {
+            let _ = tx.send(ProgressEvent::Pass2AnomalyUpdate { table_name, count });
+        }
         let total_rows: u64 = rows_per_table.values().sum();
         let _ = tx.send(ProgressEvent::Pass2Done {
             total_rows,

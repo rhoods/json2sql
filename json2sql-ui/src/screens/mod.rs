@@ -63,6 +63,8 @@ pub struct TableRowViewModel {
     // visibility
     pub visible:     bool,
     pub has_children: bool,
+    /// Anomaly count from Pass 2 (0 if Pass 2 hasn't run yet).
+    pub anomaly_count: u64,
 }
 
 /// Build the view-model for every table row.
@@ -73,13 +75,14 @@ pub struct TableRowViewModel {
 /// - `overflow_names`: tables auto-promoted to Jsonb by Pass 1 without user override.
 /// - `selected_indices`: set of selected row indices (empty → all unselected).
 pub fn build_table_rows(
-    schemas:         &[TableSchema],
-    overrides:       &HashMap<String, WideStrategy>,
-    overflow_names:  &HashSet<String>,
+    schemas:          &[TableSchema],
+    overrides:        &HashMap<String, WideStrategy>,
+    overflow_names:   &HashSet<String>,
     selected_indices: &HashSet<usize>,
-    absorbed_names:  &HashSet<String>,
-    filter:          &str,
-    show_warn_only:  bool,
+    absorbed_names:   &HashSet<String>,
+    filter:           &str,
+    show_warn_only:   bool,
+    anomaly_counts:   &HashMap<String, u64>,
 ) -> Vec<TableRowViewModel> {
     let is_last = compute_last_child(schemas);
     let filter_lc = filter.to_lowercase();
@@ -147,6 +150,7 @@ pub fn build_table_rows(
             row_cls,
             visible,
             has_children: parent_names.contains(table.name.as_str()),
+            anomaly_count: anomaly_counts.get(&table.name).copied().unwrap_or(0),
         }
     }).collect()
 }
@@ -518,7 +522,7 @@ mod tests {
     }
 
     fn empty_rows(schemas: &[TableSchema]) -> Vec<TableRowViewModel> {
-        build_table_rows(schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &HashSet::new(), "", false)
+        build_table_rows(schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &HashSet::new(), "", false, &HashMap::new())
     }
 
     // --- build_table_rows tests ---
@@ -538,7 +542,7 @@ mod tests {
     fn overflow_without_override_sets_warn_badge() {
         let schemas = vec![make_overflow_table("big")];
         let overflow = HashSet::from(["big".to_string()]);
-        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), &HashSet::new(), "", false);
+        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), &HashSet::new(), "", false, &HashMap::new());
         assert!(rows[0].has_warn);
         assert_eq!(rows[0].badge_cls, "warn");
         assert_eq!(rows[0].badge_lbl, "JSONB ⚠");
@@ -550,7 +554,7 @@ mod tests {
         let overflow = HashSet::from(["big".to_string()]);
         let mut overrides = HashMap::new();
         overrides.insert("big".to_string(), WideStrategy::Jsonb);
-        let rows = build_table_rows(&schemas, &overrides, &overflow, &HashSet::new(), &HashSet::new(), "", false);
+        let rows = build_table_rows(&schemas, &overrides, &overflow, &HashSet::new(), &HashSet::new(), "", false, &HashMap::new());
         assert!(!rows[0].has_warn, "user override must suppress overflow flag");
         assert_ne!(rows[0].badge_cls, "warn");
     }
@@ -568,7 +572,7 @@ mod tests {
     #[test]
     fn filter_text_hides_non_matching() {
         let schemas = vec![make_table("orders", None), make_table("users", None)];
-        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &HashSet::new(), "user", false);
+        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &HashSet::new(), "user", false, &HashMap::new());
         assert!(!rows[0].visible, "orders should be hidden");
         assert!(rows[1].visible, "users should match");
     }
@@ -584,7 +588,7 @@ mod tests {
     fn show_warn_only_hides_clean_rows() {
         let schemas = vec![make_table("clean", None), make_overflow_table("big")];
         let overflow = HashSet::from(["big".to_string()]);
-        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), &HashSet::new(), "", true);
+        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), &HashSet::new(), "", true, &HashMap::new());
         assert!(!rows[0].visible, "clean table must be hidden");
         assert!(rows[1].visible,  "warn table must be visible");
     }
@@ -593,7 +597,7 @@ mod tests {
     fn selected_row_has_sel_class() {
         let schemas = vec![make_table("a", None), make_table("b", None)];
         let selected = HashSet::from([1usize]);
-        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &selected, &HashSet::new(), "", false);
+        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &selected, &HashSet::new(), "", false, &HashMap::new());
         assert_eq!(rows[0].row_cls, "");
         assert_eq!(rows[1].row_cls, "sel");
         assert!(rows[1].is_selected);
@@ -663,6 +667,7 @@ mod tests {
         let absorbed = HashSet::from(["child_a".to_string(), "child_b".to_string()]);
         let rows = build_table_rows(
             &schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &absorbed, "", false,
+            &HashMap::new(),
         );
         assert!(rows[0].visible,                    "parent must be visible");
         assert!(rows[1].visible,                    "absorbed child_a must remain visible");
@@ -677,8 +682,22 @@ mod tests {
         let absorbed: HashSet<String> = HashSet::new();
         let rows = build_table_rows(
             &schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &absorbed, "", false,
+            &HashMap::new(),
         );
         assert!(rows[0].visible);
         assert_ne!(rows[0].badge_lbl, "merged");
+    }
+
+    #[test]
+    fn anomaly_count_populated_from_map() {
+        let schemas = vec![make_table("orders", None), make_table("users", None)];
+        let mut anomalies = HashMap::new();
+        anomalies.insert("orders".to_string(), 7u64);
+        let rows = build_table_rows(
+            &schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &HashSet::new(), "", false,
+            &anomalies,
+        );
+        assert_eq!(rows[0].anomaly_count, 7, "orders must carry anomaly count");
+        assert_eq!(rows[1].anomaly_count, 0, "users has no anomaly");
     }
 }

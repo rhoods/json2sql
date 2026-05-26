@@ -47,7 +47,8 @@ pub fn TableListPanel(
                             let bcls         = row.badge_cls;
                             let blbl         = row.badge_lbl;
                             let warn         = row.has_warn;
-                            let has_children = row.has_children;
+                            let has_children   = row.has_children;
+                            let anomaly_count  = row.anomaly_count;
                             let is_hovered   = *hovered.read() == Some(i);
                             rsx! {
                                 tr {
@@ -89,6 +90,14 @@ pub fn TableListPanel(
                                             if warn {
                                                 span { class: "badge warn sq", style: "height:16px;font-size:10px;", "⚠" }
                                             }
+                                            if anomaly_count > 0 {
+                                                span {
+                                                    class: "badge warn sq",
+                                                    style: "height:16px;font-size:10px;margin-left:2px;",
+                                                    title: "{anomaly_count} anomalies",
+                                                    "~{anomaly_count}"
+                                                }
+                                            }
                                         }
                                     } else {
                                         // Read-only layout: 2 columns
@@ -103,6 +112,14 @@ pub fn TableListPanel(
                                             span { class: "badge {bcls}", "{blbl}" }
                                             if warn {
                                                 span { class: "badge warn", style: "margin-left:4px;", "⚠" }
+                                            }
+                                            if anomaly_count > 0 {
+                                                span {
+                                                    class: "badge warn",
+                                                    style: "margin-left:4px;",
+                                                    title: "{anomaly_count} anomalies",
+                                                    "~{anomaly_count}"
+                                                }
                                             }
                                         }
                                     }
