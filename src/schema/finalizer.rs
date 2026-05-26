@@ -406,17 +406,27 @@ pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
         return;
     }
 
-    // Tables explicitly registered in any parent's child_routes are active routing
-    // targets for pass2 and must never be excluded, even when their parent_table
-    // points to a KeyedPivot-absorbing parent. This protects synthetic tables created
-    // by cascade waves 1+ whose synthetic parent happens to absorb all children.
+    // Pass 1: build a preliminary exclusion set WITHOUT route_targets protection,
+    // so we know which tables are going away.
+    let mut preliminary_excluded: std::collections::HashSet<&str> = partial_absorbed.clone();
+    for schema in schemas.iter() {
+        if let Some(ref parent) = schema.parent_table {
+            if absorbers.contains(parent.as_str()) || preliminary_excluded.contains(parent.as_str()) {
+                preliminary_excluded.insert(schema.name.as_str());
+            }
+        }
+    }
+
+    // Route targets that count are only those registered by tables that will SURVIVE.
+    // child_routes entries from excluded tables are stale — they point to subtrees that
+    // have been superseded by cascade-produced replacements and must not block exclusion.
     let route_targets: std::collections::HashSet<&str> = schemas
         .iter()
+        .filter(|s| !preliminary_excluded.contains(s.name.as_str()))
         .flat_map(|s| s.child_routes.values().map(|v| v.as_str()))
         .collect();
 
-    // Single forward pass exploiting topological order: if a parent is an absorber
-    // or already excluded, so are its children (transitive).
+    // Pass 2: final exclusion pass, protecting only valid route targets.
     let mut excluded: std::collections::HashSet<String> = partial_absorbed
         .into_iter()
         .map(|s| s.to_string())
@@ -424,7 +434,7 @@ pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
 
     for schema in schemas.iter() {
         if route_targets.contains(schema.name.as_str()) {
-            continue; // Protected by child_routes — must survive for pass2 routing.
+            continue; // Protected by a surviving parent's child_routes.
         }
         if let Some(ref parent) = schema.parent_table {
             if absorbers.contains(parent.as_str()) || excluded.contains(parent) {

@@ -913,12 +913,18 @@ fn run_keyed_pivot_children_wave(
             if !matches!(s.wide_strategy, WideStrategy::KeyedPivot(_)) {
                 return None;
             }
+            // Only consider children explicitly registered in child_routes — this excludes
+            // the original absorbed siblings (which are still in `schemas` at this point but
+            // will be removed by exclude_absorbed_children) from diluting the Jaccard score.
+            let routed: std::collections::HashSet<&str> =
+                s.child_routes.values().map(|v| v.as_str()).collect();
             let mut children: Vec<usize> = obj_map
                 .get(&s.name)
                 .into_iter()
                 .flatten()
                 .copied()
                 .filter(|&i| matches!(schemas[i].wide_strategy, WideStrategy::Columns))
+                .filter(|&i| routed.contains(schemas[i].name.as_str()))
                 .collect();
             if children.len() < threshold {
                 return None;
