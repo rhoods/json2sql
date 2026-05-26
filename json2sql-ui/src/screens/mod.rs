@@ -84,13 +84,16 @@ pub fn build_table_rows(
     show_warn_only:   bool,
     anomaly_counts:   &HashMap<String, u64>,
 ) -> Vec<TableRowViewModel> {
-    let is_last = compute_last_child(schemas);
+    let order   = tree_display_order(schemas);
+    let is_last = compute_last_child(&order, schemas);
     let filter_lc = filter.to_lowercase();
     let parent_names: HashSet<&str> = schemas.iter()
         .filter_map(|t| t.parent_table.as_deref())
         .collect();
 
-    schemas.iter().enumerate().map(|(i, table)| {
+    order.iter().enumerate().map(|(pos, &i)| {
+        let table = &schemas[i];
+
         let user_overrode = overrides.contains_key(&table.name);
         let effective = overrides.get(&table.name).cloned()
             .unwrap_or_else(|| table.wide_strategy.clone());
@@ -122,7 +125,7 @@ pub fn build_table_rows(
 
         let connector: &'static str = if table.depth == 0 {
             ""
-        } else if is_last[i] {
+        } else if is_last[pos] {
             "└─ "
         } else {
             "├─ "
@@ -153,6 +156,53 @@ pub fn build_table_rows(
             anomaly_count: anomaly_counts.get(&table.name).copied().unwrap_or(0),
         }
     }).collect()
+}
+
+/// Depth-first display order for `schemas`: roots alphabetically, then their
+/// children alphabetically directly underneath, recursively.
+/// Tables whose parent is absent from `schemas` are appended at the end.
+pub fn tree_display_order(schemas: &[TableSchema]) -> Vec<usize> {
+    let name_set: HashSet<&str> = schemas.iter().map(|t| t.name.as_str()).collect();
+    let mut children_of: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut true_roots:   Vec<usize> = Vec::new();
+    let mut orphan_roots: Vec<usize> = Vec::new();
+
+    for (i, t) in schemas.iter().enumerate() {
+        match t.parent_table.as_deref() {
+            None                              => true_roots.push(i),
+            Some(p) if name_set.contains(p)  => children_of.entry(p).or_default().push(i),
+            Some(_)                           => orphan_roots.push(i),
+        }
+    }
+
+    true_roots.sort_by(|&a, &b| schemas[a].name.cmp(&schemas[b].name));
+    orphan_roots.sort_by(|&a, &b| schemas[a].name.cmp(&schemas[b].name));
+    for v in children_of.values_mut() {
+        v.sort_by(|&a, &b| schemas[a].name.cmp(&schemas[b].name));
+    }
+
+    let mut order   = Vec::with_capacity(schemas.len());
+    let mut visited = vec![false; schemas.len()];
+
+    fn dfs(
+        i: usize,
+        schemas: &[TableSchema],
+        children_of: &HashMap<&str, Vec<usize>>,
+        order: &mut Vec<usize>,
+        visited: &mut Vec<bool>,
+    ) {
+        if visited[i] { return; }
+        visited[i] = true;
+        order.push(i);
+        if let Some(children) = children_of.get(schemas[i].name.as_str()) {
+            for &c in children { dfs(c, schemas, children_of, order, visited); }
+        }
+    }
+
+    for &r in &true_roots  { dfs(r, schemas, &children_of, &mut order, &mut visited); }
+    for &r in &orphan_roots { dfs(r, schemas, &children_of, &mut order, &mut visited); }
+
+    order
 }
 
 // ---------------------------------------------------------------------------
@@ -227,15 +277,16 @@ pub fn strategy_label(s: &WideStrategy) -> &'static str {
     }
 }
 
-/// For each table in `schemas`, return true if no later table shares the same parent.
-/// Used to pick tree connectors: └─ (last child) vs ├─ (has siblings below).
-pub fn compute_last_child(schemas: &[json2sql::schema::table_schema::TableSchema]) -> Vec<bool> {
-    let mut result = vec![true; schemas.len()];
-    for i in 0..schemas.len() {
+/// For each position in `order`, returns true if that table is the last child
+/// of its parent within the display order. Used to pick └─ vs ├─ connectors.
+pub fn compute_last_child(order: &[usize], schemas: &[TableSchema]) -> Vec<bool> {
+    let mut result = vec![true; order.len()];
+    for pos in 0..order.len() {
+        let i = order[pos];
         if let Some(ref parent) = schemas[i].parent_table {
-            for j in (i + 1)..schemas.len() {
-                if schemas[j].parent_table.as_deref() == Some(parent.as_str()) {
-                    result[i] = false;
+            for later_pos in (pos + 1)..order.len() {
+                if schemas[order[later_pos]].parent_table.as_deref() == Some(parent.as_str()) {
+                    result[pos] = false;
                     break;
                 }
             }
@@ -381,16 +432,18 @@ mod tests {
         t
     }
 
+    fn identity_order(n: usize) -> Vec<usize> { (0..n).collect() }
+
     #[test]
     fn no_children_all_true() {
         let schemas = vec![make_table("a", None), make_table("b", None)];
-        assert_eq!(compute_last_child(&schemas), vec![true, true]);
+        assert_eq!(compute_last_child(&identity_order(2), &schemas), vec![true, true]);
     }
 
     #[test]
     fn single_child_is_last() {
         let schemas = vec![make_table("parent", None), make_table("child", Some("parent"))];
-        assert_eq!(compute_last_child(&schemas), vec![true, true]);
+        assert_eq!(compute_last_child(&identity_order(2), &schemas), vec![true, true]);
     }
 
     #[test]
@@ -400,7 +453,7 @@ mod tests {
             make_table("child1", Some("parent")),
             make_table("child2", Some("parent")),
         ];
-        assert_eq!(compute_last_child(&schemas), vec![true, false, true]);
+        assert_eq!(compute_last_child(&identity_order(3), &schemas), vec![true, false, true]);
     }
 
     #[test]
@@ -411,13 +464,79 @@ mod tests {
             make_table("c2", Some("root")),
             make_table("c3", Some("root")),
         ];
-        assert_eq!(compute_last_child(&schemas), vec![true, false, false, true]);
+        assert_eq!(compute_last_child(&identity_order(4), &schemas), vec![true, false, false, true]);
     }
 
     #[test]
     fn empty_slice_returns_empty() {
         let schemas: Vec<TableSchema> = vec![];
-        assert_eq!(compute_last_child(&schemas), Vec::<bool>::new());
+        assert_eq!(compute_last_child(&identity_order(0), &schemas), Vec::<bool>::new());
+    }
+
+    // --- tree_display_order ---
+
+    #[test]
+    fn tree_order_flat_schemas_sorted_alphabetically() {
+        let schemas = vec![make_table("zebra", None), make_table("alpha", None), make_table("mango", None)];
+        let order = tree_display_order(&schemas);
+        let names: Vec<&str> = order.iter().map(|&i| schemas[i].name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn tree_order_children_grouped_under_parent() {
+        // enfants avant parent dans le slice
+        let schemas = vec![
+            make_table_depth("child_b", Some("parent"), 1),
+            make_table_depth("child_a", Some("parent"), 1),
+            make_table_depth("parent",  None,           0),
+        ];
+        let order = tree_display_order(&schemas);
+        let names: Vec<&str> = order.iter().map(|&i| schemas[i].name.as_str()).collect();
+        assert_eq!(names, vec!["parent", "child_a", "child_b"]);
+        // indices originaux préservés
+        assert_eq!(order[0], 2, "parent est à l'index 2 dans schemas");
+        assert_eq!(order[1], 1, "child_a est à l'index 1 dans schemas");
+        assert_eq!(order[2], 0, "child_b est à l'index 0 dans schemas");
+    }
+
+    #[test]
+    fn tree_order_three_levels() {
+        let schemas = vec![
+            make_table_depth("grandchild", Some("child"), 2),
+            make_table_depth("child",      Some("root"),  1),
+            make_table_depth("root",       None,          0),
+        ];
+        let order = tree_display_order(&schemas);
+        let names: Vec<&str> = order.iter().map(|&i| schemas[i].name.as_str()).collect();
+        assert_eq!(names, vec!["root", "child", "grandchild"]);
+    }
+
+    #[test]
+    fn tree_order_orphan_parent_at_end() {
+        let schemas = vec![
+            make_table_depth("alpha",  None,      0),
+            make_table_depth("orphan", Some("missing"), 1),
+        ];
+        let order = tree_display_order(&schemas);
+        let names: Vec<&str> = order.iter().map(|&i| schemas[i].name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "orphan"]);
+    }
+
+    #[test]
+    fn connectors_correct_after_reorder() {
+        // c2 avant c1 dans le slice, mais c1 < c2 alphabétiquement
+        let schemas = vec![
+            make_table_depth("parent", None,            0),
+            make_table_depth("c2",     Some("parent"),  1),
+            make_table_depth("c1",     Some("parent"),  1),
+        ];
+        let rows = empty_rows(&schemas);
+        assert_eq!(rows[0].name, "parent");
+        assert_eq!(rows[1].name, "c1");
+        assert_eq!(rows[1].connector, "├─ ", "c1 a un frère après lui");
+        assert_eq!(rows[2].name, "c2");
+        assert_eq!(rows[2].connector, "└─ ", "c2 est le dernier");
     }
 
     // --- build_effective_schemas ---
