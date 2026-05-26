@@ -87,6 +87,21 @@ pub(crate) fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usiz
         pending = next_pending;
     }
 
+    // ── Wave 0 bis: sibling detection on T tables created by the BFS cascade ──
+    // Tables produced by process_co_sibling_group (e.g. cluster_0_sizes_100/200/400/full)
+    // share a Columns parent but did not exist during wave 0. This pass fuses them.
+    // Parents already converted to KeyedPivot/MultiKeyedPivot are skipped automatically.
+    let co_siblings_bis = run_sibling_wave(schemas, threshold, min_jaccard);
+    let mut pending_bis: Vec<CoSiblingGroup> = co_siblings_bis;
+    while !pending_bis.is_empty() {
+        let mut next_pending: Vec<CoSiblingGroup> = Vec::new();
+        for group in pending_bis {
+            let produced = process_co_sibling_group(schemas, threshold, min_jaccard, group);
+            next_pending.extend(produced);
+        }
+        pending_bis = next_pending;
+    }
+
     // ── Post-pass: merge Columns orphans under KeyedPivot parents ───────────
     // After the BFS cascade, some Columns tables survive as children of a KeyedPivot
     // parent (e.g. lang-code T tables produced by cascade wave 1 that themselves
