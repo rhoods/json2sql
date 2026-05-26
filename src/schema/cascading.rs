@@ -542,7 +542,14 @@ fn run_sibling_wave(
             }
 
             // ── Child-compatibility gate ────────────────────────────────────
-            if child_compatibility_score(schemas, &regular, &parent_to_object_children, &parent_to_array_children) < min_jaccard {
+            // Bypass when sibling Jaccard is very high (≥ 0.9): structurally identical
+            // siblings are merged even if their children diverge (e.g. nutriscore 2021 vs
+            // 2023 — same parent schema, different _data sub-tables). Divergent children
+            // are re-parented individually by the cascade wave.
+            const HIGH_JACCARD: f64 = 0.9;
+            if actual_jaccard < HIGH_JACCARD
+                && child_compatibility_score(schemas, &regular, &parent_to_object_children, &parent_to_array_children) < min_jaccard
+            {
                 continue;
             }
 
