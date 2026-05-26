@@ -20,19 +20,46 @@ fn main() {
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">"#;
 
-    // JS focus patch: webkit2gtk receives mousedown but doesn't route keyboard
-    // focus to the DOM target — force focus() on each mousedown on form elements.
+    // JS patches injected at startup:
+    // 1. Focus patch: webkit2gtk doesn't route keyboard focus on mousedown for form elements.
+    // 2. Splitter drag: resize panes by dragging .splitter handles (JS-only, no Rust re-render).
     let head = format!(
         "{fonts_link}\n\
 <style>{css}</style>\n\
 <script>\n\
 document.addEventListener('DOMContentLoaded', function () {{\n\
+    var drag = null;\n\
     document.addEventListener('mousedown', function (e) {{\n\
         var el = e.target;\n\
         if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{\n\
             setTimeout(function () {{ el.focus(); }}, 0);\n\
         }}\n\
+        if (el.classList.contains('splitter')) {{\n\
+            var next = el.nextElementSibling;\n\
+            var prev = el.previousElementSibling;\n\
+            var isLeft = next && next.classList.contains('fluid');\n\
+            var pane = isLeft ? prev : next;\n\
+            if (!pane) return;\n\
+            drag = {{ splitter: el, pane: pane, isLeft: isLeft,\n\
+                      startX: e.clientX, startW: pane.getBoundingClientRect().width }};\n\
+            el.classList.add('dragging');\n\
+            document.body.classList.add('dragging-col');\n\
+            e.preventDefault();\n\
+        }}\n\
     }}, true);\n\
+    document.addEventListener('mousemove', function (e) {{\n\
+        if (!drag) return;\n\
+        var delta = e.clientX - drag.startX;\n\
+        var newW = Math.max(160, drag.startW + (drag.isLeft ? delta : -delta));\n\
+        drag.pane.style.flexBasis = newW + 'px';\n\
+        drag.pane.style.minWidth = '0';\n\
+    }});\n\
+    document.addEventListener('mouseup', function () {{\n\
+        if (!drag) return;\n\
+        drag.splitter.classList.remove('dragging');\n\
+        document.body.classList.remove('dragging-col');\n\
+        drag = null;\n\
+    }});\n\
 }});\n\
 </script>",
         fonts_link = fonts_link,

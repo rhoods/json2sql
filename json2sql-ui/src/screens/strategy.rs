@@ -313,8 +313,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                     }
                 }
 
-                // splitter
-                div { style: "flex:0 0 1px;background:var(--bd);flex-shrink:0;" }
+                div { class: "splitter" }
 
                 // ── CENTER — column detail / selection summary ─────────────
                 div { class: "pane fluid",
@@ -446,8 +445,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                     }
                 }
 
-                // splitter
-                div { style: "flex:0 0 1px;background:var(--bd);flex-shrink:0;" }
+                div { class: "splitter" }
 
                 // ── RIGHT — strategy configurator ─────────────────────────
                 {

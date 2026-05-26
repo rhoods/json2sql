@@ -13,13 +13,11 @@ use crate::screens::TableRowViewModel;
 pub fn TableListPanel(
     rows: Vec<TableRowViewModel>,
     on_select: EventHandler<(usize, Modifiers)>,
-    /// Called with the parent row index when the "Select children" hover-button is clicked.
+    /// Called with the parent row index when the "Select children" button is clicked.
     on_select_children: EventHandler<usize>,
     /// true = interactive (col count, thead); false = read-only (tree indent)
     show_checkboxes: bool,
 ) -> Element {
-    let mut hovered: Signal<Option<usize>> = use_signal(|| None);
-
     rsx! {
         table { class: "t", style: "width:100%;",
             if show_checkboxes {
@@ -49,35 +47,31 @@ pub fn TableListPanel(
                             let warn         = row.has_warn;
                             let has_children   = row.has_children;
                             let anomaly_count  = row.anomaly_count;
-                            let is_hovered   = *hovered.read() == Some(i);
                             rsx! {
                                 tr {
                                     key: "{name}",
                                     class: "{cls}",
                                     style: "cursor:pointer;",
                                     onclick: move |evt: MouseEvent| on_select.call((i, evt.modifiers())),
-                                    onmouseenter: move |_| hovered.set(Some(i)),
-                                    onmouseleave: move |_| hovered.set(None),
                                     if show_checkboxes {
                                         // Interactive layout: 4 columns
                                         td { style: "padding-left:{indent}px;",
                                             div { class: "row gap-xs",
-                                                if !conn.is_empty() {
-                                                    span { class: "{tc_cls}" }
-                                                }
-                                                span { class: "mono", "{name}" }
-                                                if has_children && is_hovered {
+                                                if has_children {
                                                     button {
-                                                        class: "btn ghost sq",
-                                                        style: "font-size:10px;padding:1px 5px;height:18px;line-height:1;",
-                                                        title: "Select children",
+                                                        class: "btn-children",
+                                                        title: "Sélectionner les enfants",
                                                         onclick: move |evt| {
                                                             evt.stop_propagation();
                                                             on_select_children.call(i);
                                                         },
-                                                        "⊕ children"
+                                                        "⤷"
                                                     }
                                                 }
+                                                if !conn.is_empty() {
+                                                    span { class: "{tc_cls}" }
+                                                }
+                                                span { class: "mono", "{name}" }
                                             }
                                         }
                                         td {

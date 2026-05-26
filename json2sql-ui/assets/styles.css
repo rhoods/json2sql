@@ -269,6 +269,24 @@ button { font-family: inherit; }
 .btn.lg { height: 36px; padding: 0 16px; font-size: var(--fs-md); }
 .btn.icon-only { width: 30px; padding: 0; justify-content: center; }
 
+/* children-select button — always visible, compact, left of row name */
+.btn-children {
+  display: inline-grid;
+  place-items: center;
+  width: 18px; height: 18px;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--bd-2);
+  border-radius: var(--r-sm);
+  color: var(--fg-3);
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+  transition: background .1s, color .1s, border-color .1s;
+}
+.btn-children:hover { background: var(--bg-2); color: var(--acc); border-color: var(--acc-bd); }
+
 .input {
   height: 30px;
   background: var(--bg-input);
@@ -751,9 +769,9 @@ body.dragging-col * { cursor: col-resize !important; user-select: none !importan
 
 /* collapse button (inside pane heads) */
 .pane-head .collapse-btn {
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--fg-3);
+  background: var(--bg-2);
+  border: 1px solid var(--bd-2);
+  color: var(--fg-2);
   width: 22px; height: 22px;
   border-radius: var(--r-sm);
   cursor: pointer;
@@ -762,7 +780,7 @@ body.dragging-col * { cursor: col-resize !important; user-select: none !importan
   flex-shrink: 0;
   margin-left: 2px;
 }
-.pane-head .collapse-btn:hover { background: var(--bg-2); color: var(--fg); border-color: var(--bd-2); }
+.pane-head .collapse-btn:hover { background: var(--bg-3); color: var(--fg); border-color: var(--bd-3); }
 
 /* collapsed pane */
 .split-3 > .pane.collapsed {
