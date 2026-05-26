@@ -54,18 +54,22 @@ pub fn TableListPanel(
                                     style: "cursor:pointer;",
                                     onclick: move |evt: MouseEvent| on_select.call((i, evt.modifiers())),
                                     if show_checkboxes {
-                                        // Interactive layout: 4 columns
+                                        // Interactive layout: 4 columns — name | cols | badge | warn
+                                        // Le slot bouton est un div flex de 20px fixe DANS le td name,
+                                        // pour que le connecteur + nom soient alignés sur toutes les lignes.
                                         td { style: "padding-left:{indent}px;",
-                                            div { class: "row gap-xs",
-                                                if has_children {
-                                                    button {
-                                                        class: "btn-children",
-                                                        title: "Sélectionner les enfants",
-                                                        onclick: move |evt| {
-                                                            evt.stop_propagation();
-                                                            on_select_children.call(i);
-                                                        },
-                                                        "⤷"
+                                            div { style: "display:flex;align-items:center;gap:4px;",
+                                                div { style: "width:20px;flex-shrink:0;display:flex;justify-content:center;",
+                                                    if has_children {
+                                                        button {
+                                                            class: "btn-children",
+                                                            title: "Sélectionner les enfants",
+                                                            onclick: move |evt| {
+                                                                evt.stop_propagation();
+                                                                on_select_children.call(i);
+                                                            },
+                                                            "⤷"
+                                                        }
                                                     }
                                                 }
                                                 if !conn.is_empty() {
