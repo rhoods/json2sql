@@ -1088,5 +1088,50 @@ mod tests {
             "with threshold=3, only 2 orphan T tables must NOT create a sub-pivot"
         );
     }
+
+    /// ScalarArray siblings (≥ threshold) with identical value schemas must be merged into KeyedPivot.
+    /// Concrete case: nova_groups_markers {"2": [...], "3": [...], "4": [...]} → parent becomes KeyedPivot.
+    #[test]
+    fn test_scalar_array_siblings_merged_keyed_pivot() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let obj = json!({
+            "markers": {
+                "2": [1, 2],
+                "3": [3, 4],
+                "4": [5, 6]
+            }
+        });
+        reg.observe_root("product", make_root(&obj));
+        let schemas = reg.finalize();
+        let markers = schemas.iter().find(|s| s.name == "product_markers").unwrap();
+        assert!(
+            matches!(markers.wide_strategy, WideStrategy::KeyedPivot(_)),
+            "3 ScalarArray siblings with threshold=2 must become KeyedPivot, got: {:?}",
+            markers.wide_strategy
+        );
+        assert!(
+            !schemas.iter().any(|s| matches!(s.name.as_str(), "product_markers_2" | "product_markers_3" | "product_markers_4")),
+            "absorbed ScalarArray children must not appear in final schema"
+        );
+    }
+
+    /// A single ScalarArray child (below threshold=2) must NOT trigger a merge.
+    #[test]
+    fn test_scalar_array_single_child_not_merged() {
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let obj = json!({
+            "markers": {
+                "2": [1, 2, 3]
+            }
+        });
+        reg.observe_root("product", make_root(&obj));
+        let schemas = reg.finalize();
+        let markers = schemas.iter().find(|s| s.name == "product_markers").unwrap();
+        assert!(
+            !matches!(markers.wide_strategy, WideStrategy::KeyedPivot(_)),
+            "single ScalarArray child must NOT become KeyedPivot, got: {:?}",
+            markers.wide_strategy
+        );
+    }
 }
 

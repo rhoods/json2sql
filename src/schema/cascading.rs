@@ -150,7 +150,7 @@ fn build_parent_child_maps(
                 Some(ChildKind::Object) => {
                     obj_map.entry(parent.clone()).or_default().push(i);
                 }
-                Some(ChildKind::ObjectArray) => {
+                Some(ChildKind::ObjectArray) | Some(ChildKind::ScalarArray) => {
                     arr_map.entry(parent.clone()).or_default().push(i);
                 }
                 _ => {}

@@ -515,12 +515,14 @@ table.t tbody td {
   padding: 6px 10px;
   border-bottom: 1px solid rgba(38, 45, 58, 0.5);
   color: var(--fg);
+  user-select: none;
 }
 table.t tbody tr:hover { background: var(--bg-2); }
 table.t tbody tr.sel  { background: var(--acc-bg); }
 table.t tbody tr.sel:hover { background: var(--acc-bg); }
-table.t tbody tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--acc); }
 table.t tbody tr.muted td { color: var(--fg-3); }
+table.t tbody tr:focus,
+table.t tbody tr:focus-visible { outline: none; }
 
 /* ── tree connector (.tc) ─────────────────────────────────────────── */
 /* Flex sibling of the name span — never inside inline text. Row-h = 28px. */
