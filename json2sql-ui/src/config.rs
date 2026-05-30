@@ -25,6 +25,8 @@ pub struct ProjectConfig {
     pub drop_existing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anomaly_dir: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temp_dir: Option<PathBuf>,
     pub workers: usize,
     pub pass2_parallel: usize,
 }
@@ -40,6 +42,7 @@ impl Default for ProjectConfig {
             pg_schema: "public".to_string(),
             drop_existing: false,
             anomaly_dir: None,
+            temp_dir: None,
             workers: 1,
             pass2_parallel: std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -60,6 +63,7 @@ impl ProjectConfig {
             pg_schema: p.pg_schema.clone(),
             drop_existing: p.drop_existing,
             anomaly_dir: p.anomaly_dir.clone(),
+            temp_dir: p.temp_dir.clone(),
             workers: p.workers,
             pass2_parallel: p.pass2_parallel,
         }
@@ -75,6 +79,7 @@ impl ProjectConfig {
         p.pg_schema = self.pg_schema.clone();
         p.drop_existing = self.drop_existing;
         p.anomaly_dir = self.anomaly_dir.clone();
+        p.temp_dir = self.temp_dir.clone();
         p.workers = self.workers;
         p.pass2_parallel = self.pass2_parallel;
     }
@@ -170,6 +175,7 @@ mod tests {
             pg_schema: "analytics".to_string(),
             drop_existing: false,
             anomaly_dir: None,
+            temp_dir: None,
             workers: 2,
             pass2_parallel: 3,
         };
@@ -215,6 +221,7 @@ mod tests {
             pg_schema: "staging".to_string(),
             drop_existing: true,
             anomaly_dir: Some(PathBuf::from("/tmp/anomalies")),
+            temp_dir: None,
             workers: 3,
             pass2_parallel: 5,
         };
@@ -236,11 +243,29 @@ mod tests {
 
     #[test]
     fn optional_fields_absent_when_none() {
-        let cfg = ProjectConfig::default(); // source_file and anomaly_dir are None
+        let cfg = ProjectConfig::default(); // source_file, anomaly_dir, temp_dir are None
         let toml_str = toml::to_string(&cfg).expect("serialize");
 
         assert!(!toml_str.contains("source_file"), "absent when None");
         assert!(!toml_str.contains("anomaly_dir"), "absent when None");
+        assert!(!toml_str.contains("temp_dir"), "absent when None");
+    }
+
+    #[test]
+    fn temp_dir_round_trips_toml() {
+        let mut p = ProjectState::default();
+        p.temp_dir = Some(PathBuf::from("/data/tmp"));
+        let cfg = ProjectConfig::from_project(&p);
+        let toml_str = toml::to_string(&cfg).expect("serialize");
+        let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(parsed.temp_dir, Some(PathBuf::from("/data/tmp")));
+    }
+
+    #[test]
+    fn temp_dir_absent_in_toml_when_none() {
+        let cfg = ProjectConfig::default();
+        let toml_str = toml::to_string(&cfg).expect("serialize");
+        assert!(!toml_str.contains("temp_dir"));
     }
 
     #[test]

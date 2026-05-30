@@ -32,3 +32,6 @@ zeroize = "1"
 # Config persistence
 directories-next = "2"
 toml = "0.8"
+
+# Disk free-space probe (cross-platform: statvfs on Unix, GetDiskFreeSpaceEx on Windows)
+fs2 = "0.4"

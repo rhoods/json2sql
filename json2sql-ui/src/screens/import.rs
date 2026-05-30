@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 use json2sql::db::ddl;
 use json2sql::io::progress_event::ProgressEvent;
 
+use crate::screens::{progress_pct, ProgressBar};
 use crate::state::{format_bytes, AppScreen, AppState};
 
 // ---------------------------------------------------------------------------
@@ -31,7 +32,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         }
         state.write().import.pass2_progress = crate::state::Pass2Progress::default();
 
-        let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, pg_schema, pass2_parallel) = {
+        let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, temp_dir, pg_schema, pass2_parallel) = {
             let source_file_opt = state.read().project.source_file.clone();
             let Some(path) = source_file_opt else {
                 state.write().cancel();
@@ -50,6 +51,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 crate::screens::build_effective_schemas(&s.schema.schemas, &s.schema.strategy_overrides),
                 s.project.drop_existing,
                 s.project.anomaly_dir.clone(),
+                s.project.temp_dir.clone(),
                 s.project.pg_schema.clone(),
                 s.project.pass2_parallel,
             )
@@ -80,7 +82,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 &pg_schema,
                 pass2_parallel,
                 anomaly_dir,
-                None,
+                temp_dir,
                 Some(tx),
                 None,
             )
@@ -107,33 +109,39 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     });
 
     // ── Derived values ────────────────────────────────────────────────────
-    let progress = state.read().import.pass2_progress.clone();
-    let done     = progress.done;
-    let elapsed  = *elapsed_secs.read();
+    let progress      = state.read().import.pass2_progress.clone();
+    let done          = progress.done;
+    let elapsed       = *elapsed_secs.read();
+    let tables_total  = state.read().schema.schemas.len() as u64;
 
-    let pct: u32 = if done { 100 }
-        else if progress.total_bytes > 0 {
-            (progress.bytes_read as f64 / progress.total_bytes as f64 * 100.0) as u32
-        } else { 0 };
+    // Phase A — streaming (bytes_read / total_bytes)
+    let pct_a: u32 = if done || progress.total_bytes > 0 && progress.bytes_read >= progress.total_bytes {
+        100
+    } else {
+        progress_pct(progress.bytes_read, progress.total_bytes)
+    };
+    let streaming_done = pct_a == 100;
+
+    // Phase B — COPY (tables flushed / tables total)
+    let tables_done = progress.rows_per_table.len() as u64;
+    let pct_b: u32 = if done { 100 } else { progress_pct(tables_done, tables_total) };
 
     let elapsed_str = format!("{:02}:{:02}", elapsed / 60, elapsed % 60);
+    let status_label = if done { "Import complete" } else { "Importing data…" };
 
-    let status_label   = if done { "Import complete" } else { "Importing data…" };
-    let progress_label = if done {
-        format!(
-            "{} rows · {} / {}",
-            progress.rows_processed,
-            format_bytes(progress.bytes_read),
-            format_bytes(progress.total_bytes),
-        )
+    let label_a = if streaming_done {
+        format!("{} · done", format_bytes(progress.total_bytes))
     } else {
-        format!(
-            "{} rows · {} / {} · {}",
-            progress.rows_processed,
+        format!("{} / {} · {}",
             format_bytes(progress.bytes_read),
             format_bytes(progress.total_bytes),
-            elapsed_str,
-        )
+            elapsed_str)
+    };
+
+    let label_b = if done {
+        format!("{tables_total} tables · {}", progress.rows_processed)
+    } else {
+        format!("{tables_done} / {tables_total} tables · {} rows so far", progress.rows_processed)
     };
 
     let mut table_rows: Vec<(String, u64)> = progress
@@ -285,20 +293,26 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 }
             }
 
-            // ── Bottom bar — progress + actions ───────────────────────────
+            // ── Bottom bar — double progress + actions ────────────────────
             div { style: "padding:10px 20px 14px;background:var(--bg-1);border-top:1px solid var(--bd);flex-shrink:0;",
 
-                // Progress bar
-                div { class: if done { "prog thick" } else { "prog thick indeterminate" },
-                    style: "margin-bottom:6px;",
-                    i { style: "width:{pct}%;", "" }
+                div { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;",
+                    ProgressBar {
+                        pct: pct_a,
+                        done: streaming_done,
+                        label: label_a,
+                        phase: "A · Streaming".to_string(),
+                    }
+                    ProgressBar {
+                        pct: pct_b,
+                        done,
+                        label: label_b,
+                        phase: "B · Inserting".to_string(),
+                    }
                 }
 
-                // Caption + buttons row
-                div { class: "row", style: "justify-content:space-between;align-items:center;",
-                    span { style: "font-size:var(--fs-xs);color:var(--fg-3);font-family:'JetBrains Mono',monospace;",
-                        "{progress_label}"
-                    }
+                // Actions row
+                div { class: "row", style: "justify-content:flex-end;",
                     div { class: "row gap-md",
                         if done {
                             button {

@@ -183,6 +183,8 @@ pub struct ProjectState {
     pub drop_existing: bool,
     /// Optional directory where anomaly NDJSON files are streamed during Pass 2.
     pub anomaly_dir: Option<PathBuf>,
+    /// Optional directory for Pass 2 temporary files (default: system temp dir).
+    pub temp_dir: Option<PathBuf>,
     /// True while the "Test connection" check is in flight.
     pub pg_testing: bool,
     /// Some(true/false) after the test completes.
@@ -203,6 +205,7 @@ impl Default for ProjectState {
             pg_schema: "public".to_string(),
             drop_existing: false,
             anomaly_dir: None,
+            temp_dir: None,
             pg_testing: false,
             pg_ok: None,
             pg_error: None,
@@ -858,6 +861,11 @@ mod tests {
             .map(|n| n.get())
             .unwrap_or(4);
         assert_eq!(s.project.pass2_parallel, cpus.min(8));
+    }
+
+    #[test]
+    fn temp_dir_defaults_to_none() {
+        assert!(ProjectState::default().temp_dir.is_none());
     }
 
     // --- format_bytes ---

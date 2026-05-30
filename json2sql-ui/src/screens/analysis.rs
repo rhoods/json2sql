@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 
 use json2sql::io::progress_event::ProgressEvent;
 
-use crate::screens::strategy_badge;
+use crate::screens::{strategy_badge, progress_pct, ProgressBar};
 use crate::state::{
     format_bytes, AppState, AppScreen,
     PASS1_TEXT_THRESHOLD, PASS1_WIDE_COLUMN_THRESHOLD, PASS1_SIBLING_THRESHOLD,
@@ -121,7 +121,7 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
 
     let pct: u32 = if done { 100 }
         else if progress.total_bytes > 0 {
-            (progress.bytes_read as f64 / progress.total_bytes as f64 * 100.0) as u32
+            progress_pct(progress.bytes_read, progress.total_bytes)
         } else if progress.rows_scanned > 0 {
             ((progress.rows_scanned / 1_000) as u32).min(89)
         } else { 0 };
@@ -288,27 +288,26 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
 
                 // ── Progress card ─────────────────────────────────────────
                 div { class: "card mt-lg", style: "padding:14px 18px;",
-                    div { class: "row", style: "justify-content:space-between;margin-bottom:8px;",
+                    div { class: "row", style: "justify-content:space-between;margin-bottom:10px;",
                         span { style: "font-weight:600;font-size:var(--fs-md);color:var(--fg);",
                             "Pass 1 — schema discovery"
                         }
-                        span { class: "mono fs-sm fg-2",
-                            "{pct}%"
-                            if rate > 0 { " · {rate_str}" }
-                            " · ETA {eta_str}"
+                        if rate > 0 {
+                            span { class: "mono fs-sm fg-2", "{rate_str} · ETA {eta_str}" }
                         }
                     }
-                    div { class: "prog thick",
-                        i { style: "width:{pct}%;" }
-                    }
-                    div { class: "row mt-sm fs-xs fg-3",
-                        span { "{elapsed_str} elapsed" }
-                        span { class: "grow" }
-                        if progress.total_bytes > 0 {
-                            span {
-                                "{format_bytes(progress.bytes_read)} / {format_bytes(progress.total_bytes)}"
-                            }
-                        }
+                    ProgressBar {
+                        pct,
+                        done,
+                        label: if progress.total_bytes > 0 {
+                            format!("{} / {} · {} elapsed",
+                                format_bytes(progress.bytes_read),
+                                format_bytes(progress.total_bytes),
+                                elapsed_str)
+                        } else {
+                            format!("{elapsed_str} elapsed")
+                        },
+                        phase: "Scanning".to_string(),
                     }
                 }
 
