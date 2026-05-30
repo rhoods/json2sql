@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,11 +10,10 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::anomaly::collector::AnomalyCollector;
-use crate::db::copy_sink::{merge_copy_to_db, TempFileSink, INTERIM_FLUSH_THRESHOLD};
+use crate::db::copy_sink::{merge_copy_to_db, TempFileSink};
 use crate::schema::PATH_SEP;
 use crate::db::ddl::{add_constraints, ConstraintWarning};
 use crate::error::{J2sError, Result};
-use crate::io::mem::ram_pressure_exceeded;
 use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonReader};
@@ -49,22 +47,6 @@ pub struct Pass2Result {
     pub timing: Pass2Timing,
 }
 
-/// Minimum bytes physically on disk in a worker sink before it is handed off to
-/// the flush task during a drain cycle. Keyed on `bytes_on_disk` (not
-/// `bytes_buffered`) so a table that only accumulates a small amount per drain
-/// cycle still gets handed off once its temp file reaches this size, bounding
-/// per-table disk usage across the full streaming run.
-/// Sinks below this threshold are force_spill'd in-place; they accumulate
-/// until they cross the threshold on a future drain cycle.
-/// Peak worker disk ≈ parallel × N_tables × MIN_SINK_HANDOFF_BYTES.
-const MIN_SINK_HANDOFF_BYTES: u64 = 1024 * 1024; // 1 MiB
-
-/// Returns true if a sink should be handed off to the flush task during a drain cycle.
-/// Keyed on bytes_on_disk (not bytes_buffered) — see MIN_SINK_HANDOFF_BYTES.
-fn sink_eligible_for_handoff(sink: &crate::db::copy_sink::TempFileSink) -> bool {
-    sink.bytes_on_disk >= MIN_SINK_HANDOFF_BYTES
-}
-
 fn validate_run_params(parallel: usize) -> Result<()> {
     if parallel == 0 {
         return Err(J2sError::InvalidInput(
@@ -74,9 +56,6 @@ fn validate_run_params(parallel: usize) -> Result<()> {
     Ok(())
 }
 
-
-/// Default RAM usage percentage above which workers force-spill all sinks in-place.
-pub const DEFAULT_RAM_PRESSURE_PCT: u8 = 70;
 
 /// Run Pass 2: stream the file into per-worker temp-file buffers, COPY to
 /// PostgreSQL, then add PRIMARY KEY and FOREIGN KEY constraints.
@@ -103,7 +82,7 @@ pub async fn run(
     anomaly_dir: Option<PathBuf>,
     temp_dir: Option<PathBuf>,
     progress_tx: Option<ProgressTx>,
-    ram_pressure_pct: Option<u8>,
+    _ram_pressure_pct: Option<u8>,
 ) -> Result<Pass2Result> {
     validate_run_params(parallel)?;
     let total_bytes = file_size(path)?;
@@ -114,10 +93,6 @@ pub async fn run(
     };
     let mut rows_processed = 0u64;
     const PROGRESS_INTERVAL: u64 = 1_000;
-    let ram_pct = ram_pressure_pct.unwrap_or(DEFAULT_RAM_PRESSURE_PCT);
-    // Shared flag: set by the dispatch loop every PROGRESS_INTERVAL rows when
-    // RSS exceeds ram_pct% of total RAM. Workers drain all sinks when true.
-    let memory_pressure = Arc::new(AtomicBool::new(false));
 
     let sep = PATH_SEP.to_string();
     let path_map: HashMap<String, TableSchema> =
@@ -167,21 +142,15 @@ pub async fn run(
         }
     }
 
-    // Per-worker interim flush threshold: divide the global budget evenly so that
-    // total temp-file disk usage stays bounded at ~INTERIM_FLUSH_THRESHOLD regardless
-    // of the number of workers. Without this, 32 workers × 512 MiB = 16 GiB on disk.
-    let per_worker_flush_threshold = INTERIM_FLUSH_THRESHOLD / parallel as u64;
-
     // Cancellation token: a DropGuard is held for the lifetime of this async fn.
-    // If the caller aborts the task (e.g. UI cancel), the guard is dropped, the
-    // token is cancelled, and all workers / flush / conn tasks exit their loops.
     let cancel = CancellationToken::new();
     let _cancel_guard = cancel.clone().drop_guard();
 
     // -------------------------------------------------------------------------
-    // Phase B — Parallel streaming
+    // Phase A — Parallel streaming (no PG connections)
     // N workers each hold their own HashMap<table_name, TempFileSink>.
     // Root objects are dispatched round-robin from the main task.
+    // Workers return their sinks at the end for Phase B COPY.
     // -------------------------------------------------------------------------
     let (mut reader, _format) = JsonReader::open(path)?;
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
@@ -191,12 +160,6 @@ pub async fn run(
     let mut senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> =
         Vec::with_capacity(parallel);
     let mut worker_handles = Vec::with_capacity(parallel);
-
-    // Flush channel: workers send over-threshold sinks here and replace them
-    // with a fresh empty sink. A dedicated flush task (spawned below) drains
-    // this channel and COPYs sinks to PG concurrently with Phase B streaming.
-    let (flush_tx, flush_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(String, TempFileSink)>();
 
     for _ in 0..parallel {
         let (tx, mut rx) =
@@ -211,20 +174,16 @@ pub async fn run(
         let mut worker_anomalies = AnomalyCollector::new(None);
         let pm = path_map_arc.clone();
         let rs = root_schema_arc.clone();
-        let ftx = flush_tx.clone();
-        let sbn = schema_by_name.clone();
-        let pg_schema_owned = pg_schema.to_string();
         let cancel_token = cancel.clone();
-        let mem_pressure = Arc::clone(&memory_pressure);
 
         let handle = tokio::task::spawn(async move {
             let mut sinks = worker_sinks;
 
             loop {
-            let mut bytes = tokio::select! {
-                _ = cancel_token.cancelled() => break,
-                msg = rx.recv() => match msg { Some(b) => b, None => break },
-            };
+                let mut bytes = tokio::select! {
+                    _ = cancel_token.cancelled() => break,
+                    msg = rx.recv() => match msg { Some(b) => b, None => break },
+                };
                 let obj = match simd_json::from_slice::<serde_json::Value>(&mut bytes) {
                     Ok(Value::Object(o)) => o,
                     Ok(other) => return Err(J2sError::InvalidInput(format!(
@@ -245,210 +204,27 @@ pub async fn run(
                     None,
                     None,
                 )?;
-
-                let total_bytes: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
-                let ram_flag = mem_pressure.load(Ordering::Relaxed);
-
-                if ram_flag {
-                    // RAM pressure: force_spill all sinks in-place — no handoff.
-                    // spill() auto-hibernates, so no FD tracking needed.
-                    for sink in sinks.values_mut() {
-                        sink.force_spill()?;
-                    }
-                } else if total_bytes > per_worker_flush_threshold {
-                    // Byte budget exceeded.
-                    // Sinks ≥ MIN_SINK_HANDOFF_BYTES are handed off to the flush
-                    // task for a streaming COPY (paces large tables during import).
-                    // All other non-empty sinks are force_spill'd in-place: their
-                    // pending Vec is written to their existing temp file, freeing
-                    // RAM without creating a new fragmented file per drain cycle.
-                    let handoff_names: Vec<String> = sinks
-                        .iter()
-                        .filter(|(_, s)| sink_eligible_for_handoff(s))
-                        .map(|(k, _)| k.clone())
-                        .collect();
-
-                    for name in handoff_names {
-                        if let Some(mut old_sink) = sinks.remove(&name) {
-                            old_sink.force_spill()?;
-                            if let Some(schema) = sbn.get(&name) {
-                                match TempFileSink::new(schema, &pg_schema_owned, worker_temp_dir.as_deref()) {
-                                    Ok(new_sink) => {
-                                        let _ = ftx.send((name.clone(), old_sink));
-                                        sinks.insert(name, new_sink);
-                                    }
-                                    Err(_) => {
-                                        sinks.insert(name, old_sink);
-                                    }
-                                }
-                            } else {
-                                sinks.insert(name, old_sink);
-                            }
-                        }
-                    }
-
-                    // force_spill all remaining non-empty sinks in-place.
-                    for sink in sinks.values_mut() {
-                        if sink.bytes_buffered > 0 {
-                            sink.force_spill()?;
-                        }
-                    }
-                }
             }
 
-            // Send remaining non-empty sinks to the flush task before exiting.
-            // spill() auto-hibernates, so no explicit hibernate loop needed.
-            for (name, sink) in sinks {
-                if sink.row_count > 0 || sink.total_flushed > 0 {
-                    let _ = ftx.send((name, sink));
-                }
+            // Force remaining in-memory data to disk before returning sinks.
+            for sink in sinks.values_mut() {
+                sink.force_spill()?;
             }
-            Ok::<_, J2sError>(worker_anomalies)
+            Ok::<_, J2sError>((worker_anomalies, sinks))
         });
         worker_handles.push(handle);
     }
 
-    // Drop the main-task's sender clone; only the per-worker clones remain.
-    drop(flush_tx);
-
     // -------------------------------------------------------------------------
-    // Flush pool — `parallel` persistent PG connections + accumulating dispatcher.
-    //
-    // The dispatcher (flush_task) groups sinks by table name. Small tables wait
-    // until flush_rx closes and are dispatched as one merged COPY per table
-    // (N worker sinks → 1 COPY). Large tables are dispatched early when their
-    // accumulated bytes_on_disk exceeds flush_dispatch_threshold (= parallel × MIN_SINK_HANDOFF_BYTES).
+    // (nothing here — flush pool removed, Phase B COPY happens after workers join)
     // -------------------------------------------------------------------------
-
-    // Dispatch a table once it accumulates parallel × MIN_SINK_HANDOFF_BYTES.
-    // This merges one sink per worker into a single COPY, reducing transaction
-    // count while bounding flush-task queue depth to ~1 sink per table per worker.
-    let flush_dispatch_threshold: u64 = parallel as u64 * MIN_SINK_HANDOFF_BYTES;
-
-    let (result_tx, mut result_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<(String, u64)>>();
-    let mut conn_senders: Vec<tokio::sync::mpsc::Sender<Vec<TempFileSink>>> =
-        Vec::with_capacity(parallel);
-    let mut conn_handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(parallel);
-
-    for _ in 0..parallel {
-        let (ctx, mut crx) = tokio::sync::mpsc::channel::<Vec<TempFileSink>>(64);
-        conn_senders.push(ctx);
-        let url = pg_url.to_string();
-        let rtx = result_tx.clone();
-        let cancel_conn = cancel.clone();
-        let ptx_conn = progress_tx.clone();
-        conn_handles.push(tokio::task::spawn(async move {
-            use crate::db::connection::connect;
-            let conn = match connect(&url).await {
-                Ok(c) => c,
-                Err(e) => { let _ = rtx.send(Err(e)); return; }
-            };
-            loop {
-                let sinks = tokio::select! {
-                    _ = cancel_conn.cancelled() => break,
-                    msg = crx.recv() => match msg { Some(s) => s, None => break },
-                };
-                if sinks.is_empty() { continue; }
-                let name = sinks[0].table_name.clone();
-                let result = merge_copy_to_db(sinks, &conn).await;
-                match &result {
-                    Ok(rows) => {
-                        eprintln!("  COPY {} ({} rows) done.", name, rows);
-                        if let Some(ref tx) = ptx_conn {
-                            let _ = tx.send(ProgressEvent::Pass2Log(format!(
-                                "COPY {} ({} rows)", name, rows
-                            )));
-                            let _ = tx.send(ProgressEvent::Pass2Flush {
-                                table_name: name.clone(),
-                                rows_flushed: *rows,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("  COPY {} FAILED: {}", name, e);
-                        if let Some(ref tx) = ptx_conn {
-                            let _ = tx.send(ProgressEvent::Pass2Error {
-                                table_name: name.clone(),
-                                message: e.to_string(),
-                            });
-                        }
-                    }
-                }
-                let _ = rtx.send(result.map(|rows| (name, rows)));
-            }
-        }));
-    }
-    drop(result_tx);
-
-    let cancel_flush = cancel.clone();
-    let flush_task: tokio::task::JoinHandle<Result<HashMap<String, u64>>> =
-        tokio::task::spawn(async move {
-            let mut flush_rx = flush_rx;
-            let mut robin = 0usize;
-            let mut table_pending: HashMap<String, Vec<TempFileSink>> = HashMap::new();
-
-            loop {
-                let (table_name, sink) = tokio::select! {
-                    _ = cancel_flush.cancelled() => break,
-                    msg = flush_rx.recv() => match msg { Some(v) => v, None => break },
-                };
-                if sink.row_count == 0 && sink.total_flushed == 0 { continue; }
-
-                let entry = table_pending.entry(table_name.clone()).or_default();
-                entry.push(sink);
-
-                // Early dispatch for large tables: don't wait for end-of-streaming.
-                let total_bytes: u64 = entry.iter().map(|s| s.bytes_buffered).sum();
-                if total_bytes >= flush_dispatch_threshold {
-                    let sinks = table_pending.remove(&table_name).unwrap();
-                    if conn_senders[robin].send(sinks).await.is_err() { break; }
-                    robin = (robin + 1) % conn_senders.len();
-                }
-            }
-
-            // Dispatch remaining accumulated sinks — one merged COPY per table.
-            // Replaces up to N per-worker COPYs with a single COPY for each table.
-            for (_table_name, sinks) in table_pending {
-                let total_rows: u64 = sinks.iter().map(|s| s.total_flushed + s.row_count).sum();
-                if total_rows == 0 { continue; }
-                if conn_senders[robin].send(sinks).await.is_err() { break; }
-                robin = (robin + 1) % conn_senders.len();
-            }
-
-            // Signal conn workers to drain and exit.
-            drop(conn_senders);
-
-            // Collect all COPY results (channel closes when all conn workers exit).
-            let mut rows_per_table: HashMap<String, u64> = HashMap::new();
-            let mut first_error: Option<J2sError> = None;
-            while let Some(result) = result_rx.recv().await {
-                match result {
-                    Ok((name, count)) => { *rows_per_table.entry(name).or_insert(0) += count; }
-                    Err(e) => { if first_error.is_none() { first_error = Some(e); } }
-                }
-            }
-            for handle in conn_handles {
-                if let Err(e) = handle.await {
-                    if first_error.is_none() {
-                        first_error = Some(J2sError::InvalidInput(format!("conn worker panic: {e}")));
-                    }
-                }
-            }
-            if let Some(e) = first_error { return Err(e); }
-            Ok(rows_per_table)
-        });
 
     let stream_start = Instant::now();
     let mut robin = 0usize;
     let mut worker_died = false;
-    // Initial check before any objects are dispatched so workers see the flag
-    // from their very first iteration (important for small files / low threshold).
-    memory_pressure.store(ram_pressure_exceeded(ram_pct), Ordering::Relaxed);
     'dispatch: while let Some(item) = reader.next_raw() {
         let bytes = item?;
         if senders[robin].send(bytes).await.is_err() {
-            // A worker exited early; collect the real error below.
             worker_died = true;
             break 'dispatch;
         }
@@ -465,7 +241,6 @@ pub async fn run(
                     total_bytes,
                 });
             }
-            memory_pressure.store(ram_pressure_exceeded(ram_pct), Ordering::Relaxed);
         }
     }
     drop(senders);
@@ -485,48 +260,67 @@ pub async fn run(
     let streaming_ms = stream_start.elapsed().as_millis() as u64;
     eprintln!("Pass 2 streaming done ({parallel} workers). Flushing remaining rows to PostgreSQL...");
 
-    // Drain all worker handles — always collect real errors rather than
-    // swallowing them behind "worker channel closed unexpectedly".
+    // Join all workers and collect their sinks.
     let mut merged_anomalies = AnomalyCollector::new(anomaly_dir);
+    let mut all_worker_sinks: Vec<HashMap<String, TempFileSink>> = Vec::with_capacity(parallel);
     let mut first_worker_error: Option<J2sError> = None;
     for handle in worker_handles {
         match handle.await {
-            Ok(Ok(w_anomalies)) => {
+            Ok(Ok((w_anomalies, sinks))) => {
                 merged_anomalies.merge(w_anomalies);
+                all_worker_sinks.push(sinks);
             }
             Ok(Err(e)) => {
-                if first_worker_error.is_none() {
-                    first_worker_error = Some(e);
-                }
+                if first_worker_error.is_none() { first_worker_error = Some(e); }
             }
             Err(e) => {
                 if first_worker_error.is_none() {
-                    first_worker_error =
-                        Some(J2sError::InvalidInput(format!("worker panic: {}", e)));
+                    first_worker_error = Some(J2sError::InvalidInput(format!("worker panic: {}", e)));
                 }
             }
         }
     }
-    if let Some(err) = first_worker_error {
-        return Err(err);
-    }
+    if let Some(err) = first_worker_error { return Err(err); }
     if worker_died {
-        return Err(J2sError::InvalidInput(
-            "worker channel closed unexpectedly".into(),
-        ));
+        return Err(J2sError::InvalidInput("worker channel closed unexpectedly".into()));
     }
 
     // -------------------------------------------------------------------------
-    // Join flush task — all workers have sent their remaining sinks via flush_rx.
-    // The flush task terminates once flush_rx is exhausted and all in-flight
-    // COPYs complete. rows_per_table accumulates counts from every COPY.
+    // Phase B — COPY post-streaming: group sinks by table, one COPY per table.
+    // (T5 will parallelize this on `parallel` PG connections.)
     // -------------------------------------------------------------------------
     let copy_start = Instant::now();
-    let rows_per_table = match flush_task.await {
-        Ok(Ok(rpt)) => rpt,
-        Ok(Err(e)) => return Err(e),
-        Err(e) => return Err(J2sError::InvalidInput(format!("flush task panic: {e}"))),
+    let mut rows_per_table: HashMap<String, u64> = HashMap::new();
+
+    // Collect all table names that have data across any worker.
+    let table_names: Vec<String> = {
+        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for sinks in &all_worker_sinks {
+            for (name, sink) in sinks {
+                if sink.row_count > 0 { names.insert(name.clone()); }
+            }
+        }
+        let mut v: Vec<String> = names.into_iter().collect();
+        v.sort();
+        v
     };
+
+    for table_name in &table_names {
+        let sinks: Vec<TempFileSink> = all_worker_sinks
+            .iter_mut()
+            .filter_map(|worker| worker.remove(table_name))
+            .filter(|s| s.row_count > 0)
+            .collect();
+        if sinks.is_empty() { continue; }
+        let rows = merge_copy_to_db(sinks, client).await?;
+        if let Some(ref tx) = progress_tx {
+            let _ = tx.send(ProgressEvent::Pass2Flush {
+                table_name: table_name.clone(),
+                rows_flushed: rows,
+            });
+        }
+        *rows_per_table.entry(table_name.clone()).or_insert(0) += rows;
+    }
 
     // -------------------------------------------------------------------------
     // Phase D — Constraints: PK (fatal on error), FK (failures → warnings)
@@ -577,7 +371,7 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{Pass2Timing, MIN_SINK_HANDOFF_BYTES, sink_eligible_for_handoff, validate_run_params};
+    use super::{Pass2Timing, validate_run_params};
     use crate::db::copy_sink::TempFileSink;
     use crate::schema::table_schema::{ColumnSchema, TableSchema};
     use crate::schema::type_tracker::PgType;
@@ -605,107 +399,6 @@ mod tests {
     #[test]
     fn run_params_parallel_one_is_valid() {
         assert!(validate_run_params(1).is_ok());
-    }
-
-    // INTERIM_FLUSH_THRESHOLD divided by parallel must never be zero,
-    // so the per-worker flush threshold remains a meaningful bound.
-    #[test]
-    fn per_worker_flush_threshold_never_zero() {
-        use crate::db::copy_sink::INTERIM_FLUSH_THRESHOLD;
-        for parallel in [1usize, 2, 4, 8, 16, 32, 64, 128, 256] {
-            let per_worker = INTERIM_FLUSH_THRESHOLD / parallel as u64;
-            assert!(per_worker > 0, "threshold must be > 0 for parallel={parallel}");
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Drain cycle handoff filter — bytes_on_disk >= MIN_SINK_HANDOFF_BYTES
-    //
-    // These tests guard the critical semantic change in the drain cycle filter:
-    // handoff is keyed on bytes_on_disk (bytes physically on disk since last PG
-    // flush), NOT bytes_buffered (total bytes written since last PG flush). A
-    // regression back to bytes_buffered would let sinks with large pending buffers
-    // get handed off prematurely, before they have meaningful data on disk.
-    // -------------------------------------------------------------------------
-
-    // TempFileSink auto-spills when pending.len() >= 256 KiB (copy_sink internal).
-    const TEST_SPILL_SIZE: usize = 256 * 1024;
-
-    fn make_test_sink() -> TempFileSink {
-        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
-        schema.columns.push(ColumnSchema {
-            name: "col".to_string(),
-            original_name: "col".to_string(),
-            pg_type: PgType::Text,
-            not_null: false,
-            is_generated: false,
-            is_parent_fk: false,
-        });
-        TempFileSink::new(&schema, "public", None).unwrap()
-    }
-
-    /// A sink with pending data but no spill must not pass the handoff filter.
-    /// bytes_buffered > 0 is insufficient — bytes_on_disk must reach the threshold.
-    #[test]
-    fn drain_filter_not_triggered_before_spill() {
-        let mut sink = make_test_sink();
-        sink.write_row(vec![b'x'; TEST_SPILL_SIZE - 1]).unwrap();
-        assert!(sink.bytes_buffered > 0, "precondition: bytes_buffered must be non-zero");
-        assert_eq!(sink.bytes_on_disk, 0, "no spill yet → bytes_on_disk must be 0");
-        assert!(!sink_eligible_for_handoff(&sink), "must not pass handoff filter");
-    }
-
-    /// A sink that has spilled but accumulated less than MIN_SINK_HANDOFF_BYTES on
-    /// disk must not pass the handoff filter.
-    #[test]
-    fn drain_filter_not_triggered_below_threshold() {
-        let mut sink = make_test_sink();
-        // 3 × 256 KiB = 768 KiB < 1 MiB = MIN_SINK_HANDOFF_BYTES
-        for _ in 0..3 {
-            sink.write_row(vec![b'x'; TEST_SPILL_SIZE]).unwrap();
-        }
-        assert!(sink.bytes_on_disk > 0, "precondition: some bytes must be on disk");
-        assert!(!sink_eligible_for_handoff(&sink), "must not pass handoff filter");
-    }
-
-    /// A sink that has accumulated >= MIN_SINK_HANDOFF_BYTES on disk must pass the filter.
-    #[test]
-    fn drain_filter_triggered_at_threshold() {
-        let mut sink = make_test_sink();
-        // 4 × 256 KiB = 1 MiB = MIN_SINK_HANDOFF_BYTES
-        for _ in 0..4 {
-            sink.write_row(vec![b'x'; TEST_SPILL_SIZE]).unwrap();
-        }
-        assert!(sink_eligible_for_handoff(&sink), "must pass handoff filter at 4 × SPILL_SIZE");
-    }
-
-    /// Regression guard: a large bytes_buffered must not trigger handoff when
-    /// bytes_on_disk is still below the threshold. This is the exact failure mode
-    /// of the old bytes_buffered-based filter.
-    ///
-    /// Uses chunks just below SPILL_THRESHOLD so auto-spill is never triggered;
-    /// force_spill is called manually to accumulate bytes_on_disk in a controlled way.
-    /// After 4 force_spill cycles: bytes_on_disk = 4×(SPILL_SIZE-1) = 1 048 572 < threshold.
-    /// A 5th write (no spill) brings bytes_buffered to 5×(SPILL_SIZE-1) = 1 310 715 > threshold.
-    #[test]
-    fn drain_filter_large_bytes_buffered_insufficient_without_enough_spill() {
-        let mut sink = make_test_sink();
-        let chunk = vec![b'x'; TEST_SPILL_SIZE - 1]; // below auto-spill trigger
-        for _ in 0..4 {
-            sink.write_row(chunk.clone()).unwrap();
-            sink.force_spill().unwrap();
-        }
-        // One more write (no spill) pushes bytes_buffered past the threshold.
-        sink.write_row(chunk.clone()).unwrap();
-        assert!(sink.bytes_buffered >= MIN_SINK_HANDOFF_BYTES,
-            "precondition: bytes_buffered ({}) must exceed threshold ({})",
-            sink.bytes_buffered, MIN_SINK_HANDOFF_BYTES);
-        assert!(sink.bytes_on_disk < MIN_SINK_HANDOFF_BYTES,
-            "bytes_on_disk ({}) must still be below threshold ({})",
-            sink.bytes_on_disk, MIN_SINK_HANDOFF_BYTES);
-        // sink_eligible_for_handoff uses bytes_on_disk — the old bytes_buffered filter
-        // would have returned true here, this is the exact regression being guarded.
-        assert!(!sink_eligible_for_handoff(&sink), "must not pass handoff filter");
     }
 
 }
