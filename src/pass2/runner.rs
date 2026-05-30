@@ -286,14 +286,16 @@ pub async fn run(
     }
 
     // -------------------------------------------------------------------------
-    // Phase B — COPY post-streaming: group sinks by table, one COPY per table.
-    // (T5 will parallelize this on `parallel` PG connections.)
+    // Phase B — COPY post-streaming: parallel on `parallel` PG connections.
+    // Tables are distributed round-robin across connection tasks; each task
+    // processes its batch sequentially and returns (table_name, rows) pairs.
     // -------------------------------------------------------------------------
     let copy_start = Instant::now();
-    let mut rows_per_table: HashMap<String, u64> = HashMap::new();
 
-    // Collect all table names that have data across any worker.
-    let table_names: Vec<String> = {
+    // Collect (table_name, sinks) pairs for non-empty tables, sorted for determinism.
+    let mut table_batches: Vec<Vec<(String, Vec<TempFileSink>)>> =
+        (0..parallel).map(|_| Vec::new()).collect();
+    let mut table_names: Vec<String> = {
         let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for sinks in &all_worker_sinks {
             for (name, sink) in sinks {
@@ -304,22 +306,53 @@ pub async fn run(
         v.sort();
         v
     };
-
-    for table_name in &table_names {
+    for (i, table_name) in table_names.drain(..).enumerate() {
         let sinks: Vec<TempFileSink> = all_worker_sinks
             .iter_mut()
-            .filter_map(|worker| worker.remove(table_name))
+            .filter_map(|w| w.remove(&table_name))
             .filter(|s| s.row_count > 0)
             .collect();
-        if sinks.is_empty() { continue; }
-        let rows = merge_copy_to_db(sinks, client).await?;
-        if let Some(ref tx) = progress_tx {
-            let _ = tx.send(ProgressEvent::Pass2Flush {
-                table_name: table_name.clone(),
-                rows_flushed: rows,
-            });
+        if !sinks.is_empty() {
+            table_batches[i % parallel].push((table_name, sinks));
         }
-        *rows_per_table.entry(table_name.clone()).or_insert(0) += rows;
+    }
+
+    // Spawn one task per PG connection, each processing its batch of tables.
+    let mut copy_handles: Vec<tokio::task::JoinHandle<Result<Vec<(String, u64)>>>> =
+        Vec::with_capacity(parallel);
+    for batch in table_batches {
+        if batch.is_empty() { continue; }
+        let url = pg_url.to_string();
+        let ptx = progress_tx.clone();
+        copy_handles.push(tokio::task::spawn(async move {
+            use crate::db::connection::connect;
+            let conn = connect(&url).await?;
+            let mut results = Vec::new();
+            for (table_name, sinks) in batch {
+                let rows = merge_copy_to_db(sinks, &conn).await?;
+                if let Some(ref tx) = ptx {
+                    let _ = tx.send(ProgressEvent::Pass2Flush {
+                        table_name: table_name.clone(),
+                        rows_flushed: rows,
+                    });
+                }
+                results.push((table_name, rows));
+            }
+            Ok(results)
+        }));
+    }
+
+    let mut rows_per_table: HashMap<String, u64> = HashMap::new();
+    for handle in copy_handles {
+        match handle.await {
+            Ok(Ok(results)) => {
+                for (name, rows) in results {
+                    *rows_per_table.entry(name).or_insert(0) += rows;
+                }
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(J2sError::InvalidInput(format!("copy task panic: {e}"))),
+        }
     }
 
     // -------------------------------------------------------------------------
