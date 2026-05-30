@@ -132,6 +132,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub parallel: usize,
 
+    /// Directory for temporary COPY files during Pass 2 (default: system temp dir)
+    #[arg(long, value_name = "DIR")]
+    pub temp_dir: Option<PathBuf>,
+
     /// Tables with more data columns than this threshold are automatically assigned a WideStrategy
     /// (Pivot or Jsonb). Override per table via --schema-config with `strategy = "pivot"|"jsonb"`.
     /// Set to 0 to disable automatic wide-table detection.

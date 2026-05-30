@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
 use futures_util::SinkExt;
@@ -153,11 +153,13 @@ pub struct TempFileSink {
     writer: Option<File>,
     /// Keeps the temp file alive between spills. None until the first spill.
     temp_file: Option<TempFilePath>,
+    /// Directory for the spill temp file. None = system default (std::env::temp_dir()).
+    temp_dir: Option<PathBuf>,
     copy_sql: String,
 }
 
 impl TempFileSink {
-    pub fn new(schema: &TableSchema, pg_schema: &str) -> Result<Self> {
+    pub fn new(schema: &TableSchema, pg_schema: &str, temp_dir: Option<&Path>) -> Result<Self> {
         let col_names: Vec<String> = schema
             .columns
             .iter()
@@ -180,6 +182,7 @@ impl TempFileSink {
             pending: Vec::new(),
             writer: None,
             temp_file: None,
+            temp_dir: temp_dir.map(|p| p.to_path_buf()),
             copy_sql,
         })
     }
@@ -210,7 +213,10 @@ impl TempFileSink {
                     .open(&guard.0)
                     .map_err(J2sError::Io)?
             } else {
-                let tmp = NamedTempFile::new().map_err(J2sError::Io)?;
+                let tmp = match &self.temp_dir {
+                    Some(dir) => NamedTempFile::new_in(dir).map_err(J2sError::Io)?,
+                    None => NamedTempFile::new().map_err(J2sError::Io)?,
+                };
                 let (file, path) = tmp
                     .keep()
                     .map_err(|e| J2sError::Io(std::io::Error::other(e)))?;
@@ -330,6 +336,7 @@ impl TempFileSink {
             pending,
             writer,
             temp_file,
+            temp_dir: _,
             copy_sql,
             table_name,
         } = self;
@@ -462,7 +469,7 @@ mod tests {
             is_generated: false,
             is_parent_fk: false,
         });
-        TempFileSink::new(&schema, "public").unwrap()
+        TempFileSink::new(&schema, "public", None).unwrap()
     }
 
     /// Returns true if any /proc/self/fd/N symlink resolves to `path`.
@@ -734,5 +741,43 @@ mod tests {
         sink.write_row(row.clone()).unwrap();
         sink.force_spill().unwrap();
         assert_eq!(sink.bytes_on_disk, row_len * 3);
+    }
+
+    /// With temp_dir=None, spilled file lands in the system temp directory.
+    #[test]
+    fn temp_dir_none_uses_system_temp() {
+        let mut sink = make_sink();
+        sink.write_row(vec![b'x'; SPILL_THRESHOLD + 1]).unwrap();
+        let path = sink.temp_file.as_ref().unwrap().0.clone();
+        assert!(
+            path.starts_with(std::env::temp_dir()),
+            "expected system temp dir {:?}, got {:?}",
+            std::env::temp_dir(),
+            path
+        );
+    }
+
+    /// With a custom temp_dir, spilled file lands in that directory.
+    #[test]
+    fn temp_dir_custom_creates_file_in_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        schema.columns.push(ColumnSchema {
+            name: "col".to_string(),
+            original_name: "col".to_string(),
+            pg_type: PgType::Text,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
+        });
+        let mut sink = TempFileSink::new(&schema, "public", Some(dir.path())).unwrap();
+        sink.write_row(vec![b'x'; SPILL_THRESHOLD + 1]).unwrap();
+        let path = sink.temp_file.as_ref().unwrap().0.clone();
+        assert!(
+            path.starts_with(dir.path()),
+            "expected custom temp dir {:?}, got {:?}",
+            dir.path(),
+            path
+        );
     }
 }

@@ -377,6 +377,7 @@ async fn run(cli: Cli) -> Result<()> {
         &cli.schema,
         cli.parallel,
         cli.anomaly_dir.clone(),
+        cli.temp_dir.clone(),
         None,
         None,
     )

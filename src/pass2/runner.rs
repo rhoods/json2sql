@@ -119,6 +119,7 @@ pub async fn run(
     pg_schema: &str,
     parallel: usize,
     anomaly_dir: Option<PathBuf>,
+    temp_dir: Option<PathBuf>,
     progress_tx: Option<ProgressTx>,
     ram_pressure_pct: Option<u8>,
 ) -> Result<Pass2Result> {
@@ -229,9 +230,10 @@ pub async fn run(
             tokio::sync::mpsc::channel::<Vec<u8>>(CHANNEL_CAP);
         senders.push(tx);
 
+        let worker_temp_dir = temp_dir.clone();
         let worker_sinks: HashMap<String, TempFileSink> = schemas
             .iter()
-            .map(|s| Ok((s.name.clone(), TempFileSink::new(s, pg_schema)?)))
+            .map(|s| Ok((s.name.clone(), TempFileSink::new(s, pg_schema, worker_temp_dir.as_deref())?)))
             .collect::<Result<_>>()?;
         let mut worker_anomalies = AnomalyCollector::new(None);
         let pm = path_map_arc.clone();
@@ -350,7 +352,7 @@ pub async fn run(
                                 my_open = my_open.saturating_sub(1);
                             }
                             if let Some(schema) = sbn.get(&name) {
-                                match TempFileSink::new(schema, &pg_schema_owned) {
+                                match TempFileSink::new(schema, &pg_schema_owned, worker_temp_dir.as_deref()) {
                                     Ok(new_sink) => {
                                         let _ = ftx.send((name.clone(), old_sink));
                                         sinks.insert(name, new_sink);
@@ -752,7 +754,7 @@ mod tests {
             is_generated: false,
             is_parent_fk: false,
         });
-        TempFileSink::new(&schema, "public").unwrap()
+        TempFileSink::new(&schema, "public", None).unwrap()
     }
 
     /// A sink with pending data but no spill must not pass the handoff filter.
