@@ -947,19 +947,18 @@ async fn test_pass2_error_event_emitted_on_copy_failure() {
 }
 
 // ---------------------------------------------------------------------------
-// Byte budget drain-max: ram_pressure_pct = Some(100) disables RAM pressure so
-// only the byte-budget branch can fire. With the small test fixture the threshold
-// (512 MiB / parallel) is never reached, but this validates the else-if branch
-// compiles and runs correctly and catches any panic/data-loss regression.
+// Per-worker budget check — correctness with a small threshold (1 MiB).
+// The budget fires repeatedly throughout Phase A, flushing pending to disk
+// in-place. Verifies row counts are correct with frequent forced spills.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn test_byte_budget_drain_max_correctness() {
+async fn test_per_worker_budget_correctness() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(
-            &path, "users", &p1.schemas, &client, &url, &schema, 2, None, None, None, Some(100),
+            &path, "users", &p1.schemas, &client, &url, &schema, 2, None, None, None, Some(1024 * 1024),
         ).await.unwrap();
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("users_address").unwrap(), 3);
@@ -970,24 +969,20 @@ async fn test_byte_budget_drain_max_correctness() {
 }
 
 // ---------------------------------------------------------------------------
-// RAM pressure: force_spill in-place — no handoff, sink stays in worker.
-// ram_pressure_pct = Some(0) forces pressure unconditionally (0% threshold →
-// any RSS > 0 triggers). The initial check fires before the first dispatch so
-// workers see the flag from their very first object even on small fixtures.
-// Verifies data integrity: all tables get the correct row counts despite
-// constant in-place force_spill on every worker iteration.
+// Per-worker budget check — minimum threshold (1 byte = fires after every
+// insert_object). Stress-tests data integrity: all tables must have correct
+// row counts despite force_spill() being called on every worker iteration.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn test_ram_pressure_force_spill_in_place() {
+async fn test_per_worker_budget_minimum_threshold() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(
-            &path, "users", &p1.schemas, &client, &url, &schema, 2, None, None, None, Some(0),
+            &path, "users", &p1.schemas, &client, &url, &schema, 2, None, None, None, Some(1),
         ).await.unwrap();
 
-        // All nested tables must have correct counts despite constant RAM pressure.
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("users_address").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("users_tags").unwrap(), 6);

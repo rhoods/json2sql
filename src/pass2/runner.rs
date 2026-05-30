@@ -47,6 +47,13 @@ pub struct Pass2Result {
     pub timing: Pass2Timing,
 }
 
+/// Per-worker budget for in-memory pending data during Phase A.
+/// When the sum of all sinks' `bytes_buffered` exceeds this value, all sinks
+/// are force-spilled to disk, freeing the pending allocations. The budget
+/// then advances by the same amount so spills are evenly spaced throughout
+/// the streaming phase regardless of how many tables the schema has.
+pub const PER_WORKER_FLUSH_THRESHOLD: u64 = 1024 * 1024 * 1024; // 1 GiB
+
 fn validate_run_params(parallel: usize) -> Result<()> {
     if parallel == 0 {
         return Err(J2sError::InvalidInput(
@@ -82,7 +89,7 @@ pub async fn run(
     anomaly_dir: Option<PathBuf>,
     temp_dir: Option<PathBuf>,
     progress_tx: Option<ProgressTx>,
-    _ram_pressure_pct: Option<u8>,
+    per_worker_budget: Option<u64>,
 ) -> Result<Pass2Result> {
     validate_run_params(parallel)?;
     let total_bytes = file_size(path)?;
@@ -93,6 +100,7 @@ pub async fn run(
     };
     let mut rows_processed = 0u64;
     const PROGRESS_INTERVAL: u64 = 1_000;
+    let worker_budget = per_worker_budget.unwrap_or(PER_WORKER_FLUSH_THRESHOLD);
 
     let sep = PATH_SEP.to_string();
     let path_map: HashMap<String, TableSchema> =
@@ -178,6 +186,9 @@ pub async fn run(
 
         let handle = tokio::task::spawn(async move {
             let mut sinks = worker_sinks;
+            // Advances by `worker_budget` after each forced spill so memory
+            // stays bounded regardless of the number of tables in the schema.
+            let mut next_budget_trigger = worker_budget;
 
             loop {
                 let mut bytes = tokio::select! {
@@ -204,6 +215,14 @@ pub async fn run(
                     None,
                     None,
                 )?;
+
+                let total_written: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
+                if total_written >= next_budget_trigger {
+                    for sink in sinks.values_mut() {
+                        sink.force_spill()?;
+                    }
+                    next_budget_trigger = total_written + worker_budget;
+                }
             }
 
             // Force remaining in-memory data to disk before returning sinks.
