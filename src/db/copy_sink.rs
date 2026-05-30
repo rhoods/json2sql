@@ -27,11 +27,6 @@ fn pg_err(context: &str, e: tokio_postgres::Error) -> J2sError {
 pub const COPY_NULL: &str = "\\N";
 /// Column delimiter in COPY text format.
 pub const COPY_DELIMITER: u8 = b'\t';
-/// Maximum number of temp files open simultaneously before the Pass 2 runner
-/// triggers a preventive flush of all active sinks to recycle file descriptors.
-/// Chosen conservatively below the typical ulimit of 1024.
-pub const MAX_OPEN_TEMP_FILES: usize = 950;
-
 /// Total bytes written to a single worker's sinks that trigger an interim
 /// COPY-to-PostgreSQL flush during Phase B streaming. Keeps per-worker peak
 /// temp-file disk usage bounded instead of accumulating the full source file.
@@ -230,19 +225,18 @@ impl TempFileSink {
         Ok(self.writer.as_mut().unwrap())
     }
 
-    /// Write all of `pending` to the temp file and clear the buffer.
-    /// The file FD stays open after the spill for the next spill.
+    /// Write all of `pending` to the temp file, clear the buffer, and immediately
+    /// close the FD (auto-hibernate). This keeps FD count at 0 across all workers,
+    /// eliminating the need for a global FD counter or per-worker budget checks.
     fn spill(&mut self) -> Result<()> {
         if self.pending.is_empty() {
             return Ok(());
         }
-        // mem::take satisfies the borrow checker: ensure_file borrows &mut self,
-        // so we extract pending first. On write failure the data is lost, but
-        // an I/O error on a temp file is already fatal to the import.
         let data = std::mem::take(&mut self.pending);
         self.bytes_on_disk += data.len() as u64;
         let file = self.ensure_file()?;
         file.write_all(&data).map_err(J2sError::Io)?;
+        self.writer = None; // close FD immediately after write
         Ok(())
     }
 
@@ -510,21 +504,19 @@ mod tests {
         assert!(!sink.is_open(), "no FD after hibernate");
     }
 
-    /// After a spill, hibernate must close the file descriptor.
+    /// spill() must auto-hibernate: FD is closed immediately after write_all,
+    /// without a separate hibernate() call.
     #[cfg(target_os = "linux")]
     #[test]
-    fn hibernate_releases_fd_after_spill() {
+    fn spill_auto_hibernates_fd() {
         let mut sink = make_sink();
-        // Write enough to trigger a spill.
         let row = vec![b'x'; SPILL_THRESHOLD + 1];
         sink.write_row(row).unwrap();
 
         let path = sink.temp_file.as_ref().unwrap().0.clone();
-        assert!(fd_points_to(&path), "FD should be open after spill");
-
-        sink.hibernate().unwrap();
-        assert!(!fd_points_to(&path), "FD must be closed after hibernate");
-        // pending is empty (was spilled), but temp_file still exists.
+        // After spill, FD must already be closed — no hibernate() needed.
+        assert!(!sink.is_open(), "is_open() must be false immediately after spill");
+        assert!(!fd_points_to(&path), "FD must be closed immediately after spill");
         assert!(sink.pending.is_empty());
     }
 
@@ -550,7 +542,8 @@ mod tests {
         let large_row = vec![b'x'; SPILL_THRESHOLD + 1];
         let expected = large_row.len() as u64;
         sink.write_row(large_row).unwrap();
-        assert!(sink.is_open(), "spill should have opened a file");
+        assert!(!sink.is_open(), "FD must be closed immediately after auto-hibernate spill");
+        assert!(sink.temp_file.is_some(), "temp file must exist after spill");
         assert_eq!(sink.bytes_buffered, expected, "bytes_buffered must reflect spilled data");
     }
 
@@ -599,18 +592,18 @@ mod tests {
         assert_eq!(s2.row_count, 2);
     }
 
-    /// is_open() must be false after hibernation.
+    /// is_open() must be false after a spill (auto-hibernate) and remains false
+    /// after an explicit hibernate() call (which is now a no-op in this path).
     #[test]
-    fn is_open_false_after_hibernate() {
+    fn is_open_false_after_spill() {
         let mut sink = make_sink();
 
-        // Force a spill to open a FD.
         let row = vec![b'y'; SPILL_THRESHOLD + 1];
         sink.write_row(row).unwrap();
-        assert!(sink.is_open());
+        assert!(!sink.is_open(), "spill must auto-hibernate — no explicit call needed");
 
         sink.hibernate().unwrap();
-        assert!(!sink.is_open());
+        assert!(!sink.is_open(), "hibernate after auto-hibernate must remain false");
     }
 
     // -------------------------------------------------------------------------
@@ -652,15 +645,16 @@ mod tests {
         assert_eq!(sink.bytes_buffered, expected);
     }
 
-    /// force_spill opens a FD; a subsequent hibernate must close it.
+    /// force_spill must auto-hibernate: FD is closed immediately after write_all.
+    /// A subsequent hibernate() is a no-op (already closed).
     #[test]
     fn force_spill_then_hibernate_releases_fd() {
         let mut sink = make_sink();
         sink.write_row(b"row\n".to_vec()).unwrap();
         sink.force_spill().unwrap();
-        assert!(sink.is_open(), "force_spill must open a FD");
+        assert!(!sink.is_open(), "force_spill must auto-hibernate the FD");
         sink.hibernate().unwrap();
-        assert!(!sink.is_open(), "hibernate must close the FD");
+        assert!(!sink.is_open());
         assert!(sink.pending.is_empty());
     }
 

@@ -840,12 +840,10 @@ async fn test_merge_copy_large_file_streaming() {
         }
         // Force everything to disk so the streaming read path is exercised.
         sink.force_spill().unwrap();
-        sink.hibernate().unwrap();
-        assert!(sink.temp_file.is_some(), "data must be on disk for this test");
 
         let rows = merge_copy_to_db(vec![sink], &client).await.unwrap();
         assert_eq!(rows, expected_rows);
-        assert_eq!(common::row_count(&client, &schema, "t").await, expected_rows);
+        assert_eq!(common::row_count(&client, &schema, "t").await, expected_rows as i64);
     }).await;
 }
 

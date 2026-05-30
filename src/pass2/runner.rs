@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::anomaly::collector::AnomalyCollector;
-use crate::db::copy_sink::{merge_copy_to_db, TempFileSink, INTERIM_FLUSH_THRESHOLD, MAX_OPEN_TEMP_FILES};
+use crate::db::copy_sink::{merge_copy_to_db, TempFileSink, INTERIM_FLUSH_THRESHOLD};
 use crate::schema::PATH_SEP;
 use crate::db::ddl::{add_constraints, ConstraintWarning};
 use crate::error::{J2sError, Result};
@@ -49,11 +49,6 @@ pub struct Pass2Result {
     pub timing: Pass2Timing,
 }
 
-/// Fraction of `MAX_OPEN_TEMP_FILES` that all workers combined may hold open
-/// simultaneously. Conservative to leave headroom for PG connection, reader,
-/// and process descriptors.
-const FD_GLOBAL_THRESHOLD: usize = MAX_OPEN_TEMP_FILES * 9 / 10; // 855 with default 950
-
 /// Minimum bytes physically on disk in a worker sink before it is handed off to
 /// the flush task during a drain cycle. Keyed on `bytes_on_disk` (not
 /// `bytes_buffered`) so a table that only accumulates a small amount per drain
@@ -79,19 +74,6 @@ fn validate_run_params(parallel: usize) -> Result<()> {
     Ok(())
 }
 
-/// Saturating subtraction on an `AtomicUsize`.
-///
-/// Needed because `fetch_sub` wraps on underflow (undefined in usize arithmetic).
-fn global_sub(global: &AtomicUsize, n: usize) {
-    let mut cur = global.load(Ordering::Relaxed);
-    loop {
-        let next = cur.saturating_sub(n);
-        match global.compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => break,
-            Err(actual) => cur = actual,
-        }
-    }
-}
 
 /// Default RAM usage percentage above which workers force-spill all sinks in-place.
 pub const DEFAULT_RAM_PRESSURE_PCT: u8 = 70;
@@ -210,15 +192,6 @@ pub async fn run(
         Vec::with_capacity(parallel);
     let mut worker_handles = Vec::with_capacity(parallel);
 
-    // Per-worker FD ceiling: each worker hibernates when it holds this many
-    // open sinks. Divided across workers with 10% global headroom.
-    let fd_budget_per_worker = (FD_GLOBAL_THRESHOLD / parallel).max(64);
-
-    // Global FD counter shared across all workers.
-    // Workers update this after every insert so every worker has visibility into
-    // total process FD pressure, not just its own slice.
-    let global_open_fds = Arc::new(AtomicUsize::new(0));
-
     // Flush channel: workers send over-threshold sinks here and replace them
     // with a fresh empty sink. A dedicated flush task (spawned below) drains
     // this channel and COPYs sinks to PG concurrently with Phase B streaming.
@@ -238,7 +211,6 @@ pub async fn run(
         let mut worker_anomalies = AnomalyCollector::new(None);
         let pm = path_map_arc.clone();
         let rs = root_schema_arc.clone();
-        let global = Arc::clone(&global_open_fds);
         let ftx = flush_tx.clone();
         let sbn = schema_by_name.clone();
         let pg_schema_owned = pg_schema.to_string();
@@ -247,8 +219,6 @@ pub async fn run(
 
         let handle = tokio::task::spawn(async move {
             let mut sinks = worker_sinks;
-            // FDs this worker currently holds open, reflected in `global`.
-            let mut my_open: usize = 0;
 
             loop {
             let mut bytes = tokio::select! {
@@ -265,24 +235,6 @@ pub async fn run(
                     ))),
                 };
 
-                // Global pressure check: if the process-wide FD count is at or
-                // above threshold, release our share before adding more.
-                if global.load(Ordering::Relaxed) >= FD_GLOBAL_THRESHOLD && my_open > 0 {
-                    for sink in sinks.values_mut() {
-                        sink.hibernate()?;
-                    }
-                    global_sub(&global, my_open);
-                    my_open = 0;
-                }
-                // Per-worker budget check before insert.
-                if my_open >= fd_budget_per_worker {
-                    for sink in sinks.values_mut() {
-                        sink.hibernate()?;
-                    }
-                    global_sub(&global, my_open);
-                    my_open = 0;
-                }
-
                 insert_object(
                     &pm,
                     &mut sinks,
@@ -294,40 +246,14 @@ pub async fn run(
                     None,
                 )?;
 
-                // Recount after every insert and update the global counter.
-                let new_open = sinks.values().filter(|s| s.is_open()).count();
-                if new_open > my_open {
-                    global.fetch_add(new_open - my_open, Ordering::Relaxed);
-                } else if new_open < my_open {
-                    global_sub(&global, my_open - new_open);
-                }
-                my_open = new_open;
-
-                // Per-worker budget check after insert.
-                if my_open >= fd_budget_per_worker {
-                    for sink in sinks.values_mut() {
-                        sink.hibernate()?;
-                    }
-                    global_sub(&global, my_open);
-                    my_open = 0;
-                }
-
                 let total_bytes: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
                 let ram_flag = mem_pressure.load(Ordering::Relaxed);
 
                 if ram_flag {
                     // RAM pressure: force_spill all sinks in-place — no handoff.
-                    // Pending Vecs are written to each sink's existing temp file
-                    // (append), freeing RAM. Sinks stay in the worker and continue
-                    // accumulating new rows into the same file — no fragmentation.
+                    // spill() auto-hibernates, so no FD tracking needed.
                     for sink in sinks.values_mut() {
-                        let was_open = sink.is_open();
                         sink.force_spill()?;
-                        sink.hibernate()?;
-                        if was_open {
-                            global_sub(&global, 1);
-                            my_open = my_open.saturating_sub(1);
-                        }
                     }
                 } else if total_bytes > per_worker_flush_threshold {
                     // Byte budget exceeded.
@@ -344,13 +270,7 @@ pub async fn run(
 
                     for name in handoff_names {
                         if let Some(mut old_sink) = sinks.remove(&name) {
-                            let was_open = old_sink.is_open();
                             old_sink.force_spill()?;
-                            old_sink.hibernate()?;
-                            if was_open {
-                                global_sub(&global, 1);
-                                my_open = my_open.saturating_sub(1);
-                            }
                             if let Some(schema) = sbn.get(&name) {
                                 match TempFileSink::new(schema, &pg_schema_owned, worker_temp_dir.as_deref()) {
                                     Ok(new_sink) => {
@@ -370,24 +290,14 @@ pub async fn run(
                     // force_spill all remaining non-empty sinks in-place.
                     for sink in sinks.values_mut() {
                         if sink.bytes_buffered > 0 {
-                            let was_open = sink.is_open();
                             sink.force_spill()?;
-                            sink.hibernate()?;
-                            if was_open {
-                                global_sub(&global, 1);
-                                my_open = my_open.saturating_sub(1);
-                            }
                         }
                     }
                 }
             }
 
-            // Hibernate all open sinks to release FDs, then send remaining
-            // non-empty sinks to the flush task before exiting.
-            for sink in sinks.values_mut() {
-                sink.hibernate()?;
-            }
-            global_sub(&global, my_open);
+            // Send remaining non-empty sinks to the flush task before exiting.
+            // spill() auto-hibernates, so no explicit hibernate loop needed.
             for (name, sink) in sinks {
                 if sink.row_count > 0 || sink.total_flushed > 0 {
                     let _ = ftx.send((name, sink));
@@ -667,9 +577,7 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::{global_sub, Pass2Timing, MIN_SINK_HANDOFF_BYTES, sink_eligible_for_handoff, validate_run_params};
+    use super::{Pass2Timing, MIN_SINK_HANDOFF_BYTES, sink_eligible_for_handoff, validate_run_params};
     use crate::db::copy_sink::TempFileSink;
     use crate::schema::table_schema::{ColumnSchema, TableSchema};
     use crate::schema::type_tracker::PgType;
@@ -684,27 +592,6 @@ mod tests {
     fn pass2_timing_zero() {
         let t = Pass2Timing { streaming_ms: 0, copy_ms: 0 };
         assert_eq!(t.total_ms(), 0);
-    }
-
-    #[test]
-    fn global_sub_does_not_underflow() {
-        let g = AtomicUsize::new(10);
-        global_sub(&g, 20); // subtract more than current value
-        assert_eq!(g.load(Ordering::Relaxed), 0); // must saturate to 0, not wrap
-    }
-
-    #[test]
-    fn global_sub_normal_case() {
-        let g = AtomicUsize::new(100);
-        global_sub(&g, 30);
-        assert_eq!(g.load(Ordering::Relaxed), 70);
-    }
-
-    #[test]
-    fn global_sub_exact_to_zero() {
-        let g = AtomicUsize::new(50);
-        global_sub(&g, 50);
-        assert_eq!(g.load(Ordering::Relaxed), 0);
     }
 
     #[test]
