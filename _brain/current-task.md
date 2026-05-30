@@ -22,9 +22,10 @@ _Mis à jour automatiquement en fin de session._
 
 ## Ce qui est livré (session 2026-05-30)
 
+- **IHM T1** : temp dir picker dans Setup Advanced + probe free space (fs2) + warning vert/jaune/rouge + note PG local
+- **IHM T2** : double barre de progression ImportScreen (Phase A Streaming / Phase B Inserting) + composant `ProgressBar` partagé + refacto AnalysisScreen
 - **Pass 2 refactoring T1–T5** : séparation franche streaming / COPY — voir `_brain/done.md` pour le détail complet
 - `docs/technical/pass2-refactor-plan.md` : document de référence de l'architecture retenue
-- `_brain/ux-todo.md` : idée double barre de progression ImportScreen notée (post-refactor)
 
 ## Ce qui est livré (session 2026-05-25)
 

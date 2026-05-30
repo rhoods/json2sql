@@ -8,6 +8,25 @@ Description courte de ce qui a été fait.
 
 Ajouter toujours EN HAUT du fichier. -->
 
+## 2026-05-30 — IHM : temp dir picker + double barre progression (T1–T2)
+
+Deux features UI suite au pass2-refactor (séparation streaming/COPY) :
+
+**T1 — Temp dir picker (Setup → Advanced)**
+- `ProjectState.temp_dir: Option<PathBuf>` + persistance TOML (`ProjectConfig`)
+- Bloc field-row "Temp directory" dans Step 4 Advanced, pattern identique à anomaly_dir
+- Probe disk free space via `fs2::available_space` (nouveau dep cross-platform)
+- Warning vert/jaune/rouge : `disk_warning_level(free, source_size)` fn pure testée × 6
+- Note conditionnelle "PG local → réserver 2×" si pg.host == localhost
+- `temp_dir` propagé dans le `use_coroutine` de ImportScreen (remplace le `None` hardcodé)
+
+**T2 — Double barre de progression (ImportScreen)**
+- `progress_pct(done, total) → u32` fn pure extraite dans `screens/mod.rs` (testée × 5)
+- Composant `ProgressBar { pct, done, label, phase }` partagé Analysis + Import
+- ImportScreen : 2 barres en grid 1fr/1fr — "A · Streaming" (bytes_read/total) + "B · Inserting" (tables_done/total)
+- AnalysisScreen refactorisé pour utiliser `ProgressBar` + `progress_pct`
+- Zéro changement backend (les events `Pass2Progress` et `Pass2Flush` existaient déjà)
+
 ## 2026-05-30 — Pass 2 refactoring : séparation streaming / COPY (T1–T5)
 
 Refactoring complet du pipeline Pass 2 pour résoudre l'accumulation de ~71 000 fichiers
