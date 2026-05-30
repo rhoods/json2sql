@@ -822,6 +822,33 @@ async fn test_merge_copy_multiple_sinks_same_table() {
     }).await;
 }
 
+/// Sink whose temp file exceeds 4 MiB (the streaming chunk size): all rows must
+/// arrive in PG, verifying that the chunked streaming path handles multi-chunk files.
+#[tokio::test]
+async fn test_merge_copy_large_file_streaming() {
+    common::with_schema(|client, schema| async move {
+        client.execute(&format!("CREATE TABLE \"{schema}\".\"t\" (v TEXT)"), &[]).await.unwrap();
+        let ts = single_col_schema("t");
+        let mut sink = TempFileSink::new(&ts, &schema, None).unwrap();
+
+        // Write enough rows to produce a temp file larger than the 4 MiB chunk size.
+        // Each row is ~1 KiB; 5000 rows ≈ 5 MiB on disk.
+        let row_data: Vec<u8> = std::iter::repeat(b'x').take(1023).chain(std::iter::once(b'\n')).collect();
+        let expected_rows: u64 = 5_000;
+        for _ in 0..expected_rows {
+            sink.write_row(row_data.clone()).unwrap();
+        }
+        // Force everything to disk so the streaming read path is exercised.
+        sink.force_spill().unwrap();
+        sink.hibernate().unwrap();
+        assert!(sink.temp_file.is_some(), "data must be on disk for this test");
+
+        let rows = merge_copy_to_db(vec![sink], &client).await.unwrap();
+        assert_eq!(rows, expected_rows);
+        assert_eq!(common::row_count(&client, &schema, "t").await, expected_rows);
+    }).await;
+}
+
 /// Pass2Flush events must be emitted after each COPY completes and their row
 /// counts must match the data actually in PostgreSQL across all generated tables.
 #[tokio::test]

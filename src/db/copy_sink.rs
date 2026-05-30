@@ -2,6 +2,8 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use tokio::io::AsyncReadExt;
+
 use bytes::Bytes;
 use futures_util::SinkExt;
 use tempfile::NamedTempFile;
@@ -431,16 +433,17 @@ pub async fn merge_copy_to_db(sinks: Vec<TempFileSink>, client: &Client) -> Resu
             continue;
         }
         drop(writer);
-        let file_data = if let Some(ref guard) = temp_file {
-            tokio::fs::read(&guard.0).await.map_err(J2sError::Io)?
-        } else {
-            Vec::new()
-        };
-        drop(temp_file);
-        for chunk in file_data.chunks(1024 * 1024) {
-            pinned.send(Bytes::copy_from_slice(chunk)).await
-                .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+        if let Some(ref guard) = temp_file {
+            let mut file = tokio::fs::File::open(&guard.0).await.map_err(J2sError::Io)?;
+            let mut buf = vec![0u8; 4 * 1024 * 1024];
+            loop {
+                let n = file.read(&mut buf).await.map_err(J2sError::Io)?;
+                if n == 0 { break; }
+                pinned.send(Bytes::copy_from_slice(&buf[..n])).await
+                    .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+            }
         }
+        drop(temp_file);
         for chunk in pending.chunks(1024 * 1024) {
             pinned.send(Bytes::copy_from_slice(chunk)).await
                 .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
@@ -741,6 +744,33 @@ mod tests {
         sink.write_row(row.clone()).unwrap();
         sink.force_spill().unwrap();
         assert_eq!(sink.bytes_on_disk, row_len * 3);
+    }
+
+    /// Chunked read of a file larger than 4 MiB must accumulate all bytes without
+    /// loading the full content at once. This validates the streaming read pattern
+    /// used by merge_copy_to_db independently of a PostgreSQL connection.
+    #[tokio::test]
+    async fn stream_file_reads_all_bytes_in_chunks() {
+        use tokio::io::AsyncReadExt;
+
+        let file_size = 5 * 1024 * 1024; // 5 MiB
+        let content: Vec<u8> = (0..file_size).map(|i| (i % 256) as u8).collect();
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut tmp, &content).unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let mut file = tokio::fs::File::open(&path).await.unwrap();
+        let mut buf = vec![0u8; 4 * 1024 * 1024];
+        let mut received: Vec<u8> = Vec::new();
+        loop {
+            let n = file.read(&mut buf).await.unwrap();
+            if n == 0 { break; }
+            received.extend_from_slice(&buf[..n]);
+        }
+
+        assert_eq!(received.len(), file_size, "all bytes must be read across chunks");
+        assert_eq!(received, content, "byte content must be identical");
     }
 
     /// With temp_dir=None, spilled file lands in the system temp directory.
