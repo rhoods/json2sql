@@ -80,6 +80,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 &pg_schema,
                 pass2_parallel,
                 anomaly_dir,
+                None,
                 Some(tx),
                 None,
             )
