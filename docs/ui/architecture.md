@@ -127,6 +127,21 @@ Source unique pour Strategy, Preview, et StrategyConfigurator.
 ### Helpers file picker (`rfd`)
 `pick_file`, `pick_folder`, `pick_save_file` — dialogues natifs via `rfd::AsyncFileDialog`. Cross-platform, pas de dépendance zenity/GTK externe.
 
+### `progress_pct(done: u64, total: u64) -> u32`
+Calcule un pourcentage de progression (0–100). Retourne 0 si `total == 0`, plafonne à 100 si `done >= total`. Partagé entre `analysis.rs` et `import.rs`.
+
+### `ProgressBar` (composant partagé)
+Barre de progression labellisée, utilisée par `AnalysisScreen` et `ImportScreen`.
+
+```rust
+ProgressBar {
+    pct: u32,       // 0–100
+    done: bool,     // si true : barre pleine sans animation
+    label: String,  // légende sous la barre (bytes, lignes, ETA…)
+    phase: String,  // préfixe affiché au-dessus (ex : "A · Streaming")
+}
+```
+
 ---
 
 ## Composants partagés
@@ -192,8 +207,13 @@ Les clics transmettent les `Modifiers` du `MouseEvent` pour permettre Ctrl+clic 
 ## Les 5 écrans
 
 ### Écran 1 — Setup (`setup.rs`)
-Wizard 4 étapes accordion (`.step-card`). Étape 3 délègue à `PgConnectionForm`.  
+Wizard 4 étapes accordion (`.step-card`). Étape 3 délègue à `PgConnectionForm`. Étape 4 (Advanced) est toujours optionnelle.
 Sauvegarde la config TOML à chaque modification. Supporte le chargement d'un snapshot JSON sauvegardé.
+
+**Étape 4 — Advanced** :
+- **Pass 1 / Pass 2 parallelism** : deux cartes côte à côte avec toggle on/off et champ `Workers`. Pass 1 = workers d'inférence de schéma ; Pass 2 = connexions PG parallèles pour le COPY.
+- **Temp directory** : folder picker natif (`rfd`). À la sélection, une probe async (`fs2::available_space`) mesure l'espace disque libre et affiche un badge coloré (vert / jaune / rouge) selon le ratio espace libre / taille du fichier source. Si PostgreSQL tourne localement sur le même disque, une note affiche la réserve totale recommandée (2 × taille source).
+- **Table handling** : toggle "Drop existing tables (CASCADE)" avec avertissement destructif.
 
 ### Écran 2 — Analysis (`analysis.rs`)
 Split 60/40. Panneau gauche : log temps réel (monospace). Panneau droit : 4 tuiles `.stat-tile` (tables, colonnes, lignes, statut).  
@@ -228,6 +248,11 @@ Layout trois panneaux `.split-3` (25/45/30), read-only :
 Split `.split-60-40`. Lance la pipeline complète Pass 2 au montage (connexion PG → DDL → COPY).  
 Panneau gauche : log `.log` colorisé. Panneau droit : compteur de lignes par table (`table.t`), triées par volume décroissant.  
 Utilise `use_elapsed_timer` pour le chrono. Bannière de succès avec total lignes + anomalies. Bouton "New Import" → `AppState::cancel()`.
+
+**Double barre de progression (bottom bar)** :
+Deux composants `ProgressBar` côte à côte (`grid-template-columns: 1fr 1fr`) :
+- **A · Streaming** : `bytes_read / total_bytes` — reflète la Phase A (lecture JSON + écriture des fichiers temporaires). Passe à 100 % quand tout le fichier est parsé.
+- **B · Inserting** : `tables_done / tables_total` — reflète la Phase B (COPY vers PostgreSQL). Incrémente à chaque `Pass2Flush` reçu. Passe à 100 % à `Pass2Done`.
 
 ---
 

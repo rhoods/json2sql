@@ -170,7 +170,8 @@ json2sql \
 | Paramètre | Défaut | Description |
 |---|---|---|
 | `--batch-size` | 100 000 | Flush vers PostgreSQL toutes les N lignes par table |
-| `--parallel` | 1 | Connexions PostgreSQL parallèles |
+| `--parallel` | 1 | Connexions PostgreSQL parallèles pour le COPY (Phase B) |
+| `--temp-dir` | `$TMPDIR` | Répertoire pour les fichiers temporaires de Pass 2 |
 | `--transaction` | false | Enveloppe tout dans une transaction |
 
 ### Paramètres d'anomalies
@@ -254,11 +255,17 @@ Résultat : 125 colonnes stables dans la table principale, 184 clés médium dan
 
 ## Conseils pratiques
 
-**Fichiers temporaires volumineux** : la Pass 2 écrit les COPY dans des fichiers temporaires. Sur des datasets de plusieurs Go, s'assurer que `TMPDIR` pointe vers un disque avec suffisamment d'espace :
+**Fichiers temporaires volumineux** : la Pass 2 (Phase A) accumule **toutes** les données dans des fichiers temporaires avant le COPY PostgreSQL (Phase B). Sur des datasets de plusieurs Go, choisir un répertoire avec suffisamment d'espace :
 
 ```bash
+# Option recommandée — flag dédié
+json2sql --input big.jsonl --db-url $DATABASE_URL --temp-dir /path/to/large/disk
+
+# Alternative — variable d'environnement (s'applique aussi aux autres outils)
 TMPDIR=/path/to/large/disk json2sql --input big.jsonl --db-url $DATABASE_URL
 ```
+
+Dimensionnement : le peak disque est ≈ la taille du fichier source. Pour un fichier de 70 Go, prévoir ~70 Go libres dans le répertoire temp.
 
 **Explorer un fichier inconnu** : utiliser `inspect` pour comprendre la structure d'un fichier trop grand à ouvrir, avant tout import :
 

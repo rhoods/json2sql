@@ -127,19 +127,19 @@ Type et fonction garantissant la sécurité du format COPY PostgreSQL texte au n
 
 Implémente le chargement via le protocole `COPY FROM STDIN`.
 
-Constantes publiques :
-- **`MAX_OPEN_TEMP_FILES`** (950) : nombre maximal de FD temp-file ouverts simultanément dans le processus. En-dessous du ulimit typique de 1024 pour laisser de la marge aux connexions PG et autres FD.
-- **`INTERIM_FLUSH_THRESHOLD`** (512 MiB) : seuil par worker au-delà duquel le sink le plus gros est expédié à la flush task pour libérer l'espace disque.
+Constante interne :
+- **`SPILL_THRESHOLD`** (256 KiB) : taille maximale du buffer in-memory `pending` avant déversement sur disque.
 
 Types et fonctions :
 - **`RowBuilder`** : construit une ligne au format texte COPY (colonnes séparées par `\t`, NULL représenté par `\N`). `push_value()` prend un `&CopyEscaped`. `push_null()` et `push_uuid()` disponibles. `finish()` ajoute le `\n` et retourne le buffer.
 - **`TempFileSink`** : accumule les lignes d'une table pendant la Pass 2. Utilise un **buffer in-memory `pending`** qui se renverse dans un fichier temporaire quand il dépasse `SPILL_THRESHOLD` (256 KiB). Champs publics : `table_name`, `row_count`, `total_flushed`, `bytes_buffered`.
-  - `write_row()` : ajoute une ligne ; déclenche un spill si `pending` dépasse le seuil.
-  - `hibernate()` : ferme le FD du fichier temporaire **sans toucher `pending`**. Coût = un syscall `close()`. Le FD est rouvert sur le prochain spill.
-  - `is_open()` : vrai si un FD est actuellement ouvert.
-  - `flush_to_db()` : envoie toutes les données (fichier + `pending`) en COPY puis réinitialise le sink pour réutilisation (flush périodique).
-  - `copy_to_db()` : flush final, consomme le sink, supprime le fichier temporaire.
-- **`merge_copy_to_db(sinks, client)`** : ouvre **une seule session COPY** et y stream les données de N sinks appartenant à la même table. Réduit le overhead COPY de `N_workers × N_tables` à `~N_tables` dans le cas des petites tables.
+  - `new(schema, pg_schema, temp_dir: Option<&Path>)` : crée un sink ; si `temp_dir` est fourni, le fichier temporaire est créé dans ce répertoire (défaut : `std::env::temp_dir()`).
+  - `write_row()` : ajoute une ligne ; déclenche un spill automatique si `pending` dépasse le seuil.
+  - `spill()` (interne) : vide `pending` dans le fichier temporaire et **ferme le FD immédiatement** (auto-hibernate). Aucun FD n'est conservé ouvert entre deux écritures — aucun budget global de FD n'est nécessaire.
+  - `force_spill()` : force le déversement de `pending` sur disque même si sous le seuil. Appelé par les workers en fin de Phase A pour libérer la mémoire avant de retourner les sinks.
+  - `hibernate()` : ferme le FD si ouvert, sans toucher `pending`. No-op dans la plupart des cas (spill auto-hiberne déjà).
+  - `is_open()` : `true` uniquement si un FD est actuellement ouvert — toujours `false` après un spill.
+- **`merge_copy_to_db(sinks, client)`** : ouvre **une seule session COPY** et y stream les données de N sinks d'une même table. Lit les fichiers temporaires en **chunks de 4 MiB** (streaming — sans chargement entier en mémoire). Réduit le overhead COPY de `N_workers × N_tables` à `~N_tables`.
 
 ---
 
@@ -170,8 +170,9 @@ Protocole de communication entre les runners et l'IHM Dioxus.
 |---|---|---|
 | `Pass1Progress` | rows_scanned, bytes_read, total_bytes | Pass 1, périodique |
 | `Pass1Done` | total_rows, tables_count, columns_count | Pass 1, fin |
-| `Pass2Progress` | rows_processed, bytes_read, total_bytes | Pass 2, périodique |
-| `Pass2Flush` | table_name, rows_flushed | Pass 2, à chaque COPY batch |
+| `Pass2Progress` | rows_processed, bytes_read, total_bytes | Phase A, périodique |
+| `Pass2Flush` | table_name, rows_flushed | Phase B, à chaque table COPYée |
+| `Pass2AnomalyUpdate` | table_name, count | Phase B, une fois par table après fin des workers |
 | `Pass2Log` | String | Pass 2, messages de log |
 | `Pass2Done` | total_rows, anomaly_count, constraint_warning_count | Pass 2, fin |
 
@@ -226,12 +227,16 @@ Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cibl
 
 ### `runner.rs`
 
-Orchestre la Pass 2. Relit le fichier et insère les données via une architecture **3 couches** :
+Orchestre la Pass 2. Relit le fichier et insère les données via une architecture **2 phases séquentielles** :
 
 ```
-Dispatcher (main task)
-  └─► N Worker tasks  ──flush_tx──►  Flush task (accumulation)
-                                         └─► N Conn tasks  ──► PostgreSQL
+Phase A — Streaming (aucune connexion PG)
+  N workers ─round-robin─► N × HashMap<table_name, TempFileSink>
+  Fin : workers retournent leurs sinks via JoinHandle
+
+Phase B — COPY post-streaming (parallel connexions PG)
+  Tables regroupées par nom · distribuées round-robin sur parallel tâches
+  Chaque tâche : merge_copy_to_db(sinks) ──► PostgreSQL
 ```
 
 **Signature `run()`** :
@@ -241,34 +246,34 @@ pub async fn run(
     path: &Path,
     root_table: &str,
     schemas: &[TableSchema],
-    client: &Client,     // pour les contraintes (Phase D)
-    pg_url: &str,        // pour les N connexions COPY
+    client: &Client,           // pour les contraintes (Phase D)
+    pg_url: &str,              // pour les N connexions COPY (Phase B)
     pg_schema: &str,
     parallel: usize,
     anomaly_dir: Option<PathBuf>,
+    temp_dir: Option<PathBuf>, // répertoire pour les fichiers temporaires
     progress_tx: Option<ProgressTx>,
+    _ram_pressure_pct: Option<u8>, // réservé, non utilisé
 ) -> Result<Pass2Result>
 ```
 
 Le `client` est utilisé uniquement pour la Phase D (contraintes). Les COPYs passent par des connexions dédiées ouvertes à partir de `pg_url`.
 
-**Phase B — Streaming parallèle (`parallel` workers)** :
+**Phase A — Streaming parallèle (aucune connexion PG)** :
 - Le dispatcher lit le fichier raw byte-par-byte et envoie chaque objet JSON (sérialisé `Vec<u8>`) à un worker en round-robin.
 - Chaque worker parse avec `simd_json`, appelle `insert_object()` récursivement, et accumule les lignes dans son propre `HashMap<table_name, TempFileSink>`.
-- **Gestion des FD** : un compteur global `AtomicUsize` trace les FD ouverts entre tous les workers. Quand le budget global (`FD_GLOBAL_THRESHOLD = MAX_OPEN_TEMP_FILES × 90%`) ou le budget par worker est dépassé, tous les sinks du worker sont hibernés (`hibernate()`).
-- **Interim flush** : quand le total en bytes d'un worker dépasse `INTERIM_FLUSH_THRESHOLD`, le sink le plus gros est hiberné et envoyé à la flush task via `flush_tx`. Un sink vide le remplace.
-- **Annulation** : un `CancellationToken` + `DropGuard` est créé au début de `run()`. Si le caller avorte la tâche Tokio (ex : bouton Cancel de l'IHM), le guard est droppé, le token est annulé, et tous les workers/flush/conn tasks sortent de leur `tokio::select!`.
+- Aucune connexion PostgreSQL n'est ouverte pendant cette phase.
+- **Gestion des FD** : `spill()` auto-hiberne le FD immédiatement après chaque écriture — aucun compteur global de FD n'est nécessaire.
+- En fin de phase, chaque worker appelle `force_spill()` sur tous ses sinks (libération mémoire), puis retourne ses sinks via `JoinHandle`.
+- **Annulation** : un `CancellationToken` + `DropGuard` est créé au début de `run()`. Si le caller avorte la tâche Tokio (ex : bouton Cancel de l'IHM), le token est annulé et tous les workers sortent de leur `tokio::select!`.
 
-**Flush task — accumulateur par table** :
-- Reçoit les `(table_name, TempFileSink)` des workers via `flush_rx`.
-- Accumule par table dans `table_pending: HashMap<String, Vec<TempFileSink>>`.
-- **Dispatch anticipé** : si une table accumule ≥ 1 MiB de bytes, ses sinks sont envoyés immédiatement à un conn worker (tables larges).
-- **Dispatch final** : une fois `flush_rx` fermé (tous les workers terminés), les sinks restants (tables petites) sont envoyés table par table — `merge_copy_to_db()` fusionne tous les sinks en un seul COPY.
-
-**Conn workers (`parallel` tâches)** :
-- Chaque conn worker ouvre une connexion PG indépendante via `pg_url`.
-- Reçoit des `Vec<TempFileSink>` (sinks d'une même table) et appelle `merge_copy_to_db()`.
-- Renvoie `Result<(table_name, row_count)>` via `result_tx`.
+**Phase B — COPY post-streaming (`parallel` connexions PG)** :
+- Après join de tous les workers, les sinks sont regroupés par `table_name`.
+- Les tables non-vides sont triées (déterminisme) puis distribuées round-robin sur `parallel` tâches.
+- Chaque tâche ouvre une connexion PG indépendante via `pg_url` et appelle `merge_copy_to_db(sinks)` séquentiellement pour chaque table de son batch.
+- Résultats collectés via `JoinHandle<Result<Vec<(String, u64)>>>` — aucun canal `result_tx`/`result_rx`.
+- Émet `Pass2Flush { table_name, rows_flushed }` après chaque COPY réussi.
+- Émet `Pass2AnomalyUpdate { table_name, count }` une fois par table après la fin des workers.
 
 **Phase D — Contraintes** :
 - `add_constraints(client, schemas, pg_schema)` ajoute les PK (fatal en cas d'erreur) puis les FK (échecs → `constraint_warnings`).
