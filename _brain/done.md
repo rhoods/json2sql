@@ -8,6 +8,21 @@ Description courte de ce qui a été fait.
 
 Ajouter toujours EN HAUT du fichier. -->
 
+## 2026-05-30 — Pass 2 refactoring : séparation streaming / COPY (T1–T5)
+
+Refactoring complet du pipeline Pass 2 pour résoudre l'accumulation de ~71 000 fichiers
+temporaires observée sur OpenFoodFacts (70 GB). Root cause : flush_task unbounded sans
+backpressure. Architecture retenue : Phase A streaming pur (aucune connexion PG), Phase B
+COPY post-streaming parallèle.
+
+- **T1** `--temp-dir` CLI : `Option<&Path>` dans `TempFileSink::new()` → `NamedTempFile::new_in()`, propagé jusqu'aux workers. 2 nouveaux tests.
+- **T2** Streaming COPY par chunks : `merge_copy_to_db` remplace `tokio::fs::read()` par boucle `AsyncReadExt::read()` 4 MiB. Évite OOM sur tables denses (~500 MB). 2 nouveaux tests.
+- **T3** Auto-hibernate FD : `spill()` ferme le FD immédiatement après `write_all`. `is_open()` toujours `false` après spill. Suppression `global_open_fds`, `FD_GLOBAL_THRESHOLD`, `global_sub()`, `my_open`.
+- **T4** Suppression infrastructure flush-during-streaming : `flush_task`, `conn_pool`, drain cycle, RAM pressure check, `MIN_SINK_HANDOFF_BYTES`, `bytes_on_disk`, `INTERIM_FLUSH_THRESHOLD` entièrement supprimés. Workers retournent leurs sinks via `JoinHandle`.
+- **T5** Phase B parallèle : pool de `parallel` connexions PG, tables distribuées round-robin, résultats via `JoinHandle<Result<Vec<(String, u64)>>>` (plus de `result_tx`/`result_rx`).
+
+Résultat : ~3 920 fichiers (245 × 16) au lieu de ~71 000. Même disk usage peak, filesystem sain.
+
 ## 2026-05-25 — T2+T3 Jaccard similarity + Merge as siblings (Strategy panel)
 
 - **Backend** : `pairwise_jaccard_min` → `pub` dans `cascading.rs` ; `build_keyed_pivot_from_siblings(&[TableSchema], &[usize], key_col_name) -> Result<MergeResult, MergeError>` — valide la sélection (≥2 tables, même parent, pas de routing table), extrait les clés depuis les suffixes de noms, produit `KeyedPivot` (clés homogènes) ou `MultiKeyedPivot` (clés mixtes num+txt) ; `extract_key_suffixes` privée ; 8 tests unitaires

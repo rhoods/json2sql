@@ -20,6 +20,12 @@ _Mis à jour automatiquement en fin de session._
 - **SSL/TLS pour connexions PG distantes** : actuellement `NoTls` hardcodé dans `tokio-postgres`. À implémenter si usage cloud (RDS, Supabase, Neon, etc.). Nécessite d'activer `tokio-postgres` avec feature `native-tls` ou `openssl` + dépendance système (`libssl-dev`). Checkbox "Require SSL" dans Setup, propagée au connect dans import.rs et setup.rs.
 - Picker de fichier lent (xdg-portal) : installer `libgtk-3-dev` sur le host puis `features = ["tokio", "gtk3"]` dans rfd
 
+## Ce qui est livré (session 2026-05-30)
+
+- **Pass 2 refactoring T1–T5** : séparation franche streaming / COPY — voir `_brain/done.md` pour le détail complet
+- `docs/technical/pass2-refactor-plan.md` : document de référence de l'architecture retenue
+- `_brain/ux-todo.md` : idée double barre de progression ImportScreen notée (post-refactor)
+
 ## Ce qui est livré (session 2026-05-25)
 
 - **T1 multi-sélection tables (Strategy)** : Ctrl+clic toggle, Shift+clic plage sur visibles, bouton "⊕ children" au survol, bouton "⊕ all" dans filter bar
