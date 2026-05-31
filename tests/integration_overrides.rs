@@ -27,7 +27,7 @@ async fn test_override_type_valid() {
         apply_overrides(&mut p1.schemas, &config);
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None, None, None)
+        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("people").unwrap(), 3);
@@ -110,7 +110,7 @@ async fn test_override_bad() {
         let pg_type: String = row.get(0);
         assert_eq!(pg_type, "integer", "score doit être INTEGER en base, obtenu: {}", pg_type);
 
-        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None, None, None)
+        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
             .await.unwrap();
 
         // rows_per_table = compteur pipeline interne ; row_count = vérité DB via COUNT(*).

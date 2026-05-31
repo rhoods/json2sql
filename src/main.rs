@@ -380,6 +380,7 @@ async fn run(cli: Cli) -> Result<()> {
         cli.temp_dir.clone(),
         None,
         None,
+        None,
     )
     .await?;
 
