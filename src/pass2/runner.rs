@@ -54,6 +54,11 @@ pub struct Pass2Result {
 /// the streaming phase regardless of how many tables the schema has.
 pub const PER_WORKER_FLUSH_THRESHOLD: u64 = 1024 * 1024 * 1024; // 1 GiB
 
+/// Minimum bytes a sink must hold before it gets an interim COPY to PG.
+/// Sinks below this are force-spilled to disk (RAM freed) and COPYed in Phase B.
+/// Prevents COPY overhead (~5 ms/table) on tables with very few rows.
+const MIN_SINK_COPY_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
+
 fn validate_run_params(parallel: usize) -> Result<()> {
     if parallel == 0 {
         return Err(J2sError::InvalidInput(
@@ -219,14 +224,18 @@ pub async fn run(
                 let total_written: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
                 if total_written >= worker_budget {
                     for sink in sinks.values_mut() {
-                        let rows = sink.flush_to_db(&worker_client).await?;
-                        if rows > 0 {
-                            if let Some(ref tx) = worker_ptx {
-                                let _ = tx.send(ProgressEvent::Pass2Flush {
-                                    table_name: sink.table_name.clone(),
-                                    rows_flushed: rows,
-                                });
+                        if sink.bytes_buffered >= MIN_SINK_COPY_BYTES {
+                            let rows = sink.flush_to_db(&worker_client).await?;
+                            if rows > 0 {
+                                if let Some(ref tx) = worker_ptx {
+                                    let _ = tx.send(ProgressEvent::Pass2Flush {
+                                        table_name: sink.table_name.clone(),
+                                        rows_flushed: rows,
+                                    });
+                                }
                             }
+                        } else {
+                            sink.force_spill()?;
                         }
                     }
                 }
