@@ -29,7 +29,7 @@ pub const COPY_NULL: &str = "\\N";
 pub const COPY_DELIMITER: u8 = b'\t';
 /// Row data accumulates in memory up to this size before being spilled to disk.
 /// Large batches amortize the syscall overhead of write() and open()/close().
-const SPILL_THRESHOLD: usize = 256 * 1024;
+const SPILL_THRESHOLD: usize = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Row builder

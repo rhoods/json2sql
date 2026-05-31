@@ -186,8 +186,6 @@ pub async fn run(
 
         let handle = tokio::task::spawn(async move {
             let mut sinks = worker_sinks;
-            // Advances by `worker_budget` after each forced spill so memory
-            // stays bounded regardless of the number of tables in the schema.
             let mut next_budget_trigger = worker_budget;
 
             loop {
