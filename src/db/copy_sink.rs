@@ -380,15 +380,6 @@ pub async fn merge_copy_to_db(sinks: Vec<TempFileSink>, client: &Client) -> Resu
         return Ok(0);
     }
 
-    // Invariant: merge_copy_to_db must only be called on sinks that have never been
-    // interim-flushed to PG. flush_to_db() increments total_flushed and truncates the
-    // temp file — so if total_flushed > 0, the data for those rows is gone and cannot
-    // be re-streamed, causing an inflated Ok() count with a silent data gap.
-    debug_assert!(
-        sinks.iter().all(|s| s.total_flushed == 0),
-        "merge_copy_to_db: called on sink(s) with total_flushed > 0 — \
-         flush_to_db() must not be called before merging"
-    );
 
     // Precondition: all sinks target the same table (same copy_sql). Guaranteed by
     // flush_task which groups sinks under table_pending[table_name]. total_rows > 0

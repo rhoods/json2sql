@@ -183,10 +183,11 @@ pub async fn run(
         let pm = path_map_arc.clone();
         let rs = root_schema_arc.clone();
         let cancel_token = cancel.clone();
+        let worker_pg_url = pg_url.to_string();
 
         let handle = tokio::task::spawn(async move {
+            let worker_client = crate::db::connection::connect(&worker_pg_url).await?;
             let mut sinks = worker_sinks;
-            let mut next_budget_trigger = worker_budget;
 
             loop {
                 let mut bytes = tokio::select! {
@@ -215,11 +216,10 @@ pub async fn run(
                 )?;
 
                 let total_written: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
-                if total_written >= next_budget_trigger {
+                if total_written >= worker_budget {
                     for sink in sinks.values_mut() {
-                        sink.force_spill()?;
+                        sink.flush_to_db(&worker_client).await?;
                     }
-                    next_budget_trigger = total_written + worker_budget;
                 }
             }
 
