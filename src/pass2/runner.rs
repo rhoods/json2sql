@@ -184,6 +184,7 @@ pub async fn run(
         let rs = root_schema_arc.clone();
         let cancel_token = cancel.clone();
         let worker_pg_url = pg_url.to_string();
+        let worker_ptx = progress_tx.clone();
 
         let handle = tokio::task::spawn(async move {
             let worker_client = crate::db::connection::connect(&worker_pg_url).await?;
@@ -218,7 +219,15 @@ pub async fn run(
                 let total_written: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
                 if total_written >= worker_budget {
                     for sink in sinks.values_mut() {
-                        sink.flush_to_db(&worker_client).await?;
+                        let rows = sink.flush_to_db(&worker_client).await?;
+                        if rows > 0 {
+                            if let Some(ref tx) = worker_ptx {
+                                let _ = tx.send(ProgressEvent::Pass2Flush {
+                                    table_name: sink.table_name.clone(),
+                                    rows_flushed: rows,
+                                });
+                            }
+                        }
                     }
                 }
             }
