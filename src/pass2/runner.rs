@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde_json::Value;
@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::anomaly::collector::AnomalyCollector;
-use crate::db::copy_sink::{merge_copy_to_db, TempFileSink};
+use crate::db::copy_sink::{copy_snapshot_to_pg, merge_copy_to_db, TempFileSink};
 use crate::schema::PATH_SEP;
 use crate::db::ddl::{add_constraints, ConstraintWarning};
 use crate::error::{J2sError, Result};
@@ -163,17 +163,26 @@ pub async fn run(
 
     // -------------------------------------------------------------------------
     // Phase A — Parallel streaming.
-    // N workers each hold their own HashMap<table_name, TempFileSink>.
-    // Root objects are dispatched round-robin from the main task.
-    // When a worker's budget fires, large sinks are handed off to background
-    // COPY tasks (fire-and-forget) while the worker keeps processing.
-    // Workers return their remaining sinks + COPY handles for Phase B.
+    // One shared TempFileSink per table (Arc<Mutex>) — 245 files instead of
+    // N*245. Workers write to shared sinks under a brief sync lock.
+    // When a worker's budget fires, large sinks emit a FlushSnapshot handed to
+    // a background COPY task; the sink immediately resets for new data.
+    // Workers return anomalies + COPY handles; sinks are unwrapped in Phase B.
     // -------------------------------------------------------------------------
     let (mut reader, _format) = JsonReader::open(path)?;
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
     let root_schema_arc: Arc<TableSchema> = Arc::new(root_schema.clone());
     // Limits concurrent interim COPYs — HDD benefits from low values (1-2).
     let copy_sem: Arc<tokio::sync::Semaphore> = Arc::new(tokio::sync::Semaphore::new(parallel));
+
+    // One shared sink per table.
+    let shared_sinks: HashMap<String, Arc<Mutex<TempFileSink>>> = schemas
+        .iter()
+        .map(|s| Ok((
+            s.name.clone(),
+            Arc::new(Mutex::new(TempFileSink::new(s, pg_schema, temp_dir.as_deref())?)),
+        )))
+        .collect::<Result<_>>()?;
 
     const CHANNEL_CAP: usize = 256;
     let mut senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> =
@@ -185,30 +194,29 @@ pub async fn run(
             tokio::sync::mpsc::channel::<Vec<u8>>(CHANNEL_CAP);
         senders.push(tx);
 
-        let worker_temp_dir = temp_dir.clone();
-        let worker_sinks: HashMap<String, TempFileSink> = schemas
-            .iter()
-            .map(|s| Ok((s.name.clone(), TempFileSink::new(s, pg_schema, worker_temp_dir.as_deref())?)))
-            .collect::<Result<_>>()?;
+        // Each worker gets its own HashMap of Arc clones (cheap — no TempFileSink copy).
+        let worker_sinks: HashMap<String, Arc<Mutex<TempFileSink>>> =
+            shared_sinks.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
         let mut worker_anomalies = AnomalyCollector::new(None);
         let pm = path_map_arc.clone();
         let rs = root_schema_arc.clone();
         let cancel_token = cancel.clone();
         let worker_pg_url = pg_url.to_string();
-        let worker_pg_schema = pg_schema.to_string();
         let worker_ptx = progress_tx.clone();
-        let worker_schema_by_name = schema_by_name.clone();
         let worker_copy_sem = copy_sem.clone();
 
         let handle = tokio::task::spawn(async move {
             let mut sinks = worker_sinks;
             let mut copy_handles: Vec<tokio::task::JoinHandle<Result<(String, u64)>>> = Vec::new();
+            // Budget: proxy via raw JSON bytes (avoids per-object lock on all 245 sinks).
+            let mut my_bytes: u64 = 0;
 
             loop {
                 let mut bytes = tokio::select! {
                     _ = cancel_token.cancelled() => break,
                     msg = rx.recv() => match msg { Some(b) => b, None => break },
                 };
+                let obj_len = bytes.len() as u64;
                 let obj = match simd_json::from_slice::<serde_json::Value>(&mut bytes) {
                     Ok(Value::Object(o)) => o,
                     Ok(other) => return Err(J2sError::InvalidInput(format!(
@@ -230,25 +238,32 @@ pub async fn run(
                     None,
                 )?;
 
-                let total_written: u64 = sinks.values().map(|s| s.bytes_buffered).sum();
-                if total_written >= worker_budget {
-                    for (table_name, sink) in sinks.iter_mut() {
-                        if sink.bytes_buffered >= interim_copy_threshold {
-                            // Replace sink with a fresh one; hand old data to a background COPY task.
-                            let schema = &worker_schema_by_name[table_name];
-                            let fresh = TempFileSink::new(schema, &worker_pg_schema, worker_temp_dir.as_deref())?;
-                            let old_sink = std::mem::replace(sink, fresh);
+                my_bytes += obj_len;
+                if my_bytes >= worker_budget {
+                    my_bytes = 0;
+                    for (table_name, sink_arc) in &sinks {
+                        let snap = {
+                            let mut s = sink_arc.lock().unwrap();
+                            if s.bytes_buffered >= interim_copy_threshold {
+                                s.take_flush_snapshot()
+                            } else {
+                                let _ = s.force_spill();
+                                None
+                            }
+                        };
+                        if let Some(snap) = snap {
                             let sem = worker_copy_sem.clone();
                             let url = worker_pg_url.clone();
                             let ptx = worker_ptx.clone();
+                            let sink_arc2 = Arc::clone(sink_arc);
                             let tname = table_name.clone();
                             copy_handles.push(tokio::spawn(async move {
                                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
                                 let conn = crate::db::connection::connect(&url).await?;
-                                // Skips WAL fsync per COPY — safe for one-shot import.
                                 conn.execute("SET synchronous_commit = off", &[]).await
                                     .map_err(crate::error::J2sError::Db)?;
-                                let rows = old_sink.copy_to_db(&conn).await?;
+                                let rows = copy_snapshot_to_pg(snap, &conn).await?;
+                                sink_arc2.lock().unwrap().apply_flush(rows);
                                 if rows > 0 {
                                     if let Some(tx) = ptx {
                                         let _ = tx.send(ProgressEvent::Pass2Flush {
@@ -259,18 +274,16 @@ pub async fn run(
                                 }
                                 Ok::<(String, u64), J2sError>((tname, rows))
                             }));
-                        } else {
-                            sink.force_spill()?;
                         }
                     }
                 }
             }
 
-            // Force remaining in-memory data to disk before returning sinks.
-            for sink in sinks.values_mut() {
-                sink.force_spill()?;
+            // Flush remaining in-memory pending to disk — Phase B will COPY it.
+            for (_, sink_arc) in &sinks {
+                let _ = sink_arc.lock().unwrap().force_spill();
             }
-            Ok::<_, J2sError>((worker_anomalies, sinks, copy_handles))
+            Ok::<_, J2sError>((worker_anomalies, copy_handles))
         });
         worker_handles.push(handle);
     }
@@ -320,16 +333,14 @@ pub async fn run(
     let streaming_ms = stream_start.elapsed().as_millis() as u64;
     eprintln!("Pass 2 streaming done ({parallel} workers). Flushing remaining rows to PostgreSQL...");
 
-    // Join all workers and collect their sinks + background COPY handles.
+    // Join all workers and collect background COPY handles.
     let mut merged_anomalies = AnomalyCollector::new(anomaly_dir);
-    let mut all_worker_sinks: Vec<HashMap<String, TempFileSink>> = Vec::with_capacity(parallel);
     let mut all_copy_handles: Vec<tokio::task::JoinHandle<Result<(String, u64)>>> = Vec::new();
     let mut first_worker_error: Option<J2sError> = None;
     for handle in worker_handles {
         match handle.await {
-            Ok(Ok((w_anomalies, sinks, copy_handles))) => {
+            Ok(Ok((w_anomalies, copy_handles))) => {
                 merged_anomalies.merge(w_anomalies);
-                all_worker_sinks.push(sinks);
                 all_copy_handles.extend(copy_handles);
             }
             Ok(Err(e)) => {
@@ -368,34 +379,25 @@ pub async fn run(
 
     // -------------------------------------------------------------------------
     // Phase B — COPY post-streaming: parallel on `parallel` PG connections.
-    // Tables are distributed round-robin across connection tasks; each task
-    // processes its batch sequentially and returns (table_name, rows) pairs.
+    // Workers and all background COPYs are done — unwrap shared sinks (one per
+    // table) and distribute round-robin across connection tasks.
     // -------------------------------------------------------------------------
     let copy_start = Instant::now();
 
-    // Collect (table_name, sinks) pairs for non-empty tables, sorted for determinism.
+    // Unwrap Arc<Mutex<TempFileSink>> — workers are done, no other references.
+    let mut all_sinks: Vec<(String, TempFileSink)> = shared_sinks
+        .into_iter()
+        .filter_map(|(name, arc)| {
+            let sink = Arc::try_unwrap(arc).ok()?.into_inner().ok()?;
+            if sink.row_count > 0 || sink.total_flushed > 0 { Some((name, sink)) } else { None }
+        })
+        .collect();
+    all_sinks.sort_by(|a, b| a.0.cmp(&b.0));
+
     let mut table_batches: Vec<Vec<(String, Vec<TempFileSink>)>> =
         (0..parallel).map(|_| Vec::new()).collect();
-    let mut table_names: Vec<String> = {
-        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for sinks in &all_worker_sinks {
-            for (name, sink) in sinks {
-                if sink.row_count > 0 { names.insert(name.clone()); }
-            }
-        }
-        let mut v: Vec<String> = names.into_iter().collect();
-        v.sort();
-        v
-    };
-    for (i, table_name) in table_names.drain(..).enumerate() {
-        let sinks: Vec<TempFileSink> = all_worker_sinks
-            .iter_mut()
-            .filter_map(|w| w.remove(&table_name))
-            .filter(|s| s.row_count > 0)
-            .collect();
-        if !sinks.is_empty() {
-            table_batches[i % parallel].push((table_name, sinks));
-        }
+    for (i, (table_name, sink)) in all_sinks.drain(..).enumerate() {
+        table_batches[i % parallel].push((table_name, vec![sink]));
     }
 
     // Spawn one task per PG connection, each processing its batch of tables.

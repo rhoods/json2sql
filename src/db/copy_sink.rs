@@ -102,6 +102,62 @@ impl Drop for TempFilePath {
     }
 }
 
+impl TempFilePath {
+    /// Consume self and return the path without triggering file deletion.
+    /// Caller is responsible for deleting the file when done.
+    fn into_path_no_delete(self) -> PathBuf {
+        let p = self.0.clone();
+        std::mem::forget(self);
+        p
+    }
+}
+
+/// Data extracted from a [`TempFileSink`] for an async background COPY.
+/// The caller reads `file_path` + `pending`, COPYs to PG, then deletes
+/// `file_path`. The sink is already reset and ready for new writes.
+pub struct FlushSnapshot {
+    pub copy_sql: String,
+    /// Path of the spill file to read. Caller must delete it after COPY.
+    pub file_path: Option<PathBuf>,
+    pub pending: Vec<u8>,
+    pub row_count: u64,
+    pub table_name: String,
+}
+
+/// Copy the data in `snap` to PostgreSQL, then delete the spill file.
+/// Returns the number of rows sent (= `snap.row_count`).
+pub async fn copy_snapshot_to_pg(snap: FlushSnapshot, client: &Client) -> Result<u64> {
+    let FlushSnapshot { copy_sql, file_path, pending, row_count, table_name } = snap;
+    if row_count == 0 {
+        if let Some(ref p) = file_path { let _ = tokio::fs::remove_file(p).await; }
+        return Ok(0);
+    }
+    let file_data = if let Some(ref p) = file_path {
+        tokio::fs::read(p).await.map_err(J2sError::Io)?
+    } else {
+        Vec::new()
+    };
+    if let Some(ref p) = file_path { let _ = tokio::fs::remove_file(p).await; }
+    if !file_data.is_empty() || !pending.is_empty() {
+        let sink = client
+            .copy_in::<_, Bytes>(&copy_sql)
+            .await
+            .map_err(|e| pg_err(&format!("COPY INTO {}", table_name), e))?;
+        let mut pinned = Box::pin(sink);
+        for chunk in file_data.chunks(1024 * 1024) {
+            pinned.send(Bytes::copy_from_slice(chunk)).await
+                .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+        }
+        for chunk in pending.chunks(1024 * 1024) {
+            pinned.send(Bytes::copy_from_slice(chunk)).await
+                .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+        }
+        pinned.close().await
+            .map_err(|e| pg_err(&format!("COPY close {}", table_name), e))?;
+    }
+    Ok(row_count)
+}
+
 // ---------------------------------------------------------------------------
 // TempFileSink
 // ---------------------------------------------------------------------------
@@ -233,6 +289,36 @@ impl TempFileSink {
     /// the caller can reclaim that memory. No-op if `pending` is already empty.
     pub fn force_spill(&mut self) -> Result<()> {
         self.spill()
+    }
+
+    /// Atomically extract all buffered data for a background async COPY, and reset
+    /// this sink so new writes immediately go to a fresh file.
+    ///
+    /// After this call: `row_count == 0`, `bytes_buffered == 0`, `pending` is empty,
+    /// and `temp_file` is `None` (next spill creates a new file).
+    /// The returned snapshot owns the old file path; the caller must delete it after COPY.
+    /// Call [`apply_flush`] with the returned `row_count` once the COPY succeeds.
+    pub fn take_flush_snapshot(&mut self) -> Option<FlushSnapshot> {
+        if self.row_count == 0 {
+            return None;
+        }
+        self.writer = None; // close FD if open (auto-hibernate may have done this already)
+        let snap = FlushSnapshot {
+            copy_sql: self.copy_sql.clone(),
+            file_path: self.temp_file.take().map(|p| p.into_path_no_delete()),
+            pending: std::mem::take(&mut self.pending),
+            row_count: self.row_count,
+            table_name: self.table_name.clone(),
+        };
+        self.row_count = 0;
+        self.bytes_buffered = 0;
+        Some(snap)
+    }
+
+    /// Record that `rows` were successfully COPYed to PG by a background task.
+    /// Must be called after [`copy_snapshot_to_pg`] succeeds.
+    pub fn apply_flush(&mut self, rows: u64) {
+        self.total_flushed += rows;
     }
 
     pub fn write_row(&mut self, row: Vec<u8>) -> Result<()> {
@@ -723,5 +809,70 @@ mod tests {
             dir.path(),
             path
         );
+    }
+
+    /// take_flush_snapshot resets sink state and returns extractable data.
+    /// apply_flush updates total_flushed. Next writes go to a fresh file.
+    #[test]
+    fn take_flush_snapshot_resets_sink_and_preserves_data() {
+        let mut sink = make_sink();
+        sink.write_row(b"row1\n".to_vec()).unwrap();
+        sink.write_row(b"row2\n".to_vec()).unwrap();
+        let expected_bytes = b"row1\nrow2\n".len();
+
+        let snap = sink.take_flush_snapshot().unwrap();
+        assert_eq!(snap.row_count, 2);
+        assert_eq!(snap.pending, b"row1\nrow2\n");
+        assert!(snap.file_path.is_none(), "no spill happened so no file");
+
+        // Sink is reset: ready for new data
+        assert_eq!(sink.row_count, 0);
+        assert_eq!(sink.bytes_buffered, 0);
+        assert!(sink.pending.is_empty());
+        assert_eq!(sink.total_flushed, 0, "apply_flush not called yet");
+
+        sink.apply_flush(snap.row_count);
+        assert_eq!(sink.total_flushed, 2);
+
+        // New writes go to a fresh file
+        sink.write_row(b"row3\n".to_vec()).unwrap();
+        assert_eq!(sink.row_count, 1);
+        assert_eq!(sink.bytes_buffered, b"row3\n".len() as u64);
+        let _ = expected_bytes; // suppress unused warning
+    }
+
+    /// take_flush_snapshot with spilled data: file_path is set, next spill creates new file.
+    #[test]
+    fn take_flush_snapshot_with_spilled_data_uses_new_file() {
+        let mut sink = make_sink();
+        // Force a spill
+        sink.write_row(vec![b'x'; SPILL_THRESHOLD + 1]).unwrap();
+        assert!(sink.temp_file.is_some(), "spill must have created temp file");
+        let old_path = sink.temp_file.as_ref().unwrap().0.clone();
+
+        // Write one more small row (stays in pending)
+        sink.write_row(b"small\n".to_vec()).unwrap();
+
+        let snap = sink.take_flush_snapshot().unwrap();
+        assert_eq!(snap.file_path, Some(old_path.clone()), "snapshot gets old file path");
+        assert_eq!(&snap.pending, b"small\n");
+        assert!(sink.temp_file.is_none(), "sink no longer owns the file");
+
+        // New spill creates a different file
+        sink.write_row(vec![b'y'; SPILL_THRESHOLD + 1]).unwrap();
+        let new_path = sink.temp_file.as_ref().unwrap().0.clone();
+        assert_ne!(new_path, old_path, "new writes use a different temp file");
+
+        // Old file still exists (not deleted yet — snapshot owns it)
+        assert!(old_path.exists(), "old file must still exist while snapshot is alive");
+        // Simulate flusher deleting it
+        std::fs::remove_file(&old_path).unwrap();
+    }
+
+    /// take_flush_snapshot on empty sink returns None.
+    #[test]
+    fn take_flush_snapshot_on_empty_sink_is_none() {
+        let mut sink = make_sink();
+        assert!(sink.take_flush_snapshot().is_none());
     }
 }
