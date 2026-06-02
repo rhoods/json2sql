@@ -52,7 +52,7 @@ pub struct Pass2Result {
 /// are force-spilled to disk, freeing the pending allocations. The budget
 /// then advances by the same amount so spills are evenly spaced throughout
 /// the streaming phase regardless of how many tables the schema has.
-pub const PER_WORKER_FLUSH_THRESHOLD: u64 = 1024 * 1024 * 1024; // 1 GiB
+pub const PER_WORKER_FLUSH_THRESHOLD: u64 = 256 * 1024 * 1024; // 256 MiB
 
 /// Minimum bytes a sink must hold before it gets an interim COPY to PG.
 /// Sinks below this are force-spilled to disk (RAM freed) and COPYed in Phase B.
