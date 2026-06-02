@@ -59,6 +59,20 @@ pub const PER_WORKER_FLUSH_THRESHOLD: u64 = 256 * 1024 * 1024; // 256 MiB
 /// Prevents COPY overhead (~5 ms/table) on tables with very few rows.
 const MIN_SINK_COPY_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
 
+/// All parameters controlling a Pass 2 run.
+pub struct Pass2Config {
+    pub root_table: String,
+    pub pg_schema: String,
+    pub parallel: usize,
+    pub anomaly_dir: Option<PathBuf>,
+    pub temp_dir: Option<PathBuf>,
+    pub per_worker_budget: Option<u64>,
+    pub min_interim_copy_bytes: Option<u64>,
+    /// Stop pass 2 after inserting this many root objects. None = full import.
+    /// Some(0) = create tables with no rows.
+    pub limit: Option<u64>,
+}
+
 fn validate_run_params(parallel: usize) -> Result<()> {
     if parallel == 0 {
         return Err(J2sError::InvalidInput(
@@ -85,18 +99,21 @@ fn validate_run_params(parallel: usize) -> Result<()> {
 
 pub async fn run(
     path: &Path,
-    root_table: &str,
     schemas: &[TableSchema],
     client: &Client,
     pg_url: &str,
-    pg_schema: &str,
-    parallel: usize,
-    anomaly_dir: Option<PathBuf>,
-    temp_dir: Option<PathBuf>,
+    config: &Pass2Config,
     progress_tx: Option<ProgressTx>,
-    per_worker_budget: Option<u64>,
-    min_interim_copy_bytes: Option<u64>,
 ) -> Result<Pass2Result> {
+    let root_table = &config.root_table;
+    let pg_schema = &config.pg_schema;
+    let parallel = config.parallel;
+    let anomaly_dir = config.anomaly_dir.clone();
+    let temp_dir = config.temp_dir.clone();
+    let per_worker_budget = config.per_worker_budget;
+    let min_interim_copy_bytes = config.min_interim_copy_bytes;
+    let limit = config.limit;
+
     validate_run_params(parallel)?;
     let total_bytes = file_size(path)?;
     let progress = if progress_tx.is_none() {
@@ -115,13 +132,8 @@ pub async fn run(
 
     let root_schema = schemas
         .iter()
-        .find(|s| s.path.join(&sep) == root_table)
+        .find(|s| s.path.join(&sep) == root_table.as_str())
         .ok_or_else(|| J2sError::Schema(format!("Root table '{}' not found", root_table)))?;
-
-    // Keyed by table name so workers can create replacement sinks after interim flushes.
-    let schema_by_name: Arc<HashMap<String, TableSchema>> = Arc::new(
-        schemas.iter().map(|s| (s.name.clone(), s.clone())).collect(),
-    );
 
     if let Some(ref dir) = anomaly_dir {
         std::fs::create_dir_all(dir).map_err(J2sError::Io)?;
@@ -295,24 +307,29 @@ pub async fn run(
     let stream_start = Instant::now();
     let mut robin = 0usize;
     let mut worker_died = false;
-    'dispatch: while let Some(item) = reader.next_raw() {
-        let bytes = item?;
-        if senders[robin].send(bytes).await.is_err() {
-            worker_died = true;
-            break 'dispatch;
-        }
-        rows_processed += 1;
-        robin = (robin + 1) % parallel;
-        if let Some(ref bar) = progress {
-            bar.inc_rows(1);
-        }
-        if rows_processed % PROGRESS_INTERVAL == 0 {
-            if let Some(ref tx) = progress_tx {
-                let _ = tx.send(ProgressEvent::Pass2Progress {
-                    rows_processed,
-                    bytes_read: reader.bytes_read(),
-                    total_bytes,
-                });
+    if limit != Some(0) {
+        'dispatch: while let Some(item) = reader.next_raw() {
+            let bytes = item?;
+            if senders[robin].send(bytes).await.is_err() {
+                worker_died = true;
+                break 'dispatch;
+            }
+            rows_processed += 1;
+            if limit.map_or(false, |n| rows_processed >= n) {
+                break 'dispatch;
+            }
+            robin = (robin + 1) % parallel;
+            if let Some(ref bar) = progress {
+                bar.inc_rows(1);
+            }
+            if rows_processed % PROGRESS_INTERVAL == 0 {
+                if let Some(ref tx) = progress_tx {
+                    let _ = tx.send(ProgressEvent::Pass2Progress {
+                        rows_processed,
+                        bytes_read: reader.bytes_read(),
+                        total_bytes,
+                    });
+                }
             }
         }
     }
@@ -493,7 +510,7 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{Pass2Timing, validate_run_params};
+    use super::{Pass2Config, Pass2Timing, validate_run_params};
     use crate::db::copy_sink::TempFileSink;
     use crate::schema::table_schema::{ColumnSchema, TableSchema};
     use crate::schema::type_tracker::PgType;
@@ -521,6 +538,36 @@ mod tests {
     #[test]
     fn run_params_parallel_one_is_valid() {
         assert!(validate_run_params(1).is_ok());
+    }
+
+    #[test]
+    fn pass2_config_limit_none_means_full_import() {
+        let cfg = Pass2Config {
+            root_table: "root".to_string(),
+            pg_schema: "public".to_string(),
+            parallel: 1,
+            anomaly_dir: None,
+            temp_dir: None,
+            per_worker_budget: None,
+            min_interim_copy_bytes: None,
+            limit: None,
+        };
+        assert!(cfg.limit.is_none());
+    }
+
+    #[test]
+    fn pass2_config_limit_zero_means_ddl_only() {
+        let cfg = Pass2Config {
+            root_table: "root".to_string(),
+            pg_schema: "public".to_string(),
+            parallel: 1,
+            anomaly_dir: None,
+            temp_dir: None,
+            per_worker_budget: None,
+            min_interim_copy_bytes: None,
+            limit: Some(0),
+        };
+        assert_eq!(cfg.limit, Some(0));
     }
 
 }

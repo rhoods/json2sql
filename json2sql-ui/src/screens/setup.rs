@@ -90,6 +90,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
         h == "localhost" || h == "127.0.0.1" || h == "::1"
     };
     let temp_warn = (*temp_free_bytes.read()).and_then(|free| disk_warning_level(free, size_bytes.unwrap_or(0)));
+    let import_limit = state.read().project.import_limit;
 
     let step1_done = source_file.is_some();
     let step2_done = true; // optional — always OK
@@ -749,6 +750,42 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                 }
                                 p { style: "font-size:var(--fs-xs);color:var(--fg-4);margin:8px 0 0;",
                                     "Wide-table split is mandatory and always runs."
+                                }
+
+                                div { class: "divider" }
+
+                                // ── Sample import ─────────────────────────
+                                h4 { style: "font-size:var(--fs-sm);margin:0 0 8px;color:var(--fg);", "Sample import" }
+                                p { style: "font-size:var(--fs-xs);color:var(--fg-3);margin:0 0 10px;line-height:1.5;",
+                                    "Limit pass 2 to the first N root objects. Pass 1 always runs on the full file. "
+                                    "Empty = full import."
+                                }
+                                div { class: "field-row",
+                                    label { "Limit to" }
+                                    input {
+                                        class: "input sm",
+                                        style: "width:96px;",
+                                        r#type: "number",
+                                        min: "0",
+                                        placeholder: "unlimited",
+                                        value: import_limit.map(|n| n.to_string()).unwrap_or_default(),
+                                        oninput: move |e| {
+                                            let v = e.value();
+                                            if v.is_empty() {
+                                                state.write().project.import_limit = None;
+                                            } else if let Ok(n) = v.parse::<u64>() {
+                                                state.write().project.import_limit = Some(n);
+                                            }
+                                            crate::config::try_save(&state.read().project);
+                                        },
+                                    }
+                                    span { style: "font-size:var(--fs-xs);color:var(--fg-3);", "root objects  (0 = DDL only)" }
+                                }
+                                if import_limit.is_some() {
+                                    div { class: "alert warn compact mt-sm",
+                                        span { "⚠" }
+                                        div { b { "Sample mode" } " — only the first " b { "{import_limit.unwrap()}" } " root objects will be imported." }
+                                    }
                                 }
                             }
                         }

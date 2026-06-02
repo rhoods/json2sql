@@ -396,20 +396,17 @@ async fn run(cli: Cli, disabled_strategies: std::collections::HashSet<schema::st
     // Pass 2 — Data insertion
     // -------------------------------------------------------------------------
     eprintln!("\nPass 2: inserting data...");
-    let pass2 = pass2::runner::run(
-        &input_path,
-        &root_table,
-        &pass1.schemas,
-        &client,
-        db_url,
-        &cli.schema,
-        cli.parallel,
-        cli.anomaly_dir.clone(),
-        cli.temp_dir.clone(),
-        None,
-        None,
-        None,
-    )
+    let pass2_config = pass2::Pass2Config {
+        root_table: root_table.clone(),
+        pg_schema: cli.schema.clone(),
+        parallel: cli.parallel,
+        anomaly_dir: cli.anomaly_dir.clone(),
+        temp_dir: cli.temp_dir.clone(),
+        per_worker_budget: None,
+        min_interim_copy_bytes: None,
+        limit: cli.limit,
+    };
+    let pass2 = pass2::runner::run(&input_path, &pass1.schemas, &client, db_url, &pass2_config, None)
     .await?;
 
     // -------------------------------------------------------------------------

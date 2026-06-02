@@ -45,7 +45,7 @@ async fn test_pivot_strategy() {
 
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
             .await.unwrap();
 
         // Widget:4 + Gadget:4 + Doohickey:3 = 11 paires EAV
@@ -144,7 +144,7 @@ async fn test_jsonb_strategy() {
             ).await.unwrap().get("count");
         assert_eq!(tables_created, 2);
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
@@ -223,7 +223,7 @@ async fn test_flatten_strategy() {
             .await.unwrap().get("count");
         assert_eq!(dims_absent, 0, "products_dims ne doit pas être créé");
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
             .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "products").await, 3);
@@ -280,7 +280,7 @@ async fn test_null_patterns() {
         );
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("people", &schema), None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("people").unwrap(), 4);
@@ -360,7 +360,7 @@ async fn test_structured_pivot_strategy() {
 
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
             .await.unwrap();
 
         // Widget:2 + Gadget:2 + Doohickey:1 = 5 lignes
@@ -463,7 +463,7 @@ async fn test_auto_split_strategy() {
         let schemas = p1.schemas;
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(),         5);
@@ -570,7 +570,7 @@ async fn test_keyed_pivot_strategy() {
         ).await.unwrap().get(0);
         assert_eq!(sibling_tables, 0, "tables siblings ne doivent pas être créées");
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(),              2);
@@ -669,10 +669,8 @@ async fn test_keyed_pivot_pure_container() {
         let schemas = p1.schemas;
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(
-            &path, "graph", &schemas, &client, &url, &schema,
-            1, None, None, None, None, None,
-        ).await.unwrap();
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("graph", &schema), None)
+        .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("graph").unwrap(),         2);
         assert_eq!(*p2.rows_per_table.get("graph_genomes").unwrap(), 6);
@@ -755,7 +753,7 @@ async fn test_normalize_dynamic_keys_strategy() {
 
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false).await.unwrap();
 
-        let p2 = pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(),        3);
@@ -836,7 +834,7 @@ async fn test_jsonb_flatten_strategy() {
             .await.unwrap().get("count");
         assert_eq!(jsonb_col_present, 1, "products doit avoir une colonne products_dims");
 
-        pass2::runner::run(&path, "products", &schemas, &client, &url, &schema, 1, None, None, None, None, None).await.unwrap();
+        pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None).await.unwrap();
 
         // Widget : dims = {"width": 10, "height": 20, "depth": 5}
         let widget = client.query_one(
@@ -923,10 +921,8 @@ async fn test_keyed_pivot_array_strategy() {
         ).await.unwrap().get(0);
         assert_eq!(gcf_tables, 0, "les tables gcf_* ne doivent pas être créées");
 
-        let p2 = pass2::runner::run(
-            &path, "graph", &schemas, &client, &url, &schema,
-            1, None, None, None, None, None,
-        ).await.unwrap();
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("graph", &schema), None)
+        .await.unwrap();
 
         // graph : 2 lignes
         // graph_genomes : id=1 → gcf_001×2 + gcf_002×1 + gcf_003×1 = 4; id=2 → 3 = 7 total

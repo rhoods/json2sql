@@ -413,6 +413,13 @@ pub fn build_effective_schemas(
     // Remove tables explicitly skipped by the user.
     result.retain(|s| !matches!(strategy_overrides.get(&s.name), Some(WideStrategy::Ignore)));
 
+    // Defensive dedup: stale snapshots saved before the finalizer fix may contain
+    // duplicate table names, which would cause add_constraints() to fail with 42P16.
+    {
+        let mut seen = std::collections::HashSet::new();
+        result.retain(|s| seen.insert(s.name.clone()));
+    }
+
     result
 }
 
@@ -626,6 +633,22 @@ mod tests {
         overrides.insert("a".to_string(), WideStrategy::Ignore);
         let _ = build_effective_schemas(&schemas, &overrides);
         assert_eq!(schemas.len(), original_len, "original slice must not be mutated");
+    }
+
+    #[test]
+    fn duplicate_names_in_input_are_deduped() {
+        // Regression: stale snapshots saved before the finalizer dedup fix can
+        // contain duplicate table names → add_constraints() would fail with 42P16.
+        // build_effective_schemas must dedup defensively.
+        let schemas = vec![
+            make_table("a", None),
+            make_table("b", None),
+            make_table("a", None), // duplicate
+        ];
+        let result = build_effective_schemas(&schemas, &HashMap::new());
+        assert_eq!(result.len(), 2, "duplicate table names must be removed");
+        assert!(result.iter().any(|s| s.name == "a"));
+        assert!(result.iter().any(|s| s.name == "b"));
     }
 
     // --- build_table_rows helpers ---

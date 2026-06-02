@@ -198,6 +198,8 @@ pub struct ProjectState {
     pub pass2_parallel: usize,
     /// Optional strategies disabled before analysis. Empty set = all strategies active (default).
     pub disabled_strategies: HashSet<StrategyName>,
+    /// Stop pass 2 after this many root objects. None = full import (default).
+    pub import_limit: Option<u64>,
 }
 
 impl Default for ProjectState {
@@ -218,6 +220,7 @@ impl Default for ProjectState {
                 .unwrap_or(4)
                 .min(8),
             disabled_strategies: HashSet::new(),
+            import_limit: None,
         }
     }
 }
@@ -378,7 +381,12 @@ impl Default for AppState {
 impl AppState {
     /// Populate AppState from a loaded SchemaSnapshot.
     pub fn load_snapshot(&mut self, snapshot: json2sql::schema::persistence::SchemaSnapshot) {
-        self.schema.schemas = snapshot.schemas;
+        // Dedup defensively: snapshots saved before the finalizer fix may contain
+        // duplicate table names → add_constraints() would fail with 42P16.
+        let mut seen = std::collections::HashSet::new();
+        self.schema.schemas = snapshot.schemas.into_iter()
+            .filter(|s| seen.insert(s.name.clone()))
+            .collect();
         self.schema.truncated_names = snapshot.truncated_names;
         self.schema.column_collisions = snapshot.column_collisions;
         self.schema.pass1_stats = snapshot.stats;
@@ -810,6 +818,31 @@ mod tests {
     }
 
     #[test]
+    fn load_snapshot_deduplicates_schemas_by_name() {
+        use json2sql::schema::persistence::SchemaSnapshot;
+        use json2sql::schema::table_schema::TableSchema;
+
+        let dup = TableSchema::new("dup".to_string(), vec!["dup".to_string()], 0);
+        let other = TableSchema::new("other".to_string(), vec!["other".to_string()], 0);
+        let snapshot = SchemaSnapshot {
+            version: 1,
+            total_rows: 3,
+            schemas: vec![dup.clone(), other.clone(), dup.clone()], // duplicate "dup"
+            truncated_names: vec![],
+            column_collisions: vec![],
+            stats: vec![],
+            strategy_overrides: HashMap::new(),
+        };
+        let mut s = AppState::default();
+        s.load_snapshot(snapshot);
+
+        assert_eq!(s.schema.schemas.len(), 2, "duplicate table names must be removed on load");
+        let names: Vec<&str> = s.schema.schemas.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"dup"));
+        assert!(names.contains(&"other"));
+    }
+
+    #[test]
     fn schema_state_fields_default_to_empty_and_false() {
         let s = AppState::default();
         assert!(!s.schema.schema_snapshot_loaded);
@@ -870,6 +903,11 @@ mod tests {
     #[test]
     fn temp_dir_defaults_to_none() {
         assert!(ProjectState::default().temp_dir.is_none());
+    }
+
+    #[test]
+    fn import_limit_defaults_to_none() {
+        assert!(ProjectState::default().import_limit.is_none());
     }
 
     // --- format_bytes ---

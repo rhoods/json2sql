@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use json2sql::db::connection;
 use json2sql::pass1::runner::Pass1Config;
+use json2sql::pass2::Pass2Config;
 
 /// Default Pass1Config for integration tests — all strategies enabled, standard thresholds.
 pub fn pass1_config(root_table: &str) -> Pass1Config {
@@ -34,6 +35,20 @@ pub fn pass1_config(root_table: &str) -> Pass1Config {
         rare_threshold: 0.001,
         disabled_strategies: std::collections::HashSet::new(),
         num_workers: None,
+    }
+}
+
+/// Default Pass2Config for integration tests — parallel=1, no limit, no dirs.
+pub fn pass2_config(root_table: &str, pg_schema: &str) -> Pass2Config {
+    Pass2Config {
+        root_table: root_table.to_string(),
+        pg_schema: pg_schema.to_string(),
+        parallel: 1,
+        anomaly_dir: None,
+        temp_dir: None,
+        per_worker_budget: None,
+        min_interim_copy_bytes: None,
+        limit: None,
     }
 }
 

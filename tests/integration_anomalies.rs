@@ -12,7 +12,7 @@ async fn test_anomaly_detection() {
         let path = common::fixture("anomalies.jsonl");
         let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("people", &schema), None)
             .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "people").await, 3);
@@ -38,8 +38,18 @@ async fn test_anomaly_dir_streaming() {
 
         let anomaly_dir = tempfile::TempDir::new().unwrap();
         let mut p2 = pass2::runner::run(
-            &path, "people", &p1.schemas, &client, &url, &schema,
-            1, Some(anomaly_dir.path().to_path_buf()), None, None, None, None,
+            &path, &p1.schemas, &client, &url,
+            &json2sql::pass2::Pass2Config {
+                root_table: "people".to_string(),
+                pg_schema: schema.clone(),
+                parallel: 1,
+                anomaly_dir: Some(anomaly_dir.path().to_path_buf()),
+                temp_dir: None,
+                per_worker_budget: None,
+                min_interim_copy_bytes: None,
+                limit: None,
+            },
+            None,
         ).await.unwrap();
 
         assert_eq!(p2.anomaly_collector.total_anomalies(), 1);
@@ -87,7 +97,7 @@ async fn test_float_anomaly_boolean_value() {
         );
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "items", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("items", &schema), None)
             .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "items").await, 5);
@@ -110,7 +120,7 @@ async fn test_null_byte_anomaly() {
         let path = common::fixture("anomalies_nullbytes.jsonl");
         let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("people", &schema), None)
             .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "people").await, 3);

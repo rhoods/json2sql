@@ -33,6 +33,8 @@ pub struct ProjectConfig {
     pub pass2_parallel: usize,
     #[serde(default)]
     pub disabled_strategies: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_limit: Option<u64>,
 }
 
 impl Default for ProjectConfig {
@@ -53,6 +55,7 @@ impl Default for ProjectConfig {
                 .unwrap_or(4)
                 .min(8),
             disabled_strategies: Vec::new(),
+            import_limit: None,
         }
     }
 }
@@ -72,6 +75,7 @@ impl ProjectConfig {
             workers: p.workers,
             pass2_parallel: p.pass2_parallel,
             disabled_strategies: p.disabled_strategies.iter().map(|s| s.as_str().to_string()).collect(),
+            import_limit: p.import_limit,
         }
     }
 
@@ -92,6 +96,7 @@ impl ProjectConfig {
         p.disabled_strategies = self.disabled_strategies.iter()
             .filter_map(|s| StrategyName::try_from(s.as_str()).ok())
             .collect::<HashSet<_>>();
+        p.import_limit = self.import_limit;
     }
 }
 
@@ -189,6 +194,7 @@ mod tests {
             workers: 2,
             pass2_parallel: 3,
             disabled_strategies: Vec::new(),
+            import_limit: None,
         };
         let mut p = ProjectState::default();
         p.pg.password = "original_password".to_string();
@@ -236,6 +242,7 @@ mod tests {
             workers: 3,
             pass2_parallel: 5,
             disabled_strategies: Vec::new(),
+            import_limit: None,
         };
 
         let toml_str = toml::to_string(&cfg).expect("serialize");
@@ -278,6 +285,23 @@ mod tests {
         let cfg = ProjectConfig::default();
         let toml_str = toml::to_string(&cfg).expect("serialize");
         assert!(!toml_str.contains("temp_dir"));
+    }
+
+    #[test]
+    fn import_limit_round_trips_toml() {
+        let mut p = ProjectState::default();
+        p.import_limit = Some(500);
+        let cfg = ProjectConfig::from_project(&p);
+        let toml_str = toml::to_string(&cfg).expect("serialize");
+        let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(parsed.import_limit, Some(500));
+    }
+
+    #[test]
+    fn import_limit_absent_in_toml_when_none() {
+        let cfg = ProjectConfig::default();
+        let toml_str = toml::to_string(&cfg).expect("serialize");
+        assert!(!toml_str.contains("import_limit"));
     }
 
     #[test]

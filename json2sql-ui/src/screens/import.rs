@@ -32,7 +32,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         }
         state.write().import.pass2_progress = crate::state::Pass2Progress::default();
 
-        let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, temp_dir, pg_schema, pass2_parallel) = {
+        let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, temp_dir, pg_schema, pass2_parallel, import_limit) = {
             let source_file_opt = state.read().project.source_file.clone();
             let Some(path) = source_file_opt else {
                 state.write().cancel();
@@ -54,6 +54,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 s.project.temp_dir.clone(),
                 s.project.pg_schema.clone(),
                 s.project.pass2_parallel,
+                s.project.import_limit,
             )
         };
 
@@ -73,20 +74,17 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
 
             ddl::create_tables_no_constraints(&client, &schemas, &pg_schema, drop_existing).await?;
 
-            json2sql::pass2::runner::run(
-                &source_file,
-                &root_table,
-                &schemas,
-                &client,
-                &pg_url,
-                &pg_schema,
-                pass2_parallel,
+            let cfg = json2sql::pass2::Pass2Config {
+                root_table,
+                pg_schema,
+                parallel: pass2_parallel,
                 anomaly_dir,
                 temp_dir,
-                Some(tx),
-                None,
-                None,
-            )
+                per_worker_budget: None,
+                min_interim_copy_bytes: None,
+                limit: import_limit,
+            };
+            json2sql::pass2::runner::run(&source_file, &schemas, &client, &pg_url, &cfg, Some(tx))
             .await
         });
 
@@ -110,6 +108,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     });
 
     // ── Derived values ────────────────────────────────────────────────────
+    let import_limit_display = state.read().project.import_limit;
     let progress      = state.read().import.pass2_progress.clone();
     let done          = progress.done;
     let elapsed       = *elapsed_secs.read();
@@ -193,6 +192,9 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                         }
                     }
                     span { class: "badge muted sq", "PASS 2 / 2" }
+                    if let Some(n) = import_limit_display {
+                        span { class: "badge warn", "⚠ SAMPLE MODE — first {n} rows only" }
+                    }
                 }
             }
 

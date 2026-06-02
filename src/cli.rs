@@ -174,6 +174,11 @@ pub struct Cli {
     /// Mandatory strategies (split) cannot be disabled — exits non-zero with explicit error.
     #[arg(long = "disable-strategy", value_name = "STRATEGY")]
     pub disable_strategy: Vec<String>,
+
+    /// Stop pass 2 after inserting N root objects. Pass 1 always runs on the full file.
+    /// 0 = create tables with no rows. Default: no limit (full import).
+    #[arg(long, value_name = "N")]
+    pub limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -253,5 +258,34 @@ mod tests {
     fn test_disable_strategy_default_empty() {
         let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
         assert!(cli.disable_strategy.is_empty());
+    }
+
+    #[test]
+    fn test_limit_default_is_none() {
+        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
+        assert!(cli.limit.is_none());
+    }
+
+    #[test]
+    fn test_limit_parses_value() {
+        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--limit", "500"]).unwrap();
+        assert_eq!(cli.limit, Some(500));
+    }
+
+    #[test]
+    fn test_limit_zero_parses() {
+        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--limit", "0"]).unwrap();
+        assert_eq!(cli.limit, Some(0));
+    }
+
+    #[test]
+    fn test_limit_composable_with_disable_strategy() {
+        let cli = Cli::try_parse_from([
+            "json2sql", "--input", "data.json",
+            "--disable-strategy", "sibling",
+            "--limit", "100",
+        ]).unwrap();
+        assert_eq!(cli.disable_strategy, vec!["sibling"]);
+        assert_eq!(cli.limit, Some(100));
     }
 }

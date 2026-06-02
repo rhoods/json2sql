@@ -28,7 +28,7 @@ async fn test_nested_row_counts_json_array() {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -53,7 +53,7 @@ async fn test_nested_row_counts_ndjson() {
         let path = common::fixture("users.jsonl");
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -75,13 +75,13 @@ async fn test_drop_existing() {
 
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
             .await.unwrap();
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
 
         let p1b = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1b.schemas, &schema, true).await.unwrap();
-        pass2::runner::run(&path, "users", &p1b.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        pass2::runner::run(&path, &p1b.schemas, &client, &url, &common::pass2_config("users", &schema), None)
             .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
@@ -97,7 +97,7 @@ async fn test_transaction_commit() {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -580,7 +580,7 @@ async fn test_array_as_pg_array() {
         );
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
             .await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -632,9 +632,8 @@ async fn test_column_limit_guard_jsonb_non_root_with_children() {
         }
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(
-            f.path(), "root", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None,
-        ).await.unwrap();
+        let p2 = pass2::runner::run(f.path(), &p1.schemas, &client, &url, &common::pass2_config("root", &schema), None)
+        .await.unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "root").await, 2);
         assert_eq!(common::row_count(&client, &schema, "root_middle").await, 2,
@@ -676,7 +675,18 @@ async fn test_parallel_copy() {
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
 
         let p2 = pass2::runner::run(
-            &path, "users", &p1.schemas, &client, &url, &schema, 3, None, None, None, None, None,
+            &path, &p1.schemas, &client, &url,
+            &json2sql::pass2::Pass2Config {
+                root_table: "users".to_string(),
+                pg_schema: schema.clone(),
+                parallel: 3,
+                anomaly_dir: None,
+                temp_dir: None,
+                per_worker_budget: None,
+                min_interim_copy_bytes: None,
+                limit: None,
+            },
+            None,
         ).await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -698,7 +708,7 @@ async fn test_pass2_timing_fields_populated() {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
             .await.unwrap();
 
         // Identity sanity — total_ms() is defined as the sum of both phases.
@@ -722,9 +732,8 @@ async fn test_parallel_streaming_matches_sequential() {
 
         // Sequential run on the schema provided by with_schema_url
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        let seq = pass2::runner::run(
-            &path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None,
-        ).await.unwrap();
+        let seq = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
+        .await.unwrap();
 
         // Parallel streaming run on a second schema
         let schema2 = common::unique_schema();
@@ -732,7 +741,18 @@ async fn test_parallel_streaming_matches_sequential() {
         client2.execute(&format!("CREATE SCHEMA \"{}\"", schema2), &[]).await.unwrap();
         db::ddl::create_tables_no_constraints(&client2, &p1.schemas, &schema2, false).await.unwrap();
         let par = pass2::runner::run(
-            &path, "users", &p1.schemas, &client2, &url, &schema2, 2, None, None, None, None, None,
+            &path, &p1.schemas, &client2, &url,
+            &json2sql::pass2::Pass2Config {
+                root_table: "users".to_string(),
+                pg_schema: schema2.clone(),
+                parallel: 2,
+                anomaly_dir: None,
+                temp_dir: None,
+                per_worker_budget: None,
+                min_interim_copy_bytes: None,
+                limit: None,
+            },
+            None,
         ).await.unwrap();
         common::drop_schema(&client2, &schema2).await;
 
@@ -857,8 +877,20 @@ async fn test_pass2_flush_events_emitted_after_copy() {
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
 
         let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<json2sql::io::progress_event::ProgressEvent>();
-        pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 2, None, None, Some(ptx), None, None)
-            .await.unwrap();
+        pass2::runner::run(
+            &path, &p1.schemas, &client, &url,
+            &json2sql::pass2::Pass2Config {
+                root_table: "users".to_string(),
+                pg_schema: schema.clone(),
+                parallel: 2,
+                anomaly_dir: None,
+                temp_dir: None,
+                per_worker_budget: None,
+                min_interim_copy_bytes: None,
+                limit: None,
+            },
+            Some(ptx),
+        ).await.unwrap();
 
         // Collect all Pass2Flush events — typed, no string parsing.
         let mut flush_rows: u64 = 0;
@@ -931,8 +963,20 @@ async fn test_pass2_error_event_emitted_on_copy_failure() {
         // Intentionally skip DDL — tables don't exist, every COPY will fail.
         let fresh = json2sql::db::connection::connect(&url).await.unwrap();
         let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<json2sql::io::progress_event::ProgressEvent>();
-        let result = pass2::runner::run(&path, "users", &p1.schemas, &fresh, &url, &schema, 2, None, None, Some(ptx), None, None)
-            .await;
+        let result = pass2::runner::run(
+            &path, &p1.schemas, &fresh, &url,
+            &json2sql::pass2::Pass2Config {
+                root_table: "users".to_string(),
+                pg_schema: schema.clone(),
+                parallel: 2,
+                anomaly_dir: None,
+                temp_dir: None,
+                per_worker_budget: None,
+                min_interim_copy_bytes: None,
+                limit: None,
+            },
+            Some(ptx),
+        ).await;
 
         assert!(result.is_err(), "expected run() to fail when tables don't exist");
 
@@ -958,7 +1002,18 @@ async fn test_per_worker_budget_correctness() {
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(
-            &path, "users", &p1.schemas, &client, &url, &schema, 2, None, None, None, Some(1024 * 1024), None,
+            &path, &p1.schemas, &client, &url,
+            &json2sql::pass2::Pass2Config {
+                root_table: "users".to_string(),
+                pg_schema: schema.clone(),
+                parallel: 2,
+                anomaly_dir: None,
+                temp_dir: None,
+                per_worker_budget: Some(1024 * 1024),
+                min_interim_copy_bytes: None,
+                limit: None,
+            },
+            None,
         ).await.unwrap();
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("users_address").unwrap(), 3);
@@ -980,7 +1035,18 @@ async fn test_per_worker_budget_minimum_threshold() {
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(
-            &path, "users", &p1.schemas, &client, &url, &schema, 2, None, None, None, Some(1), None,
+            &path, &p1.schemas, &client, &url,
+            &json2sql::pass2::Pass2Config {
+                root_table: "users".to_string(),
+                pg_schema: schema.clone(),
+                parallel: 2,
+                anomaly_dir: None,
+                temp_dir: None,
+                per_worker_budget: Some(1),
+                min_interim_copy_bytes: None,
+                limit: None,
+            },
+            None,
         ).await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -1010,10 +1076,18 @@ async fn test_background_interim_copy_correctness() {
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
 
         let p2 = pass2::runner::run(
-            &path, "users", &p1.schemas, &client, &url, &schema,
-            2, None, None, None,
-            Some(1), // per_worker_budget=1 → triggers budget check after every row
-            Some(1), // min_interim_copy_bytes=1 → every non-empty sink gets background COPY
+            &path, &p1.schemas, &client, &url,
+            &json2sql::pass2::Pass2Config {
+                root_table: "users".to_string(),
+                pg_schema: schema.clone(),
+                parallel: 2,
+                anomaly_dir: None,
+                temp_dir: None,
+                per_worker_budget: Some(1),
+                min_interim_copy_bytes: Some(1),
+                limit: None,
+            },
+            None,
         ).await.unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
@@ -1039,14 +1113,25 @@ async fn test_warn_on_nonempty_root_table_before_import() {
 
         // Premier import — remplit la table racine "users" avec 3 lignes.
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
-        pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
+        pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
             .await.unwrap();
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
 
         // Second import — la table racine est non-vide, un warning doit être émis.
         let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<json2sql::io::progress_event::ProgressEvent>();
         let result = pass2::runner::run(
-            &path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, Some(ptx), None, None,
+            &path, &p1.schemas, &client, &url,
+            &json2sql::pass2::Pass2Config {
+                root_table: "users".to_string(),
+                pg_schema: schema.clone(),
+                parallel: 1,
+                anomaly_dir: None,
+                temp_dir: None,
+                per_worker_budget: None,
+                min_interim_copy_bytes: None,
+                limit: None,
+            },
+            Some(ptx),
         ).await;
 
         // Doit toujours réussir (warning, pas erreur).
@@ -1069,5 +1154,36 @@ async fn test_warn_on_nonempty_root_table_before_import() {
             6,
             "rows should be doubled after second import (append, not replace)"
         );
+    }).await;
+}
+
+// ---------------------------------------------------------------------------
+// Regression: 42P16 "multiple primary keys not allowed" on OFoodFacts-like
+// structures where cascading generates duplicate table names.
+// Structure: images.cluster_{0,1,2}.sizes.{0,1,num} — the "num" key conflicts
+// with the _num suffix used by the numeric sibling split.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_no_duplicate_pk_on_num_key_collision_structure() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("num_key_collision.jsonl");
+        let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
+
+        // Invariant: no duplicate names in finalized schemas.
+        let mut seen = std::collections::HashSet::new();
+        for s in &p1.schemas {
+            assert!(seen.insert(s.name.clone()),
+                "duplicate table name in pass1 schemas: '{}' — regression for 42P16", s.name);
+        }
+
+        // Full import must succeed without 42P16 error.
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
+        let result = pass2::runner::run(
+            &path, &p1.schemas, &client, &url, &common::pass2_config("root", &schema), None,
+        ).await;
+        assert!(result.is_ok(), "pass2 failed (possible duplicate PK): {:?}",
+            result.err().map(|e| e.to_string()));
+        assert!(result.unwrap().constraint_warnings.is_empty(),
+            "unexpected constraint warnings on num_key_collision fixture");
     }).await;
 }
