@@ -105,6 +105,14 @@ impl SchemaFinalizer {
             finalize_cascading(&mut schemas, self.sibling_threshold, self.sibling_jaccard);
         }
         exclude_absorbed_children(&mut schemas);
+        // Post-cascade dedup: cascading can produce synthetic table names (co-sibling path,
+        // _num/_txt split) that collide with already-registered names. Without this dedup,
+        // add_constraints() would attempt to add PRIMARY KEY twice → PostgreSQL 42P16.
+        // Keeps the first (pre-cascade, more stable) occurrence.
+        {
+            let mut seen = std::collections::HashSet::new();
+            schemas.retain(|s| seen.insert(s.name.clone()));
+        }
         // Re-sort after cascade: finalize_cascading appends synthetic tables at the end of the
         // Vec without inserting them at their correct depth position. A second sort restores
         // topological (depth-then-name) order so the UI tree and pass2 flush order are correct.

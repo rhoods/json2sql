@@ -1181,6 +1181,33 @@ mod tests {
     }
 
     #[test]
+    fn no_duplicate_table_names_after_cascade() {
+        // Regression test for the "multiple primary keys" bug (42P16).
+        // Structure mimics OpenFoodFacts images.cluster_X.sizes.{0,1,num}:
+        // the cascading pipeline can generate the same name from two code paths:
+        // (1) make_subgroup(parent, suffix="num") for numeric children {0,1}
+        // (2) co-sibling path creates t_name=parent+"_num" for json_key "num"
+        // Both produce `root_images_cluster_0_sizes_num` → duplicate PK without the fix.
+        let obj = json!({
+            "images": {
+                "cluster_0": { "sizes": { "0": {"w":100,"h":200}, "1": {"w":300,"h":400}, "num": {"w":500,"h":600} } },
+                "cluster_1": { "sizes": { "0": {"w":700,"h":800}, "1": {"w":900,"h":1000}, "num": {"w":1100,"h":1200} } },
+                "cluster_2": { "sizes": { "0": {"w":150,"h":250}, "1": {"w":350,"h":450}, "num": {"w":550,"h":650} } }
+            }
+        });
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
+        for _ in 0..4 {
+            reg.observe_root("root", make_root(&obj));
+        }
+        let schemas = reg.finalize();
+        let mut seen = std::collections::HashSet::new();
+        for s in &schemas {
+            assert!(seen.insert(s.name.clone()),
+                "duplicate table name after finalize(): '{}' — regression for 42P16 bug", s.name);
+        }
+    }
+
+    #[test]
     fn test_no_disabled_strategies_no_regression() {
         let obj = json!({ "nutrients": { "vit_c": 10.5, "iron": 2.3, "calcium": 50.0 } });
         let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
