@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use crossbeam_channel;
@@ -12,7 +13,23 @@ use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::finalizer::{apply_column_limit_guard, OverflowWarning};
 use crate::schema::registry::SchemaRegistry;
 use crate::schema::stats::ColumnStats;
+use crate::schema::strategies::StrategyName;
 use crate::schema::table_schema::TableSchema;
+
+/// All parameters controlling a Pass 1 run.
+pub struct Pass1Config {
+    pub root_table: String,
+    pub text_threshold: u32,
+    pub array_as_pg_array: bool,
+    pub wide_column_threshold: usize,
+    pub sibling_threshold: usize,
+    pub sibling_jaccard: f64,
+    pub stable_threshold: f64,
+    pub rare_threshold: f64,
+    pub disabled_strategies: HashSet<StrategyName>,
+    /// Used by run_parallel only; ignored by run and run_inspect.
+    pub num_workers: Option<usize>,
+}
 
 /// Result of Pass 1.
 pub struct Pass1Result {
@@ -34,14 +51,7 @@ pub struct Pass1Result {
 /// Pass `None` for CLI / headless mode (terminal progress bar is used instead).
 pub fn run(
     path: &Path,
-    root_table: &str,
-    text_threshold: u32,
-    array_as_pg_array: bool,
-    wide_column_threshold: usize,
-    sibling_threshold: usize,
-    sibling_jaccard: f64,
-    stable_threshold: f64,
-    rare_threshold: f64,
+    config: &Pass1Config,
     progress_tx: Option<ProgressTx>,
 ) -> Result<Pass1Result> {
     let total_bytes = file_size(path)?;
@@ -52,7 +62,16 @@ pub fn run(
         None
     };
 
-    let mut registry = SchemaRegistry::new(text_threshold, array_as_pg_array, wide_column_threshold, sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold);
+    let mut registry = SchemaRegistry::new(
+        config.text_threshold,
+        config.array_as_pg_array,
+        config.wide_column_threshold,
+        config.sibling_threshold,
+        config.sibling_jaccard,
+        config.stable_threshold,
+        config.rare_threshold,
+        config.disabled_strategies.clone(),
+    );
     let (mut reader, _format) = JsonReader::open(path)?;
 
     let mut total_rows = 0u64;
@@ -63,7 +82,7 @@ pub fn run(
         let value = item?;
         match value {
             Value::Object(ref obj) => {
-                registry.observe_root(root_table, obj);
+                registry.observe_root(&config.root_table, obj);
                 total_rows += 1;
             }
             other => {
@@ -142,18 +161,18 @@ pub struct InspectResult {
 /// Useful for quickly understanding the structure of a large file before a full import.
 pub fn run_inspect(
     path: &std::path::Path,
-    root_table: &str,
-    text_threshold: u32,
+    config: &Pass1Config,
     limit: usize,
 ) -> Result<InspectResult> {
     let mut registry = SchemaRegistry::new(
-        text_threshold,
-        false,        // array_as_pg_array
+        config.text_threshold,
+        false,        // array_as_pg_array: always false in inspect mode
         usize::MAX,   // wide_column_threshold: disable wide detection
         usize::MAX,   // sibling_threshold: disable sibling merging
-        1.0,          // sibling_jaccard: disable sibling merging
-        0.0,          // stable_threshold: irrelevant (wide detection disabled)
-        0.0,          // rare_threshold: irrelevant (wide detection disabled)
+        1.0,          // sibling_jaccard
+        0.0,          // stable_threshold
+        0.0,          // rare_threshold
+        HashSet::from([StrategyName::Sibling]),
     );
 
     let (mut reader, _format) = JsonReader::open(path)?;
@@ -167,7 +186,7 @@ pub fn run_inspect(
         let value = item?;
         match value {
             Value::Object(ref obj) => {
-                registry.observe_root(root_table, obj);
+                registry.observe_root(&config.root_table, obj);
                 rows_scanned += 1;
                 sampled_objects.push(Value::Object(obj.clone()));
             }
@@ -203,29 +222,21 @@ pub fn effective_workers(requested: usize) -> (usize, Option<usize>) {
     }
 }
 
-/// Run Pass 1 with `num_workers` parallel schema-inference threads.
+/// Run Pass 1 with `config.num_workers` parallel schema-inference threads.
 ///
 /// One reader thread streams and parses the file sequentially (preserving I/O order),
-/// distributing each parsed object to `num_workers` worker threads via a bounded channel.
+/// distributing each parsed object to the worker threads via a bounded channel.
 /// Each worker maintains its own `SchemaRegistry`; they are merged and finalized once
 /// the reader is done.
 ///
-/// Using `num_workers = 1` is equivalent to sequential processing with extra overhead;
-/// prefer `run()` for single-threaded use.
+/// `config.num_workers = None` or `Some(1)` is equivalent to sequential processing with extra
+/// overhead; prefer `run()` for single-threaded use.
 pub fn run_parallel(
     path: &Path,
-    root_table: &str,
-    text_threshold: u32,
-    array_as_pg_array: bool,
-    wide_column_threshold: usize,
-    sibling_threshold: usize,
-    sibling_jaccard: f64,
-    stable_threshold: f64,
-    rare_threshold: f64,
+    config: &Pass1Config,
     progress_tx: Option<ProgressTx>,
-    num_workers: usize,
 ) -> Result<Pass1Result> {
-    let num_workers = num_workers.max(1);
+    let num_workers = config.num_workers.unwrap_or(1).max(1);
     let total_bytes = file_size(path)?;
 
     let progress = if progress_tx.is_none() {
@@ -240,14 +251,24 @@ pub fn run_parallel(
     let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(num_workers * 4);
 
     // Spawn worker threads, each with its own SchemaRegistry.
-    let root_table_owned = root_table.to_string();
+    let root_table_owned = config.root_table.clone();
+    let (text_threshold, array_as_pg_array, wide_column_threshold, sibling_threshold,
+         sibling_jaccard, stable_threshold, rare_threshold) = (
+        config.text_threshold, config.array_as_pg_array, config.wide_column_threshold,
+        config.sibling_threshold, config.sibling_jaccard, config.stable_threshold,
+        config.rare_threshold,
+    );
+    let disabled_strategies = config.disabled_strategies.clone();
+
     let worker_handles: Vec<std::thread::JoinHandle<crate::error::Result<SchemaRegistry>>> = (0..num_workers)
         .map(|_| {
             let rx = rx.clone();
             let root = root_table_owned.clone();
+            let disabled = disabled_strategies.clone();
             let mut reg = SchemaRegistry::new(
                 text_threshold, array_as_pg_array, wide_column_threshold,
                 sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold,
+                disabled,
             );
             std::thread::spawn(move || {
                 while let Ok(mut bytes) = rx.recv() {
@@ -315,6 +336,7 @@ pub fn run_parallel(
     let mut merged = SchemaRegistry::new(
         text_threshold, array_as_pg_array, wide_column_threshold,
         sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold,
+        disabled_strategies,
     );
     let mut worker_errors: Vec<String> = Vec::new();
     for join_result in join_results {
@@ -380,24 +402,39 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
     }
 
+    fn inspect_config(root: &str) -> Pass1Config {
+        Pass1Config {
+            root_table: root.to_string(),
+            text_threshold: 256,
+            array_as_pg_array: false,
+            wide_column_threshold: usize::MAX,
+            sibling_threshold: usize::MAX,
+            sibling_jaccard: 1.0,
+            stable_threshold: 0.0,
+            rare_threshold: 0.0,
+            disabled_strategies: HashSet::new(),
+            num_workers: None,
+        }
+    }
+
     #[test]
     fn test_inspect_respects_limit() {
         let path = fixture("users.jsonl"); // 3 rows
-        let result = run_inspect(&path, "users", 256, 2).unwrap();
+        let result = run_inspect(&path, &inspect_config("users"), 2).unwrap();
         assert_eq!(result.rows_scanned, 2, "should stop at limit");
     }
 
     #[test]
     fn test_inspect_reads_all_when_limit_exceeds_file() {
         let path = fixture("users.jsonl"); // 3 rows
-        let result = run_inspect(&path, "users", 256, 1000).unwrap();
+        let result = run_inspect(&path, &inspect_config("users"), 1000).unwrap();
         assert_eq!(result.rows_scanned, 3, "should read all rows when limit > file size");
     }
 
     #[test]
     fn test_inspect_returns_schemas() {
         let path = fixture("users.jsonl");
-        let result = run_inspect(&path, "users", 256, 10).unwrap();
+        let result = run_inspect(&path, &inspect_config("users"), 10).unwrap();
         assert!(!result.schemas.is_empty(), "should infer at least one table");
         assert!(result.schemas.iter().any(|s| s.name == "users"), "root table must be present");
     }
@@ -405,7 +442,7 @@ mod tests {
     #[test]
     fn test_inspect_no_column_limit_guard() {
         let path = fixture("users.jsonl");
-        let result = run_inspect(&path, "users", 256, 10).unwrap();
+        let result = run_inspect(&path, &inspect_config("users"), 10).unwrap();
         use crate::schema::table_schema::WideStrategy;
         assert!(
             result.schemas.iter().all(|s| !matches!(s.wide_strategy, WideStrategy::Jsonb)),
@@ -416,7 +453,7 @@ mod tests {
     #[test]
     fn test_inspect_sampled_objects_count_matches_rows_scanned() {
         let path = fixture("users.jsonl"); // 3 rows
-        let result = run_inspect(&path, "users", 256, 2).unwrap();
+        let result = run_inspect(&path, &inspect_config("users"), 2).unwrap();
         assert_eq!(result.sampled_objects.len(), result.rows_scanned as usize);
         assert_eq!(result.sampled_objects.len(), 2);
     }
@@ -424,7 +461,7 @@ mod tests {
     #[test]
     fn test_inspect_sampled_objects_are_json_objects() {
         let path = fixture("users.jsonl");
-        let result = run_inspect(&path, "users", 256, 3).unwrap();
+        let result = run_inspect(&path, &inspect_config("users"), 3).unwrap();
         for obj in &result.sampled_objects {
             assert!(obj.is_object(), "each sampled item must be a JSON object");
         }
@@ -433,7 +470,7 @@ mod tests {
     #[test]
     fn test_inspect_sampled_objects_all_when_limit_exceeds_file() {
         let path = fixture("users.jsonl"); // 3 rows
-        let result = run_inspect(&path, "users", 256, 1000).unwrap();
+        let result = run_inspect(&path, &inspect_config("users"), 1000).unwrap();
         assert_eq!(result.sampled_objects.len(), 3);
     }
 
@@ -442,16 +479,19 @@ mod tests {
     fn run_parallel_default(path: &std::path::PathBuf, workers: usize) -> crate::error::Result<Pass1Result> {
         run_parallel(
             path,
-            "users",
-            256,        // text_threshold
-            false,      // array_as_pg_array
-            usize::MAX, // wide_column_threshold: disabled
-            usize::MAX, // sibling_threshold: disabled
-            1.0,        // sibling_jaccard: disabled
-            0.0,
-            0.0,
-            None,       // progress_tx
-            workers,
+            &Pass1Config {
+                root_table: "users".to_string(),
+                text_threshold: 256,
+                array_as_pg_array: false,
+                wide_column_threshold: usize::MAX,
+                sibling_threshold: usize::MAX,
+                sibling_jaccard: 1.0,
+                stable_threshold: 0.0,
+                rare_threshold: 0.0,
+                disabled_strategies: HashSet::new(),
+                num_workers: Some(workers),
+            },
+            None,
         )
     }
 
@@ -493,7 +533,20 @@ mod tests {
         f.write_all(b"[{\"a\": 1}, 42, {\"b\": 2}]").unwrap();
         f.flush().unwrap();
         let result = run_parallel(
-            f.path(), "root", 256, false, usize::MAX, usize::MAX, 1.0, 0.0, 0.0, None, 8,
+            f.path(),
+            &Pass1Config {
+                root_table: "root".to_string(),
+                text_threshold: 256,
+                array_as_pg_array: false,
+                wide_column_threshold: usize::MAX,
+                sibling_threshold: usize::MAX,
+                sibling_jaccard: 1.0,
+                stable_threshold: 0.0,
+                rare_threshold: 0.0,
+                disabled_strategies: HashSet::new(),
+                num_workers: Some(8),
+            },
+            None,
         );
         assert!(result.is_err(), "must return Err for non-object root element");
     }
@@ -508,7 +561,20 @@ mod tests {
         f.write_all(b"[42, 43, 44, 45, 46, 47, 48, 49]").unwrap();
         f.flush().unwrap();
         let result = run_parallel(
-            f.path(), "root", 256, false, usize::MAX, usize::MAX, 1.0, 0.0, 0.0, None, 4,
+            f.path(),
+            &Pass1Config {
+                root_table: "root".to_string(),
+                text_threshold: 256,
+                array_as_pg_array: false,
+                wide_column_threshold: usize::MAX,
+                sibling_threshold: usize::MAX,
+                sibling_jaccard: 1.0,
+                stable_threshold: 0.0,
+                rare_threshold: 0.0,
+                disabled_strategies: HashSet::new(),
+                num_workers: Some(4),
+            },
+            None,
         );
         match result {
             Err(crate::error::J2sError::InvalidInput(msg)) => {
@@ -529,7 +595,20 @@ mod tests {
         f.write_all(b"[{\"a\": 1}, 42]").unwrap();
         f.flush().unwrap();
         let result = run_parallel(
-            f.path(), "root", 256, false, usize::MAX, usize::MAX, 1.0, 0.0, 0.0, None, 1,
+            f.path(),
+            &Pass1Config {
+                root_table: "root".to_string(),
+                text_threshold: 256,
+                array_as_pg_array: false,
+                wide_column_threshold: usize::MAX,
+                sibling_threshold: usize::MAX,
+                sibling_jaccard: 1.0,
+                stable_threshold: 0.0,
+                rare_threshold: 0.0,
+                disabled_strategies: HashSet::new(),
+                num_workers: Some(1),
+            },
+            None,
         );
         match result {
             Err(crate::error::J2sError::InvalidInput(msg)) =>

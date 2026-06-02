@@ -13,7 +13,7 @@ use json2sql::schema::config::{apply_overrides, SchemaConfig};
 async fn test_override_type_valid() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.jsonl");
-        let mut p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let mut p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
 
         // Pass1 doit inférer DoublePrecision AVANT override — prouve que l'override n'est pas un no-op.
         let pre_schema = p1.schemas.iter().find(|s| s.name == "people").unwrap();
@@ -77,7 +77,7 @@ async fn test_override_type_valid() {
 async fn test_override_bad() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.jsonl");
-        let mut p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let mut p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
 
         // Pass1 doit inférer DoublePrecision AVANT override — prouve que l'override n'est pas un no-op.
         let pre_schema = p1.schemas.iter().find(|s| s.name == "people").unwrap();

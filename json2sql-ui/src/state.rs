@@ -7,6 +7,7 @@ use json2sql::io::progress_event::ProgressEvent;
 use json2sql::schema::naming::{ColumnCollision, TruncatedName};
 use json2sql::schema::finalizer::OverflowWarning;
 use json2sql::schema::stats::ColumnStats;
+use json2sql::schema::strategies::StrategyName;
 use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 
 // ---------------------------------------------------------------------------
@@ -195,6 +196,8 @@ pub struct ProjectState {
     pub workers: usize,
     /// Number of parallel PostgreSQL connections for Pass 2 COPY.
     pub pass2_parallel: usize,
+    /// Optional strategies disabled before analysis. Empty set = all strategies active (default).
+    pub disabled_strategies: HashSet<StrategyName>,
 }
 
 impl Default for ProjectState {
@@ -214,6 +217,7 @@ impl Default for ProjectState {
                 .map(|n| n.get())
                 .unwrap_or(4)
                 .min(8),
+            disabled_strategies: HashSet::new(),
         }
     }
 }

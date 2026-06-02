@@ -26,7 +26,7 @@ fn single_col_schema(table: &str) -> TableSchema {
 async fn test_nested_row_counts_json_array() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
-        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
             .await.unwrap();
@@ -51,7 +51,7 @@ async fn test_nested_row_counts_json_array() {
 async fn test_nested_row_counts_ndjson() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.jsonl");
-        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
             .await.unwrap();
@@ -73,13 +73,13 @@ async fn test_drop_existing() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
 
-        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
             .await.unwrap();
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
 
-        let p1b = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1b = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1b.schemas, &schema, true).await.unwrap();
         pass2::runner::run(&path, "users", &p1b.schemas, &client, &url, &schema, 1, None, None, None, None, None)
             .await.unwrap();
@@ -95,7 +95,7 @@ async fn test_drop_existing() {
 async fn test_transaction_commit() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
-        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
             .await.unwrap();
@@ -115,7 +115,7 @@ async fn test_transaction_commit() {
 #[test]
 fn test_schema_inference_no_db() {
     let path = common::fixture("users.json");
-    let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+    let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
 
     assert_eq!(p1.schemas.len(), 5);
 
@@ -155,7 +155,7 @@ fn test_keyed_pivot_mixed_key_shapes() {
     use json2sql::schema::table_schema::WideStrategy;
 
     let path = common::fixture("keyed_pivot_mixed_shape.jsonl");
-    let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+    let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
@@ -206,7 +206,7 @@ fn test_sibling_significant_container_not_diluting_jaccard() {
     use json2sql::schema::table_schema::WideStrategy;
 
     let path = common::fixture("sibling_significant_container.jsonl");
-    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+    let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
@@ -254,7 +254,7 @@ fn test_sibling_noisy_schema_jaccard_filter() {
     use json2sql::schema::table_schema::WideStrategy;
 
     let path = common::fixture("sibling_noisy_schema.jsonl");
-    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+    let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
@@ -294,7 +294,7 @@ fn test_sibling_all_pure_container_collapse() {
     use json2sql::schema::table_schema::WideStrategy;
 
     let path = common::fixture("sibling_all_pure_containers.jsonl");
-    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+    let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
@@ -350,7 +350,7 @@ fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
     use json2sql::schema::table_schema::WideStrategy;
 
     let path = common::fixture("cascade_wave1_child_route_survives.jsonl");
-    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+    let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
@@ -408,7 +408,7 @@ fn test_sibling_pure_diluter_absorbed() {
     use json2sql::schema::table_schema::WideStrategy;
 
     let path = common::fixture("sibling_pure_diluter.jsonl");
-    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+    let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
@@ -445,7 +445,7 @@ fn test_sibling_mixed_unified_fallback() {
     use json2sql::schema::table_schema::WideStrategy;
 
     let path = common::fixture("sibling_mixed_unified_fallback.jsonl");
-    let p1 = pass1::runner::run(&path, "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+    let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
@@ -479,11 +479,11 @@ fn test_schema_inference_parallel_parity_ndjson() {
     let path = common::fixture("users.jsonl");
 
     let seq = pass1::runner::run(
-        &path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None,
+        &path, &common::pass1_config("users"), None,
     ).unwrap();
 
     let par = pass1::runner::run_parallel(
-        &path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None, 2,
+        &path, &pass1::runner::Pass1Config { num_workers: Some(2), ..common::pass1_config("users") }, None,
     ).unwrap();
 
     assert_eq!(seq.total_rows, par.total_rows, "row count must match");
@@ -515,7 +515,7 @@ fn test_parallel_non_object_root_returns_error() {
     f.flush().unwrap();
 
     let result = pass1::runner::run_parallel(
-        f.path(), "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None, 2,
+        f.path(), &pass1::runner::Pass1Config { num_workers: Some(2), ..common::pass1_config("root") }, None,
     );
     match result {
         Err(e) => assert!(e.to_string().contains("root level"),
@@ -532,11 +532,11 @@ fn test_schema_inference_parallel_parity() {
     let path = common::fixture("users.json");
 
     let seq = pass1::runner::run(
-        &path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None,
+        &path, &common::pass1_config("users"), None,
     ).unwrap();
 
     let par = pass1::runner::run_parallel(
-        &path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None, 2,
+        &path, &pass1::runner::Pass1Config { num_workers: Some(2), ..common::pass1_config("users") }, None,
     ).unwrap();
 
     assert_eq!(seq.total_rows, par.total_rows, "row count must match");
@@ -565,7 +565,7 @@ fn test_schema_inference_parallel_parity() {
 async fn test_array_as_pg_array() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
-        let p1 = pass1::runner::run(&path, "users", 256, true, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config { root_table: "users".to_string(), text_threshold: 256, array_as_pg_array: true, wide_column_threshold: usize::MAX, sibling_threshold: 3, sibling_jaccard: 0.5, stable_threshold: 0.10, rare_threshold: 0.001, disabled_strategies: std::collections::HashSet::new(), num_workers: None }, None).unwrap();
 
         assert_eq!(p1.schemas.len(), 4);
         let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
@@ -619,7 +619,7 @@ async fn test_column_limit_guard_jsonb_non_root_with_children() {
         f.flush().unwrap();
 
         let mut p1 = pass1::runner::run(
-            f.path(), "root", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None,
+            f.path(), &common::pass1_config("root"), None,
         ).unwrap();
 
         // Force Jsonb sur "root_middle" (non-racine — a un parent_table = "root").
@@ -672,7 +672,7 @@ async fn test_column_limit_guard_jsonb_non_root_with_children() {
 async fn test_parallel_copy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
-        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
 
         let p2 = pass2::runner::run(
@@ -696,7 +696,7 @@ async fn test_parallel_copy() {
 async fn test_pass2_timing_fields_populated() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
-        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(&path, "users", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
             .await.unwrap();
@@ -717,7 +717,7 @@ async fn test_parallel_streaming_matches_sequential() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(
-            &path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None,
+            &path, &common::pass1_config("users"), None,
         ).unwrap();
 
         // Sequential run on the schema provided by with_schema_url
@@ -853,7 +853,7 @@ async fn test_merge_copy_large_file_streaming() {
 async fn test_pass2_flush_events_emitted_after_copy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.jsonl");
-        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
 
         let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<json2sql::io::progress_event::ProgressEvent>();
@@ -926,7 +926,7 @@ async fn test_merge_copy_skips_empty_sinks_among_non_empty() {
 async fn test_pass2_error_event_emitted_on_copy_failure() {
     common::with_schema_url(|_client, schema, url| async move {
         let path = common::fixture("users.jsonl");
-        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
 
         // Intentionally skip DDL — tables don't exist, every COPY will fail.
         let fresh = json2sql::db::connection::connect(&url).await.unwrap();
@@ -955,7 +955,7 @@ async fn test_pass2_error_event_emitted_on_copy_failure() {
 async fn test_per_worker_budget_correctness() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
-        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(
             &path, "users", &p1.schemas, &client, &url, &schema, 2, None, None, None, Some(1024 * 1024), None,
@@ -977,7 +977,7 @@ async fn test_per_worker_budget_correctness() {
 async fn test_per_worker_budget_minimum_threshold() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
-        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(
             &path, "users", &p1.schemas, &client, &url, &schema, 2, None, None, None, Some(1), None,
@@ -1005,7 +1005,7 @@ async fn test_background_interim_copy_correctness() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(
-            &path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None,
+            &path, &common::pass1_config("users"), None,
         ).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
 
@@ -1035,7 +1035,7 @@ async fn test_background_interim_copy_correctness() {
 async fn test_warn_on_nonempty_root_table_before_import() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.jsonl");
-        let p1 = pass1::runner::run(&path, "users", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
 
         // Premier import — remplit la table racine "users" avec 3 lignes.
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();

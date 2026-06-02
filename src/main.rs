@@ -10,6 +10,7 @@ mod schema;
 use clap::Parser;
 use cli::{Cli, Commands};
 use error::Result;
+use schema::strategies::parse_disabled_strategies;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -22,7 +23,12 @@ async fn main() -> anyhow::Result<()> {
             run_inspect(input, &root, text_threshold, limit, sample_output.as_deref(), output.as_deref())
                 .map_err(|e| anyhow::anyhow!("{}", e))
         }
-        None => run(cli).await.map_err(|e| anyhow::anyhow!("{}", e)),
+        None => {
+            // Validate --disable-strategy flags before any file I/O.
+            let disabled_strategies = parse_disabled_strategies(&cli.disable_strategy)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            run(cli, disabled_strategies).await.map_err(|e| anyhow::anyhow!("{}", e))
+        }
     }
 }
 
@@ -37,7 +43,22 @@ fn run_inspect(
     use std::io::Write;
 
     eprintln!("Inspecting '{}' (limit: {} objects)...", path.display(), limit);
-    let result = pass1::runner::run_inspect(path, root_table, text_threshold, limit)?;
+    let result = pass1::runner::run_inspect(
+        path,
+        &pass1::runner::Pass1Config {
+            root_table: root_table.to_string(),
+            text_threshold,
+            array_as_pg_array: false,
+            wide_column_threshold: usize::MAX,
+            sibling_threshold: usize::MAX,
+            sibling_jaccard: 1.0,
+            stable_threshold: 0.0,
+            rare_threshold: 0.0,
+            disabled_strategies: std::collections::HashSet::new(),
+            num_workers: None,
+        },
+        limit,
+    )?;
 
     eprintln!(
         "\nScanned {} object(s) → {} table(s) detected\n",
@@ -95,7 +116,7 @@ fn run_inspect(
     Ok(())
 }
 
-async fn run(cli: Cli) -> Result<()> {
+async fn run(cli: Cli, disabled_strategies: std::collections::HashSet<schema::strategies::StrategyName>) -> Result<()> {
     let root_table = cli.root_table_name();
 
     // -------------------------------------------------------------------------
@@ -147,28 +168,35 @@ async fn run(cli: Cli) -> Result<()> {
             eprintln!("Using {} parallel workers for schema inference.", workers);
             pass1::runner::run_parallel(
                 &input_path,
-                &root_table,
-                cli.text_threshold,
-                cli.array_as_pg_array,
-                cli.wide_column_threshold,
-                cli.sibling_threshold,
-                cli.sibling_jaccard,
-                cli.stable_threshold,
-                cli.rare_threshold,
+                &pass1::runner::Pass1Config {
+                    root_table: root_table.clone(),
+                    text_threshold: cli.text_threshold,
+                    array_as_pg_array: cli.array_as_pg_array,
+                    wide_column_threshold: cli.wide_column_threshold,
+                    sibling_threshold: cli.sibling_threshold,
+                    sibling_jaccard: cli.sibling_jaccard,
+                    stable_threshold: cli.stable_threshold,
+                    rare_threshold: cli.rare_threshold,
+                    disabled_strategies: disabled_strategies.clone(),
+                    num_workers: Some(workers),
+                },
                 None,
-                workers,
             )?
         } else {
             pass1::runner::run(
                 &input_path,
-                &root_table,
-                cli.text_threshold,
-                cli.array_as_pg_array,
-                cli.wide_column_threshold,
-                cli.sibling_threshold,
-                cli.sibling_jaccard,
-                cli.stable_threshold,
-                cli.rare_threshold,
+                &pass1::runner::Pass1Config {
+                    root_table: root_table.clone(),
+                    text_threshold: cli.text_threshold,
+                    array_as_pg_array: cli.array_as_pg_array,
+                    wide_column_threshold: cli.wide_column_threshold,
+                    sibling_threshold: cli.sibling_threshold,
+                    sibling_jaccard: cli.sibling_jaccard,
+                    stable_threshold: cli.stable_threshold,
+                    rare_threshold: cli.rare_threshold,
+                    disabled_strategies,
+                    num_workers: None,
+                },
                 None,
             )?
         }

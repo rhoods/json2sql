@@ -4,6 +4,7 @@
 pub(crate) const PATH_SEP: char = '\x00';
 
 pub mod cascading;
+pub mod strategies;
 pub mod config;
 pub mod finalizer;
 pub mod wide_strategies;

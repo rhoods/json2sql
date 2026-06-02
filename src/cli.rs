@@ -168,6 +168,12 @@ pub struct Cli {
     /// Values > 1 distribute schema inference across N threads; useful for large files on multi-core machines.
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub workers: usize,
+
+    /// Disable an optional inference strategy. Repeatable.
+    /// Valid values: sibling, pivot, structured_pivot.
+    /// Mandatory strategies (split) cannot be disabled — exits non-zero with explicit error.
+    #[arg(long = "disable-strategy", value_name = "STRATEGY")]
+    pub disable_strategy: Vec<String>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -225,5 +231,27 @@ mod tests {
     fn test_no_subcommand_is_import_mode() {
         let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn test_disable_strategy_single_parses() {
+        let cli = Cli::try_parse_from(["json2sql", "--input", "x.json", "--disable-strategy", "sibling"]).unwrap();
+        assert_eq!(cli.disable_strategy, vec!["sibling"]);
+    }
+
+    #[test]
+    fn test_disable_strategy_repeatable() {
+        let cli = Cli::try_parse_from([
+            "json2sql", "--input", "x.json",
+            "--disable-strategy", "sibling",
+            "--disable-strategy", "pivot",
+        ]).unwrap();
+        assert_eq!(cli.disable_strategy, vec!["sibling", "pivot"]);
+    }
+
+    #[test]
+    fn test_disable_strategy_default_empty() {
+        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
+        assert!(cli.disable_strategy.is_empty());
     }
 }

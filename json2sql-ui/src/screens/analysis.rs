@@ -65,23 +65,24 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
             ));
         }
 
+        let disabled_strategies = state.read().project.disabled_strategies.clone();
         let handle = tokio::task::spawn_blocking(move || {
+            let config = json2sql::pass1::runner::Pass1Config {
+                root_table,
+                text_threshold: PASS1_TEXT_THRESHOLD,
+                array_as_pg_array: false,
+                wide_column_threshold: PASS1_WIDE_COLUMN_THRESHOLD,
+                sibling_threshold: PASS1_SIBLING_THRESHOLD,
+                sibling_jaccard: PASS1_SIBLING_JACCARD,
+                stable_threshold: PASS1_STABLE_THRESHOLD,
+                rare_threshold: PASS1_RARE_THRESHOLD,
+                disabled_strategies,
+                num_workers: Some(workers),
+            };
             if workers > 1 {
-                json2sql::pass1::runner::run_parallel(
-                    &source_file, &root_table,
-                    PASS1_TEXT_THRESHOLD, false,
-                    PASS1_WIDE_COLUMN_THRESHOLD, PASS1_SIBLING_THRESHOLD, PASS1_SIBLING_JACCARD,
-                    PASS1_STABLE_THRESHOLD, PASS1_RARE_THRESHOLD,
-                    Some(tx), workers,
-                )
+                json2sql::pass1::runner::run_parallel(&source_file, &config, Some(tx))
             } else {
-                json2sql::pass1::runner::run(
-                    &source_file, &root_table,
-                    PASS1_TEXT_THRESHOLD, false,
-                    PASS1_WIDE_COLUMN_THRESHOLD, PASS1_SIBLING_THRESHOLD, PASS1_SIBLING_JACCARD,
-                    PASS1_STABLE_THRESHOLD, PASS1_RARE_THRESHOLD,
-                    Some(tx),
-                )
+                json2sql::pass1::runner::run(&source_file, &config, Some(tx))
             }
         });
 

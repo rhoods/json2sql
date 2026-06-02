@@ -2,10 +2,12 @@
 ///
 /// Saves/loads the Setup-screen form to `~/.config/json2sql/last_project.toml`.
 /// Password is intentionally excluded — never written to disk.
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use json2sql::schema::strategies::StrategyName;
 use crate::state::ProjectState;
 
 // ---------------------------------------------------------------------------
@@ -29,6 +31,8 @@ pub struct ProjectConfig {
     pub temp_dir: Option<PathBuf>,
     pub workers: usize,
     pub pass2_parallel: usize,
+    #[serde(default)]
+    pub disabled_strategies: Vec<String>,
 }
 
 impl Default for ProjectConfig {
@@ -48,6 +52,7 @@ impl Default for ProjectConfig {
                 .map(|n| n.get())
                 .unwrap_or(4)
                 .min(8),
+            disabled_strategies: Vec::new(),
         }
     }
 }
@@ -66,6 +71,7 @@ impl ProjectConfig {
             temp_dir: p.temp_dir.clone(),
             workers: p.workers,
             pass2_parallel: p.pass2_parallel,
+            disabled_strategies: p.disabled_strategies.iter().map(|s| s.as_str().to_string()).collect(),
         }
     }
 
@@ -82,6 +88,10 @@ impl ProjectConfig {
         p.temp_dir = self.temp_dir.clone();
         p.workers = self.workers;
         p.pass2_parallel = self.pass2_parallel;
+        // Silently ignore invalid entries — config file may predate a strategy rename
+        p.disabled_strategies = self.disabled_strategies.iter()
+            .filter_map(|s| StrategyName::try_from(s.as_str()).ok())
+            .collect::<HashSet<_>>();
     }
 }
 
@@ -178,6 +188,7 @@ mod tests {
             temp_dir: None,
             workers: 2,
             pass2_parallel: 3,
+            disabled_strategies: Vec::new(),
         };
         let mut p = ProjectState::default();
         p.pg.password = "original_password".to_string();
@@ -224,6 +235,7 @@ mod tests {
             temp_dir: None,
             workers: 3,
             pass2_parallel: 5,
+            disabled_strategies: Vec::new(),
         };
 
         let toml_str = toml::to_string(&cfg).expect("serialize");
@@ -274,5 +286,49 @@ mod tests {
         // by verifying it doesn't panic and returns None or Some (both valid).
         // We only assert it does not panic.
         let _ = load();
+    }
+
+    #[test]
+    fn disabled_strategies_round_trips_from_project_to_apply() {
+        let mut p = ProjectState::default();
+        p.disabled_strategies.insert(StrategyName::Sibling);
+        p.disabled_strategies.insert(StrategyName::Pivot);
+
+        let cfg = ProjectConfig::from_project(&p);
+        assert!(cfg.disabled_strategies.contains(&"sibling".to_string()));
+        assert!(cfg.disabled_strategies.contains(&"pivot".to_string()));
+        assert!(!cfg.disabled_strategies.contains(&"structured_pivot".to_string()));
+
+        let mut p2 = ProjectState::default();
+        cfg.apply_to(&mut p2);
+        assert!(p2.disabled_strategies.contains(&StrategyName::Sibling));
+        assert!(p2.disabled_strategies.contains(&StrategyName::Pivot));
+        assert!(!p2.disabled_strategies.contains(&StrategyName::StructuredPivot));
+    }
+
+    #[test]
+    fn disabled_strategies_toml_round_trip() {
+        let mut p = ProjectState::default();
+        p.disabled_strategies.insert(StrategyName::StructuredPivot);
+
+        let cfg = ProjectConfig::from_project(&p);
+        let toml_str = toml::to_string(&cfg).expect("serialize");
+        let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
+        assert!(parsed.disabled_strategies.contains(&"structured_pivot".to_string()));
+
+        let mut p2 = ProjectState::default();
+        parsed.apply_to(&mut p2);
+        assert!(p2.disabled_strategies.contains(&StrategyName::StructuredPivot));
+    }
+
+    #[test]
+    fn apply_to_ignores_invalid_strategy_names() {
+        let cfg = ProjectConfig {
+            disabled_strategies: vec!["unknown_strategy".to_string()],
+            ..ProjectConfig::default()
+        };
+        let mut p = ProjectState::default();
+        cfg.apply_to(&mut p);
+        assert!(p.disabled_strategies.is_empty(), "invalid strategy names must be silently ignored");
     }
 }

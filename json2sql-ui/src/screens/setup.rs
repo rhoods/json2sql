@@ -4,6 +4,7 @@
 /// CSS classes come from the embedded design system (assets/styles.css).
 use dioxus::prelude::*;
 
+use json2sql::schema::strategies::StrategyName;
 use crate::screens::{pick_file, pick_folder, PickResult};
 use crate::state::{format_bytes, AppScreen, AppState};
 
@@ -668,6 +669,86 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                         span { "⚠" }
                                         div { b { "Destructive" } " — all existing data in target tables will be deleted." }
                                     }
+                                }
+
+                                div { class: "divider" }
+
+                                // ── Strategy selection ────────────────────
+                                h4 { style: "font-size:var(--fs-sm);margin:0 0 8px;color:var(--fg);", "Strategy selection" }
+                                p { style: "font-size:var(--fs-xs);color:var(--fg-3);margin:0 0 10px;line-height:1.5;",
+                                    "Uncheck a strategy to prevent it from running during schema analysis. "
+                                    "Wide-table split is mandatory and always runs."
+                                }
+                                div { style: "display:flex;flex-direction:column;gap:6px;",
+                                    // Sibling detection checkbox
+                                    {
+                                        let sibling_on = !state.read().project.disabled_strategies.contains(&StrategyName::Sibling);
+                                        rsx! {
+                                            label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: sibling_on,
+                                                    onchange: move |e| {
+                                                        if e.value() == "true" {
+                                                            state.write().project.disabled_strategies.remove(&StrategyName::Sibling);
+                                                        } else {
+                                                            state.write().project.disabled_strategies.insert(StrategyName::Sibling);
+                                                        }
+                                                        crate::config::try_save(&state.read().project);
+                                                    },
+                                                }
+                                                span { "Sibling detection " }
+                                                span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(sibling)" }
+                                            }
+                                        }
+                                    }
+                                    // Pivot inference checkbox
+                                    {
+                                        let pivot_on = !state.read().project.disabled_strategies.contains(&StrategyName::Pivot);
+                                        rsx! {
+                                            label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: pivot_on,
+                                                    onchange: move |e| {
+                                                        if e.value() == "true" {
+                                                            state.write().project.disabled_strategies.remove(&StrategyName::Pivot);
+                                                        } else {
+                                                            state.write().project.disabled_strategies.insert(StrategyName::Pivot);
+                                                        }
+                                                        crate::config::try_save(&state.read().project);
+                                                    },
+                                                }
+                                                span { "Pivot inference " }
+                                                span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(pivot)" }
+                                            }
+                                        }
+                                    }
+                                    // Structured pivot checkbox
+                                    {
+                                        let sp_on = !state.read().project.disabled_strategies.contains(&StrategyName::StructuredPivot);
+                                        rsx! {
+                                            label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: sp_on,
+                                                    onchange: move |e| {
+                                                        if e.value() == "true" {
+                                                            state.write().project.disabled_strategies.remove(&StrategyName::StructuredPivot);
+                                                        } else {
+                                                            state.write().project.disabled_strategies.insert(StrategyName::StructuredPivot);
+                                                        }
+                                                        crate::config::try_save(&state.read().project);
+                                                    },
+                                                }
+                                                span { "Structured pivot " }
+                                                span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(structured_pivot)" }
+                                            }
+                                        }
+                                    }
+                                }
+                                p { style: "font-size:var(--fs-xs);color:var(--fg-4);margin:8px 0 0;",
+                                    "Wide-table split is mandatory and always runs."
                                 }
                             }
                         }

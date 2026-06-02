@@ -1,8 +1,10 @@
+use std::collections::HashSet;
 use indexmap::IndexMap;
 use rayon::prelude::*;
 
 use super::naming::{ColumnCollision, ColumnNameRegistry, NamingRegistry};
 use super::observer::TableEntry;
+use super::strategies::StrategyName;
 use super::suffix_detector::detect_suffix_schema;
 use super::table_schema::{ChildKind, ColumnSchema, TableSchema, WideStrategy};
 use super::type_tracker::{widen_pg_types, PgType};
@@ -19,6 +21,7 @@ pub struct SchemaFinalizer {
     pub(crate) sibling_jaccard: f64,
     pub(crate) stable_threshold: f64,
     pub(crate) rare_threshold: f64,
+    pub(crate) disabled_strategies: HashSet<StrategyName>,
 }
 
 impl SchemaFinalizer {
@@ -28,8 +31,9 @@ impl SchemaFinalizer {
         sibling_jaccard: f64,
         stable_threshold: f64,
         rare_threshold: f64,
+        disabled_strategies: HashSet<StrategyName>,
     ) -> Self {
-        Self { wide_column_threshold, sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold }
+        Self { wide_column_threshold, sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold, disabled_strategies }
     }
 
     /// Convert all accumulated observations into finalized `TableSchema` objects,
@@ -54,6 +58,9 @@ impl SchemaFinalizer {
             .map(|e| e.parent_key.clone())
             .collect();
 
+        let disable_pivot = self.disabled_strategies.contains(&StrategyName::Pivot);
+        let disable_structured_pivot = self.disabled_strategies.contains(&StrategyName::StructuredPivot);
+
         // Build schemas in parallel — each entry is independent after pre-registration.
         let entries: Vec<&TableEntry> = tables.values().collect();
         let results: Vec<(TableSchema, Option<TableSchema>, Vec<ColumnCollision>)> = entries
@@ -67,6 +74,8 @@ impl SchemaFinalizer {
                     self.stable_threshold,
                     self.rare_threshold,
                     text_threshold,
+                    disable_pivot,
+                    disable_structured_pivot,
                 )
             })
             .collect();
@@ -92,7 +101,9 @@ impl SchemaFinalizer {
             schemas.retain(|s| seen.insert(s.name.clone()));
         }
 
-        finalize_cascading(&mut schemas, self.sibling_threshold, self.sibling_jaccard);
+        if !self.disabled_strategies.contains(&StrategyName::Sibling) {
+            finalize_cascading(&mut schemas, self.sibling_threshold, self.sibling_jaccard);
+        }
         exclude_absorbed_children(&mut schemas);
         // Re-sort after cascade: finalize_cascading appends synthetic tables at the end of the
         // Vec without inserting them at their correct depth position. A second sort restores
@@ -114,6 +125,8 @@ fn build_entry_schema(
     stable_threshold: f64,
     rare_threshold: f64,
     text_threshold: u32,
+    disable_pivot: bool,
+    disable_structured_pivot: bool,
 ) -> (TableSchema, Option<TableSchema>, Vec<ColumnCollision>) {
     let pg_name = naming.table_name_lookup_from_dot_key(&entry.path_key);
     let depth = entry.path.len().saturating_sub(1);
@@ -317,16 +330,19 @@ fn build_entry_schema(
                     wide_table_name: wide_name,
                 };
             } else {
-                if let Some(suffix_schema) =
+                let suffix_schema = if disable_structured_pivot {
+                    None
+                } else {
                     detect_suffix_schema(&entry.columns, SUFFIX_MIN_COVERAGE, text_threshold)
-                {
+                };
+                if let Some(suffix_schema) = suffix_schema {
                     eprintln!(
                         "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: StructuredPivot ({} suffixes)",
                         schema.name, data_col_count, ratio_stable * 100.0, suffix_schema.suffix_cols.len()
                     );
                     apply_structured_pivot_columns(&mut schema, suffix_schema);
                 } else {
-                    let strategy = suggest_wide_strategy(entry);
+                    let strategy = if disable_pivot { WideStrategy::Jsonb } else { suggest_wide_strategy(entry) };
                     eprintln!(
                         "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: {:?}",
                         schema.name, data_col_count, ratio_stable * 100.0, strategy

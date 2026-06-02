@@ -10,7 +10,7 @@ use json2sql::{db, pass1, pass2};
 async fn test_anomaly_detection() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies.jsonl");
-        let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
             .await.unwrap();
@@ -33,7 +33,7 @@ async fn test_anomaly_detection() {
 async fn test_anomaly_dir_streaming() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies.jsonl");
-        let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
 
         let anomaly_dir = tempfile::TempDir::new().unwrap();
@@ -77,7 +77,7 @@ async fn test_anomaly_dir_streaming() {
 async fn test_float_anomaly_boolean_value() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies_float.jsonl");
-        let p1 = pass1::runner::run(&path, "items", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("items"), None).unwrap();
 
         let items_schema = p1.schemas.iter().find(|s| s.name == "items").unwrap();
         let score_col = items_schema.find_by_original("score").unwrap();
@@ -108,7 +108,7 @@ async fn test_float_anomaly_boolean_value() {
 async fn test_null_byte_anomaly() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies_nullbytes.jsonl");
-        let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
         let p2 = pass2::runner::run(&path, "people", &p1.schemas, &client, &url, &schema, 1, None, None, None, None, None)
             .await.unwrap();

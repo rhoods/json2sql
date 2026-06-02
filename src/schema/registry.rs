@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use serde_json::Value;
 
 use super::finalizer::SchemaFinalizer;
@@ -5,6 +6,7 @@ use super::naming::{ColumnCollision, NamingRegistry, TruncatedName};
 use super::observer::SchemaObserver;
 use super::reporter;
 use super::stats::ColumnStats;
+use super::strategies::StrategyName;
 use super::type_tracker::TypeTracker;
 
 /// Façade: ties together SchemaObserver (observation) and SchemaFinalizer (finalization).
@@ -12,17 +14,12 @@ use super::type_tracker::TypeTracker;
 pub struct SchemaRegistry {
     observer: SchemaObserver,
     naming: NamingRegistry,
-    /// Tables with more data columns than this threshold get a WideStrategy applied automatically.
     wide_column_threshold: usize,
-    /// Minimum number of sibling child tables to trigger KeyedPivot merging.
     sibling_threshold: usize,
-    /// Minimum Jaccard similarity required between sibling table column sets.
     sibling_jaccard: f64,
-    /// Fraction of rows a key must appear in to be considered "stable" (stays in main table).
     stable_threshold: f64,
-    /// Fraction of rows below which a key is ignored entirely (P5 Ignore).
     rare_threshold: f64,
-    /// Column name collisions detected during finalize() (populated after finalize() is called).
+    disabled_strategies: HashSet<StrategyName>,
     column_collisions: Vec<ColumnCollision>,
 }
 
@@ -35,6 +32,7 @@ impl SchemaRegistry {
         sibling_jaccard: f64,
         stable_threshold: f64,
         rare_threshold: f64,
+        disabled_strategies: HashSet<StrategyName>,
     ) -> Self {
         Self {
             observer: SchemaObserver::new(text_threshold, array_as_pg_array),
@@ -44,6 +42,7 @@ impl SchemaRegistry {
             sibling_jaccard,
             stable_threshold,
             rare_threshold,
+            disabled_strategies,
             column_collisions: Vec::new(),
         }
     }
@@ -61,6 +60,7 @@ impl SchemaRegistry {
             self.sibling_jaccard,
             self.stable_threshold,
             self.rare_threshold,
+            self.disabled_strategies.clone(),
         );
         let (schemas, collisions) = finalizer.run(
             &self.observer.tables,
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn test_flat_object() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({"name": "Alice", "age": 30});
         reg.observe_root("users", make_root(&obj));
         let schemas = reg.finalize();
@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_nested_object_creates_child_table() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({"name": "Alice", "address": {"city": "Paris"}});
         reg.observe_root("users", make_root(&obj));
         let schemas = reg.finalize();
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_scalar_array_creates_junction_table() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({"id": 1, "tags": ["rust", "sql"]});
         reg.observe_root("users", make_root(&obj));
         let schemas = reg.finalize();
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_array_of_objects() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({"id": 1, "orders": [{"amount": 100}, {"amount": 200}]});
         reg.observe_root("users", make_root(&obj));
         let schemas = reg.finalize();
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn test_topological_order() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({"a": {"b": {"c": 1}}});
         reg.observe_root("root", make_root(&obj));
         let schemas = reg.finalize();
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn test_wide_object_pivot_homogeneous() {
         // 3 numeric keys → threshold=2 → should get WideStrategy::Pivot
-        let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({
             "id": 1,
             "nutrients": {
@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn test_wide_object_jsonb_heterogeneous() {
         // Mixed types (string + numeric) → should get WideStrategy::Jsonb
-        let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({
             "id": 1,
             "meta": {
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn test_wide_children_excluded() {
         // Sub-tables of a pivot table must be filtered out
-        let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
         // nutrients has 3 numeric keys → pivot
         // each nutrient value is a nested object → would create child tables, but should be dropped
         let obj = json!({
@@ -257,7 +257,7 @@ mod tests {
     /// With O(N²) pairwise this would be ~50M iterations (~2s in debug) — must finish <500ms.
     #[test]
     fn test_jaccard_large_pure_containers_fast() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001, HashSet::new());
 
         // Build a single JSON root where "genomes" contains 10 000 pure-container children.
         // Each genome child has one contig sub-object (making the genome a pure container).
@@ -302,7 +302,7 @@ mod tests {
     /// 500 homogeneous siblings (identical schemas) → all similar → collapsed into KeyedPivot.
     #[test]
     fn test_jaccard_large_homogeneous_collapses() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001, HashSet::new());
 
         let mut langs = serde_json::Map::new();
         for i in 0..500usize {
@@ -328,7 +328,7 @@ mod tests {
     /// Large group where one sibling has a completely different schema → must NOT collapse.
     #[test]
     fn test_jaccard_outlier_in_large_group_rejected() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
 
         let mut items = serde_json::Map::new();
         // 299 siblings with {a, b, c}
@@ -405,7 +405,7 @@ mod tests {
     /// stats collection, and Jaccard comparisons on already-finalized schemas.
     #[test]
     fn test_keyed_pivot_j2s_data_is_generated() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001, HashSet::new());
 
         let mut langs = serde_json::Map::new();
         for i in 0..5usize {
@@ -436,7 +436,7 @@ mod tests {
     /// breaking topological sort and Pass 2 flush order.
     #[test]
     fn test_dotted_field_name_correct_depth() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         // "v1.0" is a direct child of root — should produce depth 1
         let obj = json!({ "v1.0": { "count": 42 } });
         reg.observe_root("root", make_root(&obj));
@@ -458,7 +458,7 @@ mod tests {
     /// ObjectArray field with '.' in name must also produce correct depth.
     #[test]
     fn test_dotted_field_name_array_correct_depth() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({ "v1.0": [{"x": 1}, {"x": 2}] });
         reg.observe_root("root", make_root(&obj));
         let schemas = reg.finalize();
@@ -484,13 +484,13 @@ mod tests {
         ];
 
         // Single registry
-        let mut single = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut single = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         for row in &rows { single.observe_root("users", make_root(row)); }
         let schemas_single = single.finalize();
 
         // Split across two registries, then merge
-        let mut reg_a = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
-        let mut reg_b = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg_a = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg_b = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         for row in &rows[..2] { reg_a.observe_root("users", make_root(row)); }
         for row in &rows[2..] { reg_b.observe_root("users", make_root(row)); }
         reg_a.merge(reg_b);
@@ -517,12 +517,12 @@ mod tests {
             json!({"id": 3, "address": {"city": "Nice", "zip": "06000", "country": "FR"}}),
         ];
 
-        let mut single = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut single = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         for row in &rows { single.observe_root("users", make_root(row)); }
         let schemas_single = single.finalize();
 
-        let mut reg_a = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
-        let mut reg_b = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg_a = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg_b = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         for row in &rows[..2] { reg_a.observe_root("users", make_root(row)); }
         for row in &rows[2..] { reg_b.observe_root("users", make_root(row)); }
         reg_a.merge(reg_b);
@@ -852,7 +852,7 @@ mod tests {
     /// Both are scalar columns → they should be two distinct columns in root.
     #[test]
     fn dot_in_scalar_field_distinct_from_underscore() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         reg.observe_root("root", make_root(&json!({"foo.bar": 1, "foo_bar": 2})));
         let schemas = reg.finalize();
         let root = schemas.iter().find(|s| s.name == "root").unwrap();
@@ -871,7 +871,7 @@ mod tests {
     /// tables, not one merged table.
     #[test]
     fn dot_in_object_field_creates_distinct_child_table() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         reg.observe_root("root", make_root(&json!({"foo.bar": {"baz": 1}})));
         reg.observe_root("root", make_root(&json!({"foo_bar": {"baz": 2}})));
         let schemas = reg.finalize();
@@ -895,7 +895,7 @@ mod tests {
 
         let run = |order: &[&str]| -> Vec<String> {
             // threshold=3 so 5 siblings triggers detection (≥ 3)
-            let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+            let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
             for field in order {
                 reg.observe_root(
                     "root",
@@ -915,7 +915,7 @@ mod tests {
     /// With threshold=2, a pair of 2 identical siblings must be auto-merged into a KeyedPivot.
     #[test]
     fn test_sibling_threshold_two_detects_pair() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({ "nutriscore": {
             "2021": { "grade": "b", "score": 45 },
             "2023": { "grade": "b", "score": 45 }
@@ -933,7 +933,7 @@ mod tests {
     /// With threshold=3, a pair of only 2 siblings must NOT be auto-merged.
     #[test]
     fn test_sibling_threshold_three_does_not_detect_pair() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({ "nutriscore": {
             "2021": { "grade": "b", "score": 45 },
             "2023": { "grade": "b", "score": 45 }
@@ -953,7 +953,7 @@ mod tests {
     fn test_schema_clustering_non_mixed_two_groups() {
         // threshold=2, min_jaccard=0.5
         // "front_*" siblings have {imgid, rev}, "ingr_*" have {angle, x} → disjoint
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({
             "dict": {
                 "front_fr": { "imgid": "1", "rev": "3" },
@@ -978,7 +978,7 @@ mod tests {
     /// Mixed group: numeric ok + non-numeric heterogeneous → numeric merged + clusters for non-numeric.
     #[test]
     fn test_schema_clustering_mixed_numeric_plus_clusters() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({
             "images": {
                 "1": { "uploader": "u1", "uploaded_t": 123 },
@@ -1013,7 +1013,7 @@ mod tests {
     /// Post-pass: those 3 Columns children of the KeyedPivot → merged into root_selected_key.
     #[test]
     fn test_keyed_pivot_orphan_children_merged_by_post_pass() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({
             "selected": {
                 "front": {
@@ -1069,7 +1069,7 @@ mod tests {
     #[test]
     fn test_keyed_pivot_orphan_children_not_merged_below_threshold() {
         // threshold = 3, but only 2 lang codes → 2 T tables → no sub-pivot
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({
             "selected": {
                 "front":     { "fr": { "imgid": "1", "rev": "2" }, "en": { "imgid": "3", "rev": "4" } },
@@ -1093,7 +1093,7 @@ mod tests {
     /// Concrete case: nova_groups_markers {"2": [...], "3": [...], "4": [...]} → parent becomes KeyedPivot.
     #[test]
     fn test_scalar_array_siblings_merged_keyed_pivot() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({
             "markers": {
                 "2": [1, 2],
@@ -1118,7 +1118,7 @@ mod tests {
     /// A single ScalarArray child (below threshold=2) must NOT trigger a merge.
     #[test]
     fn test_scalar_array_single_child_not_merged() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001);
+        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({
             "markers": {
                 "2": [1, 2, 3]
@@ -1132,6 +1132,91 @@ mod tests {
             "single ScalarArray child must NOT become KeyedPivot, got: {:?}",
             markers.wide_strategy
         );
+    }
+
+    // ── disabled_strategies gating ────────────────────────────────────────────
+
+    #[test]
+    fn test_disable_sibling_no_keyed_pivot() {
+        let obj = json!({ "langs": {
+            "fr": { "name": "foo", "val": 1 },
+            "en": { "name": "bar", "val": 2 },
+            "de": { "name": "baz", "val": 3 }
+        }});
+
+        let mut reg_normal = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
+        reg_normal.observe_root("root", make_root(&obj));
+        let schemas_normal = reg_normal.finalize();
+        let langs_normal = schemas_normal.iter().find(|s| s.name == "root_langs").unwrap();
+        assert!(matches!(langs_normal.wide_strategy, WideStrategy::KeyedPivot(_)),
+            "sibling enabled → KeyedPivot expected");
+
+        let mut reg_disabled = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001,
+            HashSet::from([StrategyName::Sibling]));
+        reg_disabled.observe_root("root", make_root(&obj));
+        let schemas_disabled = reg_disabled.finalize();
+        let langs_disabled = schemas_disabled.iter().find(|s| s.name == "root_langs").unwrap();
+        assert!(!matches!(langs_disabled.wide_strategy, WideStrategy::KeyedPivot(_)),
+            "sibling disabled → no KeyedPivot");
+    }
+
+    #[test]
+    fn test_disable_pivot_gives_jsonb() {
+        let obj = json!({ "nutrients": { "vit_c": 10.5, "iron": 2.3, "calcium": 50.0 } });
+
+        let mut reg_normal = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
+        reg_normal.observe_root("item", make_root(&obj));
+        let schemas_normal = reg_normal.finalize();
+        let nutrients_normal = schemas_normal.iter().find(|s| s.name == "item_nutrients").unwrap();
+        assert_eq!(nutrients_normal.wide_strategy, WideStrategy::Pivot,
+            "pivot enabled → Pivot expected");
+
+        let mut reg_disabled = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001,
+            HashSet::from([StrategyName::Pivot]));
+        reg_disabled.observe_root("item", make_root(&obj));
+        let schemas_disabled = reg_disabled.finalize();
+        let nutrients_disabled = schemas_disabled.iter().find(|s| s.name == "item_nutrients").unwrap();
+        assert_eq!(nutrients_disabled.wide_strategy, WideStrategy::Jsonb,
+            "pivot disabled → Jsonb for homogeneous wide table");
+    }
+
+    #[test]
+    fn test_no_disabled_strategies_no_regression() {
+        let obj = json!({ "nutrients": { "vit_c": 10.5, "iron": 2.3, "calcium": 50.0 } });
+        let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
+        reg.observe_root("item", make_root(&obj));
+        let schemas = reg.finalize();
+        let nutrients = schemas.iter().find(|s| s.name == "item_nutrients").unwrap();
+        assert_eq!(nutrients.wide_strategy, WideStrategy::Pivot,
+            "empty disabled set → default Pivot behavior unchanged");
+    }
+
+    #[test]
+    fn test_disable_structured_pivot_falls_through_to_pivot_or_jsonb() {
+        // nutrients has 6 cols with suffix patterns _100g / _serving → StructuredPivot normally
+        let obj = json!({
+            "nutrients": {
+                "calories": 100, "calories_100g": 200, "calories_serving": 150,
+                "fat": 5, "fat_100g": 10, "fat_serving": 8
+            }
+        });
+
+        // Default: StructuredPivot expected
+        let mut reg_normal = SchemaRegistry::new(256, false, 3, usize::MAX, 0.5, 0.10, 0.001, HashSet::new());
+        reg_normal.observe_root("products", make_root(&obj));
+        let schemas_normal = reg_normal.finalize();
+        let nutrients_normal = schemas_normal.iter().find(|s| s.name == "products_nutrients").unwrap();
+        assert!(matches!(nutrients_normal.wide_strategy, WideStrategy::StructuredPivot(_)),
+            "structured_pivot enabled → StructuredPivot expected, got: {:?}", nutrients_normal.wide_strategy);
+
+        // With structured_pivot disabled: fall through to Pivot or Jsonb
+        let mut reg_disabled = SchemaRegistry::new(256, false, 3, usize::MAX, 0.5, 0.10, 0.001,
+            HashSet::from([StrategyName::StructuredPivot]));
+        reg_disabled.observe_root("products", make_root(&obj));
+        let schemas_disabled = reg_disabled.finalize();
+        let nutrients_disabled = schemas_disabled.iter().find(|s| s.name == "products_nutrients").unwrap();
+        assert!(!matches!(nutrients_disabled.wide_strategy, WideStrategy::StructuredPivot(_)),
+            "structured_pivot disabled → no StructuredPivot, got: {:?}", nutrients_disabled.wide_strategy);
     }
 }
 

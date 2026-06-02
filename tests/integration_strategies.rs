@@ -19,7 +19,7 @@ use json2sql::schema::type_tracker::PgType;
 async fn test_pivot_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("pivot_eav.jsonl");
-        let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
 
         assert_eq!(p1.schemas.len(), 2);
         assert!(p1.schemas.iter().any(|s| s.name == "products"));
@@ -103,7 +103,7 @@ async fn test_pivot_strategy() {
 async fn test_jsonb_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("wide_jsonb.jsonl");
-        let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
 
         assert_eq!(p1.schemas.len(), 2);
         assert!(p1.schemas.iter().any(|s| s.name == "products"));
@@ -194,7 +194,7 @@ async fn test_jsonb_strategy() {
 async fn test_flatten_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("flatten_nested.jsonl");
-        let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
 
         assert_eq!(p1.schemas.len(), 2);
         assert!(p1.schemas.iter().any(|s| s.name == "products_dims"));
@@ -266,7 +266,7 @@ async fn test_flatten_strategy() {
 async fn test_null_patterns() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("null_patterns.jsonl");
-        let p1 = pass1::runner::run(&path, "people", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
 
         let people_schema = p1.schemas.iter().find(|s| s.name == "people").unwrap();
         let tag_col = people_schema.find_by_original("tag").unwrap();
@@ -324,7 +324,7 @@ async fn test_null_patterns() {
 async fn test_structured_pivot_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("structured_pivot.jsonl");
-        let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
 
         assert!(p1.schemas.iter().any(|s| s.name == "products_nutrients"),
             "products_nutrients doit exister après pass1");
@@ -431,7 +431,18 @@ async fn test_auto_split_strategy() {
         let path = common::fixture("auto_split.jsonl");
         // wide_column_threshold=3 : 5 colonnes scalaires > 3 → wide
         // stable_threshold=0.80, rare_threshold=0.30
-        let p1 = pass1::runner::run(&path, "products", 256, false, 3, 3, 0.5, 0.80, 0.30, None).unwrap();
+        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
+            root_table: "products".to_string(),
+            text_threshold: 256,
+            array_as_pg_array: false,
+            wide_column_threshold: 3,
+            sibling_threshold: 3,
+            sibling_jaccard: 0.5,
+            stable_threshold: 0.80,
+            rare_threshold: 0.30,
+            disabled_strategies: std::collections::HashSet::new(),
+            num_workers: None,
+        }, None).unwrap();
 
         assert!(p1.schemas.iter().any(|s| s.name == "products"),         "products manquant");
         assert!(p1.schemas.iter().any(|s| s.name == "products_wide"),    "products_wide manquant");
@@ -527,7 +538,7 @@ async fn test_keyed_pivot_strategy() {
         let path = common::fixture("keyed_pivot.jsonl");
         // sibling_threshold=3 : au moins 3 siblings pour déclencher KeyedPivot
         // sibling_jaccard=0.5 : Jaccard min acceptable
-        let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
 
         // fr/en/de sont absorbés → exactement 2 schemas
         assert_eq!(p1.schemas.len(), 2, "fr/en/de doivent être absorbés, 2 schemas attendus");
@@ -632,7 +643,7 @@ async fn test_keyed_pivot_strategy() {
 async fn test_keyed_pivot_pure_container() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("keyed_pivot_pure_container.jsonl");
-        let p1 = pass1::runner::run(&path, "graph", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("graph"), None).unwrap();
 
         // gcf_* et NC_* absorbés → exactement 2 schemas
         assert_eq!(p1.schemas.len(), 2, "2 schemas attendus (graph + graph_genomes)");
@@ -707,7 +718,18 @@ async fn test_normalize_dynamic_keys_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("normalize_dynamic_keys.jsonl");
         // sibling_threshold=10 : 5 tables images < 10 → pas d'auto-détection KeyedPivot
-        let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 10, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
+            root_table: "products".to_string(),
+            text_threshold: 256,
+            array_as_pg_array: false,
+            wide_column_threshold: usize::MAX,
+            sibling_threshold: 10,
+            sibling_jaccard: 0.5,
+            stable_threshold: 0.10,
+            rare_threshold: 0.001,
+            disabled_strategies: std::collections::HashSet::new(),
+            num_workers: None,
+        }, None).unwrap();
 
         assert!(p1.schemas.iter().any(|s| s.name == "products_images"),
             "products_images doit exister après pass1");
@@ -781,7 +803,7 @@ async fn test_normalize_dynamic_keys_strategy() {
 async fn test_jsonb_flatten_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("flatten_nested.jsonl");
-        let p1 = pass1::runner::run(&path, "products", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
 
         assert_eq!(p1.schemas.len(), 2);
         assert!(p1.schemas.iter().any(|s| s.name == "products_dims"));
@@ -862,7 +884,7 @@ async fn test_jsonb_flatten_strategy() {
 async fn test_keyed_pivot_array_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("keyed_pivot_array.jsonl");
-        let p1 = pass1::runner::run(&path, "graph", 256, false, usize::MAX, 3, 0.5, 0.10, 0.001, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("graph"), None).unwrap();
 
         // gcf_001/002/003 absorbés → exactement 2 schemas
         assert_eq!(p1.schemas.len(), 2, "les tables gcf_* doivent être absorbées, 2 schemas attendus");
@@ -956,4 +978,64 @@ async fn test_keyed_pivot_array_strategy() {
         assert_eq!(second.get::<_, &str>("source"), "C");
         assert_eq!(second.get::<_, &str>("target"), "D");
     }).await;
+}
+
+// ---------------------------------------------------------------------------
+// Tests end-to-end disabled_strategies dans Pass1Config
+// ---------------------------------------------------------------------------
+
+// disable sibling → aucune table KeyedPivot dans le résultat
+#[test]
+fn test_disable_sibling_no_keyed_pivot_integration() {
+    use std::collections::HashSet;
+    use json2sql::schema::strategies::StrategyName;
+    use json2sql::schema::table_schema::WideStrategy;
+
+    let path = common::fixture("keyed_pivot.jsonl");
+    // Avec sibling activé : KeyedPivot attendu
+    let p1_normal = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
+    assert!(p1_normal.schemas.iter().any(|s| matches!(s.wide_strategy, WideStrategy::KeyedPivot(_))),
+        "sibling enabled → KeyedPivot attendu dans le schema normal");
+
+    // Avec sibling désactivé : aucun KeyedPivot
+    let config_disabled = pass1::runner::Pass1Config {
+        disabled_strategies: HashSet::from([StrategyName::Sibling]),
+        ..common::pass1_config("products")
+    };
+    let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
+    assert!(!p1_disabled.schemas.iter().any(|s| matches!(s.wide_strategy, WideStrategy::KeyedPivot(_))),
+        "sibling disabled → aucun KeyedPivot dans le schema");
+}
+
+// disable pivot → WideStrategy::Jsonb au lieu de Pivot pour les tables homogènes.
+// wide_column_threshold=3 : nutrients a 4 colonnes homogènes (int) → Pivot automatique.
+#[test]
+fn test_disable_pivot_gives_jsonb_integration() {
+    use std::collections::HashSet;
+    use json2sql::schema::strategies::StrategyName;
+    use json2sql::schema::table_schema::WideStrategy;
+
+    let path = common::fixture("pivot_eav.jsonl");
+    // Config avec wide_column_threshold=3 pour déclencher la détection wide sur nutrients
+    let base_config = pass1::runner::Pass1Config {
+        wide_column_threshold: 3,
+        ..common::pass1_config("products")
+    };
+
+    // Avec pivot activé : Pivot attendu sur products_nutrients
+    let p1_normal = pass1::runner::run(&path, &base_config, None).unwrap();
+    assert!(p1_normal.schemas.iter().any(|s| s.wide_strategy == WideStrategy::Pivot),
+        "pivot enabled → WideStrategy::Pivot attendu sur products_nutrients");
+
+    // Avec pivot désactivé : Jsonb à la place
+    let config_disabled = pass1::runner::Pass1Config {
+        disabled_strategies: HashSet::from([StrategyName::Pivot]),
+        wide_column_threshold: 3,
+        ..common::pass1_config("products")
+    };
+    let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
+    assert!(!p1_disabled.schemas.iter().any(|s| s.wide_strategy == WideStrategy::Pivot),
+        "pivot disabled → aucun WideStrategy::Pivot, Jsonb attendu");
+    assert!(p1_disabled.schemas.iter().any(|s| s.wide_strategy == WideStrategy::Jsonb),
+        "pivot disabled → WideStrategy::Jsonb attendu");
 }
