@@ -78,6 +78,6 @@ fn type_histogram(tracker: &TypeTracker) -> Vec<(String, u64)> {
         .filter(|(t, _)| !matches!(t, InferredType::Object | InferredType::Array))
         .map(|(t, n)| (format!("{:?}", t), n))
         .collect();
-    hist.sort_by(|a, b| b.1.cmp(&a.1));
+    hist.sort_by_key(|b| std::cmp::Reverse(b.1));
     hist
 }

@@ -8,12 +8,15 @@ pub enum StrategyName {
 }
 
 impl StrategyName {
+    #[allow(dead_code)] // used in tests + available as public API
     pub const OPTIONAL: &'static [StrategyName] = &[
         StrategyName::Sibling,
         StrategyName::Pivot,
         StrategyName::StructuredPivot,
     ];
 
+    #[allow(dead_code)] // used by json2sql-ui::config for TOML serialization
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             StrategyName::Sibling => "sibling",

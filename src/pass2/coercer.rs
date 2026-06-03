@@ -15,6 +15,7 @@ pub enum CoerceResult {
 
 /// Coerce a JSON value to the COPY text-format representation for the given PgType.
 /// Returns `None` on anomaly (caller records the anomaly and inserts NULL).
+#[must_use]
 pub fn coerce(value: &Value, pg_type: &PgType) -> CoerceResult {
     if matches!(value, Value::Null) {
         return CoerceResult::Null;

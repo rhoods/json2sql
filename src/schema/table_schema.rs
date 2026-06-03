@@ -152,6 +152,7 @@ pub struct ColumnSchema {
 
 impl ColumnSchema {
     /// Create a generated j2s column.
+    #[must_use]
     pub fn generated(name: &str, pg_type: PgType) -> Self {
         Self {
             name: name.to_string(),
@@ -165,6 +166,7 @@ impl ColumnSchema {
 
     /// Create the FK column pointing to the parent table.
     /// Column name: `j2s_{parent_name}_id`, truncated so the total is ≤ 63 chars.
+    #[must_use]
     pub fn parent_fk(parent_name: &str) -> Self {
         // NamingRegistry guarantees table names ≤ PG_TABLE_MAX_IDENT (53), so
         // "j2s_" (4) + name (≤53) + "_id" (3) = ≤60 — always within PG's 63-byte limit.
@@ -222,12 +224,13 @@ pub struct TableSchema {
     /// table that should receive that sub-object. Populated by `finalize_cascading` for two cases:
     ///   1. Co-sibling children merged into a synthetic pivot T (child_routes["k"] = T.name)
     ///   2. Independent children re-parented from an absorbed sibling to this pivot table
-    /// Empty for all non-cascaded tables (routing falls back to path_map in Pass 2).
+    ///      Empty for all non-cascaded tables (routing falls back to path_map in Pass 2).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub child_routes: HashMap<String, String>,
 }
 
 impl TableSchema {
+    #[must_use]
     pub fn new(name: String, path: Vec<String>, depth: usize) -> Self {
         Self {
             name,
@@ -242,14 +245,17 @@ impl TableSchema {
         }
     }
 
+    #[must_use]
     pub fn is_root(&self) -> bool {
         self.parent_table.is_none()
     }
 
+    #[must_use]
     pub fn is_junction(&self) -> bool {
         matches!(self.child_kind, Some(ChildKind::ScalarArray))
     }
 
+    #[must_use]
     pub fn has_order_column(&self) -> bool {
         matches!(
             self.child_kind,
@@ -264,11 +270,13 @@ impl TableSchema {
 
     /// Return all column names in order (for COPY FROM STDIN header).
     #[allow(dead_code)]
+    #[must_use]
     pub fn column_names(&self) -> Vec<&str> {
         self.columns.iter().map(|c| c.name.as_str()).collect()
     }
 
     /// Find a column by its original JSON field name.
+    #[must_use]
     pub fn find_by_original(&self, original: &str) -> Option<&ColumnSchema> {
         self.columns.iter().find(|c| c.original_name == original)
     }
@@ -277,12 +285,14 @@ impl TableSchema {
 impl WideStrategy {
     /// Returns true if this strategy changes the default column-per-key layout.
     #[allow(dead_code)]
+    #[must_use]
     pub fn is_wide(&self) -> bool {
         !matches!(self, WideStrategy::Columns)
     }
 
     /// Returns the names of all child tables directly absorbed by this strategy.
     /// For MultiKeyedPivot, this is the union of all groups' absorbed_names.
+    #[must_use]
     pub fn absorbed_names(&self) -> Vec<&str> {
         match self {
             WideStrategy::MultiKeyedPivot(groups) => groups
@@ -297,6 +307,7 @@ impl WideStrategy {
     /// data is absorbed into this table's wide column (Pivot / Jsonb / etc.).
     /// AutoSplit does NOT absorb children — they remain as separate tables.
     /// NormalizeDynamicKeys and Flatten absorb their child tables.
+    #[must_use]
     pub fn absorbs_children(&self) -> bool {
         matches!(
             self,

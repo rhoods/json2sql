@@ -68,6 +68,7 @@ impl JsonLinesReader {
         })
     }
 
+    #[must_use]
     pub fn bytes_read(&self) -> u64 {
         self.bytes_read
     }
@@ -142,6 +143,7 @@ impl JsonArrayReader {
         })
     }
 
+    #[must_use]
     pub fn bytes_read(&self) -> u64 {
         self.bytes_read
     }
@@ -385,6 +387,7 @@ impl JsonReader {
         Ok((reader, format))
     }
 
+    #[must_use]
     pub fn bytes_read(&self) -> u64 {
         match self {
             JsonReader::Lines(r) => r.bytes_read(),

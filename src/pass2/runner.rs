@@ -20,6 +20,8 @@ use crate::io::reader::{file_size, JsonReader};
 use crate::pass2::insert::insert_object;
 use crate::schema::table_schema::TableSchema;
 
+type CopyHandle = tokio::task::JoinHandle<Result<Vec<(String, u64)>>>;
+
 /// Wall-clock breakdown of the two main phases of Pass 2.
 #[allow(dead_code)]
 pub struct Pass2Timing {
@@ -31,6 +33,7 @@ pub struct Pass2Timing {
 
 impl Pass2Timing {
     #[allow(dead_code)]
+    #[must_use]
     pub fn total_ms(&self) -> u64 {
         self.streaming_ms + self.copy_ms
     }
@@ -96,7 +99,8 @@ fn validate_run_params(parallel: usize) -> Result<()> {
 ///       connections) as they fill up and when workers finish.
 ///   D — `add_constraints()` adds PRIMARY KEY (fatal on error) then
 ///       FOREIGN KEY (failures become `constraint_warnings`).
-
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+// debt: orchestrates 4 phases (streaming/spill/COPY/constraints) — candidate for phase extraction
 pub async fn run(
     path: &Path,
     schemas: &[TableSchema],
@@ -255,7 +259,7 @@ pub async fn run(
                     my_bytes = 0;
                     for (table_name, sink_arc) in &sinks {
                         let snap = {
-                            let mut s = sink_arc.lock().unwrap();
+                            let mut s = sink_arc.lock().expect("sink mutex is not poisoned");
                             if s.bytes_buffered >= interim_copy_threshold {
                                 s.take_flush_snapshot()
                             } else {
@@ -275,7 +279,7 @@ pub async fn run(
                                 conn.execute("SET synchronous_commit = off", &[]).await
                                     .map_err(crate::error::J2sError::Db)?;
                                 let rows = copy_snapshot_to_pg(snap, &conn).await?;
-                                sink_arc2.lock().unwrap().apply_flush(rows);
+                                sink_arc2.lock().expect("sink mutex is not poisoned").apply_flush(rows);
                                 if rows > 0 {
                                     if let Some(tx) = ptx {
                                         let _ = tx.send(ProgressEvent::Pass2Flush {
@@ -292,8 +296,8 @@ pub async fn run(
             }
 
             // Flush remaining in-memory pending to disk — Phase B will COPY it.
-            for (_, sink_arc) in &sinks {
-                let _ = sink_arc.lock().unwrap().force_spill();
+            for sink_arc in sinks.values() {
+                let _ = sink_arc.lock().expect("sink mutex is not poisoned").force_spill();
             }
             Ok::<_, J2sError>((worker_anomalies, copy_handles))
         });
@@ -315,14 +319,14 @@ pub async fn run(
                 break 'dispatch;
             }
             rows_processed += 1;
-            if limit.map_or(false, |n| rows_processed >= n) {
+            if limit.is_some_and(|n| rows_processed >= n) {
                 break 'dispatch;
             }
             robin = (robin + 1) % parallel;
             if let Some(ref bar) = progress {
                 bar.inc_rows(1);
             }
-            if rows_processed % PROGRESS_INTERVAL == 0 {
+            if rows_processed.is_multiple_of(PROGRESS_INTERVAL) {
                 if let Some(ref tx) = progress_tx {
                     let _ = tx.send(ProgressEvent::Pass2Progress {
                         rows_processed,
@@ -336,7 +340,7 @@ pub async fn run(
     drop(senders);
 
     if let Some(ref tx) = progress_tx {
-        if rows_processed > 0 && rows_processed % PROGRESS_INTERVAL != 0 {
+        if rows_processed > 0 && !rows_processed.is_multiple_of(PROGRESS_INTERVAL) {
             let _ = tx.send(ProgressEvent::Pass2Progress {
                 rows_processed,
                 bytes_read: reader.bytes_read(),
@@ -418,7 +422,7 @@ pub async fn run(
     }
 
     // Spawn one task per PG connection, each processing its batch of tables.
-    let mut copy_handles: Vec<tokio::task::JoinHandle<Result<Vec<(String, u64)>>>> =
+    let mut copy_handles: Vec<CopyHandle> =
         Vec::with_capacity(parallel);
     for batch in table_batches {
         if batch.is_empty() { continue; }

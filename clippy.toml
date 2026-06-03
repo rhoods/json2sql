@@ -1,0 +1,10 @@
+# Thresholds calibrated from T1 baseline (2026-06-02)
+# Applied when pedantic lints are enabled (T5)
+disallowed-methods = [
+    "std::option::Option::unwrap",
+    "std::result::Result::unwrap",
+]
+
+cognitive-complexity-threshold = 25  # 3 violations at 25: cascading(57), runner(42), insert_object(41)
+too-many-lines-threshold = 100       # 8 violations: run_sibling_wave(528) is priority refactor
+too-many-arguments-threshold = 7     # 4 violations marked #[allow] pending T5 struct refactor

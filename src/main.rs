@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+#![deny(dead_code)]
 mod anomaly;
 mod cli;
 mod db;
@@ -116,6 +118,8 @@ fn run_inspect(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+// debt: 293L/cplx-35 — CLI orchestration glue; candidate for phase extraction once stable
 async fn run(cli: Cli, disabled_strategies: std::collections::HashSet<schema::strategies::StrategyName>) -> Result<()> {
     let root_table = cli.root_table_name();
 

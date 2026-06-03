@@ -99,7 +99,7 @@ pub fn run(
         }
 
         if let Some(ref tx) = progress_tx {
-            if total_rows % PROGRESS_INTERVAL == 0 {
+            if total_rows.is_multiple_of(PROGRESS_INTERVAL) {
                 let _ = tx.send(ProgressEvent::Pass1Progress {
                     rows_scanned: total_rows,
                     bytes_read: reader.bytes_read(),
@@ -110,7 +110,7 @@ pub fn run(
     }
 
     if let Some(ref tx) = progress_tx {
-        if total_rows > 0 && total_rows % PROGRESS_INTERVAL != 0 {
+        if total_rows > 0 && !total_rows.is_multiple_of(PROGRESS_INTERVAL) {
             let _ = tx.send(ProgressEvent::Pass1Progress {
                 rows_scanned: total_rows,
                 bytes_read: reader.bytes_read(),
@@ -175,11 +175,11 @@ pub fn run_inspect(
         HashSet::from([StrategyName::Sibling]),
     );
 
-    let (mut reader, _format) = JsonReader::open(path)?;
+    let (reader, _format) = JsonReader::open(path)?;
     let mut rows_scanned = 0u64;
     let mut sampled_objects: Vec<Value> = Vec::new();
 
-    while let Some(item) = reader.next() {
+    for item in reader {
         if rows_scanned >= limit as u64 {
             break;
         }
@@ -210,6 +210,7 @@ pub fn run_inspect(
 /// Returns `(effective, Some(cap))` when clamping occurred, `(requested, None)` otherwise.
 /// A `requested` value of 0 is treated as 1 (sequential).
 /// Callers are expected to emit a warning when `Some(cap)` is returned.
+#[must_use]
 pub fn effective_workers(requested: usize) -> (usize, Option<usize>) {
     let requested = requested.max(1);
     let cap = std::thread::available_parallelism()
@@ -231,6 +232,7 @@ pub fn effective_workers(requested: usize) -> (usize, Option<usize>) {
 ///
 /// `config.num_workers = None` or `Some(1)` is equivalent to sequential processing with extra
 /// overhead; prefer `run()` for single-threaded use.
+#[allow(clippy::too_many_lines)] // debt: sequential fan-out over N workers — candidate for extraction
 pub fn run_parallel(
     path: &Path,
     config: &Pass1Config,
@@ -316,7 +318,7 @@ pub fn run_parallel(
             bar.set_bytes(reader.bytes_read());
         }
         if let Some(ref tx_prog) = progress_tx {
-            if total_rows % PROGRESS_INTERVAL == 0 {
+            if total_rows.is_multiple_of(PROGRESS_INTERVAL) {
                 let _ = tx_prog.send(ProgressEvent::Pass1Progress {
                     rows_scanned: total_rows,
                     bytes_read: reader.bytes_read(),
@@ -365,7 +367,7 @@ pub fn run_parallel(
     if let Some(e) = worker_err { return Err(e); }
 
     if let Some(ref tx_prog) = progress_tx {
-        if total_rows > 0 && total_rows % PROGRESS_INTERVAL != 0 {
+        if total_rows > 0 && !total_rows.is_multiple_of(PROGRESS_INTERVAL) {
             let _ = tx_prog.send(ProgressEvent::Pass1Progress {
                 rows_scanned: total_rows,
                 bytes_read: total_bytes, // file fully read at this point

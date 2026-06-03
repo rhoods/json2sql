@@ -189,6 +189,7 @@ pub enum AnomalyFormat {
 
 impl Cli {
     /// Derive root table name from input file or explicit --table flag
+    #[must_use]
     pub fn root_table_name(&self) -> String {
         if let Some(ref name) = self.table {
             return name.clone();

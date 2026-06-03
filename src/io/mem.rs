@@ -1,8 +1,11 @@
+#![allow(dead_code)] // utility functions — not yet wired into production paths
+
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// Returns the current process's resident set size in bytes.
 /// Returns `None` if the information is unavailable (unsupported OS,
 /// restricted container, or other system error).
+#[must_use]
 pub fn rss_bytes() -> Option<u64> {
     let pid = sysinfo::get_current_pid().ok()?;
     let mut sys = System::new();
@@ -16,6 +19,7 @@ pub fn rss_bytes() -> Option<u64> {
 
 /// Returns total installed RAM in bytes.
 /// Returns `None` if the value is zero or unavailable.
+#[must_use]
 pub fn total_memory_bytes() -> Option<u64> {
     let mut sys = System::new();
     sys.refresh_memory();
@@ -26,6 +30,7 @@ pub fn total_memory_bytes() -> Option<u64> {
 /// Returns `true` when the process RSS exceeds `threshold_pct` percent of
 /// total system RAM. Returns `false` if either value is unavailable (safe
 /// fallback: no drain triggered by RAM pressure).
+#[must_use]
 pub fn ram_pressure_exceeded(threshold_pct: u8) -> bool {
     let Some(rss) = rss_bytes() else { return false };
     let Some(total) = total_memory_bytes() else { return false };

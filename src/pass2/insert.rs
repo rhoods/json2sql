@@ -17,6 +17,8 @@ use super::traversal::{
     insert_normalize_dynamic_keys, insert_pivot_object, insert_structured_pivot_object,
 };
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
+// debt: monolithic JSON traversal — candidate for InsertContext struct + sub-functions
 pub(crate) fn insert_object<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,

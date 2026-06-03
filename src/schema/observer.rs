@@ -81,6 +81,7 @@ pub struct SchemaObserver {
 }
 
 impl SchemaObserver {
+    #[must_use]
     pub fn new(text_threshold: u32, array_as_pg_array: bool) -> Self {
         Self {
             tables: IndexMap::new(),

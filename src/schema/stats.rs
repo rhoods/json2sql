@@ -15,11 +15,13 @@ pub struct ColumnStats {
 
 impl ColumnStats {
     /// True if more than one JSON type was observed (potential anomalies).
+    #[must_use]
     pub fn is_mixed(&self) -> bool {
         self.type_histogram.len() > 1
     }
 
     /// Non-null count.
+    #[must_use]
     pub fn non_null_count(&self) -> u64 {
         self.total_count.saturating_sub(self.null_count)
     }

@@ -198,6 +198,8 @@ fn collect_children_by_key(
 
 /// Run wave 0 of sibling detection — with
 /// the child-compatibility gate added. Returns co-sibling groups for cascade waves 1+.
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+// debt: 528L/cplx-57 — highest priority refactor; handles Jaccard + clustering + re-parenting
 fn run_sibling_wave(
     schemas: &mut Vec<TableSchema>,
     threshold: usize,
@@ -442,11 +444,11 @@ fn run_sibling_wave(
             let mut all_absorbed: Vec<usize> = Vec::new();
             if num_ok {
                 all_absorbed.extend_from_slice(&numeric_idx);
-                groups.push(make_subgroup(&parent_name, &numeric_idx, true, "num"));
+                groups.push(make_subgroup(parent_name, &numeric_idx, true, "num"));
             }
             if non_ok {
                 all_absorbed.extend_from_slice(&non_num_regular);
-                groups.push(make_subgroup(&parent_name, &non_num_regular, false, "key"));
+                groups.push(make_subgroup(parent_name, &non_num_regular, false, "key"));
             }
             for (i, cluster) in non_num_clusters.iter().enumerate() {
                 let prefix = siblings_key_prefix(schemas, cluster);
@@ -455,9 +457,9 @@ fn run_sibling_wave(
                 } else {
                     format!("{}_key", prefix)
                 };
-                let suffix = unique_cluster_suffix(&parent_name, &desired, schemas);
+                let suffix = unique_cluster_suffix(parent_name, &desired, schemas);
                 all_absorbed.extend_from_slice(cluster);
-                groups.push(make_subgroup(&parent_name, cluster, false, &suffix));
+                groups.push(make_subgroup(parent_name, cluster, false, &suffix));
             }
 
             let kind_label = if *array_children { "ObjectArray" } else { "Object" };
@@ -535,9 +537,9 @@ fn run_sibling_wave(
                             } else {
                                 format!("{}_key", prefix)
                             };
-                            let suffix = unique_cluster_suffix(&parent_name, &desired, schemas);
+                            let suffix = unique_cluster_suffix(parent_name, &desired, schemas);
                             all_absorbed.extend_from_slice(cluster);
-                            groups.push(make_subgroup(&parent_name, cluster, false, &suffix));
+                            groups.push(make_subgroup(parent_name, cluster, false, &suffix));
                         }
                         collapses.push(Collapse {
                             parent_idx,
@@ -576,7 +578,7 @@ fn run_sibling_wave(
                     continue;
                 }
                 let suffix = if key_is_numeric { "num" } else { "key" };
-                let groups = vec![make_subgroup(&parent_name, &regular, key_is_numeric, suffix)];
+                let groups = vec![make_subgroup(parent_name, &regular, key_is_numeric, suffix)];
                 let log_msg = format!(
                     "  Synthetic pivot for parent with data/sig-containers: {} ({} tables → 1)",
                     parent_name, regular.len(),
@@ -801,6 +803,7 @@ fn run_sibling_wave(
 
 /// Process one `CoSiblingGroup` from a cascade wave.
 /// Returns new `CoSiblingGroup`s for the next wave (grandchildren level).
+#[allow(clippy::too_many_lines)] // debt: 107L — cascade wave processing, candidate for extraction
 fn process_co_sibling_group(
     schemas: &mut Vec<TableSchema>,
     _threshold: usize,
@@ -913,7 +916,8 @@ fn process_co_sibling_group(
                 // Sole occurrence: re-parent to T.
                 let child_name = schemas[sole_idx].name.clone();
                 schemas[sole_idx].parent_table = Some(t_name.clone());
-                let t_pos = schemas.iter().position(|s| s.name == t_name).unwrap();
+                let t_pos = schemas.iter().position(|s| s.name == t_name)
+                    .expect("t_name was derived from schemas in this same loop");
                 schemas[t_pos].child_routes.insert(json_key, child_name);
             }
         }
@@ -952,6 +956,7 @@ fn process_co_sibling_group(
 /// creates a `{parent}_key` sub-pivot, re-parents the orphans under it, and updates the
 /// parent's `child_routes` to point to the sub-pivot.  Their own children are returned as
 /// `CoSiblingGroup`s for an additional cascade wave.
+#[allow(clippy::too_many_lines)] // debt: 134L — keyed pivot cascade, candidate for extraction
 fn run_keyed_pivot_children_wave(
     schemas: &mut Vec<TableSchema>,
     threshold: usize,
@@ -1231,6 +1236,7 @@ fn pg_truncate_name(raw: &str) -> String {
 ///    sibling[0] instead of all N*(N-1)/2 pairs. Semantically equivalent for the homogeneous
 ///    schemas typical of KeyedPivot detection (language codes, numeric IDs, genome keys).
 ///    Outliers are still detected: any sibling with 0 column overlap with sibling[0] returns 0.
+#[must_use]
 pub fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
     if indices.len() < 2 {
         return 1.0;
@@ -1347,6 +1353,7 @@ pub fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// Error returned by [`build_keyed_pivot_from_siblings`].
+#[allow(dead_code)] // used by json2sql-ui::state::apply_sibling_merge
 #[derive(Debug, thiserror::Error)]
 pub enum MergeError {
     #[error("need at least 2 tables to merge, got {0}")]
@@ -1360,6 +1367,7 @@ pub enum MergeError {
 }
 
 /// Result of a manual sibling merge.
+#[allow(dead_code)] // used by json2sql-ui::state::apply_sibling_merge
 #[derive(Debug)]
 pub struct MergeResult {
     /// Parent table that receives the new WideStrategy.
@@ -1374,6 +1382,7 @@ pub struct MergeResult {
 /// Build a `KeyedPivot` or `MultiKeyedPivot` strategy from a manual user selection of
 /// sibling tables. Infers key shape from table name suffixes; auto-detects whether to
 /// produce a single-group (`KeyedPivot`) or two-group (`MultiKeyedPivot`) strategy.
+#[allow(dead_code)] // used by json2sql-ui::state::apply_sibling_merge
 pub fn build_keyed_pivot_from_siblings(
     schemas: &[TableSchema],
     indices: &[usize],
@@ -1396,7 +1405,8 @@ pub fn build_keyed_pivot_from_siblings(
         }
     }
 
-    let parent_name = tables[0].parent_table.as_deref().unwrap();
+    let parent_name = tables[0].parent_table.as_deref()
+        .expect("NoParent was checked for all tables above — parent_table is Some");
     if tables.iter().any(|t| t.parent_table.as_deref() != Some(parent_name)) {
         return Err(MergeError::DifferentParents);
     }

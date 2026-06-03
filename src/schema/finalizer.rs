@@ -25,6 +25,7 @@ pub struct SchemaFinalizer {
 }
 
 impl SchemaFinalizer {
+    #[must_use]
     pub fn new(
         wide_column_threshold: usize,
         sibling_threshold: usize,
@@ -125,6 +126,8 @@ impl SchemaFinalizer {
 /// Build the `TableSchema` for a single `TableEntry`.
 ///
 /// Pure function — no access to `SchemaRegistry` state. Called in parallel via rayon.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+// debt: 193L/9-args — candidate for FinalizerConfig struct + sub-functions
 fn build_entry_schema(
     entry: &TableEntry,
     naming: &NamingRegistry,
@@ -390,7 +393,7 @@ pub struct OverflowWarning {
 ///
 /// Must be called after `finalize()` (schemas in topological order). Each table is
 /// evaluated independently — a child can be converted without its parent being converted.
-pub fn apply_column_limit_guard(schemas: &mut Vec<TableSchema>) -> Vec<OverflowWarning> {
+pub fn apply_column_limit_guard(schemas: &mut [TableSchema]) -> Vec<OverflowWarning> {
     let mut warnings = Vec::new();
     for schema in schemas.iter_mut() {
         let count = schema.data_columns().count();

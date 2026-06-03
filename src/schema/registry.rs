@@ -24,6 +24,8 @@ pub struct SchemaRegistry {
 }
 
 impl SchemaRegistry {
+    #[allow(clippy::too_many_arguments)] // T5: candidate for RegistryConfig struct
+    #[must_use]
     pub fn new(
         text_threshold: u32,
         array_as_pg_array: bool,
@@ -77,10 +79,12 @@ impl SchemaRegistry {
         reporter::collect_stats(&self.observer, &mut self.naming)
     }
 
+    #[must_use]
     pub fn truncated_names(&self) -> &[TruncatedName] {
         self.naming.truncated_names()
     }
 
+    #[must_use]
     pub fn column_collisions(&self) -> &[ColumnCollision] {
         &self.column_collisions
     }

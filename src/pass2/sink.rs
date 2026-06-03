@@ -20,6 +20,6 @@ impl RowSink for TempFileSink {
 /// triggers disk I/O, which is bounded and infrequent at 4 MiB intervals).
 impl RowSink for Arc<Mutex<TempFileSink>> {
     fn write_row(&mut self, row: Vec<u8>) -> Result<()> {
-        self.lock().unwrap().write_row(row)
+        self.lock().expect("sink mutex is not poisoned").write_row(row)
     }
 }

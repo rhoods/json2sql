@@ -62,6 +62,7 @@ impl SchemaConfig {
 /// Apply type overrides from `config` to the finalized schemas.
 /// Matches by table name and column name (both sanitized PostgreSQL identifiers).
 /// Unknown tables or columns are silently ignored but reported via eprintln.
+#[allow(clippy::too_many_lines)] // debt: 145L — override dispatch loop, candidate for sub-handlers
 pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) -> crate::error::Result<()> {
     // Collect deferred operations that require the full schemas slice.
     // These cannot be applied inside the single-schema iteration below.

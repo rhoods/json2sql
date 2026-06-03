@@ -51,6 +51,7 @@ pub struct ColumnNameRegistry {
 }
 
 impl ColumnNameRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -97,6 +98,7 @@ impl ColumnNameRegistry {
     }
 
     /// Return the resolved PostgreSQL column name for an original JSON field.
+    #[must_use]
     pub fn resolve(&self, original: &str) -> String {
         self.resolved
             .get(original)
@@ -105,6 +107,7 @@ impl ColumnNameRegistry {
     }
 
     /// Return all detected collisions (populated after `build()`).
+    #[must_use]
     pub fn collisions(&self) -> &[ColumnCollision] {
         &self.collisions
     }
@@ -123,6 +126,7 @@ pub struct NamingRegistry {
 }
 
 impl NamingRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -160,6 +164,7 @@ impl NamingRegistry {
     /// `table_name()` has been called for this path (i.e. after the pre-registration
     /// phase in `finalize()`). Safe to call from multiple threads.
     #[allow(dead_code)]
+    #[must_use]
     pub fn table_name_lookup(&self, path: &[String]) -> String {
         let key = path.join(&PATH_SEP.to_string());
         self.cache.get(&key).cloned().unwrap_or_else(|| {
@@ -170,6 +175,7 @@ impl NamingRegistry {
 
     /// Read-only lookup from a pre-computed PATH_SEP-joined key.
     /// Use in the parallel schema-building phase where the key is already available.
+    #[must_use]
     pub fn table_name_lookup_from_dot_key(&self, dot_key: &str) -> String {
         self.cache.get(dot_key).cloned().unwrap_or_else(|| {
             sanitize_identifier(&dot_key.replace(PATH_SEP, "_"))
@@ -177,6 +183,7 @@ impl NamingRegistry {
     }
 
     /// Convert a JSON field name to a safe PostgreSQL column name.
+    #[must_use]
     pub fn column_name(field: &str) -> String {
         let sanitized = sanitize_identifier(field);
         // Column names don't need global uniqueness tracking (they're per-table)
@@ -219,6 +226,7 @@ impl NamingRegistry {
     }
 
     /// Returns all table names that were truncated to fit the 63-byte PostgreSQL limit.
+    #[must_use]
     pub fn truncated_names(&self) -> &[TruncatedName] {
         &self.truncations
     }
@@ -230,6 +238,7 @@ impl NamingRegistry {
 /// - Collapse consecutive underscores
 /// - Remove leading/trailing underscores
 /// - Prefix with `c_` if starts with a digit
+#[must_use]
 pub fn sanitize_identifier(s: &str) -> String {
     // Fast path: all-ASCII input covers 99%+ of JSON field names and is ~2× faster
     // than the Unicode path because it avoids `to_lowercase()` allocation and `chars()`.

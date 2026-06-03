@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+#![deny(dead_code)]
 pub mod anomaly;
 pub mod cli;
 pub mod db;

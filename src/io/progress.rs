@@ -8,6 +8,7 @@ pub struct ProgressTracker {
 }
 
 impl ProgressTracker {
+    #[must_use]
     pub fn new(total_bytes: u64, pass_label: &str) -> Self {
         let multi = MultiProgress::new();
 
@@ -16,7 +17,7 @@ impl ProgressTracker {
             ProgressStyle::with_template(
                 "{prefix:.bold} [{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({bytes_per_sec})",
             )
-            .unwrap()
+            .expect("bytes progress bar template is valid")
             .progress_chars("=>-"),
         );
         bytes_bar.set_prefix(format!("{} bytes", pass_label));
@@ -24,7 +25,7 @@ impl ProgressTracker {
         let rows_bar = multi.add(ProgressBar::new_spinner());
         rows_bar.set_style(
             ProgressStyle::with_template("{prefix:.bold} {spinner} {human_pos} rows ({per_sec})")
-                .unwrap(),
+                .expect("rows spinner template is valid"),
         );
         rows_bar.set_prefix(format!("{} rows ", pass_label));
 

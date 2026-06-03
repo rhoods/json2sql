@@ -16,6 +16,7 @@ fn pg_err(context: &str, e: tokio_postgres::Error) -> J2sError {
 
 /// Generate the CREATE TABLE SQL for a single schema.
 /// Uses `IF NOT EXISTS` when `drop_existing` is false (append / rerun mode).
+#[must_use]
 pub fn generate_create_table(schema: &TableSchema, pg_schema: &str, drop_existing: bool) -> String {
     let if_not_exists = if drop_existing { "" } else { "IF NOT EXISTS " };
     let mut col_defs = Vec::new();
@@ -52,6 +53,7 @@ pub fn generate_create_table(schema: &TableSchema, pg_schema: &str, drop_existin
 /// Generate CREATE TABLE SQL with columns only — no PRIMARY KEY or FOREIGN KEY constraints.
 /// Always uses IF NOT EXISTS so it is safe to rerun.
 /// Constraints are added separately via `add_constraints()` after data is loaded.
+#[must_use]
 pub fn generate_create_table_no_constraints(schema: &TableSchema, pg_schema: &str) -> String {
     let mut col_defs = Vec::new();
     for col in &schema.columns {
@@ -72,6 +74,7 @@ pub fn generate_create_table_no_constraints(schema: &TableSchema, pg_schema: &st
 }
 
 /// Generate ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY for a single schema.
+#[must_use]
 pub fn generate_add_pk_sql(schema: &TableSchema, pg_schema: &str) -> String {
     format!(
         "ALTER TABLE {}.{} ADD CONSTRAINT {} PRIMARY KEY (j2s_id)",
@@ -83,6 +86,7 @@ pub fn generate_add_pk_sql(schema: &TableSchema, pg_schema: &str) -> String {
 
 /// Generate ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY for a child schema.
 /// Returns None for root tables (no parent).
+#[must_use]
 pub fn generate_add_fk_sql(schema: &TableSchema, pg_schema: &str) -> Option<String> {
     let parent_name = schema.parent_table.as_ref()?;
     let fk_col = schema
@@ -193,6 +197,7 @@ pub async fn add_constraints(
 /// Generate a human-readable DDL preview for a single schema, including the FK constraint inline.
 /// This is for display only — execution uses `generate_create_table` + a separate ALTER TABLE.
 #[allow(dead_code)]
+#[must_use]
 pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
     let mut col_defs = Vec::new();
 
@@ -236,6 +241,7 @@ pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
 }
 
 /// Quote a PostgreSQL identifier with double quotes, escaping internal quotes.
+#[must_use]
 pub fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }

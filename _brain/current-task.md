@@ -2,6 +2,27 @@
 
 _Mis à jour automatiquement en fin de session._
 
+## Sprint actif — Rust Compiler Constraints Refactor (2026-06-02)
+
+Spec : `_bmad-output/specs/rust-compiler-constraints-distillate.md`
+
+### T1 — Clippy Baseline ✅ MESURÉ (ne pas corriger)
+- `cargo clippy` défaut : **0 erreurs** — CI gate T2 s'ajoute sans correction préalable
+- `cargo clippy -- -D clippy::pedantic` : **551 erreurs**
+- Top catégories : `doc_markdown` (198, cosmétique) · `uninlined_format_args` (88, auto-fixable) · `must_use_candidate` (71, → T6) · `missing_errors_doc` (35)
+- **Seuils calibrés réels** (remplacent les valeurs initiales du distillate) :
+  - `too-many-lines-threshold = 100` (8 fonctions > 100 lignes, max = 528)
+  - `cognitive-complexity-threshold = 25` (3 fonctions > 25, max = 57)
+  - `too-many-arguments-threshold = 7` (4 fonctions > 7 args)
+- Fonctions prioritaires : `cascading.rs::run_sibling_wave` (528L, cplx 57) · `pass2/runner.rs::run` (341L, cplx 42) · `pass2/insert.rs::insert_object` (235L, cplx 41)
+
+### T2 — CI Gate + clippy.toml ✅ LIVRÉ
+### T3 — Attributs compilateur ✅ LIVRÉ
+### T4 — Éliminer unwrap() en prod ✅ LIVRÉ (11 unwrap → expect)
+### T5 — Seuils de complexité (clippy.toml) ✅ LIVRÉ (9 fonctions documentées en debt.md)
+### T6 — #[must_use] sur types critiques ✅ LIVRÉ (70 annotations, 22 fichiers)
+### T7 — Analyse séparation crates ⬜ DÉFÉRÉ (hors sprint)
+
 ## Prochaines tâches
 
 ### UX panneau de sélection (voir `_brain/ux-todo.md` pour le détail complet)

@@ -72,6 +72,7 @@ pub enum PgType {
 }
 
 impl PgType {
+    #[must_use]
     pub fn as_sql(&self) -> String {
         match self {
             PgType::Integer => "INTEGER".to_string(),
@@ -109,6 +110,7 @@ pub struct TypeTracker {
 }
 
 impl TypeTracker {
+    #[must_use]
     pub fn new(text_threshold: u32) -> Self {
         Self {
             total_count: 0,
@@ -165,6 +167,7 @@ impl TypeTracker {
 
     /// The dominant (most frequent) non-null type.
     #[allow(dead_code)]
+    #[must_use]
     pub fn dominant_type(&self) -> InferredType {
         InferredType::ALL
             .iter()
@@ -177,6 +180,7 @@ impl TypeTracker {
 
     /// Fraction of rows where type differs from the dominant type (anomaly rate).
     #[allow(dead_code)]
+    #[must_use]
     pub fn anomaly_rate(&self) -> f64 {
         if self.total_count == 0 {
             return 0.0;
@@ -191,18 +195,20 @@ impl TypeTracker {
         anomalous as f64 / self.total_count as f64
     }
 
+    #[must_use]
     pub fn is_not_null(&self) -> bool {
         self.null_count == 0
     }
 
     /// Resolve to the final PostgreSQL type.
     /// Merging rules: the "widest" type wins.
+    #[must_use]
     pub fn to_pg_type(&self) -> PgType {
         let has = |t: InferredType| self.type_counts[t as usize] > 0;
 
         // If any text/string type is dominant, use string types
         if has(InferredType::Text) || has(InferredType::Varchar) {
-            if self.max_len as u32 > self.text_threshold {
+            if self.max_len > self.text_threshold {
                 return PgType::Text;
             } else {
                 let sized = (self.max_len as f64 * 1.2).ceil() as u32;
@@ -239,16 +245,19 @@ impl TypeTracker {
     }
 
     /// True if this field contains only objects (→ child table, not a column).
+    #[must_use]
     pub fn is_object_field(&self) -> bool {
         self.type_counts[InferredType::Object as usize] > 0 && self.active_type_count() == 1
     }
 
     /// True if this field contains only arrays (→ child table, not a column).
+    #[must_use]
     pub fn is_array_field(&self) -> bool {
         self.type_counts[InferredType::Array as usize] > 0 && self.active_type_count() == 1
     }
 
     /// True if this field has mixed types that constitute an anomaly.
+    #[must_use]
     pub fn has_anomalies(&self) -> bool {
         self.active_type_count() > 1
     }
@@ -275,6 +284,7 @@ impl TypeTracker {
 // ---------------------------------------------------------------------------
 
 /// Return the "wider" of two PgTypes — the one that can represent all values of both.
+#[must_use]
 pub fn widen_pg_types(a: PgType, b: &PgType) -> PgType {
     if a == *b {
         return a;

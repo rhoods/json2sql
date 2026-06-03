@@ -106,6 +106,7 @@ impl AnomalyCollector {
     /// Create a collector. Pass `anomaly_dir = Some(path)` to enable
     /// per-table NDJSON streaming; `None` keeps anomalies in-memory only
     /// (counters + examples, no unbounded Vec).
+    #[must_use]
     pub fn new(anomaly_dir: Option<PathBuf>) -> Self {
         Self {
             stats: HashMap::new(),
@@ -172,6 +173,7 @@ impl AnomalyCollector {
     }
 
     /// Append one NDJSON line to the per-table anomaly file, creating it if necessary.
+    #[allow(clippy::too_many_arguments)] // T5: candidate for AnomalyEntry struct
     fn stream_to_file(
         &mut self,
         table: &str,
@@ -190,18 +192,18 @@ impl AnomalyCollector {
             self.writers.insert(table.to_string(), BufWriter::new(file));
             self.written_files.insert(table.to_string(), path);
         }
-        let writer = self.writers.get_mut(table).unwrap();
-        // serde_json escapes all control chars incl. null bytes (\u0000) — always valid UTF-8.
-        let line = serde_json::json!({
-            "table": table,
-            "column": column,
-            "row_id": row_id,
-            "expected_type": expected_type,
-            "actual_value": truncated,
-            "actual_value_len": char_len,
-            "actual_type": actual_type,
-        });
-        writeln!(writer, "{}", line).map_err(J2sError::Io)
+        let writer = self.writers.get_mut(table)
+            .expect("writer was inserted above in this same block");
+        // serde_json::Map is infallible — avoids json! macro's internal unwrap.
+        let mut obj = serde_json::Map::new();
+        obj.insert("table".into(),           table.into());
+        obj.insert("column".into(),          column.into());
+        obj.insert("row_id".into(),          row_id.into());
+        obj.insert("expected_type".into(),   expected_type.into());
+        obj.insert("actual_value".into(),    truncated.into());
+        obj.insert("actual_value_len".into(), char_len.into());
+        obj.insert("actual_type".into(),     actual_type.into());
+        writeln!(writer, "{}", serde_json::Value::Object(obj)).map_err(J2sError::Io)
     }
 
     /// Increment the total-row counter for a table (used as anomaly-rate denominator).
@@ -210,11 +212,13 @@ impl AnomalyCollector {
     }
 
     /// Total anomaly count across all tables (O(1)).
+    #[must_use]
     pub fn total_anomalies(&self) -> u64 {
         self.total_count
     }
 
     /// Per-table anomaly totals (sum across all columns). O(n_columns).
+    #[must_use]
     pub fn per_table_anomaly_counts(&self) -> HashMap<String, u64> {
         let mut out: HashMap<String, u64> = HashMap::new();
         for ((table, _col), cs) in &self.stats {
@@ -225,6 +229,7 @@ impl AnomalyCollector {
 
     /// Per-(table, column) summaries including capped examples.
     /// O(n_columns) — not O(n_anomalies).
+    #[must_use]
     pub fn summaries(&self) -> Vec<AnomalySummary> {
         self.stats
             .iter()
@@ -250,6 +255,7 @@ impl AnomalyCollector {
 
     /// Overall anomaly rate across all tables.
     /// Used for `--max-anomaly-rate` threshold checks and the JSON anomaly report.
+    #[must_use]
     pub fn overall_anomaly_rate(&self) -> f64 {
         let total: u64 = self.totals.values().sum();
         if total == 0 {
@@ -279,6 +285,7 @@ impl AnomalyCollector {
 
     /// Paths of NDJSON files produced so far (one per table with anomalies).
     #[allow(dead_code)]
+    #[must_use]
     pub fn written_paths(&self) -> &HashMap<String, PathBuf> {
         &self.written_files
     }

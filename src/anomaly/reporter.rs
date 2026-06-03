@@ -60,7 +60,7 @@ fn to_json(collector: &AnomalyCollector) -> Result<String> {
 fn to_csv(collector: &AnomalyCollector) -> Result<String> {
     let mut wtr = csv::Writer::from_writer(vec![]);
 
-    wtr.write_record(&[
+    wtr.write_record([
         "table",
         "column",
         "expected_type",
@@ -83,7 +83,7 @@ fn to_csv(collector: &AnomalyCollector) -> Result<String> {
     for s in &summaries {
         let example_val = s.examples.first().map(|e| e.actual_value.as_str()).unwrap_or("");
         let example_type = s.examples.first().map(|e| e.actual_type.as_str()).unwrap_or("");
-        wtr.write_record(&[
+        wtr.write_record([
             &s.table,
             &s.column,
             &s.expected_type,

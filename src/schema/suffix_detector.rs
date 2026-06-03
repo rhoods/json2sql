@@ -19,6 +19,7 @@ const MIN_BASES: usize = 2;
 /// 5. Retain suffixes with coverage >= `coverage_threshold`.
 ///
 /// Returns `None` if no structural pattern is found above threshold.
+#[must_use]
 pub fn detect_suffix_schema(
     columns: &IndexMap<String, TypeTracker>,
     coverage_threshold: f64,
@@ -160,6 +161,7 @@ pub fn detect_suffix_schema(
 
 /// Build a SuffixSchema from an explicit list of suffix strings.
 /// Used when the user declares `suffix_columns` in the TOML config.
+#[must_use]
 pub fn build_suffix_schema_from_list(
     suffix_list: &[String],
     columns: &IndexMap<String, TypeTracker>,
@@ -208,13 +210,7 @@ pub fn build_suffix_schema_from_list(
     // Base value type from bare keys (keys not ending with any declared suffix)
     let suffix_strs: HashSet<&str> = suffix_list
         .iter()
-        .map(|s| {
-            if s.starts_with('_') {
-                s.as_str()
-            } else {
-                s.as_str()
-            }
-        })
+        .map(|s| s.as_str())
         .collect();
 
     let value_type = columns

@@ -147,6 +147,7 @@ pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: S
     schema.wide_strategy = WideStrategy::StructuredPivot(suffix_schema);
 }
 
+#[must_use]
 pub fn build_union_columns(children: &[&TableSchema]) -> Vec<ColumnSchema> {
     let mut col_map: IndexMap<String, (String, PgType)> = IndexMap::new();
     for child in children {
@@ -171,6 +172,7 @@ pub fn build_union_columns(children: &[&TableSchema]) -> Vec<ColumnSchema> {
 }
 
 /// Classify the shape of sibling keys to produce a semantic column name.
+#[must_use]
 pub fn classify_key_shape(keys: &[&str]) -> KeyShape {
     let total = keys.len();
     if total == 0 {

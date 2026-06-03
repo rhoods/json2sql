@@ -3,6 +3,24 @@
 ## À adresser avant release
 <!-- Ex: "Authentification non implémentée — accès libre aux routes" -->
 
+## Dette Complexité — fonctions trop longues (T5, 2026-06-02)
+
+Fonctions annotées `#[allow(clippy::too_many_lines/cognitive_complexity)]` — à refactoriser par priorité :
+
+| Priorité | Fonction | Lignes | Complexité | Refactoring suggéré |
+|---|---|---|---|---|
+| 🔴 1 | `cascading.rs::run_sibling_wave` | 528 | 57 | Extraire: Jaccard pass, clustering pass, re-parenting pass |
+| 🔴 2 | `pass2/runner.rs::run` | 341 | 42 | Extraire: phase_stream(), phase_copy(), phase_constraints() |
+| 🔴 3 | `pass2/insert.rs::insert_object` | 235 | 41 | InsertContext struct + sous-fonctions par type JSON |
+| 🟡 4 | `schema/finalizer.rs::build_entry_schema` | 193 | — | FinalizerConfig struct |
+| 🟡 5 | `schema/config.rs::apply_overrides` | 145 | — | Sub-handlers par type d'override |
+| 🟡 6 | `cascading.rs::run_keyed_pivot_children_wave` | 134 | — | Extraction pivot logic |
+| 🟢 7 | `cascading.rs::process_co_sibling_group` | 107 | — | Extraction absorption logic |
+| 🟢 8 | `pass1/runner.rs::run_parallel` | 123 | — | Extraction worker setup |
+
+Gate CI : `cargo clippy -- -D warnings -D clippy::too_many_lines -D clippy::cognitive_complexity`
+Chaque `#[allow]` retiré = dette remboursée.
+
 ## Améliorations futures
 - IHM Leptos bancale — à consolider (visualisation du schéma)
 - Log des flush périodiques (`flush tablename (N rows)`)

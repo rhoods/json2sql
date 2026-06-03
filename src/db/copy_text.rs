@@ -23,13 +23,14 @@ impl CopyEscaped {
     pub fn from_safe_ascii(s: impl Into<String>) -> Self {
         let s = s.into();
         debug_assert!(
-            !s.contains(|c| matches!(c, '\t' | '\n' | '\r' | '\\' | '\0')),
+            !s.contains(['\t', '\n', '\r', '\\', '\0']),
             "from_safe_ascii called with unsafe value: {:?}",
             s
         );
         CopyEscaped(s)
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -46,10 +47,11 @@ impl AsRef<str> for CopyEscaped {
 /// Escapes `\t`, `\n`, `\r`, `\\`. Returns `None` if `s` contains a null
 /// byte — PostgreSQL rejects null bytes in text columns and callers should
 /// treat this as an anomaly (→ NULL) rather than silently stripping.
+#[must_use]
 pub fn escape_copy_text(s: &str) -> Option<CopyEscaped> {
     // Fast-path: scan for any char that requires action before allocating.
     // Most values in practice contain none of these — avoid the allocation entirely.
-    let first_special = s.find(|c| matches!(c, '\0' | '\\' | '\t' | '\n' | '\r'));
+    let first_special = s.find(['\0', '\\', '\t', '\n', '\r']);
     let escape_start = match first_special {
         None => return Some(CopyEscaped(s.to_owned())), // nothing to escape
         Some(i) if s.as_bytes()[i] == b'\0' => return None, // null byte

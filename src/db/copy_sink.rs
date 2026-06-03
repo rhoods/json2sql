@@ -42,6 +42,7 @@ pub struct RowBuilder {
 }
 
 impl RowBuilder {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             buf: Vec::with_capacity(256),
@@ -78,6 +79,7 @@ impl RowBuilder {
     }
 
     /// Finish the row, appending a newline.
+    #[must_use]
     pub fn finish(mut self) -> Vec<u8> {
         self.buf.push(b'\n');
         self.buf
@@ -231,6 +233,8 @@ impl TempFileSink {
 
     /// Returns true when a temp-file FD is currently held open (i.e. a spill
     /// is in progress or has just completed and hibernate has not been called).
+    #[allow(dead_code)] // public API — not yet used in binary, available for future callers
+    #[must_use]
     pub fn is_open(&self) -> bool {
         self.writer.is_some()
     }
@@ -240,6 +244,7 @@ impl TempFileSink {
     /// many rows are buffered. Data in `pending` is preserved for the next write.
     ///
     /// No-op when no FD is held.
+    #[allow(dead_code)] // public API — not yet used in binary, available for future callers
     pub fn hibernate(&mut self) -> Result<()> {
         self.writer = None; // drop File → close FD; pending stays in memory
         Ok(())
@@ -250,7 +255,7 @@ impl TempFileSink {
         if self.writer.is_none() {
             let file = if let Some(ref guard) = self.temp_file {
                 OpenOptions::new()
-                    .write(true)
+                    
                     .append(true)
                     .open(&guard.0)
                     .map_err(J2sError::Io)?
@@ -267,7 +272,7 @@ impl TempFileSink {
             };
             self.writer = Some(file);
         }
-        Ok(self.writer.as_mut().unwrap())
+        Ok(self.writer.as_mut().expect("ensure_file sets self.writer just above"))
     }
 
     /// Write all of `pending` to the temp file, clear the buffer, and immediately
