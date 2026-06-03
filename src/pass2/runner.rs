@@ -9,6 +9,7 @@ use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::anomaly::collect::{AnomalyEvent, AnomalyProxy};
 use crate::anomaly::collector::AnomalyCollector;
 use crate::db::copy_sink::{copy_snapshot_to_pg, merge_copy_to_db, TempFileSink};
 use crate::schema::PATH_SEP;
@@ -143,6 +144,31 @@ pub async fn run(
         std::fs::create_dir_all(dir).map_err(J2sError::Io)?;
     }
 
+    // Anomaly writer task — single Tokio task owns the AnomalyCollector (with anomaly_dir
+    // and NDJSON file streaming). Workers send AnomalyEvent via channel; the writer
+    // calls record()/inc_total() on the collector. No mutex, no contention.
+    let (anomaly_tx, mut anomaly_rx) = tokio::sync::mpsc::unbounded_channel::<AnomalyEvent>();
+    let anomaly_writer_handle: tokio::task::JoinHandle<Result<AnomalyCollector>> =
+        tokio::task::spawn_blocking(move || {
+            let mut collector = AnomalyCollector::new(anomaly_dir);
+            while let Some(event) = anomaly_rx.blocking_recv() {
+                match event {
+                    AnomalyEvent::Record {
+                        table, column, row_id, expected_type, actual_value, actual_type,
+                    } => {
+                        collector.record(
+                            &table, &column, &row_id, &expected_type, &actual_value, &actual_type,
+                        )?;
+                    }
+                    AnomalyEvent::IncTotal { table } => {
+                        collector.inc_total(&table);
+                    }
+                }
+            }
+            collector.finish()?;
+            Ok(collector)
+        });
+
     let parallel = parallel.max(1);
 
     // Pre-flight check: warn if any root tables are already non-empty.
@@ -213,7 +239,7 @@ pub async fn run(
         // Each worker gets its own HashMap of Arc clones (cheap — no TempFileSink copy).
         let worker_sinks: HashMap<String, Arc<Mutex<TempFileSink>>> =
             shared_sinks.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
-        let mut worker_anomalies = AnomalyCollector::new(None);
+        let mut worker_proxy = AnomalyProxy::new(anomaly_tx.clone());
         let pm = path_map_arc.clone();
         let rs = root_schema_arc.clone();
         let cancel_token = cancel.clone();
@@ -246,7 +272,7 @@ pub async fn run(
                 insert_object(
                     &pm,
                     &mut sinks,
-                    &mut worker_anomalies,
+                    &mut worker_proxy,
                     &rs,
                     &obj,
                     Uuid::now_v7(),
@@ -299,7 +325,7 @@ pub async fn run(
             for sink_arc in sinks.values() {
                 let _ = sink_arc.lock().expect("sink mutex is not poisoned").force_spill();
             }
-            Ok::<_, J2sError>((worker_anomalies, copy_handles))
+            Ok::<_, J2sError>(copy_handles)
         });
         worker_handles.push(handle);
     }
@@ -355,13 +381,12 @@ pub async fn run(
     eprintln!("Pass 2 streaming done ({parallel} workers). Flushing remaining rows to PostgreSQL...");
 
     // Join all workers and collect background COPY handles.
-    let mut merged_anomalies = AnomalyCollector::new(anomaly_dir);
+    // Workers return only copy_handles now — anomaly events were streamed to the writer task.
     let mut all_copy_handles: Vec<tokio::task::JoinHandle<Result<(String, u64)>>> = Vec::new();
     let mut first_worker_error: Option<J2sError> = None;
     for handle in worker_handles {
         match handle.await {
-            Ok(Ok((w_anomalies, copy_handles))) => {
-                merged_anomalies.merge(w_anomalies);
+            Ok(Ok(copy_handles)) => {
                 all_copy_handles.extend(copy_handles);
             }
             Ok(Err(e)) => {
@@ -374,6 +399,14 @@ pub async fn run(
             }
         }
     }
+    // All worker clones of anomaly_tx are dropped (workers done). Drop the main sender
+    // to close the channel, then await the writer task to get the final collector.
+    drop(anomaly_tx);
+    let mut merged_anomalies = match anomaly_writer_handle.await {
+        Ok(Ok(collector)) => collector,
+        Ok(Err(e)) => return Err(e),
+        Err(e) => return Err(J2sError::InvalidInput(format!("anomaly writer task panicked: {e}"))),
+    };
     if let Some(err) = first_worker_error { return Err(err); }
     if worker_died {
         return Err(J2sError::InvalidInput("worker channel closed unexpectedly".into()));
@@ -572,6 +605,73 @@ mod tests {
             limit: Some(0),
         };
         assert_eq!(cfg.limit, Some(0));
+    }
+
+    /// Validates the writer task pattern without a database:
+    /// events sent via AnomalyProxy reach the AnomalyCollector in the writer task,
+    /// and NDJSON files are created on disk.
+    #[tokio::test]
+    async fn anomaly_writer_task_creates_ndjson_files() {
+        use crate::anomaly::collect::{AnomalyCollect, AnomalyEvent, AnomalyProxy};
+        use crate::anomaly::collector::AnomalyCollector;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let (anomaly_tx, mut anomaly_rx) = tokio::sync::mpsc::unbounded_channel::<AnomalyEvent>();
+
+        let anomaly_dir = Some(dir.path().to_path_buf());
+        let handle: tokio::task::JoinHandle<crate::error::Result<AnomalyCollector>> =
+            tokio::task::spawn_blocking(move || {
+                let mut collector = AnomalyCollector::new(anomaly_dir);
+                while let Some(event) = anomaly_rx.blocking_recv() {
+                    match event {
+                        AnomalyEvent::Record {
+                            table, column, row_id, expected_type, actual_value, actual_type,
+                        } => {
+                            collector.record(
+                                &table, &column, &row_id, &expected_type, &actual_value, &actual_type,
+                            )?;
+                        }
+                        AnomalyEvent::IncTotal { table } => {
+                            collector.inc_total(&table);
+                        }
+                    }
+                }
+                Ok(collector)
+            });
+
+        // Simulate two workers sending events
+        let mut proxy1 = AnomalyProxy::new(anomaly_tx.clone());
+        let mut proxy2 = AnomalyProxy::new(anomaly_tx.clone());
+
+        proxy1.inc_total("products");
+        proxy1.inc_total("products");
+        proxy1.record("products", "price", "r1", "double precision", "gratuit", "string").unwrap();
+
+        proxy2.inc_total("products");
+        proxy2.record("products", "price", "r2", "double precision", "N/A", "string").unwrap();
+
+        // Drop proxies + main sender to close the channel
+        drop(proxy1);
+        drop(proxy2);
+        drop(anomaly_tx);
+
+        let mut collector = handle.await.unwrap().unwrap();
+        collector.finish().unwrap();
+
+        assert_eq!(collector.total_anomalies(), 2);
+        assert!((collector.overall_anomaly_rate() - 2.0 / 3.0).abs() < 1e-9);
+
+        let paths = collector.written_paths();
+        assert!(paths.contains_key("products"), "NDJSON file must exist for products");
+        let content = std::fs::read_to_string(&paths["products"]).unwrap();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 2, "both anomaly rows must be in the file");
+        for line in &lines {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(v["table"], "products");
+            assert_eq!(v["column"], "price");
+        }
     }
 
 }

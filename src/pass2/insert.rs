@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::anomaly::collector::AnomalyCollector;
+use crate::anomaly::collect::AnomalyCollect;
 use crate::db::copy_sink::RowBuilder;
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::error::Result;
@@ -22,7 +22,7 @@ use super::traversal::{
 pub(crate) fn insert_object<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
-    anomalies: &mut AnomalyCollector,
+    anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
     obj: &serde_json::Map<String, Value>,
     row_id: Uuid,

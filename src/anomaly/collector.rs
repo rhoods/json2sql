@@ -289,32 +289,6 @@ impl AnomalyCollector {
     pub fn written_paths(&self) -> &HashMap<String, PathBuf> {
         &self.written_files
     }
-
-    /// Merge another collector's in-memory stats into this one.
-    /// File writers and anomaly_dir are not merged — `other` must have `anomaly_dir = None`.
-    /// Called after parallel streaming to consolidate per-worker results.
-    pub fn merge(&mut self, mut other: Self) {
-        // Mark other as finished so Drop does not attempt to flush (workers have no writers).
-        other.finished = true;
-        for (table, count) in std::mem::take(&mut other.totals) {
-            *self.totals.entry(table).or_insert(0) += count;
-        }
-        self.total_count += other.total_count;
-        for ((table, col), other_cs) in std::mem::take(&mut other.stats) {
-            let self_cs = self.stats
-                .entry((table, col))
-                .or_insert_with(|| ColumnStats {
-                    expected_type: other_cs.expected_type.clone(),
-                    count: 0,
-                    examples: Vec::new(),
-                });
-            self_cs.count += other_cs.count;
-            let cap = MAX_EXAMPLES.saturating_sub(self_cs.examples.len());
-            if cap > 0 {
-                self_cs.examples.extend(other_cs.examples.into_iter().take(cap));
-            }
-        }
-    }
 }
 
 /// Replace any character that is not ASCII alphanumeric or `_` with `_` so

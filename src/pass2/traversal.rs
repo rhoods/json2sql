@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::anomaly::collector::AnomalyCollector;
+use crate::anomaly::collect::AnomalyCollect;
 use crate::db::copy_sink::RowBuilder;
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::error::Result;
@@ -18,7 +18,7 @@ use super::insert::insert_object;
 /// Columns: j2s_id, j2s_parent_id, key TEXT, value <type>
 pub(super) fn insert_pivot_object<S: RowSink>(
     sinks: &mut HashMap<String, S>,
-    anomalies: &mut AnomalyCollector,
+    anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
     obj: &serde_json::Map<String, Value>,
     parent_id: Uuid,
@@ -62,7 +62,7 @@ pub(super) fn insert_pivot_object<S: RowSink>(
 pub(super) fn insert_jsonb_object<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
-    anomalies: &mut AnomalyCollector,
+    anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
     value: &Value,
     parent_id: Uuid,
@@ -151,7 +151,7 @@ pub(super) fn insert_jsonb_object<S: RowSink>(
 /// All keys sharing the same base are collapsed into a single row.
 pub(super) fn insert_structured_pivot_object<S: RowSink>(
     sinks: &mut HashMap<String, S>,
-    anomalies: &mut AnomalyCollector,
+    anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
     obj: &serde_json::Map<String, Value>,
     parent_id: Uuid,
@@ -265,7 +265,7 @@ pub(super) fn insert_structured_pivot_object<S: RowSink>(
 pub(super) fn dispatch_child_routes<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
-    anomalies: &mut AnomalyCollector,
+    anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
     child_obj: &serde_json::Map<String, Value>,
     row_id: Uuid,
@@ -320,7 +320,7 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
 pub(super) fn insert_keyed_pivot_object<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
-    anomalies: &mut AnomalyCollector,
+    anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
     obj: &serde_json::Map<String, Value>,
     parent_id: Uuid,
@@ -416,7 +416,7 @@ pub(super) fn insert_keyed_pivot_object<S: RowSink>(
 pub(super) fn insert_keyed_pivot_array_of_objects<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
-    anomalies: &mut AnomalyCollector,
+    anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
     obj: &serde_json::Map<String, Value>,
     parent_id: Uuid,
@@ -515,7 +515,7 @@ pub(super) fn insert_keyed_pivot_array_of_objects<S: RowSink>(
 /// instead of a SiblingSchema. Non-Object values (scalars, arrays) are skipped.
 pub(super) fn insert_normalize_dynamic_keys<S: RowSink>(
     sinks: &mut HashMap<String, S>,
-    anomalies: &mut AnomalyCollector,
+    anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
     obj: &serde_json::Map<String, Value>,
     parent_id: Uuid,
@@ -592,7 +592,7 @@ pub(super) fn insert_normalize_dynamic_keys<S: RowSink>(
 pub(super) fn insert_multi_keyed_pivot<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
-    anomalies: &mut AnomalyCollector,
+    anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
     obj: &serde_json::Map<String, Value>,
     parent_id: Uuid,
@@ -681,7 +681,7 @@ pub(super) fn insert_multi_keyed_pivot<S: RowSink>(
 pub(super) fn insert_array<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
-    anomalies: &mut AnomalyCollector,
+    anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
     arr: &[Value],
     parent_id: Uuid,
