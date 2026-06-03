@@ -208,10 +208,25 @@ impl TypeTracker {
 
         // If any text/string type is dominant, use string types
         if has(InferredType::Text) || has(InferredType::Varchar) {
-            if self.max_len > self.text_threshold {
+            // max_len tracks observed string lengths only. For mixed string+numeric
+            // fields, pass2 also formats numbers as strings — those representations
+            // aren't tracked in observe(). Use conservative upper bounds so VarChar
+            // is always wide enough to hold number-to-string output without false
+            // positives in the anomaly detector.
+            let num_repr_len = if has(InferredType::Float) {
+                25u32   // longest Ryu-formatted f64: "1.7976931348623157e308" ≈ 22 chars
+            } else if has(InferredType::BigInt) {
+                20u32   // longest i64: "-9223372036854775808"
+            } else if has(InferredType::Integer) {
+                11u32   // longest i32: "-2147483648"
+            } else {
+                0u32
+            };
+            let effective_max = self.max_len.max(num_repr_len);
+            if effective_max > self.text_threshold {
                 return PgType::Text;
             } else {
-                let sized = (self.max_len as f64 * 1.2).ceil() as u32;
+                let sized = (effective_max as f64 * 1.2).ceil() as u32;
                 return PgType::VarChar(sized.max(1));
             }
         }
@@ -511,6 +526,49 @@ mod tests {
         assert!(!t.has_anomalies());
         t.observe(&json!("str"));
         assert!(t.has_anomalies());
+    }
+
+    // --- Mixed string+numeric VarChar sizing ---
+
+    /// Champ mixte string+float : max_len string est petit (3) mais les floats
+    /// formattés peuvent atteindre 25 chars → VarChar doit valoir ceil(25*1.2)=30.
+    #[test]
+    fn test_mixed_string_float_varchar_sized_for_float() {
+        let mut t = TypeTracker::new(256);
+        t.observe(&json!("N/A")); // 3 bytes
+        t.observe(&json!(1234.567));
+        // effective_max = max(3, 25) = 25 → ceil(25 * 1.2) = 30
+        assert_eq!(t.to_pg_type(), PgType::VarChar(30));
+    }
+
+    /// Champ mixte string+bigint : VarChar doit valoir ceil(20*1.2)=24.
+    #[test]
+    fn test_mixed_string_bigint_varchar_sized_for_bigint() {
+        let mut t = TypeTracker::new(256);
+        t.observe(&json!("N/A")); // 3 bytes
+        t.observe(&json!(9_999_999_999_i64)); // bigint
+        // effective_max = max(3, 20) = 20 → ceil(20 * 1.2) = 24
+        assert_eq!(t.to_pg_type(), PgType::VarChar(24));
+    }
+
+    /// Champ mixte string+integer : VarChar doit valoir ceil(11*1.2)=14.
+    #[test]
+    fn test_mixed_string_integer_varchar_sized_for_integer() {
+        let mut t = TypeTracker::new(256);
+        t.observe(&json!("N/A")); // 3 bytes
+        t.observe(&json!(42));
+        // effective_max = max(3, 11) = 11 → ceil(11 * 1.2) = 14
+        assert_eq!(t.to_pg_type(), PgType::VarChar(14));
+    }
+
+    /// Quand la string est plus longue que la repr numérique, c'est max_len string qui prime.
+    #[test]
+    fn test_mixed_string_longer_than_num_repr_uses_string_max() {
+        let mut t = TypeTracker::new(256);
+        t.observe(&json!("a very long product name here!")); // 30 bytes
+        t.observe(&json!(3.14));
+        // effective_max = max(30, 25) = 30 → ceil(30 * 1.2) = 36
+        assert_eq!(t.to_pg_type(), PgType::VarChar(36));
     }
 
     /// Parity test: observing on two separate trackers then merging must equal
