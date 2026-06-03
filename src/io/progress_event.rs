@@ -20,6 +20,22 @@ pub enum ProgressEvent {
         columns_count: usize,
     },
 
+    // ── DDL (table creation before Pass 2) ───────────────────────────────────
+    /// Table creation phase starting.
+    DdlStart { table_count: usize },
+    /// One table created — done/total counter for progress display.
+    DdlProgress { done: usize, total: usize },
+    /// All tables created — DDL phase complete.
+    DdlDone,
+
+    // ── Constraints (PK + FK applied after data load) ─────────────────────────
+    /// Constraint-application phase starting.
+    ConstraintsStart { table_count: usize },
+    /// One constraint applied — done counts across both PK and FK phases.
+    ConstraintsProgress { done: usize, total: usize },
+    /// All constraints applied — constraint phase complete.
+    ConstraintsDone,
+
     // ── Pass 2 ───────────────────────────────────────────────────────────────
     /// Periodic row-processing progress during import.
     Pass2Progress {
@@ -56,3 +72,28 @@ pub enum ProgressEvent {
 
 /// Convenience alias for the sender half of a progress channel.
 pub type ProgressTx = tokio::sync::mpsc::UnboundedSender<ProgressEvent>;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ddl_and_constraints_variants_construct_and_clone() {
+        let events: Vec<ProgressEvent> = vec![
+            ProgressEvent::DdlStart { table_count: 3 },
+            ProgressEvent::DdlProgress { done: 1, total: 3 },
+            ProgressEvent::DdlDone,
+            ProgressEvent::ConstraintsStart { table_count: 3 },
+            ProgressEvent::ConstraintsProgress { done: 1, total: 6 },
+            ProgressEvent::ConstraintsDone,
+        ];
+        let cloned = events.clone();
+        for e in &cloned {
+            let _ = format!("{e:?}");
+        }
+    }
+}

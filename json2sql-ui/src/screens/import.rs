@@ -72,7 +72,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             ))??;
             tokio::spawn(async move { let _ = connection.await; });
 
-            ddl::create_tables_no_constraints(&client, &schemas, &pg_schema, drop_existing).await?;
+            ddl::create_tables_no_constraints(&client, &schemas, &pg_schema, drop_existing, Some(&tx)).await?;
 
             let cfg = json2sql::pass2::Pass2Config {
                 root_table,
@@ -114,8 +114,23 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     let elapsed       = *elapsed_secs.read();
     let tables_total  = state.read().schema.schemas.len() as u64;
 
+    // Phase 0 — DDL (tables created / total)
+    let pct_0: u32 = if progress.ddl_complete {
+        100
+    } else {
+        progress_pct(progress.ddl_done as u64, progress.ddl_table_count.max(1) as u64)
+    };
+    let label_0 = if progress.ddl_complete {
+        format!("{} tables · done", progress.ddl_table_count)
+    } else if progress.ddl_table_count == 0 {
+        "Waiting…".to_string()
+    } else {
+        format!("{} / {} tables", progress.ddl_done, progress.ddl_table_count)
+    };
+
     // Phase A — streaming (bytes_read / total_bytes)
-    let pct_a: u32 = if done || progress.total_bytes > 0 && progress.bytes_read >= progress.total_bytes {
+    // copy_complete is the authoritative signal: all workers done, regardless of file size.
+    let pct_a: u32 = if progress.copy_complete || done {
         100
     } else {
         progress_pct(progress.bytes_read, progress.total_bytes)
@@ -123,11 +138,34 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     let streaming_done = pct_a == 100;
 
     // Phase B — COPY (tables flushed / tables total)
+    // Use copy_complete to handle empty tables (they never emit Pass2Flush).
     let tables_done = progress.rows_per_table.len() as u64;
-    let pct_b: u32 = if done { 100 } else { progress_pct(tables_done, tables_total) };
+    let pct_b: u32 = if progress.copy_complete || done { 100 } else { progress_pct(tables_done, tables_total) };
+
+    // Phase D — constraints (PK + FK applied)
+    let pct_d: u32 = if progress.constraints_complete {
+        100
+    } else {
+        progress_pct(progress.constraints_done as u64, progress.constraints_total.max(1) as u64)
+    };
+    let label_d = if progress.constraints_complete {
+        "done".to_string()
+    } else if progress.constraints_total == 0 {
+        "Waiting…".to_string()
+    } else {
+        format!("{} / {} ops", progress.constraints_done, progress.constraints_total)
+    };
 
     let elapsed_str = format!("{:02}:{:02}", elapsed / 60, elapsed % 60);
-    let status_label = if done { "Import complete" } else { "Importing data…" };
+    let status_label = if done {
+        "Import complete"
+    } else if progress.ddl_table_count > 0 && !progress.ddl_complete {
+        "Creating tables…"
+    } else if progress.constraints_done > 0 && !progress.constraints_complete {
+        "Applying constraints…"
+    } else {
+        "Importing data…"
+    };
 
     let label_a = if streaming_done {
         format!("{} · done", format_bytes(progress.total_bytes))
@@ -301,6 +339,12 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
 
                 div { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;",
                     ProgressBar {
+                        pct: pct_0,
+                        done: progress.ddl_complete,
+                        label: label_0,
+                        phase: "0 · Tables".to_string(),
+                    }
+                    ProgressBar {
                         pct: pct_a,
                         done: streaming_done,
                         label: label_a,
@@ -311,6 +355,12 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                         done,
                         label: label_b,
                         phase: "B · Inserting".to_string(),
+                    }
+                    ProgressBar {
+                        pct: pct_d,
+                        done: progress.constraints_complete,
+                        label: label_d,
+                        phase: "D · Constraints".to_string(),
                     }
                 }
 

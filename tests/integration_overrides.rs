@@ -26,7 +26,7 @@ async fn test_override_type_valid() {
         let config = SchemaConfig::from_file(&common::fixture("override_score.toml")).unwrap();
         apply_overrides(&mut p1.schemas, &config);
 
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
         let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("people", &schema), None)
             .await.unwrap();
 
@@ -97,7 +97,7 @@ async fn test_override_bad() {
             "score doit être INTEGER après override, obtenu {:?}", score_col.pg_type
         );
 
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
 
         // Type DDL réel en base AVANT Pass 2.
         let type_sql = "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) \

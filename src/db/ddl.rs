@@ -1,7 +1,19 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use futures_util::future::try_join_all;
 use tokio_postgres::Client;
 
 use crate::error::{J2sError, Result};
+use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::schema::table_schema::TableSchema;
+
+fn emit(tx: Option<&ProgressTx>, event: ProgressEvent) {
+    if let Some(t) = tx {
+        let _ = t.send(event);
+    }
+}
 
 fn pg_err(context: &str, e: tokio_postgres::Error) -> J2sError {
     let detail = if let Some(db) = e.as_db_error() {
@@ -108,33 +120,57 @@ pub fn generate_add_fk_sql(schema: &TableSchema, pg_schema: &str) -> Option<Stri
     ))
 }
 
+const DDL_BATCH_SIZE: usize = 50;
+
+/// Build a single SQL string that DROPs all schemas in one batch_execute call.
+fn build_batch_drop_sql(schemas: &[TableSchema], pg_schema: &str) -> String {
+    schemas.iter()
+        .map(|s| format!(
+            "DROP TABLE IF EXISTS {}.{} CASCADE",
+            quote_ident(pg_schema),
+            quote_ident(&s.name)
+        ))
+        .collect::<Vec<_>>()
+        .join(";\n")
+}
+
+/// Build a single SQL string that CREATEs all schemas in one batch_execute call.
+fn build_batch_create_sql(schemas: &[TableSchema], pg_schema: &str) -> String {
+    schemas.iter()
+        .map(|s| generate_create_table_no_constraints(s, pg_schema))
+        .collect::<Vec<_>>()
+        .join(";\n")
+}
+
 /// Create all tables without constraints (columns only).
-/// Drops existing tables first when `drop_existing = true`.
+/// Drops existing tables first when `drop_existing = true` (single batch).
+/// Creates tables in batches of `DDL_BATCH_SIZE` to reduce round-trips.
 pub async fn create_tables_no_constraints(
     client: &Client,
     schemas: &[TableSchema],
     pg_schema: &str,
     drop_existing: bool,
+    progress_tx: Option<&ProgressTx>,
 ) -> Result<()> {
-    for schema in schemas {
-        if drop_existing {
-            let drop_sql = format!(
-                "DROP TABLE IF EXISTS {}.{} CASCADE",
-                quote_ident(pg_schema),
-                quote_ident(&schema.name)
-            );
-            client
-                .execute(&drop_sql, &[])
-                .await
-                .map_err(|e| pg_err(&format!("DROP TABLE {}", schema.name), e))?;
-        }
-        let create_sql = generate_create_table_no_constraints(schema, pg_schema);
-        client
-            .execute(&create_sql, &[])
-            .await
-            .map_err(|e| pg_err(&format!("CREATE TABLE {}", schema.name), e))?;
-        eprintln!("Created table: {}.{}", pg_schema, schema.name);
+    let total = schemas.len();
+    emit(progress_tx, ProgressEvent::DdlStart { table_count: total });
+
+    if drop_existing && !schemas.is_empty() {
+        let drop_sql = build_batch_drop_sql(schemas, pg_schema);
+        client.batch_execute(&drop_sql).await
+            .map_err(|e| pg_err("DROP TABLE batch", e))?;
     }
+
+    let mut done = 0usize;
+    for chunk in schemas.chunks(DDL_BATCH_SIZE) {
+        let create_sql = build_batch_create_sql(chunk, pg_schema);
+        client.batch_execute(&create_sql).await
+            .map_err(|e| pg_err("CREATE TABLE batch", e))?;
+        done += chunk.len();
+        emit(progress_tx, ProgressEvent::DdlProgress { done, total });
+    }
+
+    emit(progress_tx, ProgressEvent::DdlDone);
     Ok(())
 }
 
@@ -154,44 +190,108 @@ pub enum ConstraintKind {
     ForeignKey,
 }
 
-/// Add PRIMARY KEY then FOREIGN KEY constraints after data has been loaded.
-/// PK failures are fatal (UUID collision = bug). FK failures produce warnings.
-/// Schemas must be provided in topological order (parents before children).
+/// Group schemas by depth level (BTreeMap preserves ascending order → parents before children).
+fn group_schemas_by_depth(schemas: &[TableSchema]) -> BTreeMap<usize, Vec<&TableSchema>> {
+    let mut map: BTreeMap<usize, Vec<&TableSchema>> = BTreeMap::new();
+    for schema in schemas {
+        map.entry(schema.depth).or_default().push(schema);
+    }
+    map
+}
+
+/// Pre-built work item for one table's constraints: (table_name, pk_sql, fk_sql_opt).
+type ConstraintWork = (String, String, Option<String>);
+
+/// Add PRIMARY KEY + FOREIGN KEY constraints after data has been loaded.
+///
+/// Processes schemas level-by-level (grouped by `depth`): all tables at depth N
+/// are constrained in parallel before moving to depth N+1.  Within each level,
+/// each worker applies PK then FK for its assigned tables on a dedicated connection.
+///
+/// PK failures are fatal.  FK failures become warnings.
 pub async fn add_constraints(
-    client: &Client,
+    db_url: &str,
     schemas: &[TableSchema],
     pg_schema: &str,
+    parallel: usize,
+    progress_tx: Option<&ProgressTx>,
 ) -> Result<Vec<ConstraintWarning>> {
-    let mut warnings = Vec::new();
-
-    // Primary keys first (FK references depend on them).
-    for schema in schemas {
-        let pk_sql = generate_add_pk_sql(schema, pg_schema);
-        client
-            .execute(&pk_sql, &[])
-            .await
-            .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {}", schema.name), e))?;
+    if schemas.is_empty() {
+        emit(progress_tx, ProgressEvent::ConstraintsStart { table_count: 0 });
+        emit(progress_tx, ProgressEvent::ConstraintsDone);
+        return Ok(Vec::new());
     }
 
-    // Foreign keys: failures are logged as warnings, not errors.
-    for schema in schemas {
-        if let Some(fk_sql) = generate_add_fk_sql(schema, pg_schema) {
-            if let Err(e) = client.execute(&fk_sql, &[]).await {
-                let detail = if let Some(db) = e.as_db_error() {
-                    format!("{} (code: {})", db.message(), db.code().code())
-                } else {
-                    e.to_string()
-                };
-                warnings.push(ConstraintWarning {
-                    table: schema.name.clone(),
-                    constraint_type: ConstraintKind::ForeignKey,
-                    message: detail,
-                });
+    let fk_count = schemas.iter().filter(|s| s.parent_table.is_some()).count();
+    let total = schemas.len() + fk_count;
+    let done = Arc::new(AtomicUsize::new(0));
+    let ptx: Option<ProgressTx> = progress_tx.map(|t| t.clone());
+
+    emit(progress_tx, ProgressEvent::ConstraintsStart { table_count: schemas.len() });
+
+    let levels = group_schemas_by_depth(schemas);
+    let mut all_warnings: Vec<ConstraintWarning> = Vec::new();
+
+    for schemas_at_level in levels.values() {
+        // Pre-build owned SQL so async move blocks have no lifetime issues.
+        let work: Vec<ConstraintWork> = schemas_at_level.iter().map(|s| (
+            s.name.clone(),
+            generate_add_pk_sql(s, pg_schema),
+            generate_add_fk_sql(s, pg_schema),
+        )).collect();
+
+        let conn_count = parallel.min(work.len()).max(1);
+        let chunk_size = work.len().div_ceil(conn_count);
+
+        let futures: Vec<_> = work.chunks(chunk_size).map(|chunk| {
+            let chunk: Vec<ConstraintWork> = chunk.to_vec();
+            let db_url = db_url.to_string();
+            let done = Arc::clone(&done);
+            let ptx = ptx.clone();
+            async move {
+                let (client, connection) = tokio_postgres::connect(&db_url, tokio_postgres::NoTls)
+                    .await
+                    .map_err(|e| J2sError::DbContext(format!("constraints connection: {e}")))?;
+                tokio::spawn(async move { let _ = connection.await; });
+
+                let mut warnings: Vec<ConstraintWarning> = Vec::new();
+                for (table_name, pk_sql, fk_sql_opt) in &chunk {
+                    client.execute(pk_sql.as_str(), &[]).await
+                        .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {table_name}"), e))?;
+                    let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(ref t) = ptx {
+                        let _ = t.send(ProgressEvent::ConstraintsProgress { done: d, total });
+                    }
+
+                    if let Some(fk_sql) = fk_sql_opt {
+                        if let Err(e) = client.execute(fk_sql.as_str(), &[]).await {
+                            let detail = if let Some(db) = e.as_db_error() {
+                                format!("{} (code: {})", db.message(), db.code().code())
+                            } else {
+                                e.to_string()
+                            };
+                            warnings.push(ConstraintWarning {
+                                table: table_name.clone(),
+                                constraint_type: ConstraintKind::ForeignKey,
+                                message: detail,
+                            });
+                        }
+                        let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Some(ref t) = ptx {
+                            let _ = t.send(ProgressEvent::ConstraintsProgress { done: d, total });
+                        }
+                    }
+                }
+                Ok::<Vec<ConstraintWarning>, J2sError>(warnings)
             }
-        }
+        }).collect();
+
+        let results = try_join_all(futures).await?;
+        for w in results { all_warnings.extend(w); }
     }
 
-    Ok(warnings)
+    emit(progress_tx, ProgressEvent::ConstraintsDone);
+    Ok(all_warnings)
 }
 
 /// Generate a human-readable DDL preview for a single schema, including the FK constraint inline.
@@ -372,5 +472,100 @@ mod tests {
         assert!(sql.contains("REFERENCES"), "REFERENCES");
         assert!(sql.contains("\"products\""), "references parent");
         assert!(sql.contains("\"tags\""), "on child table");
+    }
+
+    #[test]
+    fn emit_helper_sends_to_channel_and_ignores_none() {
+        use crate::io::progress_event::ProgressEvent;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        emit(Some(&tx), ProgressEvent::DdlStart { table_count: 5 });
+        emit(Some(&tx), ProgressEvent::DdlProgress { done: 1, total: 5 });
+        emit(Some(&tx), ProgressEvent::DdlDone);
+        emit(None, ProgressEvent::DdlDone); // None must not panic
+        drop(tx);
+        assert!(matches!(rx.try_recv().unwrap(), ProgressEvent::DdlStart { table_count: 5 }));
+        assert!(matches!(rx.try_recv().unwrap(), ProgressEvent::DdlProgress { done: 1, total: 5 }));
+        assert!(matches!(rx.try_recv().unwrap(), ProgressEvent::DdlDone));
+        assert!(rx.try_recv().is_err(), "None emit produces no event");
+    }
+
+    #[test]
+    fn constraints_total_counts_pk_plus_fk_only() {
+        // 1 root (no FK) + 2 children (each has FK) → total = 3 PKs + 2 FKs = 5
+        let root = make_root_schema();
+        let child1 = make_child_schema();
+        let mut child2 = make_child_schema();
+        child2.name = "tags2".to_string();
+        let schemas = [root, child1, child2];
+        let fk_count = schemas.iter().filter(|s| s.parent_table.is_some()).count();
+        let total = schemas.len() + fk_count;
+        assert_eq!(fk_count, 2);
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn build_batch_create_sql_contains_all_tables() {
+        let root = make_root_schema();
+        let child = make_child_schema();
+        let sql = build_batch_create_sql(&[root, child], "public");
+        assert_eq!(sql.matches("CREATE TABLE").count(), 2, "one CREATE TABLE per schema");
+        assert!(sql.contains("\"products\""), "root table present");
+        assert!(sql.contains("\"tags\""), "child table present");
+        assert!(sql.contains(";\n"), "statements separated by semicolon");
+        // No PK or FK constraints (columns only)
+        assert!(!sql.contains("PRIMARY KEY"), "no PK in no-constraints create");
+        assert!(!sql.contains("FOREIGN KEY"), "no FK in no-constraints create");
+    }
+
+    #[test]
+    fn build_batch_drop_sql_contains_all_tables_with_cascade() {
+        let root = make_root_schema();
+        let child = make_child_schema();
+        let sql = build_batch_drop_sql(&[root, child], "public");
+        assert_eq!(sql.matches("DROP TABLE IF EXISTS").count(), 2, "one DROP per schema");
+        assert!(sql.contains("CASCADE"), "DROP includes CASCADE");
+        assert!(sql.contains("\"products\""), "root table present");
+        assert!(sql.contains("\"tags\""), "child table present");
+    }
+
+    #[test]
+    fn build_batch_create_sql_empty_slice_returns_empty() {
+        assert_eq!(build_batch_create_sql(&[], "public"), "");
+        assert_eq!(build_batch_drop_sql(&[], "public"), "");
+    }
+
+    #[test]
+    fn group_schemas_by_depth_splits_levels_correctly() {
+        let root = make_root_schema();   // depth 0
+        let child = make_child_schema(); // depth 1
+        let schemas = vec![root, child];
+        let groups = group_schemas_by_depth(&schemas);
+        assert_eq!(groups.len(), 2, "two distinct levels");
+        assert_eq!(groups[&0].len(), 1, "one root at depth 0");
+        assert_eq!(groups[&1].len(), 1, "one child at depth 1");
+        assert_eq!(groups[&0][0].name, "products");
+        assert_eq!(groups[&1][0].name, "tags");
+    }
+
+    #[test]
+    fn group_schemas_by_depth_sibling_tables_same_level() {
+        let root = make_root_schema();
+        let mut child1 = make_child_schema();
+        let mut child2 = make_child_schema();
+        child2.name = "tags2".to_string();
+        let schemas = vec![root, child1, child2];
+        let groups = group_schemas_by_depth(&schemas);
+        assert_eq!(groups[&1].len(), 2, "sibling tables grouped at same depth");
+    }
+
+    #[test]
+    fn group_schemas_by_depth_keys_sorted_ascending() {
+        // BTreeMap ensures level 0 processed before level 1 (parents before children)
+        let root = make_root_schema();
+        let child = make_child_schema();
+        let schemas = vec![child, root]; // intentionally reversed input order
+        let groups = group_schemas_by_depth(&schemas);
+        let levels: Vec<usize> = groups.keys().copied().collect();
+        assert_eq!(levels, vec![0, 1], "BTreeMap preserves ascending order");
     }
 }

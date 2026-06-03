@@ -159,6 +159,17 @@ pub struct Pass2Progress {
     pub anomaly_counts_per_table: std::collections::HashMap<String, u64>,
     /// FK constraints that failed after import (non-fatal; PK failures are errors).
     pub constraint_warning_count: u64,
+    // DDL phase (CREATE TABLE before data load)
+    pub ddl_table_count: usize,
+    pub ddl_done: usize,
+    pub ddl_complete: bool,
+    /// True once all workers have finished COPY — set on ConstraintsStart.
+    /// Used to show Phase A and Phase B as complete independently of constraints.
+    pub copy_complete: bool,
+    // Constraints phase (PK + FK after data load)
+    pub constraints_total: usize,
+    pub constraints_done: usize,
+    pub constraints_complete: bool,
 }
 
 impl Pass2Progress {
@@ -484,6 +495,44 @@ impl AppState {
                     "Error in {}: {}",
                     table_name, message
                 ));
+            }
+            DdlStart { table_count } => {
+                self.import.pass2_progress.ddl_table_count = table_count;
+                self.import.pass2_progress.ddl_done = 0;
+                self.import.pass2_progress.ddl_complete = false;
+                self.import.pass2_progress.push_log(format!(
+                    "Creating {table_count} tables…"
+                ));
+            }
+            DdlProgress { done, total } => {
+                self.import.pass2_progress.ddl_done = done;
+                self.import.pass2_progress.ddl_table_count = total;
+            }
+            DdlDone => {
+                self.import.pass2_progress.ddl_complete = true;
+                self.import.pass2_progress.push_log(format!(
+                    "Tables created ({} total)",
+                    self.import.pass2_progress.ddl_table_count
+                ));
+            }
+            ConstraintsStart { table_count } => {
+                self.import.pass2_progress.copy_complete = true;
+                self.import.pass2_progress.constraints_done = 0;
+                self.import.pass2_progress.constraints_total = table_count * 2;
+                self.import.pass2_progress.constraints_complete = false;
+                self.import.pass2_progress.push_log(format!(
+                    "Applying PK + FK constraints ({table_count} tables)…"
+                ));
+            }
+            ConstraintsProgress { done, total } => {
+                self.import.pass2_progress.constraints_done = done;
+                self.import.pass2_progress.constraints_total = total;
+            }
+            ConstraintsDone => {
+                self.import.pass2_progress.constraints_complete = true;
+                self.import.pass2_progress.push_log(
+                    "Constraints applied".to_string()
+                );
             }
         }
     }
@@ -1100,5 +1149,75 @@ mod tests {
         assert_eq!(s.import.pass2_progress.anomaly_counts_per_table["orders"], 5);
         assert_eq!(s.import.pass2_progress.anomaly_counts_per_table["users"],  2);
         assert_eq!(s.import.pass2_progress.anomaly_counts_per_table.len(),     2);
+    }
+
+    #[test]
+    fn copy_complete_set_on_constraints_start() {
+        let mut s = AppState::default();
+        assert!(!s.import.pass2_progress.copy_complete, "false before ConstraintsStart");
+
+        // Streaming + inserting events should not set it
+        s.apply_progress_event(ProgressEvent::Pass2Progress {
+            rows_processed: 1000, bytes_read: 1_000_000, total_bytes: 100_000_000,
+        });
+        s.apply_progress_event(ProgressEvent::Pass2Flush {
+            table_name: "users".to_string(), rows_flushed: 500,
+        });
+        assert!(!s.import.pass2_progress.copy_complete, "still false after streaming/flush");
+
+        s.apply_progress_event(ProgressEvent::ConstraintsStart { table_count: 3 });
+        assert!(s.import.pass2_progress.copy_complete, "true once ConstraintsStart fires");
+    }
+
+    #[test]
+    fn apply_ddl_events_updates_state_correctly() {
+        let mut s = AppState::default();
+        s.apply_progress_event(ProgressEvent::DdlStart { table_count: 4 });
+        assert_eq!(s.import.pass2_progress.ddl_table_count, 4);
+        assert!(!s.import.pass2_progress.ddl_complete);
+
+        s.apply_progress_event(ProgressEvent::DdlProgress { done: 2, total: 4 });
+        assert_eq!(s.import.pass2_progress.ddl_done, 2);
+
+        s.apply_progress_event(ProgressEvent::DdlDone);
+        assert!(s.import.pass2_progress.ddl_complete);
+        // DdlDone should have appended a log line
+        assert!(s.import.pass2_progress.log_lines.iter().any(|l| l.contains("Tables created")));
+    }
+
+    #[test]
+    fn apply_constraints_events_updates_state_correctly() {
+        let mut s = AppState::default();
+        // 2 tables → total = 2 PKs + 1 FK (1 child) = 3 ops in real life, but
+        // ConstraintsStart uses table_count for display, ConstraintsProgress carries total.
+        s.apply_progress_event(ProgressEvent::ConstraintsStart { table_count: 3 });
+        assert!(!s.import.pass2_progress.constraints_complete);
+
+        s.apply_progress_event(ProgressEvent::ConstraintsProgress { done: 3, total: 5 });
+        assert_eq!(s.import.pass2_progress.constraints_done, 3);
+        assert_eq!(s.import.pass2_progress.constraints_total, 5);
+
+        s.apply_progress_event(ProgressEvent::ConstraintsDone);
+        assert!(s.import.pass2_progress.constraints_complete);
+        assert!(s.import.pass2_progress.log_lines.iter().any(|l| l.contains("Constraints applied")));
+    }
+
+    #[test]
+    fn pct_b_source_reflects_empty_tables_correctly() {
+        // Reproduces the 84% bug: 189 tables have rows, 36 are empty → rows_per_table.len() = 189
+        // copy_complete must be the signal for 100%, not rows_per_table.len() / total
+        let mut s = AppState::default();
+        for i in 0..189u64 {
+            s.apply_progress_event(ProgressEvent::Pass2Flush {
+                table_name: format!("t{i}"),
+                rows_flushed: 10,
+            });
+        }
+        assert_eq!(s.import.pass2_progress.rows_per_table.len(), 189);
+        assert!(!s.import.pass2_progress.copy_complete);
+
+        // ConstraintsStart fires → copy_complete becomes true → pct_b must show 100%
+        s.apply_progress_event(ProgressEvent::ConstraintsStart { table_count: 225 });
+        assert!(s.import.pass2_progress.copy_complete);
     }
 }

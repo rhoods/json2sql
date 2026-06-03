@@ -11,7 +11,7 @@ async fn test_anomaly_detection() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies.jsonl");
         let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
         let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("people", &schema), None)
             .await.unwrap();
 
@@ -34,7 +34,7 @@ async fn test_anomaly_dir_streaming() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies.jsonl");
         let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
 
         let anomaly_dir = tempfile::TempDir::new().unwrap();
         let mut p2 = pass2::runner::run(
@@ -96,7 +96,7 @@ async fn test_float_anomaly_boolean_value() {
             "score should be inferred as DOUBLE PRECISION, got {:?}", score_col.pg_type
         );
 
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
         let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("items", &schema), None)
             .await.unwrap();
 
@@ -119,7 +119,7 @@ async fn test_null_byte_anomaly() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies_nullbytes.jsonl");
         let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
         let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("people", &schema), None)
             .await.unwrap();
 

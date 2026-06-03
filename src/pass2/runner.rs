@@ -501,7 +501,7 @@ pub async fn run(
     // -------------------------------------------------------------------------
     // Phase D — Constraints: PK (fatal on error), FK (failures → warnings)
     // -------------------------------------------------------------------------
-    let constraint_warnings = add_constraints(client, schemas, pg_schema).await?;
+    let constraint_warnings = add_constraints(pg_url, schemas, pg_schema, parallel, progress_tx.as_ref()).await?;
     if !constraint_warnings.is_empty() {
         eprintln!(
             "WARNING: {} FK constraint(s) could not be applied after import:",

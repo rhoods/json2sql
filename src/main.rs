@@ -394,7 +394,7 @@ async fn run(cli: Cli, disabled_strategies: std::collections::HashSet<schema::st
     // Create tables
     // -------------------------------------------------------------------------
     eprintln!("\nCreating tables in schema '{}'...", cli.schema);
-    db::ddl::create_tables_no_constraints(&client, &pass1.schemas, &cli.schema, cli.drop_existing).await?;
+    db::ddl::create_tables_no_constraints(&client, &pass1.schemas, &cli.schema, cli.drop_existing, None).await?;
 
     // -------------------------------------------------------------------------
     // Pass 2 — Data insertion
