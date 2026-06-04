@@ -25,6 +25,57 @@ pub(crate) struct InsertCtx<'a, S, A> {
     pub(crate) anomalies: &'a mut A,
 }
 
+fn push_data_col<A: AnomalyCollect>(
+    builder: &mut RowBuilder,
+    anomalies: &mut A,
+    schema: &TableSchema,
+    col: &crate::schema::table_schema::ColumnSchema,
+    obj: &serde_json::Map<String, Value>,
+    row_id: Uuid,
+) -> Result<()> {
+    // For columns inlined via Flatten strategy, look up the value in the nested object.
+    let json_val = if let Some(source_field) = schema.flatten_sources.get(col.name.as_str()) {
+        obj.get(source_field.as_str())
+            .and_then(|v| v.as_object())
+            .and_then(|nested| nested.get(col.original_name.as_str()))
+            .unwrap_or(&Value::Null)
+    } else {
+        obj.get(&col.original_name).unwrap_or(&Value::Null)
+    };
+
+    // JSONB columns accept any JSON value — serialize the raw value directly.
+    if matches!(col.pg_type, crate::schema::type_tracker::PgType::Jsonb) {
+        push_jsonb_col(builder, json_val);
+        return Ok(());
+    }
+
+    // Objects and non-array-typed arrays become child tables, not columns.
+    if matches!(json_val, Value::Object(_))
+        || (matches!(json_val, Value::Array(_))
+            && !matches!(col.pg_type, crate::schema::type_tracker::PgType::Array(_)))
+    {
+        builder.push_null();
+        return Ok(());
+    }
+
+    match coerce(json_val, &col.pg_type) {
+        CoerceResult::Ok(s) => builder.push_value(&s),
+        CoerceResult::Null => builder.push_null(),
+        CoerceResult::Anomaly { actual_value, actual_type } => {
+            anomalies.record(
+                &schema.name,
+                &col.name,
+                &row_id.to_string(),
+                &col.pg_type.as_sql(),
+                &actual_value,
+                actual_type,
+            )?;
+            builder.push_null();
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn insert_object<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
@@ -41,53 +92,12 @@ pub(crate) fn insert_object<S: RowSink, A: AnomalyCollect>(
     }
 
     let mut builder = RowBuilder::new();
-
     for col in &schema.columns {
         if col.is_generated {
             push_generated_col_insert(&mut builder, col, row_id, parent_id, order);
             continue;
         }
-
-        // For columns inlined via Flatten strategy, look up the value in the nested object.
-        let json_val = if let Some(source_field) = schema.flatten_sources.get(col.name.as_str()) {
-            obj.get(source_field.as_str())
-                .and_then(|v| v.as_object())
-                .and_then(|nested| nested.get(col.original_name.as_str()))
-                .unwrap_or(&Value::Null)
-        } else {
-            obj.get(&col.original_name).unwrap_or(&Value::Null)
-        };
-
-        // JSONB columns accept any JSON value — serialize the raw value directly.
-        if matches!(col.pg_type, crate::schema::type_tracker::PgType::Jsonb) {
-            push_jsonb_col(&mut builder, json_val);
-            continue;
-        }
-
-        // Objects and non-array-typed arrays become child tables, not columns.
-        if matches!(json_val, Value::Object(_))
-            || (matches!(json_val, Value::Array(_))
-                && !matches!(col.pg_type, crate::schema::type_tracker::PgType::Array(_)))
-        {
-            builder.push_null();
-            continue;
-        }
-
-        match coerce(json_val, &col.pg_type) {
-            CoerceResult::Ok(s) => builder.push_value(&s),
-            CoerceResult::Null => builder.push_null(),
-            CoerceResult::Anomaly { actual_value, actual_type } => {
-                ctx.anomalies.record(
-                    &schema.name,
-                    &col.name,
-                    &row_id.to_string(),
-                    &col.pg_type.as_sql(),
-                    &actual_value,
-                    actual_type,
-                )?;
-                builder.push_null();
-            }
-        }
+        push_data_col(&mut builder, ctx.anomalies, schema, col, obj, row_id)?;
     }
 
     ctx.anomalies.inc_total(&schema.name);

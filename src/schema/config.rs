@@ -205,32 +205,13 @@ pub fn apply_group_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConf
     }
 }
 
-fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, members: &[String]) {
-    let mut indices: Vec<usize> = members
-        .iter()
-        .filter_map(|name| schemas.iter().position(|s| &s.name == name))
-        .collect();
-
-    if indices.len() < 2 {
-        eprintln!(
-            "WARNING: group '{}': {}/{} membre(s) trouvé(s), fusion ignorée",
-            group_name, indices.len(), members.len()
-        );
-        return;
-    }
-    indices.sort_unstable();
-    let insert_pos = indices[0];
-
-    // Cloner les membres avant toute mutation
-    let cloned: Vec<TableSchema> = indices.iter().map(|&i| schemas[i].clone()).collect();
+fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> TableSchema {
     let refs: Vec<&TableSchema> = cloned.iter().collect();
     let first = &cloned[0];
-
     let mut merged =
         TableSchema::new(group_name.to_string(), vec![group_name.to_string()], first.depth);
     merged.parent_table = first.parent_table.clone();
     merged.child_kind = first.child_kind.clone();
-
     merged.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
     if let Some(ref parent) = first.parent_table {
         merged.columns.push(ColumnSchema::parent_fk(parent));
@@ -255,6 +236,28 @@ fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, mem
         array_children: false,
         data_col_name: "j2s_data".to_string(),
     });
+    merged
+}
+
+fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, members: &[String]) {
+    let mut indices: Vec<usize> = members
+        .iter()
+        .filter_map(|name| schemas.iter().position(|s| &s.name == name))
+        .collect();
+
+    if indices.len() < 2 {
+        eprintln!(
+            "WARNING: group '{}': {}/{} membre(s) trouvé(s), fusion ignorée",
+            group_name, indices.len(), members.len()
+        );
+        return;
+    }
+    indices.sort_unstable();
+    let insert_pos = indices[0];
+
+    // Cloner les membres avant toute mutation
+    let cloned: Vec<TableSchema> = indices.iter().map(|&i| schemas[i].clone()).collect();
+    let merged = build_merged_keyed_pivot_schema(group_name, &cloned);
 
     // Retirer les membres du plus grand index au plus petit pour éviter le décalage
     for &i in indices.iter().rev() {

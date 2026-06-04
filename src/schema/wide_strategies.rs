@@ -44,40 +44,43 @@ pub(crate) fn suggest_wide_strategy(entry: &TableEntry) -> WideStrategy {
 }
 
 /// Restructure a schema's data columns to match the given WideStrategy.
+fn apply_pivot_columns(schema: &mut TableSchema) {
+    let value_type = schema
+        .data_columns()
+        .fold(None::<PgType>, |acc, col| {
+            Some(match acc {
+                None => col.pg_type.clone(),
+                Some(a) => widen_pg_types(a, &col.pg_type),
+            })
+        })
+        .unwrap_or(PgType::Text);
+    schema.columns.retain(|c| c.is_generated);
+    schema.columns.push(ColumnSchema {
+        name: "key".to_string(),
+        original_name: "key".to_string(),
+        pg_type: PgType::Text,
+        not_null: true,
+        is_generated: false,
+        is_parent_fk: false,
+    });
+    schema.columns.push(ColumnSchema {
+        name: "value".to_string(),
+        original_name: "value".to_string(),
+        pg_type: value_type,
+        not_null: false,
+        is_generated: false,
+        is_parent_fk: false,
+    });
+    schema.wide_strategy = WideStrategy::Pivot;
+}
+
 /// Replaces all non-generated columns with either (key, value) for Pivot
 /// or (data JSONB) for Jsonb.
 pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: WideStrategy) {
     match strategy {
         WideStrategy::Columns => {} // nothing to restructure
         WideStrategy::Pivot => {
-            // Compute widest value type from existing data columns before clearing
-            let value_type = schema
-                .data_columns()
-                .fold(None::<PgType>, |acc, col| {
-                    Some(match acc {
-                        None => col.pg_type.clone(),
-                        Some(a) => widen_pg_types(a, &col.pg_type),
-                    })
-                })
-                .unwrap_or(PgType::Text);
-            schema.columns.retain(|c| c.is_generated);
-            schema.columns.push(ColumnSchema {
-                name: "key".to_string(),
-                original_name: "key".to_string(),
-                pg_type: PgType::Text,
-                not_null: true,
-                is_generated: false,
-                is_parent_fk: false,
-            });
-            schema.columns.push(ColumnSchema {
-                name: "value".to_string(),
-                original_name: "value".to_string(),
-                pg_type: value_type,
-                not_null: false,
-                is_generated: false,
-                is_parent_fk: false,
-            });
-            schema.wide_strategy = WideStrategy::Pivot;
+            apply_pivot_columns(schema);
         }
         WideStrategy::Jsonb => {
             schema.columns.retain(|c| c.is_generated);
@@ -271,6 +274,40 @@ pub fn apply_normalize_dynamic_keys(
 /// Apply Flatten strategy to a child table: inline its scalar columns into the parent table
 /// with the given prefix. The child table is removed from the schema after inlining.
 ///
+fn collect_flatten_info(
+    schemas: &[TableSchema],
+    child_table_name: &str,
+    prefix: &str,
+) -> Result<(String, String, Vec<ColumnSchema>)> {
+    let child = schemas.iter().find(|s| s.name == child_table_name)
+        .ok_or_else(|| J2sError::Schema(format!("apply_flatten: table '{child_table_name}' not found")))?;
+
+    let parent_name = child.parent_table.clone()
+        .ok_or_else(|| J2sError::Schema(format!(
+            "apply_flatten: '{child_table_name}' is a root table, cannot flatten into parent"
+        )))?;
+
+    // The JSON field name is the last path segment of the child table
+    let field_name = child.path.last()
+        .cloned()
+        .unwrap_or_else(|| child_table_name.to_string());
+
+    // Build prefixed copies of all data columns (max_depth=1: scalars only)
+    let new_cols: Vec<ColumnSchema> = child
+        .data_columns()
+        .map(|col| ColumnSchema {
+            name: format!("{prefix}{}", col.name),
+            original_name: col.original_name.clone(),
+            pg_type: col.pg_type.clone(),
+            not_null: false, // flattened columns are always nullable in parent
+            is_generated: false,
+            is_parent_fk: false,
+        })
+        .collect();
+
+    Ok((parent_name, field_name, new_cols))
+}
+
 /// After this call, `schemas` no longer contains `child_table_name`. The parent table gains
 /// new data columns and a populated `flatten_sources` map for Pass 2 lookups.
 pub fn apply_flatten(
@@ -280,36 +317,7 @@ pub fn apply_flatten(
     max_depth: u8,
 ) -> Result<()> {
     // Collect info before any mutations (avoids borrow conflicts)
-    let (parent_name, field_name, new_cols) = {
-        let child = schemas.iter().find(|s| s.name == child_table_name)
-            .ok_or_else(|| J2sError::Schema(format!("apply_flatten: table '{}' not found", child_table_name)))?;
-
-        let parent_name = child.parent_table.clone()
-            .ok_or_else(|| J2sError::Schema(format!(
-                "apply_flatten: '{}' is a root table, cannot flatten into parent",
-                child_table_name
-            )))?;
-
-        // The JSON field name is the last path segment of the child table
-        let field_name = child.path.last()
-            .cloned()
-            .unwrap_or_else(|| child_table_name.to_string());
-
-        // Build prefixed copies of all data columns (max_depth=1: scalars only)
-        let new_cols: Vec<ColumnSchema> = child
-            .data_columns()
-            .map(|col| ColumnSchema {
-                name: format!("{}{}", prefix, col.name),
-                original_name: col.original_name.clone(),
-                pg_type: col.pg_type.clone(),
-                not_null: false, // flattened columns are always nullable in parent
-                is_generated: false,
-                is_parent_fk: false,
-            })
-            .collect();
-
-        (parent_name, field_name, new_cols)
-    };
+    let (parent_name, field_name, new_cols) = collect_flatten_info(schemas, child_table_name, prefix)?;
 
     // Mark child as Flatten so absorbs_children() returns true for its descendants
     if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {

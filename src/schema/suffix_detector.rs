@@ -18,28 +18,15 @@ const MIN_BASES: usize = 2;
 /// 4. Compute coverage per suffix = |bases with this suffix| / |total base set|.
 /// 5. Retain suffixes with coverage >= `coverage_threshold`.
 ///
-/// Returns `None` if no structural pattern is found above threshold.
-#[must_use]
-pub fn detect_suffix_schema(
-    columns: &IndexMap<String, TypeTracker>,
-    coverage_threshold: f64,
-    _text_threshold: u32,
-) -> Option<SuffixSchema> {
-    let all_keys: Vec<&str> = columns.keys().map(|s| s.as_str()).collect();
-    let key_set: HashSet<&str> = all_keys.iter().copied().collect();
-
-    // Phase 1: build suffix → set_of_bases map
-    // We only split at `_` positions (the natural separator).
+// Phase 1: build suffix → set_of_bases map, splitting only at `_` positions.
+fn build_suffix_to_bases(all_keys: &[&str]) -> HashMap<String, HashSet<String>> {
     let mut suffix_to_bases: HashMap<String, HashSet<String>> = HashMap::new();
-
-    for &key in &all_keys {
-        // Find all `_` positions in the key
+    for &key in all_keys {
         let positions: Vec<usize> = key
             .char_indices()
             .filter(|(_, c)| *c == '_')
             .map(|(i, _)| i)
             .collect();
-
         for &pos in &positions {
             let base = &key[..pos];
             let suffix = &key[pos..]; // includes the leading `_`
@@ -51,6 +38,20 @@ pub fn detect_suffix_schema(
             }
         }
     }
+    suffix_to_bases
+}
+
+/// Returns `None` if no structural pattern is found above threshold.
+#[must_use]
+pub fn detect_suffix_schema(
+    columns: &IndexMap<String, TypeTracker>,
+    coverage_threshold: f64,
+    _text_threshold: u32,
+) -> Option<SuffixSchema> {
+    let all_keys: Vec<&str> = columns.keys().map(|s| s.as_str()).collect();
+    let key_set: HashSet<&str> = all_keys.iter().copied().collect();
+
+    let suffix_to_bases = build_suffix_to_bases(&all_keys);
 
     // Phase 2: filter to candidate suffixes (>= MIN_BASES distinct bases)
     let candidates: Vec<(String, HashSet<String>)> = suffix_to_bases
@@ -141,6 +142,29 @@ fn build_suffix_cols_and_value_type(
 }
 
 /// Build a SuffixSchema from an explicit list of suffix strings.
+fn build_suffix_column(raw_suffix: &str, columns: &IndexMap<String, TypeTracker>) -> SuffixColumn {
+    let suffix = if raw_suffix.starts_with('_') {
+        raw_suffix.to_string()
+    } else {
+        format!("_{raw_suffix}")
+    };
+    let pg_type = columns
+        .iter()
+        .filter(|(key, _)| key.ends_with(suffix.as_str()))
+        .fold(None::<PgType>, |acc, (_, tracker)| {
+            let t = tracker.to_pg_type();
+            Some(match acc {
+                None => t,
+                Some(a) => widen_pg_types(a, &t),
+            })
+        })
+        .unwrap_or(PgType::Text);
+    let stripped = suffix.trim_start_matches('_');
+    let s = sanitize_identifier(stripped);
+    let col_name = if s == "value" { "norm_value".to_string() } else { s };
+    SuffixColumn { suffix, col_name, pg_type }
+}
+
 /// Used when the user declares `suffix_columns` in the TOML config.
 #[must_use]
 pub fn build_suffix_schema_from_list(
@@ -149,51 +173,11 @@ pub fn build_suffix_schema_from_list(
 ) -> SuffixSchema {
     let suffix_cols = suffix_list
         .iter()
-        .map(|suffix| {
-            // Ensure the suffix starts with `_`
-            let suffix = if suffix.starts_with('_') {
-                suffix.clone()
-            } else {
-                format!("_{}", suffix)
-            };
-
-            // Collect all keys ending with this suffix and widen their types
-            let pg_type = columns
-                .iter()
-                .filter(|(key, _)| key.ends_with(suffix.as_str()))
-                .fold(None::<PgType>, |acc, (_, tracker)| {
-                    let t = tracker.to_pg_type();
-                    Some(match acc {
-                        None => t,
-                        Some(a) => widen_pg_types(a, &t),
-                    })
-                })
-                .unwrap_or(PgType::Text);
-
-            let stripped = suffix.trim_start_matches('_');
-            let col_name = {
-                let s = sanitize_identifier(stripped);
-                if s == "value" {
-                    "norm_value".to_string()
-                } else {
-                    s
-                }
-            };
-
-            SuffixColumn {
-                suffix,
-                col_name,
-                pg_type,
-            }
-        })
+        .map(|suffix| build_suffix_column(suffix, columns))
         .collect();
 
     // Base value type from bare keys (keys not ending with any declared suffix)
-    let suffix_strs: HashSet<&str> = suffix_list
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
-
+    let suffix_strs: HashSet<&str> = suffix_list.iter().map(|s| s.as_str()).collect();
     let value_type = columns
         .iter()
         .filter(|(key, _)| !suffix_strs.iter().any(|s| key.ends_with(*s)))
@@ -206,10 +190,7 @@ pub fn build_suffix_schema_from_list(
         })
         .unwrap_or(PgType::Text);
 
-    SuffixSchema {
-        suffix_cols,
-        value_type,
-    }
+    SuffixSchema { suffix_cols, value_type }
 }
 
 // ---------------------------------------------------------------------------

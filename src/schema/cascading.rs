@@ -414,45 +414,59 @@ fn assemble_mixed_collapse(
     }
 }
 
+fn filter_significant_siblings(
+    schemas: &[TableSchema],
+    ctx: &SiblingDetectCtx,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Vec<usize> {
+    let all_pure = ctx.child_indices.iter().all(|&i| schemas[i].data_columns().next().is_none());
+    if all_pure {
+        return ctx.child_indices.clone();
+    }
+    ctx.child_indices
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let name = &schemas[i].name;
+            let is_pure = schemas[i].data_columns().next().is_none();
+            let child_count = obj_map.get(name).map_or(0, |v| v.len())
+                + arr_map.get(name).map_or(0, |v| v.len());
+            !(is_pure && child_count >= ctx.threshold)
+        })
+        .collect()
+}
+
+fn effective_jaccard_for_regular(
+    schemas: &[TableSchema],
+    ctx: &SiblingDetectCtx,
+    regular: &[usize],
+) -> f64 {
+    let data_bearing: Vec<usize> = regular
+        .iter()
+        .copied()
+        .filter(|&i| schemas[i].data_columns().next().is_some())
+        .collect();
+    if data_bearing.len() >= ctx.threshold {
+        pairwise_jaccard_min(schemas, &data_bearing)
+    } else {
+        pairwise_jaccard_min(schemas, regular)
+    }
+}
+
 fn detect_homogeneous_collapse(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
     obj_map: &std::collections::HashMap<String, Vec<usize>>,
     arr_map: &std::collections::HashMap<String, Vec<usize>>,
 ) -> Option<Collapse> {
-    let all_pure = ctx.child_indices.iter().all(|&i| schemas[i].data_columns().next().is_none());
-    let regular: Vec<usize> = if all_pure {
-        ctx.child_indices.clone()
-    } else {
-        ctx.child_indices
-            .iter()
-            .copied()
-            .filter(|&i| {
-                let name = &schemas[i].name;
-                let is_pure = schemas[i].data_columns().next().is_none();
-                let child_count = obj_map.get(name).map_or(0, |v| v.len())
-                    + arr_map.get(name).map_or(0, |v| v.len());
-                !(is_pure && child_count >= ctx.threshold)
-            })
-            .collect()
-    };
+    let regular = filter_significant_siblings(schemas, ctx, obj_map, arr_map);
 
     if regular.len() < ctx.threshold {
         return None;
     }
 
-    let actual_jaccard = {
-        let data_bearing: Vec<usize> = regular
-            .iter()
-            .copied()
-            .filter(|&i| schemas[i].data_columns().next().is_some())
-            .collect();
-        if data_bearing.len() >= ctx.threshold {
-            pairwise_jaccard_min(schemas, &data_bearing)
-        } else {
-            pairwise_jaccard_min(schemas, &regular)
-        }
-    };
+    let actual_jaccard = effective_jaccard_for_regular(schemas, ctx, &regular);
 
     if actual_jaccard < ctx.min_jaccard {
         return try_cluster_fallback(schemas, ctx, &regular);
@@ -817,23 +831,15 @@ fn handle_single_co_sibling(schemas: &mut [TableSchema], group: &CoSiblingGroup)
     }
 }
 
-/// Merge co-siblings into a new synthetic table T and cascade their grandchildren.
-fn merge_co_sibling_group(
-    schemas: &mut Vec<TableSchema>,
+fn build_co_sibling_schema(
     group: &CoSiblingGroup,
-    parent_idx: usize,
-    obj_map: &std::collections::HashMap<String, Vec<usize>>,
-    arr_map: &std::collections::HashMap<String, Vec<usize>>,
-) -> Vec<CoSiblingGroup> {
-    let children_refs: Vec<&TableSchema> = group.sibling_indices.iter().map(|&i| &schemas[i]).collect();
-    let union_cols = build_union_columns(&children_refs);
-
+    parent_depth: usize,
+    parent_path: Vec<String>,
+    parent_name: String,
+    union_cols: Vec<ColumnSchema>,
+) -> (String, TableSchema) {
     let t_name = pg_truncate_name(&format!("{}_{}", group.synthetic_parent_name, group.json_key));
-    let parent_depth = schemas[parent_idx].depth;
-    let parent_path = schemas[parent_idx].path.clone();
-    let parent_name = schemas[parent_idx].name.clone();
-    let fk_col = format!("j2s_{}_id", parent_name);
-
+    let fk_col = format!("j2s_{parent_name}_id");
     let mut cols: Vec<ColumnSchema> = vec![
         ColumnSchema::generated("j2s_id", PgType::Uuid),
         ColumnSchema {
@@ -849,10 +855,8 @@ fn merge_co_sibling_group(
         cols.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
     }
     cols.extend(union_cols);
-
     let mut t_path = parent_path;
     t_path.push(group.json_key.clone());
-
     let t_schema = TableSchema {
         name: t_name.clone(),
         path: t_path,
@@ -864,30 +868,57 @@ fn merge_co_sibling_group(
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
     };
+    (t_name, t_schema)
+}
 
-    schemas[parent_idx].child_routes.insert(group.json_key.clone(), t_name.clone());
-    schemas.push(t_schema);
-
-    // Cascade grandchildren of the co-siblings to the next wave.
+fn cascade_grandchildren_to_next_wave(
+    schemas: &mut [TableSchema],
+    group: &CoSiblingGroup,
+    t_name: &str,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Vec<CoSiblingGroup> {
     let grandchildren = collect_children_by_key(schemas, &group.sibling_indices, obj_map, arr_map);
     let mut next: Vec<CoSiblingGroup> = Vec::new();
     for (json_key, siblings, arr) in grandchildren {
         if siblings.len() >= 2 {
             next.push(CoSiblingGroup {
-                synthetic_parent_name: t_name.clone(),
+                synthetic_parent_name: t_name.to_string(),
                 json_key,
                 sibling_indices: siblings,
                 array_children: arr,
             });
         } else if let Some(&sole_idx) = siblings.first() {
             let child_name = schemas[sole_idx].name.clone();
-            schemas[sole_idx].parent_table = Some(t_name.clone());
+            schemas[sole_idx].parent_table = Some(t_name.to_string());
             let t_pos = schemas.iter().position(|s| s.name == t_name)
                 .expect("t_name was just pushed to schemas");
             schemas[t_pos].child_routes.insert(json_key, child_name);
         }
     }
     next
+}
+
+/// Merge co-siblings into a new synthetic table T and cascade their grandchildren.
+fn merge_co_sibling_group(
+    schemas: &mut Vec<TableSchema>,
+    group: &CoSiblingGroup,
+    parent_idx: usize,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Vec<CoSiblingGroup> {
+    let children_refs: Vec<&TableSchema> = group.sibling_indices.iter().map(|&i| &schemas[i]).collect();
+    let union_cols = build_union_columns(&children_refs);
+
+    let parent_depth = schemas[parent_idx].depth;
+    let parent_path = schemas[parent_idx].path.clone();
+    let parent_name = schemas[parent_idx].name.clone();
+
+    let (t_name, t_schema) = build_co_sibling_schema(group, parent_depth, parent_path, parent_name, union_cols);
+    schemas[parent_idx].child_routes.insert(group.json_key.clone(), t_name.clone());
+    schemas.push(t_schema);
+
+    cascade_grandchildren_to_next_wave(schemas, group, &t_name, obj_map, arr_map)
 }
 
 /// Re-parent each sibling individually to the synthetic parent (Jaccard too low to merge).
@@ -914,6 +945,68 @@ fn reparent_siblings_individually(
 ///
 /// This function detects groups of ≥ `threshold` such orphans with Jaccard ≥ `min_jaccard`,
 /// creates a `{parent}_key` sub-pivot, re-parents the orphans under it, and updates the
+fn process_keyed_pivot_work_item(
+    schemas: &mut [TableSchema],
+    parent_idx: usize,
+    child_indices: &[usize],
+    min_jaccard: f64,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Option<(TableSchema, Vec<CoSiblingGroup>)> {
+    let jaccard = pairwise_jaccard_min(schemas, child_indices);
+    if jaccard < min_jaccard { return None; }
+
+    let parent_name = schemas[parent_idx].name.clone();
+    let parent_path = schemas[parent_idx].path.clone();
+    let parent_depth = schemas[parent_idx].depth;
+
+    let keys: Vec<String> = child_indices
+        .iter()
+        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
+        .collect();
+    let key_shape = classify_key_shape(&keys.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let key_col_name = match &key_shape {
+        KeyShape::Numeric => "key_id".to_string(),
+        KeyShape::IsoLang => "lang_code".to_string(),
+        _ => "key".to_string(),
+    };
+
+    let children_refs: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
+    let union_cols = build_union_columns(&children_refs);
+    let suffix = unique_cluster_suffix(&parent_name, "key", schemas);
+    let sub_pivot_name = format!("{parent_name}_{suffix}");
+    let fk_col = format!("j2s_{parent_name}_id");
+    let sibling_schema = SiblingSchema {
+        key_col_name: key_col_name.clone(),
+        key_shape,
+        array_children: false,
+        data_col_name: "j2s_data".to_string(),
+    };
+    let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
+    let mut sub_path = parent_path;
+    sub_path.push("key".to_string());
+
+    let co_sibs = collect_pivot_co_siblings(schemas, child_indices, &sub_pivot_name, obj_map, arr_map);
+    reparent_and_update_routes(schemas, parent_idx, child_indices, &sub_pivot_name);
+    eprintln!(
+        "  KeyedPivot post-pass: {} ({} orphan tables → sub-pivot {})",
+        parent_name, child_indices.len(), sub_pivot_name
+    );
+
+    let t_schema = TableSchema {
+        name: sub_pivot_name,
+        path: sub_path,
+        parent_table: Some(parent_name),
+        depth: parent_depth + 1,
+        columns: cols,
+        child_kind: Some(ChildKind::Object),
+        wide_strategy: WideStrategy::KeyedPivot(sibling_schema),
+        flatten_sources: std::collections::HashMap::new(),
+        child_routes: std::collections::HashMap::new(),
+    };
+    Some((t_schema, co_sibs))
+}
+
 /// parent's `child_routes` to point to the sub-pivot.  Their own children are returned as
 /// `CoSiblingGroup`s for an additional cascade wave.
 fn run_keyed_pivot_children_wave(
@@ -928,60 +1021,12 @@ fn run_keyed_pivot_children_wave(
     let mut co_siblings: Vec<CoSiblingGroup> = Vec::new();
 
     for (parent_idx, child_indices) in work {
-        let jaccard = pairwise_jaccard_min(schemas, &child_indices);
-        if jaccard < min_jaccard { continue; }
-
-        let parent_name = schemas[parent_idx].name.clone();
-        let parent_path = schemas[parent_idx].path.clone();
-        let parent_depth = schemas[parent_idx].depth;
-
-        let keys: Vec<String> = child_indices
-            .iter()
-            .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
-            .collect();
-        let key_shape = classify_key_shape(&keys.iter().map(|s| s.as_str()).collect::<Vec<_>>());
-        let key_col_name = match &key_shape {
-            KeyShape::Numeric => "key_id".to_string(),
-            KeyShape::IsoLang => "lang_code".to_string(),
-            _ => "key".to_string(),
-        };
-
-        let children_refs: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
-        let union_cols = build_union_columns(&children_refs);
-
-        let suffix = unique_cluster_suffix(&parent_name, "key", schemas);
-        let sub_pivot_name = format!("{}_{}", parent_name, suffix);
-        let fk_col = format!("j2s_{}_id", parent_name);
-        let sibling_schema = SiblingSchema {
-            key_col_name: key_col_name.clone(),
-            key_shape,
-            array_children: false,
-            data_col_name: "j2s_data".to_string(),
-        };
-
-        let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
-        let mut sub_path = parent_path;
-        sub_path.push("key".to_string());
-
-        co_siblings.extend(collect_pivot_co_siblings(schemas, &child_indices, &sub_pivot_name, &obj_map, &arr_map));
-
-        new_schemas.push(TableSchema {
-            name: sub_pivot_name.clone(),
-            path: sub_path,
-            parent_table: Some(parent_name.clone()),
-            depth: parent_depth + 1,
-            columns: cols,
-            child_kind: Some(ChildKind::Object),
-            wide_strategy: WideStrategy::KeyedPivot(sibling_schema),
-            flatten_sources: std::collections::HashMap::new(),
-            child_routes: std::collections::HashMap::new(),
-        });
-
-        reparent_and_update_routes(schemas, parent_idx, &child_indices, &sub_pivot_name);
-        eprintln!(
-            "  KeyedPivot post-pass: {} ({} orphan tables → sub-pivot {})",
-            parent_name, child_indices.len(), sub_pivot_name
-        );
+        if let Some((t_schema, co_sibs)) =
+            process_keyed_pivot_work_item(schemas, parent_idx, &child_indices, min_jaccard, &obj_map, &arr_map)
+        {
+            new_schemas.push(t_schema);
+            co_siblings.extend(co_sibs);
+        }
     }
 
     schemas.append(&mut new_schemas);

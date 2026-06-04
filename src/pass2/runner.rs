@@ -103,6 +103,18 @@ struct WorkerConfig {
     interim_copy_threshold: u64,
 }
 
+impl WorkerConfig {
+    fn new(
+        pg_url: String,
+        progress_tx: Option<ProgressTx>,
+        copy_sem: Arc<tokio::sync::Semaphore>,
+        worker_budget: u64,
+        interim_copy_threshold: u64,
+    ) -> Self {
+        WorkerConfig { pg_url, progress_tx, copy_sem, worker_budget, interim_copy_threshold }
+    }
+}
+
 /// When the worker budget is reached: snapshot large sinks → interim COPY task,
 /// spill small sinks to disk. Called from within the worker loop.
 fn trigger_budget_flush(
@@ -194,6 +206,42 @@ async fn run_worker(
     Ok(copy_handles)
 }
 
+fn unwrap_and_sort_sinks(
+    shared_sinks: HashMap<String, Arc<Mutex<TempFileSink>>>,
+) -> Vec<(String, TempFileSink)> {
+    let mut sinks: Vec<(String, TempFileSink)> = shared_sinks
+        .into_iter()
+        .filter_map(|(name, arc)| {
+            let sink = Arc::try_unwrap(arc).ok()?.into_inner().ok()?;
+            if sink.row_count > 0 || sink.total_flushed > 0 { Some((name, sink)) } else { None }
+        })
+        .collect();
+    sinks.sort_by(|a, b| a.0.cmp(&b.0));
+    sinks
+}
+
+async fn collect_copy_results(
+    copy_handles: Vec<CopyHandle>,
+    interim_rows: HashMap<String, u64>,
+) -> Result<HashMap<String, u64>> {
+    let mut rows_per_table: HashMap<String, u64> = HashMap::new();
+    for handle in copy_handles {
+        match handle.await {
+            Ok(Ok(results)) => {
+                for (name, rows) in results {
+                    *rows_per_table.entry(name).or_insert(0) += rows;
+                }
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(J2sError::InvalidInput(format!("copy task panic: {e}"))),
+        }
+    }
+    for (name, rows) in interim_rows {
+        *rows_per_table.entry(name).or_insert(0) += rows;
+    }
+    Ok(rows_per_table)
+}
+
 /// Phase B: unwrap shared sinks after streaming, distribute round-robin across
 /// `parallel` PG connections, COPY each table, then merge with interim rows.
 async fn phase_copy(
@@ -203,14 +251,7 @@ async fn phase_copy(
     progress_tx: &Option<ProgressTx>,
     interim_rows: HashMap<String, u64>,
 ) -> Result<HashMap<String, u64>> {
-    let mut all_sinks: Vec<(String, TempFileSink)> = shared_sinks
-        .into_iter()
-        .filter_map(|(name, arc)| {
-            let sink = Arc::try_unwrap(arc).ok()?.into_inner().ok()?;
-            if sink.row_count > 0 || sink.total_flushed > 0 { Some((name, sink)) } else { None }
-        })
-        .collect();
-    all_sinks.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut all_sinks = unwrap_and_sort_sinks(shared_sinks);
 
     let mut table_batches: Vec<Vec<(String, Vec<TempFileSink>)>> =
         (0..parallel).map(|_| Vec::new()).collect();
@@ -243,22 +284,7 @@ async fn phase_copy(
         }));
     }
 
-    let mut rows_per_table: HashMap<String, u64> = HashMap::new();
-    for handle in copy_handles {
-        match handle.await {
-            Ok(Ok(results)) => {
-                for (name, rows) in results {
-                    *rows_per_table.entry(name).or_insert(0) += rows;
-                }
-            }
-            Ok(Err(e)) => return Err(e),
-            Err(e) => return Err(J2sError::InvalidInput(format!("copy task panic: {e}"))),
-        }
-    }
-    for (name, rows) in interim_rows {
-        *rows_per_table.entry(name).or_insert(0) += rows;
-    }
-    Ok(rows_per_table)
+    collect_copy_results(copy_handles, interim_rows).await
 }
 
 /// Spawn the blocking anomaly writer task. Returns `(sender, handle)`.
@@ -453,6 +479,28 @@ async fn join_phase_a(
 /// **The caller is responsible for creating tables** (without constraints)
 /// via `db::ddl::create_tables_no_constraints()` before calling this function.
 ///
+fn find_root_schema(schemas: &[TableSchema], root_table: &str, sep: &str) -> Result<TableSchema> {
+    schemas
+        .iter()
+        .find(|s| s.path.join(sep) == root_table)
+        .cloned()
+        .ok_or_else(|| J2sError::Schema(format!("Root table '{root_table}' not found")))
+}
+
+fn build_shared_sinks(
+    schemas: &[TableSchema],
+    pg_schema: &str,
+    temp_dir: Option<&Path>,
+) -> Result<HashMap<String, Arc<Mutex<TempFileSink>>>> {
+    schemas
+        .iter()
+        .map(|s| Ok((
+            s.name.clone(),
+            Arc::new(Mutex::new(TempFileSink::new(s, pg_schema, temp_dir)?)),
+        )))
+        .collect()
+}
+
 /// Internal phases:
 ///   B — N workers (parallel ≥ 1) stream root objects round-robin into
 ///       per-table `TempFileSink` buffers. A dedicated flush task runs
@@ -480,10 +528,7 @@ pub async fn run(
     let sep = PATH_SEP.to_string();
     let path_map: HashMap<String, TableSchema> =
         schemas.iter().map(|s| (s.path.join(&sep), s.clone())).collect();
-    let root_schema = schemas
-        .iter()
-        .find(|s| s.path.join(&sep) == config.root_table.as_str())
-        .ok_or_else(|| J2sError::Schema(format!("Root table '{}' not found", config.root_table)))?;
+    let root_schema = find_root_schema(schemas, &config.root_table, &sep)?;
 
     if let Some(ref dir) = config.anomaly_dir {
         std::fs::create_dir_all(dir).map_err(J2sError::Io)?;
@@ -501,21 +546,8 @@ pub async fn run(
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
     let root_schema_arc: Arc<TableSchema> = Arc::new(root_schema.clone());
     let copy_sem: Arc<tokio::sync::Semaphore> = Arc::new(tokio::sync::Semaphore::new(parallel));
-    let shared_sinks: HashMap<String, Arc<Mutex<TempFileSink>>> = schemas
-        .iter()
-        .map(|s| Ok((
-            s.name.clone(),
-            Arc::new(Mutex::new(TempFileSink::new(s, &config.pg_schema, config.temp_dir.as_deref())?)),
-        )))
-        .collect::<Result<_>>()?;
-
-    let worker_cfg = WorkerConfig {
-        pg_url: pg_url.to_string(),
-        progress_tx: progress_tx.clone(),
-        copy_sem: copy_sem.clone(),
-        worker_budget,
-        interim_copy_threshold,
-    };
+    let shared_sinks = build_shared_sinks(schemas, &config.pg_schema, config.temp_dir.as_deref())?;
+    let worker_cfg = WorkerConfig::new(pg_url.to_string(), progress_tx.clone(), copy_sem.clone(), worker_budget, interim_copy_threshold);
     let (senders, worker_handles) = spawn_pass2_workers(
         parallel, &shared_sinks, &anomaly_tx, path_map_arc, root_schema_arc, cancel, worker_cfg,
     );

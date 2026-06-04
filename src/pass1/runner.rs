@@ -61,7 +61,6 @@ pub fn run(
     } else {
         None
     };
-
     let mut registry = SchemaRegistry::new(
         config.text_threshold,
         config.array_as_pg_array,
@@ -73,7 +72,20 @@ pub fn run(
         config.disabled_strategies.clone(),
     );
     let (mut reader, _format) = JsonReader::open(path)?;
+    let total_rows = scan_json_rows(&mut reader, &mut registry, config, progress.as_ref(), &progress_tx, total_bytes)?;
+    if let Some(ref bar) = progress { bar.finish(); }
+    eprintln!("Pass 1 complete: {} rows, building schema...", total_rows);
+    build_pass1_result(registry, total_rows, progress_tx)
+}
 
+fn scan_json_rows(
+    reader: &mut JsonReader,
+    registry: &mut SchemaRegistry,
+    config: &Pass1Config,
+    progress: Option<&ProgressTracker>,
+    progress_tx: &Option<ProgressTx>,
+    total_bytes: u64,
+) -> Result<u64> {
     let mut total_rows = 0u64;
     // Emit a progress event every 1000 rows to keep the channel lean.
     const PROGRESS_INTERVAL: u64 = 1_000;
@@ -92,12 +104,10 @@ pub fn run(
                 )));
             }
         }
-
-        if let Some(ref bar) = progress {
+        if let Some(bar) = progress {
             bar.inc_rows(1);
             bar.set_bytes(reader.bytes_read());
         }
-
         if let Some(ref tx) = progress_tx {
             if total_rows.is_multiple_of(PROGRESS_INTERVAL) {
                 let _ = tx.send(ProgressEvent::Pass1Progress {
@@ -118,10 +128,7 @@ pub fn run(
             });
         }
     }
-
-    if let Some(ref bar) = progress { bar.finish(); }
-    eprintln!("Pass 1 complete: {} rows, building schema...", total_rows);
-    build_pass1_result(registry, total_rows, progress_tx)
+    Ok(total_rows)
 }
 
 fn build_pass1_result(

@@ -207,6 +207,32 @@ type ConstraintWork = (String, String, Option<String>);
 /// Processes schemas level-by-level (grouped by `depth`): all tables at depth N
 /// are constrained in parallel before moving to depth N+1.  Within each level,
 /// each worker applies PK then FK for its assigned tables on a dedicated connection.
+async fn apply_constraints_chunk(
+    chunk: Vec<ConstraintWork>,
+    db_url: String,
+    done: Arc<AtomicUsize>,
+    total: usize,
+    ptx: Option<ProgressTx>,
+) -> Result<Vec<ConstraintWarning>> {
+    let (client, connection) = tokio_postgres::connect(&db_url, tokio_postgres::NoTls)
+        .await
+        .map_err(|e| J2sError::DbContext(format!("constraints connection: {e}")))?;
+    tokio::spawn(async move { let _ = connection.await; });
+    let mut warnings: Vec<ConstraintWarning> = Vec::new();
+    for (table_name, pk_sql, fk_sql_opt) in &chunk {
+        client.execute(pk_sql.as_str(), &[]).await
+            .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {table_name}"), e))?;
+        constraint_progress(&done, total, &ptx);
+        if let Some(fk_sql) = fk_sql_opt {
+            if let Err(e) = client.execute(fk_sql.as_str(), &[]).await {
+                warnings.push(to_fk_warning(e, table_name));
+            }
+            constraint_progress(&done, total, &ptx);
+        }
+    }
+    Ok(warnings)
+}
+
 ///
 /// PK failures are fatal.  FK failures become warnings.
 pub async fn add_constraints(
@@ -244,31 +270,13 @@ pub async fn add_constraints(
         let chunk_size = work.len().div_ceil(conn_count);
 
         let futures: Vec<_> = work.chunks(chunk_size).map(|chunk| {
-            let chunk: Vec<ConstraintWork> = chunk.to_vec();
-            let db_url = db_url.to_string();
-            let done = Arc::clone(&done);
-            let ptx = ptx.clone();
-            async move {
-                let (client, connection) = tokio_postgres::connect(&db_url, tokio_postgres::NoTls)
-                    .await
-                    .map_err(|e| J2sError::DbContext(format!("constraints connection: {e}")))?;
-                tokio::spawn(async move { let _ = connection.await; });
-
-                let mut warnings: Vec<ConstraintWarning> = Vec::new();
-                for (table_name, pk_sql, fk_sql_opt) in &chunk {
-                    client.execute(pk_sql.as_str(), &[]).await
-                        .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {table_name}"), e))?;
-                    constraint_progress(&done, total, &ptx);
-
-                    if let Some(fk_sql) = fk_sql_opt {
-                        if let Err(e) = client.execute(fk_sql.as_str(), &[]).await {
-                            warnings.push(to_fk_warning(e, table_name));
-                        }
-                        constraint_progress(&done, total, &ptx);
-                    }
-                }
-                Ok::<Vec<ConstraintWarning>, J2sError>(warnings)
-            }
+            apply_constraints_chunk(
+                chunk.to_vec(),
+                db_url.to_string(),
+                Arc::clone(&done),
+                total,
+                ptx.clone(),
+            )
         }).collect();
 
         let results = try_join_all(futures).await?;

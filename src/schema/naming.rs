@@ -237,48 +237,37 @@ impl NamingRegistry {
 /// - Replace non-alphanumeric (except underscore) with underscore
 /// - Collapse consecutive underscores
 /// - Remove leading/trailing underscores
-/// - Prefix with `c_` if starts with a digit
-#[must_use]
-pub fn sanitize_identifier(s: &str) -> String {
-    // Fast path: all-ASCII input covers 99%+ of JSON field names and is ~2× faster
-    // than the Unicode path because it avoids `to_lowercase()` allocation and `chars()`.
-    if s.is_ascii() {
-        let mut result = String::with_capacity(s.len());
-        let mut last_was_underscore = false;
-
-        for b in s.bytes() {
-            match b {
-                b'A'..=b'Z' => {
-                    result.push((b + 32) as char); // ASCII to_lowercase
-                    last_was_underscore = false;
-                }
-                b'a'..=b'z' | b'0'..=b'9' => {
-                    result.push(b as char);
-                    last_was_underscore = false;
-                }
-                b'_' => {
-                    if !last_was_underscore && !result.is_empty() {
-                        result.push('_');
-                        last_was_underscore = true;
-                    }
-                }
-                _ => {
-                    if !last_was_underscore && !result.is_empty() {
-                        result.push('_');
-                        last_was_underscore = true;
-                    }
+// Fast path: all-ASCII input covers 99%+ of JSON field names and is ~2× faster
+// than the Unicode path because it avoids `to_lowercase()` allocation and `chars()`.
+fn sanitize_ascii(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut last_was_underscore = false;
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' => {
+                result.push((b + 32) as char); // ASCII to_lowercase
+                last_was_underscore = false;
+            }
+            b'a'..=b'z' | b'0'..=b'9' => {
+                result.push(b as char);
+                last_was_underscore = false;
+            }
+            _ => {
+                if !last_was_underscore && !result.is_empty() {
+                    result.push('_');
+                    last_was_underscore = true;
                 }
             }
         }
-
-        return finalize_sanitized(result);
     }
+    finalize_sanitized(result)
+}
 
-    // Slow path: Unicode input (e.g. Japanese field names like "ja:カルシウム")
+// Slow path: Unicode input (e.g. Japanese field names like "ja:カルシウム")
+fn sanitize_unicode(s: &str) -> String {
     let lower = s.to_lowercase();
     let mut result = String::with_capacity(lower.len());
     let mut last_was_underscore = false;
-
     for c in lower.chars() {
         if c.is_ascii_alphanumeric() || c == '_' {
             if c == '_' {
@@ -290,15 +279,18 @@ pub fn sanitize_identifier(s: &str) -> String {
                 result.push(c);
                 last_was_underscore = false;
             }
-        } else {
-            if !last_was_underscore && !result.is_empty() {
-                result.push('_');
-                last_was_underscore = true;
-            }
+        } else if !last_was_underscore && !result.is_empty() {
+            result.push('_');
+            last_was_underscore = true;
         }
     }
-
     finalize_sanitized(result)
+}
+
+/// - Prefix with `c_` if starts with a digit
+#[must_use]
+pub fn sanitize_identifier(s: &str) -> String {
+    if s.is_ascii() { sanitize_ascii(s) } else { sanitize_unicode(s) }
 }
 
 fn finalize_sanitized(result: String) -> String {
