@@ -12,7 +12,7 @@ use crate::pass2::sink::RowSink;
 use crate::schema::PATH_SEP;
 use crate::schema::table_schema::{ChildKind, SiblingGroup, SiblingSchema, SuffixSchema, TableSchema, WideStrategy};
 
-use super::insert::insert_object;
+use super::insert::{insert_object, InsertCtx};
 
 /// Insert one row per key-value pair for a Pivot wide table.
 /// Columns: j2s_id, j2s_parent_id, key TEXT, value <type>
@@ -123,8 +123,8 @@ pub(super) fn insert_jsonb_object<S: RowSink>(
                             | WideStrategy::JsonbFlatten => {
                                 let grandchild_id = Uuid::now_v7();
                                 insert_object(
-                                    path_map, sinks, anomalies, child_schema,
-                                    nested, grandchild_id, Some(child_id), None,
+                                    path_map, &mut InsertCtx { sinks, anomalies },
+                                    child_schema, nested, grandchild_id, Some(child_id), None,
                                 )?;
                             }
                         }
@@ -295,7 +295,7 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
                     }
                     _ => {
                         let child_id = Uuid::now_v7();
-                        insert_object(path_map, sinks, anomalies, child_schema, nested, child_id, Some(row_id), None)?;
+                        insert_object(path_map, &mut InsertCtx { sinks, anomalies }, child_schema, nested, child_id, Some(row_id), None)?;
                     }
                 }
             }
@@ -644,8 +644,8 @@ pub(super) fn insert_multi_keyed_pivot<S: RowSink>(
                         _ => {
                             let child_id = Uuid::now_v7();
                             insert_object(
-                                path_map, sinks, anomalies, child_schema,
-                                nested, child_id, Some(routing_id), None,
+                                path_map, &mut InsertCtx { sinks, anomalies },
+                                child_schema, nested, child_id, Some(routing_id), None,
                             )?;
                         }
                     }
@@ -693,8 +693,8 @@ pub(super) fn insert_array<S: RowSink>(
         match (&schema.child_kind, item) {
             (Some(ChildKind::ObjectArray), Value::Object(obj)) => {
                 insert_object(
-                    path_map, sinks, anomalies, schema,
-                    obj, child_id, Some(parent_id), Some(order),
+                    path_map, &mut InsertCtx { sinks, anomalies },
+                    schema, obj, child_id, Some(parent_id), Some(order),
                 )?;
             }
             (Some(ChildKind::ScalarArray), scalar) => {

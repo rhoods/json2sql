@@ -1003,6 +1003,61 @@ fn test_disable_sibling_no_keyed_pivot_integration() {
         "sibling disabled → aucun KeyedPivot dans le schema");
 }
 
+// ---------------------------------------------------------------------------
+// WideStrategy::Jsonb sur la table RACINE (parent_id.is_none()).
+// Chemin spécial dans insert_object : l'objet entier est écrit en JSONB blob,
+// puis la récursion peuple quand même les tables enfant.
+// Fixture : 3 produits avec un objet enfant `attrs`.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_jsonb_strategy_root_table() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("wide_jsonb.jsonl");
+        let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
+
+        assert!(p1.schemas.iter().any(|s| s.name == "products"));
+        assert!(p1.schemas.iter().any(|s| s.name == "products_attrs"));
+
+        let mut schemas = p1.schemas;
+        // Apply Jsonb to the root table — each root object becomes a JSONB blob.
+        apply_wide_strategy_columns(
+            schemas.iter_mut().find(|s| s.name == "products").expect("products not found"),
+            WideStrategy::Jsonb,
+        );
+
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+
+        let p2 = pass2::runner::run(
+            &path, &schemas, &client, &url,
+            &common::pass2_config("products", &schema), None,
+        ).await.unwrap();
+
+        // Root table: 3 rows, each as a JSONB blob.
+        assert_eq!(*p2.rows_per_table.get("products").unwrap_or(&0), 3);
+        assert_eq!(common::row_count(&client, &schema, "products").await, 3);
+
+        // Child table still populated via recursion from the root Jsonb path.
+        assert_eq!(*p2.rows_per_table.get("products_attrs").unwrap_or(&0), 3);
+        assert_eq!(common::row_count(&client, &schema, "products_attrs").await, 3);
+
+        // Root JSONB blob contains the full object — verify via JSONB field access.
+        let rows = client.query(
+            &format!(
+                "SELECT data->>'name' AS name FROM \"{}\".\"products\" ORDER BY data->>'name'",
+                schema
+            ),
+            &[],
+        ).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        let names: Vec<&str> = rows.iter().map(|r| r.get("name")).collect();
+        assert!(names.contains(&"Widget"), "Widget manquant dans JSONB root");
+        assert!(names.contains(&"Gadget"), "Gadget manquant dans JSONB root");
+        assert!(names.contains(&"Doohickey"), "Doohickey manquant dans JSONB root");
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+    }).await;
+}
+
 // disable pivot → WideStrategy::Jsonb au lieu de Pivot pour les tables homogènes.
 // wide_column_threshold=3 : nutrients a 4 colonnes homogènes (int) → Pivot automatique.
 #[test]

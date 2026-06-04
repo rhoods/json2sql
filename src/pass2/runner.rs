@@ -18,7 +18,7 @@ use crate::error::{J2sError, Result};
 use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonReader};
-use crate::pass2::insert::insert_object;
+use crate::pass2::insert::{insert_object, InsertCtx};
 use crate::schema::table_schema::TableSchema;
 
 /// Phase B batch copy handle: one task processes a batch of tables, returns all (table, rows).
@@ -178,7 +178,7 @@ async fn run_worker(
             ))),
         };
 
-        insert_object(&path_map, &mut sinks, &mut proxy, &root_schema, &obj, Uuid::now_v7(), None, None)?;
+        insert_object(&path_map, &mut InsertCtx { sinks: &mut sinks, anomalies: &mut proxy }, &root_schema, &obj, Uuid::now_v7(), None, None)?;
 
         my_bytes += obj_len;
         if my_bytes >= cfg.worker_budget {
