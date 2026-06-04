@@ -9,7 +9,7 @@ Fonctions annotées `#[allow(clippy::too_many_lines/cognitive_complexity)]` — 
 
 | Priorité | Fonction | Lignes | Complexité | Refactoring suggéré |
 |---|---|---|---|---|
-| 🔴 1 | `cascading.rs::run_sibling_wave` | 528 | 57 | Extraire: Jaccard pass, clustering pass, re-parenting pass |
+| ~~🔴 1~~ ✅ | ~~`cascading.rs::run_sibling_wave`~~ | ~~528~~ → ~97 | ~~57~~ → 0 | Livré 2026-06-04 : 7 fonctions extraites + SiblingDetectCtx, `#[allow]` retiré |
 | ~~🔴 2~~ ✅ | ~~`pass2/runner.rs::run`~~ | ~~341~~ → ~90 | ~~42~~ → 0 | Livré 2026-06-04 : 11 fonctions extraites, `#[allow]` retiré |
 | 🔴 3 | `pass2/insert.rs::insert_object` | 235 | 41 | InsertContext struct + sous-fonctions par type JSON |
 | 🟡 4 | `schema/finalizer.rs::build_entry_schema` | 193 | — | FinalizerConfig struct |
@@ -20,6 +20,10 @@ Fonctions annotées `#[allow(clippy::too_many_lines/cognitive_complexity)]` — 
 
 Gate CI : `cargo clippy -- -D warnings -D clippy::too_many_lines -D clippy::cognitive_complexity`
 Chaque `#[allow]` retiré = dette remboursée.
+
+### Fonctions extraites de `cascading.rs::run_sibling_wave` (2026-06-04)
+`SiblingDetectCtx` struct · `build_work_items` · `make_subgroup` · `try_unified_fallback` · `try_cluster_fallback` · `detect_mixed_collapse` · `detect_homogeneous_collapse` · `apply_single_collapse` · `apply_multi_collapse` · `apply_collapses`
+10 nouveaux tests unitaires ajoutés (build_work_items×3, make_subgroup×3, detect_*×4)
 
 ### Fonctions extraites de `pass2/runner.rs::run` (2026-06-04)
 `WorkerConfig` struct · `InterimCopyHandle`/`WorkerHandle` type aliases · `trigger_budget_flush` · `run_worker` · `phase_copy` · `spawn_anomaly_writer` · `preflight_warn_nonempty` · `dispatch_loop` · `join_phase_a` · `finalize_dispatch` · `emit_completion_events` · `log_constraint_warnings`
