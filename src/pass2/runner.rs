@@ -94,6 +94,7 @@ fn validate_run_params(parallel: usize) -> Result<()> {
 }
 
 /// Shared config injected into each streaming worker.
+#[derive(Clone)]
 struct WorkerConfig {
     pg_url: String,
     progress_tx: Option<ProgressTx>,
@@ -508,33 +509,16 @@ pub async fn run(
         )))
         .collect::<Result<_>>()?;
 
-    const CHANNEL_CAP: usize = 256;
-    let mut senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> =
-        Vec::with_capacity(parallel);
-    let mut worker_handles = Vec::with_capacity(parallel);
-
-    for _ in 0..parallel {
-        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CHANNEL_CAP);
-        senders.push(tx);
-        let worker_sinks: HashMap<String, Arc<Mutex<TempFileSink>>> =
-            shared_sinks.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
-        let handle = tokio::task::spawn(run_worker(
-            rx,
-            worker_sinks,
-            anomaly_tx.clone(),
-            path_map_arc.clone(),
-            root_schema_arc.clone(),
-            cancel.clone(),
-            WorkerConfig {
-                pg_url: pg_url.to_string(),
-                progress_tx: progress_tx.clone(),
-                copy_sem: copy_sem.clone(),
-                worker_budget,
-                interim_copy_threshold,
-            },
-        ));
-        worker_handles.push(handle);
-    }
+    let worker_cfg = WorkerConfig {
+        pg_url: pg_url.to_string(),
+        progress_tx: progress_tx.clone(),
+        copy_sem: copy_sem.clone(),
+        worker_budget,
+        interim_copy_threshold,
+    };
+    let (senders, worker_handles) = spawn_pass2_workers(
+        parallel, &shared_sinks, &anomaly_tx, path_map_arc, root_schema_arc, cancel, worker_cfg,
+    );
 
     let stream_start = Instant::now();
     let (rows_processed, worker_died) =
@@ -576,6 +560,33 @@ pub async fn run(
     })
 }
 
+/// Spawn `parallel` async worker tasks, each receiving JSON bytes over an independent channel.
+/// Workers share access to `shared_sinks` via `Arc<Mutex<...>>`.
+fn spawn_pass2_workers(
+    parallel: usize,
+    shared_sinks: &HashMap<String, Arc<Mutex<TempFileSink>>>,
+    anomaly_tx: &tokio::sync::mpsc::UnboundedSender<AnomalyEvent>,
+    path_map_arc: Arc<HashMap<String, TableSchema>>,
+    root_schema_arc: Arc<TableSchema>,
+    cancel: CancellationToken,
+    worker_cfg: WorkerConfig,
+) -> (Vec<tokio::sync::mpsc::Sender<Vec<u8>>>, Vec<WorkerHandle>) {
+    const CHANNEL_CAP: usize = 256;
+    let mut senders = Vec::with_capacity(parallel);
+    let mut handles = Vec::with_capacity(parallel);
+    for _ in 0..parallel {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CHANNEL_CAP);
+        senders.push(tx);
+        let worker_sinks = shared_sinks.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
+        let handle = tokio::task::spawn(run_worker(
+            rx, worker_sinks, anomaly_tx.clone(),
+            path_map_arc.clone(), root_schema_arc.clone(), cancel.clone(),
+            worker_cfg.clone(),
+        ));
+        handles.push(handle);
+    }
+    (senders, handles)
+}
 
 #[cfg(test)]
 mod tests {

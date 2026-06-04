@@ -101,62 +101,43 @@ pub fn detect_suffix_schema(
         return None;
     }
 
-    // Phase 5: build SuffixColumn list with inferred types
+    // Phase 5: build SuffixColumn list + base "value" column type.
+    let (suffix_cols, value_type) = build_suffix_cols_and_value_type(&retained, &base_set, columns);
+    Some(SuffixSchema { suffix_cols, value_type })
+}
+
+/// Build `SuffixColumn` entries and the base `value` column type from retained suffix groups.
+fn build_suffix_cols_and_value_type(
+    retained: &[(String, HashSet<String>)],
+    base_set: &HashSet<String>,
+    columns: &IndexMap<String, TypeTracker>,
+) -> (Vec<SuffixColumn>, PgType) {
     let mut suffix_cols = Vec::new();
-    for (suffix, bases) in &retained {
-        // Aggregate PgType across all keys that end with this suffix
+    for (suffix, bases) in retained {
         let pg_type = bases
             .iter()
-            .filter_map(|base| {
-                let key = format!("{}{}", base, suffix);
-                columns.get(key.as_str())
-            })
+            .filter_map(|base| columns.get(format!("{}{}", base, suffix).as_str()))
             .fold(None::<PgType>, |acc, tracker| {
                 let t = tracker.to_pg_type();
-                Some(match acc {
-                    None => t,
-                    Some(a) => widen_pg_types(a, &t),
-                })
+                Some(match acc { None => t, Some(a) => widen_pg_types(a, &t) })
             })
             .unwrap_or(PgType::Text);
-
-        // Column name = sanitize(suffix without leading `_`)
         let stripped = suffix.trim_start_matches('_');
         let col_name = {
             let s = sanitize_identifier(stripped);
-            // Avoid collision with the base "value" column
-            if s == "value" {
-                "norm_value".to_string()
-            } else {
-                s
-            }
+            if s == "value" { "norm_value".to_string() } else { s }
         };
-
-        suffix_cols.push(SuffixColumn {
-            suffix: suffix.clone(),
-            col_name,
-            pg_type,
-        });
+        suffix_cols.push(SuffixColumn { suffix: suffix.clone(), col_name, pg_type });
     }
-
-    // Compute the type for the base ("value") column
-    // = widen of all TypeTrackers for bare base keys (keys that exist without any suffix)
     let value_type = base_set
         .iter()
         .filter_map(|base| columns.get(base.as_str()))
         .fold(None::<PgType>, |acc, tracker| {
             let t = tracker.to_pg_type();
-            Some(match acc {
-                None => t,
-                Some(a) => widen_pg_types(a, &t),
-            })
+            Some(match acc { None => t, Some(a) => widen_pg_types(a, &t) })
         })
         .unwrap_or(PgType::Text);
-
-    Some(SuffixSchema {
-        suffix_cols,
-        value_type,
-    })
+    (suffix_cols, value_type)
 }
 
 /// Build a SuffixSchema from an explicit list of suffix strings.

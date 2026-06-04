@@ -482,6 +482,16 @@ fn detect_homogeneous_collapse(
     }
 
     // Classic KeyedPivot: pure container parent becomes the pivot.
+    Some(build_classic_keyed_pivot_collapse(schemas, ctx, regular))
+}
+
+/// Build a classic `KeyedPivot` collapse: the pure-container parent absorbs all `regular`
+/// siblings into a single keyed pivot table.
+fn build_classic_keyed_pivot_collapse(
+    schemas: &[TableSchema],
+    ctx: &SiblingDetectCtx,
+    regular: Vec<usize>,
+) -> Collapse {
     let keys: Vec<String> = regular
         .iter()
         .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
@@ -497,7 +507,7 @@ fn detect_homogeneous_collapse(
     let key_examples = keys.iter().take(5).map(|s| s.as_str()).collect::<Vec<_>>().join("\", \"");
     let more = if keys.len() > 5 { format!("\" (+{} more)", keys.len() - 5) } else { "\"".to_string() };
     let kind_label = if ctx.array_children { "ObjectArray" } else { "Object" };
-    Some(Collapse {
+    Collapse {
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
         log_msg: format!(
@@ -512,7 +522,7 @@ fn detect_homogeneous_collapse(
             data_col_name: "j2s_data".to_string(),
         },
         absorbed_indices: regular,
-    })
+    }
 }
 
 fn apply_single_collapse(
@@ -1174,6 +1184,50 @@ fn pg_truncate_name(raw: &str) -> String {
     format!("{}_{}", &raw[..MAX - 8], hash)
 }
 
+/// Build per-sibling column sets for Jaccard computation.
+///
+/// When all siblings are data-bearing, applies a noise filter: columns present in fewer than
+/// `max(2, len/20)` schemas are excluded. Falls back to unfiltered sets if the filter
+/// removes all columns (fully disjoint schemas would otherwise produce a false 1.0 Jaccard).
+fn build_jaccard_col_sets<'a>(
+    schemas: &'a [TableSchema],
+    indices: &[usize],
+    all_data_bearing: bool,
+) -> Vec<std::collections::HashSet<&'a str>> {
+    if !all_data_bearing {
+        return indices
+            .iter()
+            .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
+            .collect();
+    }
+    let min_presence = (indices.len() / 20).max(2);
+    let mut col_freq: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for &i in indices {
+        for col in schemas[i].data_columns() {
+            *col_freq.entry(col.original_name.as_str()).or_default() += 1;
+        }
+    }
+    let filtered: Vec<std::collections::HashSet<&'a str>> = indices
+        .iter()
+        .map(|&i| {
+            schemas[i]
+                .data_columns()
+                .filter(|c| col_freq.get(c.original_name.as_str()).copied().unwrap_or(0) >= min_presence)
+                .map(|c| c.original_name.as_str())
+                .collect()
+        })
+        .collect();
+    // If noise filter emptied every set, fall back to unfiltered to avoid masking divergence.
+    if filtered.iter().all(|s| s.is_empty()) {
+        indices
+            .iter()
+            .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
+            .collect()
+    } else {
+        filtered
+    }
+}
+
 /// Compute the minimum pairwise Jaccard similarity of data-column names across all pairs.
 ///
 /// Two fast paths avoid the O(n²) full pairwise loop for large sibling groups:
@@ -1215,51 +1269,7 @@ pub fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
     // the group is heterogeneous. T1 in finalize_siblings then handles exclusion
     // of significant containers; the Jaccard must not mask that signal.
     let all_data_bearing = indices.iter().all(|&i| schemas[i].data_columns().next().is_some());
-
-    let col_sets: Vec<std::collections::HashSet<&str>> = if all_data_bearing {
-        let min_presence = (indices.len() / 20).max(2);
-        let mut col_freq: std::collections::HashMap<&str, usize> =
-            std::collections::HashMap::new();
-        for &i in indices {
-            for col in schemas[i].data_columns() {
-                *col_freq.entry(col.original_name.as_str()).or_default() += 1;
-            }
-        }
-        let filtered: Vec<std::collections::HashSet<&str>> = indices
-            .iter()
-            .map(|&i| {
-                schemas[i]
-                    .data_columns()
-                    .filter(|c| {
-                        col_freq
-                            .get(c.original_name.as_str())
-                            .copied()
-                            .unwrap_or(0)
-                            >= min_presence
-                    })
-                    .map(|c| c.original_name.as_str())
-                    .collect()
-            })
-            .collect();
-        // If the noise filter removed *all* columns from every sibling (schemas with fully
-        // disjoint column sets each having fewer occurrences than min_presence), the filtered
-        // sets are empty and union = 0 → Jaccard = 1.0, masking the true incompatibility.
-        // Fall back to unfiltered sets so the Jaccard correctly reflects the divergence.
-        if filtered.iter().all(|s| s.is_empty()) {
-            indices
-                .iter()
-                .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
-                .collect()
-        } else {
-            filtered
-        }
-    } else {
-        // Build one HashSet per sibling — O(n·m).
-        indices
-            .iter()
-            .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
-            .collect()
-    };
+    let col_sets = build_jaccard_col_sets(schemas, indices, all_data_bearing);
 
     // Fast path 2: large groups — compare each sibling against sibling[0] in O(n·m).
     const PAIRWISE_LIMIT: usize = 200;

@@ -146,6 +146,32 @@ pub(super) fn insert_jsonb_object<S: RowSink>(
 /// Insert one row per base name for a StructuredPivot wide table.
 /// Columns: j2s_id, j2s_parent_id, name TEXT, value <type>, <suffix cols...>
 ///
+/// Group JSON object keys by their base name: `base → { suffix → &Value }`.
+/// Keys with no matching suffix use an empty string as the suffix key (→ `value` column).
+fn group_keys_by_base<'a>(
+    obj: &'a serde_json::Map<String, Value>,
+    suffix_schema: &SuffixSchema,
+) -> BTreeMap<String, HashMap<String, &'a Value>> {
+    let mut groups: BTreeMap<String, HashMap<String, &'a Value>> = BTreeMap::new();
+    for (key, val) in obj {
+        let matched_suffix = suffix_schema
+            .suffix_cols
+            .iter()
+            .find(|sc| key.len() > sc.suffix.len() && key.ends_with(sc.suffix.as_str()))
+            .map(|sc| sc.suffix.as_str());
+        match matched_suffix {
+            Some(suffix) => {
+                let base = &key[..key.len() - suffix.len()];
+                groups.entry(base.to_string()).or_default().insert(suffix.to_string(), val);
+            }
+            None => {
+                groups.entry(key.clone()).or_default().insert(String::new(), val);
+            }
+        }
+    }
+    groups
+}
+
 /// For each JSON key, we check whether it ends with a known suffix.
 /// Keys that match no suffix are treated as bare base keys (→ `value` column).
 /// All keys sharing the same base are collapsed into a single row.
@@ -157,34 +183,7 @@ pub(super) fn insert_structured_pivot_object<S: RowSink>(
     parent_id: Uuid,
     suffix_schema: &SuffixSchema,
 ) -> Result<()> {
-    // Group keys by base name: base → { "" for bare, "_suffix" for suffix keys }
-    let mut groups: BTreeMap<String, HashMap<String, &Value>> = BTreeMap::new();
-
-    for (key, val) in obj {
-        let mut matched_suffix: Option<&str> = None;
-        for sc in &suffix_schema.suffix_cols {
-            if key.len() > sc.suffix.len() && key.ends_with(sc.suffix.as_str()) {
-                matched_suffix = Some(sc.suffix.as_str());
-                break;
-            }
-        }
-        match matched_suffix {
-            Some(suffix) => {
-                let base = &key[..key.len() - suffix.len()];
-                groups
-                    .entry(base.to_string())
-                    .or_default()
-                    .insert(suffix.to_string(), val);
-            }
-            None => {
-                // bare base key — goes into the "value" column
-                groups
-                    .entry(key.clone())
-                    .or_default()
-                    .insert(String::new(), val);
-            }
-        }
-    }
+    let groups = group_keys_by_base(obj, suffix_schema);
 
     for (base, suffix_vals) in groups {
         let child_id = Uuid::now_v7();
