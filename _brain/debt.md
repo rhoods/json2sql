@@ -10,7 +10,7 @@ Fonctions annotées `#[allow(clippy::too_many_lines/cognitive_complexity)]` — 
 | Priorité | Fonction | Lignes | Complexité | Refactoring suggéré |
 |---|---|---|---|---|
 | 🔴 1 | `cascading.rs::run_sibling_wave` | 528 | 57 | Extraire: Jaccard pass, clustering pass, re-parenting pass |
-| 🔴 2 | `pass2/runner.rs::run` | 341 | 42 | Extraire: phase_stream(), phase_copy(), phase_constraints() |
+| ~~🔴 2~~ ✅ | ~~`pass2/runner.rs::run`~~ | ~~341~~ → ~90 | ~~42~~ → 0 | Livré 2026-06-04 : 11 fonctions extraites, `#[allow]` retiré |
 | 🔴 3 | `pass2/insert.rs::insert_object` | 235 | 41 | InsertContext struct + sous-fonctions par type JSON |
 | 🟡 4 | `schema/finalizer.rs::build_entry_schema` | 193 | — | FinalizerConfig struct |
 | 🟡 5 | `schema/config.rs::apply_overrides` | 145 | — | Sub-handlers par type d'override |
@@ -20,6 +20,9 @@ Fonctions annotées `#[allow(clippy::too_many_lines/cognitive_complexity)]` — 
 
 Gate CI : `cargo clippy -- -D warnings -D clippy::too_many_lines -D clippy::cognitive_complexity`
 Chaque `#[allow]` retiré = dette remboursée.
+
+### Fonctions extraites de `pass2/runner.rs::run` (2026-06-04)
+`WorkerConfig` struct · `InterimCopyHandle`/`WorkerHandle` type aliases · `trigger_budget_flush` · `run_worker` · `phase_copy` · `spawn_anomaly_writer` · `preflight_warn_nonempty` · `dispatch_loop` · `join_phase_a` · `finalize_dispatch` · `emit_completion_events` · `log_constraint_warnings`
 
 ## Améliorations futures
 - IHM Leptos bancale — à consolider (visualisation du schéma)

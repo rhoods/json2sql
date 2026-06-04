@@ -225,7 +225,7 @@ pub async fn add_constraints(
     let fk_count = schemas.iter().filter(|s| s.parent_table.is_some()).count();
     let total = schemas.len() + fk_count;
     let done = Arc::new(AtomicUsize::new(0));
-    let ptx: Option<ProgressTx> = progress_tx.map(|t| t.clone());
+    let ptx: Option<ProgressTx> = progress_tx.cloned();
 
     emit(progress_tx, ProgressEvent::ConstraintsStart { table_count: schemas.len() });
 
