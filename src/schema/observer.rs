@@ -113,50 +113,9 @@ impl SchemaObserver {
                         stack.push((child_key, nested));
                     }
                     Value::Array(arr) => {
-                        if arr.is_empty() {
-                            continue;
-                        }
-                        let child_key = format!("{}{}{}", path_key, PATH_SEP, field);
-                        let first_is_object = arr.iter().any(|v| matches!(v, Value::Object(_)));
-
-                        if first_is_object {
-                            self.ensure_table_key(&child_key, &path_key, Some(ChildKind::ObjectArray));
-                            let mut objs: Vec<&serde_json::Map<String, Value>> = arr
-                                .iter()
-                                .filter_map(|v| if let Value::Object(o) = v { Some(o) } else { None })
-                                .collect();
-                            if let Some(last) = objs.pop() {
-                                for obj in objs {
-                                    stack.push((child_key.clone(), obj));
-                                }
-                                stack.push((child_key, last));
-                            }
-                        } else if self.array_as_pg_array {
-                            let threshold = self.text_threshold;
-                            let entry = self.tables.get_mut(&path_key).expect("invariant: path_key was popped from stack, must exist in tables");
-                            if let Some(tracker) = entry.array_columns.get_mut(field.as_str()) {
-                                for item in arr {
-                                    tracker.observe(item);
-                                }
-                            } else {
-                                let tracker = entry
-                                    .array_columns
-                                    .entry(field.to_string())
-                                    .or_insert_with(|| TypeTracker::new(threshold));
-                                for item in arr {
-                                    tracker.observe(item);
-                                }
-                            }
-                        } else {
-                            self.ensure_table_key(&child_key, &path_key, Some(ChildKind::ScalarArray));
-                            let threshold = self.text_threshold;
-                            let entry = self.tables.get_mut(&child_key).expect("invariant: child_key just inserted by ensure_table_key");
-                            let tracker = entry
-                                .scalar_tracker
-                                .get_or_insert_with(|| TypeTracker::new(threshold));
-                            for item in arr {
-                                tracker.observe(item);
-                            }
+                        if !arr.is_empty() {
+                            let child_key = format!("{}{}{}", path_key, PATH_SEP, field);
+                            self.observe_array_field(&mut stack, &path_key, field, arr, &child_key);
                         }
                     }
                     scalar => {
@@ -168,6 +127,39 @@ impl SchemaObserver {
                     }
                 }
             }
+        }
+    }
+
+    fn observe_array_field<'s>(
+        &mut self,
+        stack: &mut Vec<(String, &'s serde_json::Map<String, Value>)>,
+        path_key: &str,
+        field: &str,
+        arr: &'s [Value],
+        child_key: &str,
+    ) {
+        let first_is_object = arr.iter().any(|v| matches!(v, Value::Object(_)));
+        if first_is_object {
+            self.ensure_table_key(child_key, path_key, Some(ChildKind::ObjectArray));
+            let mut objs: Vec<&serde_json::Map<String, Value>> = arr
+                .iter()
+                .filter_map(|v| if let Value::Object(o) = v { Some(o) } else { None })
+                .collect();
+            if let Some(last) = objs.pop() {
+                for obj in objs { stack.push((child_key.to_string(), obj)); }
+                stack.push((child_key.to_string(), last));
+            }
+        } else if self.array_as_pg_array {
+            let threshold = self.text_threshold;
+            let entry = self.tables.get_mut(path_key).expect("invariant: path_key was popped from stack, must exist in tables");
+            let tracker = entry.array_columns.entry(field.to_string()).or_insert_with(|| TypeTracker::new(threshold));
+            for item in arr { tracker.observe(item); }
+        } else {
+            self.ensure_table_key(child_key, path_key, Some(ChildKind::ScalarArray));
+            let threshold = self.text_threshold;
+            let entry = self.tables.get_mut(child_key).expect("invariant: child_key just inserted by ensure_table_key");
+            let tracker = entry.scalar_tracker.get_or_insert_with(|| TypeTracker::new(threshold));
+            for item in arr { tracker.observe(item); }
         }
     }
 

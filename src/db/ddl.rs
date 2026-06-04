@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 use futures_util::future::try_join_all;
 use tokio_postgres::Client;
@@ -258,28 +258,13 @@ pub async fn add_constraints(
                 for (table_name, pk_sql, fk_sql_opt) in &chunk {
                     client.execute(pk_sql.as_str(), &[]).await
                         .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {table_name}"), e))?;
-                    let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-                    if let Some(ref t) = ptx {
-                        let _ = t.send(ProgressEvent::ConstraintsProgress { done: d, total });
-                    }
+                    constraint_progress(&done, total, &ptx);
 
                     if let Some(fk_sql) = fk_sql_opt {
                         if let Err(e) = client.execute(fk_sql.as_str(), &[]).await {
-                            let detail = if let Some(db) = e.as_db_error() {
-                                format!("{} (code: {})", db.message(), db.code().code())
-                            } else {
-                                e.to_string()
-                            };
-                            warnings.push(ConstraintWarning {
-                                table: table_name.clone(),
-                                constraint_type: ConstraintKind::ForeignKey,
-                                message: detail,
-                            });
+                            warnings.push(to_fk_warning(e, table_name));
                         }
-                        let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Some(ref t) = ptx {
-                            let _ = t.send(ProgressEvent::ConstraintsProgress { done: d, total });
-                        }
+                        constraint_progress(&done, total, &ptx);
                     }
                 }
                 Ok::<Vec<ConstraintWarning>, J2sError>(warnings)
@@ -292,6 +277,22 @@ pub async fn add_constraints(
 
     emit(progress_tx, ProgressEvent::ConstraintsDone);
     Ok(all_warnings)
+}
+
+fn constraint_progress(done: &std::sync::atomic::AtomicUsize, total: usize, ptx: &Option<ProgressTx>) {
+    let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if let Some(ref t) = ptx {
+        let _ = t.send(ProgressEvent::ConstraintsProgress { done: d, total });
+    }
+}
+
+fn to_fk_warning(e: tokio_postgres::Error, table: &str) -> ConstraintWarning {
+    let detail = if let Some(db) = e.as_db_error() {
+        format!("{} (code: {})", db.message(), db.code().code())
+    } else {
+        e.to_string()
+    };
+    ConstraintWarning { table: table.to_string(), constraint_type: ConstraintKind::ForeignKey, message: detail }
 }
 
 /// Generate a human-readable DDL preview for a single schema, including the FK constraint inline.

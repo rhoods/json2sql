@@ -271,14 +271,7 @@ pub fn sanitize_identifier(s: &str) -> String {
             }
         }
 
-        let result = result.trim_end_matches('_').to_string();
-        if result.is_empty() {
-            return "col".to_string();
-        }
-        if result.as_bytes()[0].is_ascii_digit() {
-            return format!("c_{}", result);
-        }
-        return result;
+        return finalize_sanitized(result);
     }
 
     // Slow path: Unicode input (e.g. Japanese field names like "ja:カルシウム")
@@ -305,11 +298,13 @@ pub fn sanitize_identifier(s: &str) -> String {
         }
     }
 
+    finalize_sanitized(result)
+}
+
+fn finalize_sanitized(result: String) -> String {
     let result = result.trim_end_matches('_').to_string();
-    if result.is_empty() {
-        return "col".to_string();
-    }
-    if result.starts_with(|c: char| c.is_ascii_digit()) {
+    if result.is_empty() { return "col".to_string(); }
+    if result.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
         return format!("c_{}", result);
     }
     result

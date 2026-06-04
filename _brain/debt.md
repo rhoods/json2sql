@@ -19,31 +19,8 @@ Fonctions annotées `#[allow(clippy::too_many_lines/cognitive_complexity)]` — 
 | ~~🟢 8~~ ✅ | ~~`pass1/runner.rs::run_parallel`~~ | ~~123~~ | — | Livré 2026-06-04 : spawn_worker_threads + read_and_dispatch + join_and_merge_workers |
 
 Gate CI : `cargo clippy -- -D warnings -D clippy::too_many_lines -D clippy::cognitive_complexity`
-Seuil actuel : **80 lignes** (abaissé depuis 100 le 2026-06-04).
-Prochain palier : **60 lignes** — 16 violations identifiées (voir tableau ci-dessous).
-
-## Dette Complexité — palier 60 lignes (identifié 2026-06-04)
-
-Violations détectées en abaissant `too-many-lines-threshold` à 60. Non bloquantes (seuil CI = 80).
-
-| Fichier | Fonction | Lignes |
-|---|---|---|
-| `src/db/ddl.rs:212` | — | 67 |
-| `src/pass1/runner.rs:52` | `run` | 72 |
-| `src/pass2/insert.rs:28` | — | 73 |
-| `src/pass2/runner.rs:463` | `run` | 76 |
-| `src/pass2/traversal.rs:62` | — | 71 |
-| `src/pass2/traversal.rs:178` | `insert_structured_pivot_object` | 63 |
-| `src/pass2/traversal.rs:319` | — | 64 |
-| `src/pass2/traversal.rs:415` | — | 70 |
-| `src/pass2/traversal.rs:591` | — | 65 |
-| `src/schema/cascading.rs:331` | `detect_mixed_collapse` | 65 |
-| `src/schema/cascading.rs:671` | `run_sibling_wave` | 78 |
-| `src/schema/cascading.rs:909` | `merge_co_sibling_group` | 66 |
-| `src/schema/cascading.rs:1346` | `build_keyed_pivot_from_siblings` | 72 |
-| `src/schema/finalizer.rs:298` | `apply_autosplit_strategy` | 76 |
-| `src/schema/naming.rs:242` | — | 65 |
-| `src/schema/observer.rs:97` | — | 70 |
+Seuil actuel : **60 lignes** (abaissé depuis 80 le 2026-06-04).
+Prochain palier : à définir.
 
 ### Fonctions extraites de `cascading.rs::run_sibling_wave` (2026-06-04)
 `SiblingDetectCtx` struct · `build_work_items` · `make_subgroup` · `try_unified_fallback` · `try_cluster_fallback` · `detect_mixed_collapse` · `detect_homogeneous_collapse` · `apply_single_collapse` · `apply_multi_collapse` · `apply_collapses`
@@ -57,7 +34,6 @@ Violations détectées en abaissant `too-many-lines-threshold` à 60. Non bloqua
 `WorkerConfig` struct · `InterimCopyHandle`/`WorkerHandle` type aliases · `trigger_budget_flush` · `run_worker` · `phase_copy` · `spawn_anomaly_writer` · `preflight_warn_nonempty` · `dispatch_loop` · `join_phase_a` · `finalize_dispatch` · `emit_completion_events` · `log_constraint_warnings`
 
 ## Améliorations futures
-- IHM Leptos bancale — à consolider (visualisation du schéma)
 - Log des flush périodiques (`flush tablename (N rows)`)
 - Double barre progression ImportScreen (Phase A streaming / Phase B COPY) — voir ux-todo.md
 

@@ -44,21 +44,7 @@ pub(crate) fn insert_object<S: RowSink, A: AnomalyCollect>(
 
     for col in &schema.columns {
         if col.is_generated {
-            if col.is_parent_fk {
-                match parent_id {
-                    Some(pid) => builder.push_uuid(pid),
-                    None => builder.push_null(),
-                }
-            } else {
-                match col.name.as_str() {
-                    "j2s_id" => builder.push_uuid(row_id),
-                    "j2s_order" => match order {
-                        Some(ord) => builder.push_value(&CopyEscaped::from_safe_ascii(ord.to_string())),
-                        None => builder.push_null(),
-                    },
-                    _ => builder.push_null(),
-                }
-            }
+            push_generated_col_insert(&mut builder, col, row_id, parent_id, order);
             continue;
         }
 
@@ -74,15 +60,7 @@ pub(crate) fn insert_object<S: RowSink, A: AnomalyCollect>(
 
         // JSONB columns accept any JSON value — serialize the raw value directly.
         if matches!(col.pg_type, crate::schema::type_tracker::PgType::Jsonb) {
-            if matches!(json_val, Value::Null) {
-                builder.push_null();
-            } else {
-                let json_str = serde_json::to_string(json_val).unwrap_or_default();
-                match escape_copy_text(&json_str) {
-                    Some(escaped) => builder.push_value(&escaped),
-                    None => builder.push_null(),
-                }
-            }
+            push_jsonb_col(&mut builder, json_val);
             continue;
         }
 
@@ -120,6 +98,36 @@ pub(crate) fn insert_object<S: RowSink, A: AnomalyCollect>(
     write_autosplit_rows(path_map, ctx, schema, obj, row_id)?;
     recurse_children(path_map, ctx, schema, obj, row_id)?;
     Ok(())
+}
+
+fn push_generated_col_insert(
+    builder: &mut RowBuilder,
+    col: &crate::schema::table_schema::ColumnSchema,
+    row_id: Uuid,
+    parent_id: Option<Uuid>,
+    order: Option<i64>,
+) {
+    if col.is_parent_fk {
+        match parent_id { Some(pid) => builder.push_uuid(pid), None => builder.push_null() }
+    } else {
+        match col.name.as_str() {
+            "j2s_id" => builder.push_uuid(row_id),
+            "j2s_order" => match order {
+                Some(ord) => builder.push_value(&CopyEscaped::from_safe_ascii(ord.to_string())),
+                None => builder.push_null(),
+            },
+            _ => builder.push_null(),
+        }
+    }
+}
+
+fn push_jsonb_col(builder: &mut RowBuilder, json_val: &Value) {
+    if matches!(json_val, Value::Null) { builder.push_null(); return; }
+    let json_str = serde_json::to_string(json_val).unwrap_or_default();
+    match escape_copy_text(&json_str) {
+        Some(escaped) => builder.push_value(&escaped),
+        None => builder.push_null(),
+    }
 }
 
 /// Write the full object as a JSONB blob for a root table with Jsonb strategy,

@@ -174,7 +174,7 @@ fn build_entry_schema(
     }
 
     let local_collisions = build_data_columns(&mut schema, entry, &pg_name);
-    let extra_schema = apply_wide_strategy(&mut schema, entry, config, tables_with_object_children, depth);
+    let extra_schema = apply_wide_strategy(&mut schema, entry, config, tables_with_object_children);
     (schema, extra_schema, local_collisions)
 }
 
@@ -238,7 +238,6 @@ fn apply_wide_strategy(
     entry: &TableEntry,
     config: &FinalizerConfig,
     tables_with_object_children: &std::collections::HashSet<String>,
-    depth: usize,
 ) -> Option<TableSchema> {
     let is_wide_eligible = matches!(entry.child_kind, Some(ChildKind::Object) | None);
     let data_col_count = schema.data_columns().count();
@@ -268,7 +267,7 @@ fn apply_wide_strategy(
     }
 
     if is_root && has_object_children {
-        return Some(apply_autosplit_strategy(schema, entry, config, row_count, data_col_count, ratio_stable, depth));
+        return Some(apply_autosplit_strategy(schema, entry, config, row_count, data_col_count, ratio_stable));
     }
 
     let suffix_schema = if config.disable_structured_pivot {
@@ -302,7 +301,6 @@ fn apply_autosplit_strategy(
     row_count: f64,
     data_col_count: usize,
     ratio_stable: f64,
-    depth: usize,
 ) -> TableSchema {
     let medium_keys: std::collections::HashSet<String> = entry
         .columns
@@ -358,36 +356,36 @@ fn apply_autosplit_strategy(
         })
         .unwrap_or(PgType::Text);
 
-    let mut wide_schema = TableSchema::new(wide_name.clone(), vec![wide_name.clone()], depth + 1);
+    build_wide_pivot_schema(schema, wide_name, value_type, medium_keys, config)
+}
+
+fn build_wide_pivot_schema(
+    schema: &mut TableSchema,
+    wide_name: String,
+    value_type: PgType,
+    medium_keys: std::collections::HashSet<String>,
+    config: &FinalizerConfig,
+) -> TableSchema {
+    let mut wide_schema = TableSchema::new(wide_name.clone(), vec![wide_name.clone()], schema.depth + 1);
     wide_schema.parent_table = Some(schema.name.clone());
     wide_schema.child_kind = Some(ChildKind::Object);
     wide_schema.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
     wide_schema.columns.push(ColumnSchema::parent_fk(&schema.name));
     wide_schema.columns.push(ColumnSchema {
-        name: "key".to_string(),
-        original_name: "key".to_string(),
-        pg_type: PgType::Text,
-        not_null: true,
-        is_generated: false,
-        is_parent_fk: false,
+        name: "key".to_string(), original_name: "key".to_string(),
+        pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false,
     });
     wide_schema.columns.push(ColumnSchema {
-        name: "value".to_string(),
-        original_name: "value".to_string(),
-        pg_type: value_type,
-        not_null: false,
-        is_generated: false,
-        is_parent_fk: false,
+        name: "value".to_string(), original_name: "value".to_string(),
+        pg_type: value_type, not_null: false, is_generated: false, is_parent_fk: false,
     });
     wide_schema.wide_strategy = WideStrategy::Pivot;
-
     schema.wide_strategy = WideStrategy::AutoSplit {
         stable_threshold: config.stable_threshold,
         rare_threshold: config.rare_threshold,
         medium_keys,
         wide_table_name: wide_name,
     };
-
     wide_schema
 }
 

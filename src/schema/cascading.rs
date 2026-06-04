@@ -373,6 +373,17 @@ fn detect_mixed_collapse(
         return None;
     }
 
+    Some(assemble_mixed_collapse(schemas, ctx, num_ok, non_ok, &non_num_regular, &non_num_clusters))
+}
+
+fn assemble_mixed_collapse(
+    schemas: &[TableSchema],
+    ctx: &SiblingDetectCtx,
+    num_ok: bool,
+    non_ok: bool,
+    non_num_regular: &[usize],
+    non_num_clusters: &[Vec<usize>],
+) -> Collapse {
     let mut groups: Vec<SubgroupData> = Vec::new();
     let mut all_absorbed: Vec<usize> = Vec::new();
     if num_ok {
@@ -380,23 +391,18 @@ fn detect_mixed_collapse(
         groups.push(make_subgroup(schemas, &ctx.parent_name, &ctx.numeric_idx, true, "num"));
     }
     if non_ok {
-        all_absorbed.extend_from_slice(&non_num_regular);
-        groups.push(make_subgroup(schemas, &ctx.parent_name, &non_num_regular, false, "key"));
+        all_absorbed.extend_from_slice(non_num_regular);
+        groups.push(make_subgroup(schemas, &ctx.parent_name, non_num_regular, false, "key"));
     }
     for (i, cluster) in non_num_clusters.iter().enumerate() {
         let prefix = siblings_key_prefix(schemas, cluster);
-        let desired = if prefix.is_empty() {
-            format!("cluster_{}", i)
-        } else {
-            format!("{}_key", prefix)
-        };
+        let desired = if prefix.is_empty() { format!("cluster_{}", i) } else { format!("{}_key", prefix) };
         let suffix = unique_cluster_suffix(&ctx.parent_name, &desired, schemas);
         all_absorbed.extend_from_slice(cluster);
         groups.push(make_subgroup(schemas, &ctx.parent_name, cluster, false, &suffix));
     }
-
     let kind_label = if ctx.array_children { "ObjectArray" } else { "Object" };
-    Some(Collapse {
+    Collapse {
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
         log_msg: format!(
@@ -405,7 +411,7 @@ fn detect_mixed_collapse(
         ),
         kind: CollapseKind::Multi { groups },
         absorbed_indices: all_absorbed,
-    })
+    }
 }
 
 fn detect_homogeneous_collapse(
@@ -668,6 +674,48 @@ fn make_subgroup(
     }
 }
 
+/// Build the `SiblingDetectCtx` for one work item, filtering AutoSplit companions.
+/// Returns `None` if effective children fall below `threshold` after filtering.
+fn build_sibling_ctx(
+    schemas: &[TableSchema],
+    parent_name: String,
+    parent_idx: usize,
+    child_indices: &[usize],
+    array_children: bool,
+    threshold: usize,
+    min_jaccard: f64,
+) -> Option<(SiblingDetectCtx, bool)> {
+    let effective: Vec<usize> =
+        if matches!(schemas[parent_idx].wide_strategy, WideStrategy::AutoSplit { .. }) {
+            let filtered: Vec<usize> = child_indices.iter().copied()
+                .filter(|&i| !matches!(schemas[i].wide_strategy, WideStrategy::Pivot))
+                .collect();
+            if filtered.len() < threshold { return None; }
+            filtered
+        } else {
+            child_indices.to_vec()
+        };
+    let (numeric_idx, non_numeric_idx): (Vec<usize>, Vec<usize>) =
+        effective.iter().partition(|&&i| {
+            schemas[i].path.last()
+                .map(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or(false)
+        });
+    let is_mixed = !numeric_idx.is_empty() && !non_numeric_idx.is_empty();
+    let ctx = SiblingDetectCtx {
+        parent_name,
+        parent_idx,
+        child_indices: effective,
+        array_children,
+        threshold,
+        min_jaccard,
+        parent_has_data: schemas[parent_idx].data_columns().next().is_some(),
+        numeric_idx,
+        non_numeric_idx,
+    };
+    Some((ctx, is_mixed))
+}
+
 fn run_sibling_wave(
     schemas: &mut Vec<TableSchema>,
     threshold: usize,
@@ -714,54 +762,16 @@ fn run_sibling_wave(
             continue;
         }
 
-        // For AutoSplit parents, filter out the companion _wide table (WideStrategy::Pivot).
-        let wide_filtered: Vec<usize>;
-        let effective_children: &[usize] =
-            if matches!(schemas[parent_idx].wide_strategy, WideStrategy::AutoSplit { .. }) {
-                wide_filtered = child_indices
-                    .iter()
-                    .copied()
-                    .filter(|&i| !matches!(schemas[i].wide_strategy, WideStrategy::Pivot))
-                    .collect();
-                if wide_filtered.len() < threshold {
-                    continue;
-                }
-                &wide_filtered
-            } else {
-                child_indices
-            };
-
-        let (numeric_idx, non_numeric_idx): (Vec<usize>, Vec<usize>) =
-            effective_children.iter().partition(|&&i| {
-                schemas[i]
-                    .path
-                    .last()
-                    .map(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()))
-                    .unwrap_or(false)
-            });
-        let is_mixed = !numeric_idx.is_empty() && !non_numeric_idx.is_empty();
-
-        let ctx = SiblingDetectCtx {
-            parent_name: parent_name.clone(),
-            parent_idx,
-            child_indices: effective_children.to_vec(),
-            array_children: *array_children,
-            threshold,
-            min_jaccard,
-            parent_has_data: schemas[parent_idx].data_columns().next().is_some(),
-            numeric_idx,
-            non_numeric_idx,
-        };
+        let Some((ctx, is_mixed)) = build_sibling_ctx(
+            schemas, parent_name.clone(), parent_idx, child_indices, *array_children, threshold, min_jaccard,
+        ) else { continue; };
 
         let collapse = if is_mixed {
             detect_mixed_collapse(schemas, &ctx, &parent_to_object_children, &parent_to_array_children)
         } else {
             detect_homogeneous_collapse(schemas, &ctx, &parent_to_object_children, &parent_to_array_children)
         };
-
-        if let Some(c) = collapse {
-            collapses.push(c);
-        }
+        if let Some(c) = collapse { collapses.push(c); }
     }
 
     apply_collapses(schemas, collapses, &name_to_idx, &parent_to_object_children, &parent_to_array_children)
@@ -953,20 +963,7 @@ fn run_keyed_pivot_children_wave(
         let mut sub_path = parent_path;
         sub_path.push("key".to_string());
 
-        // Collect co-siblings from absorbed children for the next cascade wave.
-        let children_by_key = collect_children_by_key(schemas, &child_indices, &obj_map, &arr_map);
-        for (json_key, siblings, arr) in children_by_key {
-            if siblings.len() >= 2 {
-                co_siblings.push(CoSiblingGroup {
-                    synthetic_parent_name: sub_pivot_name.clone(),
-                    json_key,
-                    sibling_indices: siblings,
-                    array_children: arr,
-                });
-            } else if let Some(&sole_idx) = siblings.first() {
-                schemas[sole_idx].parent_table = Some(sub_pivot_name.clone());
-            }
-        }
+        co_siblings.extend(collect_pivot_co_siblings(schemas, &child_indices, &sub_pivot_name, &obj_map, &arr_map));
 
         new_schemas.push(TableSchema {
             name: sub_pivot_name.clone(),
@@ -989,6 +986,30 @@ fn run_keyed_pivot_children_wave(
 
     schemas.append(&mut new_schemas);
     co_siblings
+}
+
+fn collect_pivot_co_siblings(
+    schemas: &mut [TableSchema],
+    child_indices: &[usize],
+    sub_pivot_name: &str,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Vec<CoSiblingGroup> {
+    let children_by_key = collect_children_by_key(schemas, child_indices, obj_map, arr_map);
+    let mut result = Vec::new();
+    for (json_key, siblings, arr) in children_by_key {
+        if siblings.len() >= 2 {
+            result.push(CoSiblingGroup {
+                synthetic_parent_name: sub_pivot_name.to_string(),
+                json_key,
+                sibling_indices: siblings,
+                array_children: arr,
+            });
+        } else if let Some(&sole_idx) = siblings.first() {
+            schemas[sole_idx].parent_table = Some(sub_pivot_name.to_string());
+        }
+    }
+    result
 }
 
 /// Collect (parent_idx, sorted_child_indices) for KeyedPivot parents with enough Columns children.
@@ -1348,8 +1369,6 @@ pub fn build_keyed_pivot_from_siblings(
     indices: &[usize],
     key_col_name: &str,
 ) -> Result<MergeResult, MergeError> {
-    use super::table_schema::SiblingGroup;
-
     if indices.len() < 2 {
         return Err(MergeError::TooFewTables(indices.len()));
     }
@@ -1382,43 +1401,7 @@ pub fn build_keyed_pivot_from_siblings(
     let has_non_numeric = is_numeric.iter().any(|&b| !b);
 
     let strategy = if has_numeric && has_non_numeric {
-        let mut numeric_names: Vec<String> = Vec::new();
-        let mut non_numeric_names: Vec<String> = Vec::new();
-        let mut numeric_keys: Vec<&str> = Vec::new();
-        let mut non_numeric_keys: Vec<&str> = Vec::new();
-        for (i, &num) in is_numeric.iter().enumerate() {
-            if num {
-                numeric_names.push(names[i].to_string());
-                numeric_keys.push(key_refs[i]);
-            } else {
-                non_numeric_names.push(names[i].to_string());
-                non_numeric_keys.push(key_refs[i]);
-            }
-        }
-        WideStrategy::MultiKeyedPivot(vec![
-            SiblingGroup {
-                pivot_table: pg_truncate_name(&format!("{}_{}_num", parent_name, key_col_name)),
-                key_is_numeric: true,
-                sibling_schema: SiblingSchema {
-                    key_col_name: key_col_name.to_string(),
-                    key_shape: classify_key_shape(&numeric_keys),
-                    array_children: false,
-                    data_col_name: "j2s_data".to_string(),
-                },
-                absorbed_names: numeric_names,
-            },
-            SiblingGroup {
-                pivot_table: pg_truncate_name(&format!("{}_{}_txt", parent_name, key_col_name)),
-                key_is_numeric: false,
-                sibling_schema: SiblingSchema {
-                    key_col_name: key_col_name.to_string(),
-                    key_shape: classify_key_shape(&non_numeric_keys),
-                    array_children: false,
-                    data_col_name: "j2s_data".to_string(),
-                },
-                absorbed_names: non_numeric_names,
-            },
-        ])
+        build_mixed_keyed_pivot_strategy(parent_name, key_col_name, &names, &key_refs, &is_numeric)
     } else {
         WideStrategy::KeyedPivot(SiblingSchema {
             key_col_name: key_col_name.to_string(),
@@ -1429,6 +1412,48 @@ pub fn build_keyed_pivot_from_siblings(
     };
 
     Ok(MergeResult { parent_name: parent_name.to_string(), strategy, absorbed_names })
+}
+
+fn build_mixed_keyed_pivot_strategy(
+    parent_name: &str,
+    key_col_name: &str,
+    names: &[&str],
+    key_refs: &[&str],
+    is_numeric: &[bool],
+) -> WideStrategy {
+    use super::table_schema::SiblingGroup;
+    let mut numeric_names: Vec<String> = Vec::new();
+    let mut non_numeric_names: Vec<String> = Vec::new();
+    let mut numeric_keys: Vec<&str> = Vec::new();
+    let mut non_numeric_keys: Vec<&str> = Vec::new();
+    for (i, &num) in is_numeric.iter().enumerate() {
+        if num { numeric_names.push(names[i].to_string()); numeric_keys.push(key_refs[i]); }
+        else { non_numeric_names.push(names[i].to_string()); non_numeric_keys.push(key_refs[i]); }
+    }
+    WideStrategy::MultiKeyedPivot(vec![
+        SiblingGroup {
+            pivot_table: pg_truncate_name(&format!("{}_{}_num", parent_name, key_col_name)),
+            key_is_numeric: true,
+            sibling_schema: SiblingSchema {
+                key_col_name: key_col_name.to_string(),
+                key_shape: classify_key_shape(&numeric_keys),
+                array_children: false,
+                data_col_name: "j2s_data".to_string(),
+            },
+            absorbed_names: numeric_names,
+        },
+        SiblingGroup {
+            pivot_table: pg_truncate_name(&format!("{}_{}_txt", parent_name, key_col_name)),
+            key_is_numeric: false,
+            sibling_schema: SiblingSchema {
+                key_col_name: key_col_name.to_string(),
+                key_shape: classify_key_shape(&non_numeric_keys),
+                array_children: false,
+                data_col_name: "j2s_data".to_string(),
+            },
+            absorbed_names: non_numeric_names,
+        },
+    ])
 }
 
 fn extract_key_suffixes(names: &[&str]) -> Vec<String> {

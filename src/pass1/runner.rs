@@ -119,25 +119,27 @@ pub fn run(
         }
     }
 
-    if let Some(ref bar) = progress {
-        bar.finish();
-    }
+    if let Some(ref bar) = progress { bar.finish(); }
     eprintln!("Pass 1 complete: {} rows, building schema...", total_rows);
+    build_pass1_result(registry, total_rows, progress_tx)
+}
 
+fn build_pass1_result(
+    mut registry: SchemaRegistry,
+    total_rows: u64,
+    progress_tx: Option<ProgressTx>,
+) -> Result<Pass1Result> {
     let mut schemas = registry.finalize();
     let overflow_warnings = apply_column_limit_guard(&mut schemas);
     let stats = registry.collect_stats();
     let truncated_names = registry.truncated_names().to_vec();
     let column_collisions = registry.column_collisions().to_vec();
-
     let tables_count = schemas.len();
     let columns_count = schemas.iter().map(|s| s.columns.len()).sum::<usize>();
     eprintln!("Schema: {} tables, {} total columns", tables_count, columns_count);
-
     if let Some(ref tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
     }
-
     Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings })
 }
 

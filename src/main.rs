@@ -42,8 +42,6 @@ fn run_inspect(
     sample_output: Option<&std::path::Path>,
     output: Option<&std::path::Path>,
 ) -> Result<()> {
-    use std::io::Write;
-
     eprintln!("Inspecting '{}' (limit: {} objects)...", path.display(), limit);
     let result = pass1::runner::run_inspect(
         path,
@@ -62,59 +60,48 @@ fn run_inspect(
         limit,
     )?;
 
-    eprintln!(
-        "\nScanned {} object(s) → {} table(s) detected\n",
-        result.rows_scanned,
-        result.schemas.len()
-    );
+    eprintln!("\nScanned {} object(s) → {} table(s) detected\n", result.rows_scanned, result.schemas.len());
+    write_inspect_outputs(&result, output, sample_output)
+}
 
-    // Schema output: file if --output provided, stdout otherwise.
+fn write_inspect_outputs(
+    result: &pass1::runner::InspectResult,
+    output: Option<&std::path::Path>,
+    sample_output: Option<&std::path::Path>,
+) -> Result<()> {
+    use std::io::Write;
     let mut schema_out: Box<dyn Write> = match output {
         Some(p) => Box::new(std::io::BufWriter::new(
             std::fs::File::create(p).map_err(error::J2sError::Io)?
         )),
         None => Box::new(std::io::stdout()),
     };
-
     for schema in &result.schemas {
         let data_cols: Vec<_> = schema.data_columns().collect();
-        writeln!(schema_out, "┌─ {} ({} columns)", schema.name, data_cols.len())
-            .map_err(error::J2sError::Io)?;
+        writeln!(schema_out, "┌─ {} ({} columns)", schema.name, data_cols.len()).map_err(error::J2sError::Io)?;
         if let Some(ref parent) = schema.parent_table {
             writeln!(schema_out, "│  parent: {}", parent).map_err(error::J2sError::Io)?;
         }
         for col in &data_cols {
-            writeln!(schema_out, "│  {:30} {}", col.name, col.pg_type.as_sql())
-                .map_err(error::J2sError::Io)?;
+            writeln!(schema_out, "│  {:30} {}", col.name, col.pg_type.as_sql()).map_err(error::J2sError::Io)?;
         }
         writeln!(schema_out).map_err(error::J2sError::Io)?;
     }
-
-    if let Some(p) = output {
-        eprintln!("Schema written → {}", p.display());
-    }
-
+    if let Some(p) = output { eprintln!("Schema written → {}", p.display()); }
     if result.anomaly_count > 0 {
         eprintln!("⚠ {} column(s) with mixed types detected (re-run with --schema-report for details)", result.anomaly_count);
     } else {
         eprintln!("✓ No type anomalies detected");
     }
-
     if let Some(out_path) = sample_output {
         let file = std::fs::File::create(out_path).map_err(error::J2sError::Io)?;
         let mut writer = std::io::BufWriter::new(file);
         for obj in &result.sampled_objects {
-            serde_json::to_writer(&mut writer, obj)
-                .map_err(|e| error::J2sError::Json { source: e, position: 0 })?;
+            serde_json::to_writer(&mut writer, obj).map_err(|e| error::J2sError::Json { source: e, position: 0 })?;
             writeln!(writer).map_err(error::J2sError::Io)?;
         }
-        eprintln!(
-            "Sample written: {} objects → {}",
-            result.sampled_objects.len(),
-            out_path.display()
-        );
+        eprintln!("Sample written: {} objects → {}", result.sampled_objects.len(), out_path.display());
     }
-
     Ok(())
 }
 

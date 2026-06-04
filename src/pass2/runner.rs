@@ -529,7 +529,7 @@ pub async fn run(
     let streaming_ms = stream_start.elapsed().as_millis() as u64;
     eprintln!("Pass 2 streaming done ({parallel} workers). Flushing remaining rows to PostgreSQL...");
 
-    let (mut merged_anomalies, interim_rows) =
+    let (merged_anomalies, interim_rows) =
         join_phase_a(worker_handles, anomaly_tx, anomaly_writer_handle, worker_died).await?;
 
     // Phase B — COPY remaining data to PG.
@@ -540,23 +540,28 @@ pub async fn run(
     let constraint_warnings = add_constraints(pg_url, schemas, &config.pg_schema, parallel, progress_tx.as_ref()).await?;
     log_constraint_warnings(&constraint_warnings, &progress_tx);
 
+    build_pass2_result(merged_anomalies, rows_per_table, constraint_warnings, progress_tx, copy_start, streaming_ms)
+}
+
+fn build_pass2_result(
+    mut merged_anomalies: AnomalyCollector,
+    rows_per_table: HashMap<String, u64>,
+    constraint_warnings: Vec<ConstraintWarning>,
+    progress_tx: Option<ProgressTx>,
+    copy_start: Instant,
+    streaming_ms: u64,
+) -> Result<Pass2Result> {
     if let Some(ref tx) = progress_tx {
         emit_completion_events(tx, &merged_anomalies, &rows_per_table, &constraint_warnings);
     }
     merged_anomalies.finish()?;
     let copy_ms = copy_start.elapsed().as_millis() as u64;
-    eprintln!(
-        "Pass 2 timing: streaming={streaming_ms}ms, copy={copy_ms}ms, total={}ms",
-        streaming_ms + copy_ms
-    );
+    eprintln!("Pass 2 timing: streaming={streaming_ms}ms, copy={copy_ms}ms, total={}ms", streaming_ms + copy_ms);
     Ok(Pass2Result {
         rows_per_table,
         anomaly_collector: merged_anomalies,
         constraint_warnings,
-        timing: Pass2Timing {
-            streaming_ms,
-            copy_ms,
-        },
+        timing: Pass2Timing { streaming_ms, copy_ms },
     })
 }
 
