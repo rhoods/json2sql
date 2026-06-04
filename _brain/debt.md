@@ -12,14 +12,38 @@ Fonctions annotées `#[allow(clippy::too_many_lines/cognitive_complexity)]` — 
 | ~~🔴 1~~ ✅ | ~~`cascading.rs::run_sibling_wave`~~ | ~~528~~ → ~97 | ~~57~~ → 0 | Livré 2026-06-04 : 7 fonctions extraites + SiblingDetectCtx, `#[allow]` retiré |
 | ~~🔴 2~~ ✅ | ~~`pass2/runner.rs::run`~~ | ~~341~~ → ~90 | ~~42~~ → 0 | Livré 2026-06-04 : 11 fonctions extraites, `#[allow]` retiré |
 | ~~🔴 3~~ ✅ | ~~`pass2/insert.rs::insert_object`~~ | ~~235~~ → ~110 | ~~41~~ → 0 | Livré 2026-06-04 : InsertCtx<S,A> struct + 4 fonctions extraites, `#[allow]` retiré |
-| 🟡 4 | `schema/finalizer.rs::build_entry_schema` | 193 | — | FinalizerConfig struct |
-| 🟡 5 | `schema/config.rs::apply_overrides` | 145 | — | Sub-handlers par type d'override |
-| 🟡 6 | `cascading.rs::run_keyed_pivot_children_wave` | 134 | — | Extraction pivot logic |
-| 🟢 7 | `cascading.rs::process_co_sibling_group` | 107 | — | Extraction absorption logic |
-| 🟢 8 | `pass1/runner.rs::run_parallel` | 123 | — | Extraction worker setup |
+| ~~🟡 4~~ ✅ | ~~`schema/finalizer.rs::build_entry_schema`~~ | ~~193~~ | — | Livré 2026-06-04 : FinalizerConfig + build_data_columns + apply_wide_strategy + apply_autosplit_strategy |
+| ~~🟡 5~~ ✅ | ~~`schema/config.rs::apply_overrides`~~ | ~~145~~ | — | Livré 2026-06-04 : apply_strategy_override + apply_suffix_columns_override + apply_column_type_overrides |
+| ~~🟡 6~~ ✅ | ~~`cascading.rs::run_keyed_pivot_children_wave`~~ | ~~134~~ | — | Livré 2026-06-04 : collect_keyed_pivot_work_items + build_sub_pivot_columns + reparent_and_update_routes |
+| ~~🟢 7~~ ✅ | ~~`cascading.rs::process_co_sibling_group`~~ | ~~107~~ | — | Livré 2026-06-04 : handle_single_co_sibling + merge_co_sibling_group + reparent_siblings_individually |
+| ~~🟢 8~~ ✅ | ~~`pass1/runner.rs::run_parallel`~~ | ~~123~~ | — | Livré 2026-06-04 : spawn_worker_threads + read_and_dispatch + join_and_merge_workers |
 
 Gate CI : `cargo clippy -- -D warnings -D clippy::too_many_lines -D clippy::cognitive_complexity`
-Chaque `#[allow]` retiré = dette remboursée.
+Seuil actuel : **80 lignes** (abaissé depuis 100 le 2026-06-04).
+Prochain palier : **60 lignes** — 16 violations identifiées (voir tableau ci-dessous).
+
+## Dette Complexité — palier 60 lignes (identifié 2026-06-04)
+
+Violations détectées en abaissant `too-many-lines-threshold` à 60. Non bloquantes (seuil CI = 80).
+
+| Fichier | Fonction | Lignes |
+|---|---|---|
+| `src/db/ddl.rs:212` | — | 67 |
+| `src/pass1/runner.rs:52` | `run` | 72 |
+| `src/pass2/insert.rs:28` | — | 73 |
+| `src/pass2/runner.rs:463` | `run` | 76 |
+| `src/pass2/traversal.rs:62` | — | 71 |
+| `src/pass2/traversal.rs:178` | `insert_structured_pivot_object` | 63 |
+| `src/pass2/traversal.rs:319` | — | 64 |
+| `src/pass2/traversal.rs:415` | — | 70 |
+| `src/pass2/traversal.rs:591` | — | 65 |
+| `src/schema/cascading.rs:331` | `detect_mixed_collapse` | 65 |
+| `src/schema/cascading.rs:671` | `run_sibling_wave` | 78 |
+| `src/schema/cascading.rs:909` | `merge_co_sibling_group` | 66 |
+| `src/schema/cascading.rs:1346` | `build_keyed_pivot_from_siblings` | 72 |
+| `src/schema/finalizer.rs:298` | `apply_autosplit_strategy` | 76 |
+| `src/schema/naming.rs:242` | — | 65 |
+| `src/schema/observer.rs:97` | — | 70 |
 
 ### Fonctions extraites de `cascading.rs::run_sibling_wave` (2026-06-04)
 `SiblingDetectCtx` struct · `build_work_items` · `make_subgroup` · `try_unified_fallback` · `try_cluster_fallback` · `detect_mixed_collapse` · `detect_homogeneous_collapse` · `apply_single_collapse` · `apply_multi_collapse` · `apply_collapses`
