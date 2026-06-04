@@ -61,24 +61,20 @@ impl SchemaFinalizer {
 
         let disable_pivot = self.disabled_strategies.contains(&StrategyName::Pivot);
         let disable_structured_pivot = self.disabled_strategies.contains(&StrategyName::StructuredPivot);
+        let config = FinalizerConfig {
+            wide_column_threshold: self.wide_column_threshold,
+            stable_threshold: self.stable_threshold,
+            rare_threshold: self.rare_threshold,
+            text_threshold,
+            disable_pivot,
+            disable_structured_pivot,
+        };
 
         // Build schemas in parallel — each entry is independent after pre-registration.
         let entries: Vec<&TableEntry> = tables.values().collect();
         let results: Vec<(TableSchema, Option<TableSchema>, Vec<ColumnCollision>)> = entries
             .par_iter()
-            .map(|entry| {
-                build_entry_schema(
-                    entry,
-                    naming,
-                    &tables_with_object_children,
-                    self.wide_column_threshold,
-                    self.stable_threshold,
-                    self.rare_threshold,
-                    text_threshold,
-                    disable_pivot,
-                    disable_structured_pivot,
-                )
-            })
+            .map(|entry| build_entry_schema(entry, naming, &tables_with_object_children, &config))
             .collect();
 
         let mut schemas: Vec<TableSchema> = Vec::with_capacity(results.len());
@@ -123,21 +119,23 @@ impl SchemaFinalizer {
     }
 }
 
-/// Build the `TableSchema` for a single `TableEntry`.
-///
-/// Pure function — no access to `SchemaRegistry` state. Called in parallel via rayon.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-// debt: 193L/9-args — candidate for FinalizerConfig struct + sub-functions
-fn build_entry_schema(
-    entry: &TableEntry,
-    naming: &NamingRegistry,
-    tables_with_object_children: &std::collections::HashSet<String>,
+struct FinalizerConfig {
     wide_column_threshold: usize,
     stable_threshold: f64,
     rare_threshold: f64,
     text_threshold: u32,
     disable_pivot: bool,
     disable_structured_pivot: bool,
+}
+
+/// Build the `TableSchema` for a single `TableEntry`.
+///
+/// Pure function — no access to `SchemaRegistry` state. Called in parallel via rayon.
+fn build_entry_schema(
+    entry: &TableEntry,
+    naming: &NamingRegistry,
+    tables_with_object_children: &std::collections::HashSet<String>,
+    config: &FinalizerConfig,
 ) -> (TableSchema, Option<TableSchema>, Vec<ColumnCollision>) {
     let pg_name = naming.table_name_lookup_from_dot_key(&entry.path_key);
     let depth = entry.path.len().saturating_sub(1);
@@ -151,7 +149,6 @@ fn build_entry_schema(
     schema.parent_table = parent_table;
     schema.child_kind = entry.child_kind.clone();
 
-    // Generated columns first
     schema.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
     if let Some(ref p) = schema.parent_table {
         schema.columns.push(ColumnSchema::parent_fk(p));
@@ -159,9 +156,6 @@ fn build_entry_schema(
     if schema.has_order_column() {
         schema.columns.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
     }
-
-    let mut extra_schema: Option<TableSchema> = None;
-    let mut local_collisions: Vec<ColumnCollision> = Vec::new();
 
     // Junction tables have a single `value` column
     if schema.is_junction() {
@@ -176,195 +170,225 @@ fn build_entry_schema(
                 is_parent_fk: false,
             });
         }
-    } else {
-        let row_count = entry.row_count.max(1) as f64;
-
-        // Build per-table column name registry to detect and resolve collisions
-        let mut col_registry = ColumnNameRegistry::new();
-        for (original_field, tracker) in &entry.columns {
-            if !tracker.is_object_field() && !tracker.is_array_field() {
-                col_registry.register(original_field);
-            }
-        }
-        for original_field in entry.array_columns.keys() {
-            col_registry.register(original_field);
-        }
-        col_registry.build(&pg_name);
-        local_collisions.extend_from_slice(col_registry.collisions());
-
-        // Regular data columns
-        for (original_field, tracker) in &entry.columns {
-            if tracker.is_object_field() || tracker.is_array_field() {
-                continue;
-            }
-            let col_name = col_registry.resolve(original_field);
-            schema.columns.push(ColumnSchema {
-                name: col_name,
-                original_name: original_field.clone(),
-                pg_type: tracker.to_pg_type(),
-                not_null: tracker.is_not_null(),
-                is_generated: false,
-                is_parent_fk: false,
-            });
-        }
-
-        // Array-as-column fields (array_as_pg_array mode)
-        for (original_field, elem_tracker) in &entry.array_columns {
-            let elem_type = elem_tracker.to_pg_type();
-            let col_name = col_registry.resolve(original_field);
-            schema.columns.push(ColumnSchema {
-                name: col_name,
-                original_name: original_field.clone(),
-                pg_type: PgType::Array(Box::new(elem_type)),
-                not_null: false,
-                is_generated: false,
-                is_parent_fk: false,
-            });
-        }
-
-        // Apply wide strategy if data column count exceeds threshold.
-        // Only eligible for direct Object children (not ObjectArray/ScalarArray)
-        // whose keys are dynamic and variable.
-        let is_wide_eligible = matches!(entry.child_kind, Some(ChildKind::Object) | None);
-        let data_col_count = schema.data_columns().count();
-        if is_wide_eligible && data_col_count > wide_column_threshold {
-            let is_root = entry.parent_key.is_empty();
-            let has_object_children = tables_with_object_children.contains(&entry.path_key);
-
-            // Compute ratio of "stable" keys (present in >= stable_threshold of rows).
-            let stable_count = entry
-                .columns
-                .values()
-                .filter(|t| !t.is_object_field() && !t.is_array_field())
-                .filter(|t| t.total_count as f64 / row_count >= stable_threshold)
-                .count();
-            let ratio_stable = stable_count as f64 / data_col_count as f64;
-
-            if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && entry.row_count >= 10 {
-                eprintln!(
-                    "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: Columns \
-                    (high stable ratio — legitimate schema, not key explosion)",
-                    schema.name, data_col_count, ratio_stable * 100.0
-                );
-            } else if is_root && has_object_children {
-                // P5: classify keys by frequency.
-                let medium_keys: std::collections::HashSet<String> = entry
-                    .columns
-                    .iter()
-                    .filter(|(_, t)| !t.is_object_field() && !t.is_array_field())
-                    .filter(|(_, t)| {
-                        let freq = t.total_count as f64 / row_count;
-                        freq >= rare_threshold && freq < stable_threshold
-                    })
-                    .map(|(k, _)| k.clone())
-                    .collect();
-
-                // Drop medium and rare columns from main schema.
-                schema.columns.retain(|c| {
-                    if c.is_generated {
-                        return true;
-                    }
-                    entry
-                        .columns
-                        .get(&c.original_name)
-                        .map(|t| t.total_count as f64 / row_count >= stable_threshold)
-                        .unwrap_or(false)
-                });
-
-                let stable_col_count = schema.data_columns().count();
-                let rare_count = data_col_count
-                    .saturating_sub(stable_col_count)
-                    .saturating_sub(medium_keys.len());
-                // Build the companion table name. Strip any existing `_wide` suffix first
-                // to avoid `foo_wide_wide`. If the result still collides with the main
-                // table name (e.g. main table is itself named `foo_wide`), fall back to `_eav`.
-                let base_name = schema.name.strip_suffix("_wide").unwrap_or(&schema.name);
-                let wide_candidate = format!("{}_wide", base_name);
-                let wide_name = if wide_candidate == schema.name {
-                    format!("{}_eav", base_name)
-                } else {
-                    wide_candidate
-                };
-
-                eprintln!(
-                    "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: AutoSplit \
-                    ({} stable cols, {} medium → {}, {} rare dropped)",
-                    schema.name, data_col_count, ratio_stable * 100.0,
-                    stable_col_count, medium_keys.len(), wide_name, rare_count,
-                );
-
-                // Compute widened value type from medium keys for the _wide table.
-                let value_type = medium_keys
-                    .iter()
-                    .filter_map(|k| entry.columns.get(k))
-                    .fold(None::<PgType>, |acc, t| {
-                        Some(match acc {
-                            None => t.to_pg_type(),
-                            Some(a) => widen_pg_types(a, &t.to_pg_type()),
-                        })
-                    })
-                    .unwrap_or(PgType::Text);
-
-                // Build the synthetic _wide companion table (EAV Pivot, child of main).
-                let mut wide_schema = TableSchema::new(
-                    wide_name.clone(),
-                    vec![wide_name.clone()],
-                    depth + 1,
-                );
-                wide_schema.parent_table = Some(schema.name.clone());
-                wide_schema.child_kind = Some(ChildKind::Object);
-                wide_schema.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
-                wide_schema.columns.push(ColumnSchema::parent_fk(&schema.name));
-                wide_schema.columns.push(ColumnSchema {
-                    name: "key".to_string(),
-                    original_name: "key".to_string(),
-                    pg_type: PgType::Text,
-                    not_null: true,
-                    is_generated: false,
-                    is_parent_fk: false,
-                });
-                wide_schema.columns.push(ColumnSchema {
-                    name: "value".to_string(),
-                    original_name: "value".to_string(),
-                    pg_type: value_type,
-                    not_null: false,
-                    is_generated: false,
-                    is_parent_fk: false,
-                });
-                wide_schema.wide_strategy = WideStrategy::Pivot;
-                extra_schema = Some(wide_schema);
-
-                schema.wide_strategy = WideStrategy::AutoSplit {
-                    stable_threshold,
-                    rare_threshold,
-                    medium_keys,
-                    wide_table_name: wide_name,
-                };
-            } else {
-                let suffix_schema = if disable_structured_pivot {
-                    None
-                } else {
-                    detect_suffix_schema(&entry.columns, SUFFIX_MIN_COVERAGE, text_threshold)
-                };
-                if let Some(suffix_schema) = suffix_schema {
-                    eprintln!(
-                        "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: StructuredPivot ({} suffixes)",
-                        schema.name, data_col_count, ratio_stable * 100.0, suffix_schema.suffix_cols.len()
-                    );
-                    apply_structured_pivot_columns(&mut schema, suffix_schema);
-                } else {
-                    let strategy = if disable_pivot { WideStrategy::Jsonb } else { suggest_wide_strategy(entry) };
-                    eprintln!(
-                        "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: {:?}",
-                        schema.name, data_col_count, ratio_stable * 100.0, strategy
-                    );
-                    apply_wide_strategy_columns(&mut schema, strategy);
-                }
-            }
-        }
+        return (schema, None, Vec::new());
     }
 
+    let local_collisions = build_data_columns(&mut schema, entry, &pg_name);
+    let extra_schema = apply_wide_strategy(&mut schema, entry, config, tables_with_object_children, depth);
     (schema, extra_schema, local_collisions)
+}
+
+/// Build regular data columns and array-as-column fields into `schema`.
+///
+/// Returns column collisions detected during name registration.
+fn build_data_columns(
+    schema: &mut TableSchema,
+    entry: &TableEntry,
+    pg_name: &str,
+) -> Vec<ColumnCollision> {
+    let mut col_registry = ColumnNameRegistry::new();
+    for (original_field, tracker) in &entry.columns {
+        if !tracker.is_object_field() && !tracker.is_array_field() {
+            col_registry.register(original_field);
+        }
+    }
+    for original_field in entry.array_columns.keys() {
+        col_registry.register(original_field);
+    }
+    col_registry.build(pg_name);
+    let local_collisions = col_registry.collisions().to_vec();
+
+    for (original_field, tracker) in &entry.columns {
+        if tracker.is_object_field() || tracker.is_array_field() {
+            continue;
+        }
+        let col_name = col_registry.resolve(original_field);
+        schema.columns.push(ColumnSchema {
+            name: col_name,
+            original_name: original_field.clone(),
+            pg_type: tracker.to_pg_type(),
+            not_null: tracker.is_not_null(),
+            is_generated: false,
+            is_parent_fk: false,
+        });
+    }
+
+    for (original_field, elem_tracker) in &entry.array_columns {
+        let elem_type = elem_tracker.to_pg_type();
+        let col_name = col_registry.resolve(original_field);
+        schema.columns.push(ColumnSchema {
+            name: col_name,
+            original_name: original_field.clone(),
+            pg_type: PgType::Array(Box::new(elem_type)),
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
+        });
+    }
+
+    local_collisions
+}
+
+/// Apply a wide-table strategy to `schema` if the column count exceeds the threshold.
+///
+/// Only eligible for direct Object children (not ObjectArray/ScalarArray).
+/// Returns a companion `_wide` table if the AutoSplit strategy is chosen.
+fn apply_wide_strategy(
+    schema: &mut TableSchema,
+    entry: &TableEntry,
+    config: &FinalizerConfig,
+    tables_with_object_children: &std::collections::HashSet<String>,
+    depth: usize,
+) -> Option<TableSchema> {
+    let is_wide_eligible = matches!(entry.child_kind, Some(ChildKind::Object) | None);
+    let data_col_count = schema.data_columns().count();
+    if !is_wide_eligible || data_col_count <= config.wide_column_threshold {
+        return None;
+    }
+
+    let row_count = entry.row_count.max(1) as f64;
+    let stable_count = entry
+        .columns
+        .values()
+        .filter(|t| !t.is_object_field() && !t.is_array_field())
+        .filter(|t| t.total_count as f64 / row_count >= config.stable_threshold)
+        .count();
+    let ratio_stable = stable_count as f64 / data_col_count as f64;
+
+    let is_root = entry.parent_key.is_empty();
+    let has_object_children = tables_with_object_children.contains(&entry.path_key);
+
+    if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && entry.row_count >= 10 {
+        eprintln!(
+            "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: Columns \
+            (high stable ratio — legitimate schema, not key explosion)",
+            schema.name, data_col_count, ratio_stable * 100.0
+        );
+        return None;
+    }
+
+    if is_root && has_object_children {
+        return Some(apply_autosplit_strategy(schema, entry, config, row_count, data_col_count, ratio_stable, depth));
+    }
+
+    let suffix_schema = if config.disable_structured_pivot {
+        None
+    } else {
+        detect_suffix_schema(&entry.columns, SUFFIX_MIN_COVERAGE, config.text_threshold)
+    };
+    if let Some(suffix_schema) = suffix_schema {
+        eprintln!(
+            "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: StructuredPivot ({} suffixes)",
+            schema.name, data_col_count, ratio_stable * 100.0, suffix_schema.suffix_cols.len()
+        );
+        apply_structured_pivot_columns(schema, suffix_schema);
+    } else {
+        let strategy = if config.disable_pivot { WideStrategy::Jsonb } else { suggest_wide_strategy(entry) };
+        eprintln!(
+            "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: {:?}",
+            schema.name, data_col_count, ratio_stable * 100.0, strategy
+        );
+        apply_wide_strategy_columns(schema, strategy);
+    }
+    None
+}
+
+/// Apply the P5 AutoSplit strategy: retain stable columns on the main table,
+/// build a companion `_wide` EAV table for medium-frequency keys.
+fn apply_autosplit_strategy(
+    schema: &mut TableSchema,
+    entry: &TableEntry,
+    config: &FinalizerConfig,
+    row_count: f64,
+    data_col_count: usize,
+    ratio_stable: f64,
+    depth: usize,
+) -> TableSchema {
+    let medium_keys: std::collections::HashSet<String> = entry
+        .columns
+        .iter()
+        .filter(|(_, t)| !t.is_object_field() && !t.is_array_field())
+        .filter(|(_, t)| {
+            let freq = t.total_count as f64 / row_count;
+            freq >= config.rare_threshold && freq < config.stable_threshold
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    schema.columns.retain(|c| {
+        if c.is_generated {
+            return true;
+        }
+        entry
+            .columns
+            .get(&c.original_name)
+            .map(|t| t.total_count as f64 / row_count >= config.stable_threshold)
+            .unwrap_or(false)
+    });
+
+    let stable_col_count = schema.data_columns().count();
+    let rare_count = data_col_count
+        .saturating_sub(stable_col_count)
+        .saturating_sub(medium_keys.len());
+
+    // Strip any existing `_wide` suffix to avoid `foo_wide_wide`; fall back to `_eav` on collision.
+    let base_name = schema.name.strip_suffix("_wide").unwrap_or(&schema.name);
+    let wide_candidate = format!("{}_wide", base_name);
+    let wide_name = if wide_candidate == schema.name {
+        format!("{}_eav", base_name)
+    } else {
+        wide_candidate
+    };
+
+    eprintln!(
+        "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: AutoSplit \
+        ({} stable cols, {} medium → {}, {} rare dropped)",
+        schema.name, data_col_count, ratio_stable * 100.0,
+        stable_col_count, medium_keys.len(), wide_name, rare_count,
+    );
+
+    let value_type = medium_keys
+        .iter()
+        .filter_map(|k| entry.columns.get(k))
+        .fold(None::<PgType>, |acc, t| {
+            Some(match acc {
+                None => t.to_pg_type(),
+                Some(a) => widen_pg_types(a, &t.to_pg_type()),
+            })
+        })
+        .unwrap_or(PgType::Text);
+
+    let mut wide_schema = TableSchema::new(wide_name.clone(), vec![wide_name.clone()], depth + 1);
+    wide_schema.parent_table = Some(schema.name.clone());
+    wide_schema.child_kind = Some(ChildKind::Object);
+    wide_schema.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+    wide_schema.columns.push(ColumnSchema::parent_fk(&schema.name));
+    wide_schema.columns.push(ColumnSchema {
+        name: "key".to_string(),
+        original_name: "key".to_string(),
+        pg_type: PgType::Text,
+        not_null: true,
+        is_generated: false,
+        is_parent_fk: false,
+    });
+    wide_schema.columns.push(ColumnSchema {
+        name: "value".to_string(),
+        original_name: "value".to_string(),
+        pg_type: value_type,
+        not_null: false,
+        is_generated: false,
+        is_parent_fk: false,
+    });
+    wide_schema.wide_strategy = WideStrategy::Pivot;
+
+    schema.wide_strategy = WideStrategy::AutoSplit {
+        stable_threshold: config.stable_threshold,
+        rare_threshold: config.rare_threshold,
+        medium_keys,
+        wide_table_name: wide_name,
+    };
+
+    wide_schema
 }
 
 /// PostgreSQL hard limit on columns per table.

@@ -232,7 +232,6 @@ pub fn effective_workers(requested: usize) -> (usize, Option<usize>) {
 ///
 /// `config.num_workers = None` or `Some(1)` is equivalent to sequential processing with extra
 /// overhead; prefer `run()` for single-threaded use.
-#[allow(clippy::too_many_lines)] // debt: sequential fan-out over N workers — candidate for extraction
 pub fn run_parallel(
     path: &Path,
     config: &Pass1Config,
@@ -247,31 +246,75 @@ pub fn run_parallel(
         None
     };
 
-    // Bounded MPMC channel — crossbeam Receiver is Clone+Send, no Mutex needed.
-    // Capacity: 4 slots per worker gives the reader a small lead without unbounded buffering.
+    // Bounded MPMC channel — capacity: 4 slots per worker gives the reader a small lead.
     // At typical JSON object sizes (~1–100 KB), peak buffer ≈ num_workers × 4 × object_size.
     let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(num_workers * 4);
+    let worker_handles = spawn_worker_threads(rx, config, num_workers);
 
-    // Spawn worker threads, each with its own SchemaRegistry.
-    let root_table_owned = config.root_table.clone();
-    let (text_threshold, array_as_pg_array, wide_column_threshold, sibling_threshold,
-         sibling_jaccard, stable_threshold, rare_threshold) = (
+    let (total_rows, reader_err) =
+        read_and_dispatch(path, tx, progress.as_ref(), progress_tx.as_ref(), total_bytes)?;
+
+    let (merged, worker_err) = join_and_merge_workers(worker_handles, config);
+
+    if let Some(ref bar) = progress { bar.finish(); }
+
+    // Reader errors take priority: an I/O failure is the most actionable signal.
+    if let Some(e) = reader_err { return Err(e); }
+    if let Some(e) = worker_err { return Err(e); }
+
+    const PROGRESS_INTERVAL: u64 = 1_000;
+    if let Some(ref tx_prog) = progress_tx {
+        if total_rows > 0 && !total_rows.is_multiple_of(PROGRESS_INTERVAL) {
+            let _ = tx_prog.send(ProgressEvent::Pass1Progress {
+                rows_scanned: total_rows,
+                bytes_read: total_bytes,
+                total_bytes,
+            });
+        }
+    }
+
+    eprintln!("Pass 1 complete (parallel, {} workers): {} rows, building schema...", num_workers, total_rows);
+
+    let mut merged = merged;
+    let mut schemas = merged.finalize();
+    let overflow_warnings = apply_column_limit_guard(&mut schemas);
+    let stats = merged.collect_stats();
+    let truncated_names = merged.truncated_names().to_vec();
+    let column_collisions = merged.column_collisions().to_vec();
+
+    let tables_count = schemas.len();
+    let columns_count = schemas.iter().map(|s| s.columns.len()).sum::<usize>();
+    eprintln!("Schema: {} tables, {} total columns", tables_count, columns_count);
+
+    if let Some(ref tx_prog) = progress_tx {
+        let _ = tx_prog.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
+    }
+
+    Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings })
+}
+
+/// Spawn `num_workers` threads, each consuming JSON object bytes from `rx` and building
+/// an independent `SchemaRegistry`. The original `rx` is dropped at the end of this function;
+/// each worker holds its own clone.
+fn spawn_worker_threads(
+    rx: crossbeam_channel::Receiver<Vec<u8>>,
+    config: &Pass1Config,
+    num_workers: usize,
+) -> Vec<std::thread::JoinHandle<crate::error::Result<SchemaRegistry>>> {
+    let root = config.root_table.clone();
+    let disabled = config.disabled_strategies.clone();
+    let (tt, apga, wct, st, sj, stable, rare) = (
         config.text_threshold, config.array_as_pg_array, config.wide_column_threshold,
         config.sibling_threshold, config.sibling_jaccard, config.stable_threshold,
         config.rare_threshold,
     );
-    let disabled_strategies = config.disabled_strategies.clone();
 
-    let worker_handles: Vec<std::thread::JoinHandle<crate::error::Result<SchemaRegistry>>> = (0..num_workers)
+    let handles = (0..num_workers)
         .map(|_| {
             let rx = rx.clone();
-            let root = root_table_owned.clone();
-            let disabled = disabled_strategies.clone();
-            let mut reg = SchemaRegistry::new(
-                text_threshold, array_as_pg_array, wide_column_threshold,
-                sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold,
-                disabled,
-            );
+            let root = root.clone();
+            let disabled = disabled.clone();
+            let mut reg = SchemaRegistry::new(tt, apga, wct, st, sj, stable, rare, disabled);
             std::thread::spawn(move || {
                 while let Ok(mut bytes) = rx.recv() {
                     // simd_json mutates the slice in-place (zero-copy parsing); bytes is owned here.
@@ -289,35 +332,40 @@ pub fn run_parallel(
             })
         })
         .collect();
-    // Reader thread doesn't consume from the channel — drop our Receiver clone now.
-    drop(rx);
+    // rx is dropped here — workers keep their clones; the reader uses only tx.
+    handles
+}
 
-    // Reader: current thread finds object boundaries and sends raw bytes to workers.
-    let mut total_rows = 0u64;
+/// Stream JSON objects from `path`, sending raw bytes to workers via `tx`.
+///
+/// Returns `(total_rows, reader_err)`. Drops `tx` on return to signal workers that reading
+/// is done. Returns `Err` only for I/O errors opening the file; parse errors are returned
+/// as the `Option<J2sError>`.
+fn read_and_dispatch(
+    path: &Path,
+    tx: crossbeam_channel::Sender<Vec<u8>>,
+    progress: Option<&ProgressTracker>,
+    progress_tx: Option<&ProgressTx>,
+    total_bytes: u64,
+) -> Result<(u64, Option<crate::error::J2sError>)> {
     let (mut reader, _format) = JsonReader::open(path)?;
+    let mut total_rows = 0u64;
     let mut reader_err: Option<crate::error::J2sError> = None;
     const PROGRESS_INTERVAL: u64 = 1_000;
 
     while let Some(item) = reader.next_raw() {
         match item {
             Ok(bytes) => {
-                // Blocks when the channel is full (backpressure).
-                if tx.send(bytes).is_err() {
-                    break; // all workers died — stop reading
-                }
+                if tx.send(bytes).is_err() { break; } // all workers died
                 total_rows += 1;
             }
-            Err(e) => {
-                reader_err = Some(e);
-                break;
-            }
+            Err(e) => { reader_err = Some(e); break; }
         }
-
-        if let Some(ref bar) = progress {
+        if let Some(bar) = progress {
             bar.inc_rows(1);
             bar.set_bytes(reader.bytes_read());
         }
-        if let Some(ref tx_prog) = progress_tx {
+        if let Some(tx_prog) = progress_tx {
             if total_rows.is_multiple_of(PROGRESS_INTERVAL) {
                 let _ = tx_prog.send(ProgressEvent::Pass1Progress {
                     rows_scanned: total_rows,
@@ -327,22 +375,28 @@ pub fn run_parallel(
             }
         }
     }
+    // tx dropped here — signals workers that reading is done.
+    Ok((total_rows, reader_err))
+}
 
-    // Signal workers that reading is done.
-    drop(tx);
-
-    // Join ALL worker handles before propagating any error.
-    // Using ? inside the loop would detach remaining threads on the first panic.
-    let join_results: Vec<_> = worker_handles.into_iter().map(|h| h.join()).collect();
+/// Join all worker threads and merge their `SchemaRegistry` results.
+///
+/// Joins ALL handles before propagating any error so no thread is left detached.
+/// Returns `(merged_registry, aggregated_worker_error)`.
+fn join_and_merge_workers(
+    handles: Vec<std::thread::JoinHandle<crate::error::Result<SchemaRegistry>>>,
+    config: &Pass1Config,
+) -> (SchemaRegistry, Option<crate::error::J2sError>) {
+    let join_results: Vec<_> = handles.into_iter().map(|h| h.join()).collect();
 
     let mut merged = SchemaRegistry::new(
-        text_threshold, array_as_pg_array, wide_column_threshold,
-        sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold,
-        disabled_strategies,
+        config.text_threshold, config.array_as_pg_array, config.wide_column_threshold,
+        config.sibling_threshold, config.sibling_jaccard, config.stable_threshold,
+        config.rare_threshold, config.disabled_strategies.clone(),
     );
     let mut worker_errors: Vec<String> = Vec::new();
-    for join_result in join_results {
-        match join_result.map_err(|_| crate::error::J2sError::Schema(
+    for result in join_results {
+        match result.map_err(|_| crate::error::J2sError::Schema(
             "Pass 1 worker thread panicked unexpectedly".to_string()
         )) {
             Err(e)      => worker_errors.push(e.to_string()),
@@ -355,44 +409,7 @@ pub fn run_parallel(
     } else {
         Some(crate::error::J2sError::InvalidInput(worker_errors.join(" | ")))
     };
-
-    if let Some(ref bar) = progress {
-        bar.finish();
-    }
-
-    // Reader errors take priority: an I/O failure is the most actionable signal.
-    // total_rows reflects only successfully dispatched rows; if workers died mid-run
-    // and tx.send() failed, unprocessed rows are excluded from the count.
-    if let Some(e) = reader_err { return Err(e); }
-    if let Some(e) = worker_err { return Err(e); }
-
-    if let Some(ref tx_prog) = progress_tx {
-        if total_rows > 0 && !total_rows.is_multiple_of(PROGRESS_INTERVAL) {
-            let _ = tx_prog.send(ProgressEvent::Pass1Progress {
-                rows_scanned: total_rows,
-                bytes_read: total_bytes, // file fully read at this point
-                total_bytes,
-            });
-        }
-    }
-
-    eprintln!("Pass 1 complete (parallel, {} workers): {} rows, building schema...", num_workers, total_rows);
-
-    let mut schemas = merged.finalize();
-    let overflow_warnings = apply_column_limit_guard(&mut schemas);
-    let stats = merged.collect_stats();
-    let truncated_names = merged.truncated_names().to_vec();
-    let column_collisions = merged.column_collisions().to_vec();
-
-    let tables_count = schemas.len();
-    let columns_count = schemas.iter().map(|s| s.columns.len()).sum::<usize>();
-    eprintln!("Schema: {} tables, {} total columns", tables_count, columns_count);
-
-    if let Some(ref tx_prog) = progress_tx {
-        let _ = tx_prog.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
-    }
-
-    Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings })
+    (merged, worker_err)
 }
 
 #[cfg(test)]

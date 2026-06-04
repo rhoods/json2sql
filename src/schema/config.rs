@@ -59,170 +59,29 @@ impl SchemaConfig {
     }
 }
 
+struct DeferredNormalize { table_name: String, id_column: String }
+struct DeferredFlatten  { table_name: String, prefix: String, max_depth: u8 }
+
 /// Apply type overrides from `config` to the finalized schemas.
 /// Matches by table name and column name (both sanitized PostgreSQL identifiers).
 /// Unknown tables or columns are silently ignored but reported via eprintln.
-#[allow(clippy::too_many_lines)] // debt: 145L — override dispatch loop, candidate for sub-handlers
 pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) -> crate::error::Result<()> {
-    // Collect deferred operations that require the full schemas slice.
-    // These cannot be applied inside the single-schema iteration below.
-    struct DeferredNormalize { table_name: String, id_column: String }
-    struct DeferredFlatten  { table_name: String, prefix: String, max_depth: u8 }
     let mut deferred_normalize: Vec<DeferredNormalize> = Vec::new();
     let mut deferred_flatten:   Vec<DeferredFlatten>   = Vec::new();
 
     for (table_name, col_overrides) in &config.tables {
         match schemas.iter_mut().find(|s| &s.name == table_name) {
-            None => {
-                eprintln!(
-                    "WARNING: schema-config: table '{}' not found in inferred schema",
-                    table_name
-                );
-            }
+            None => eprintln!("WARNING: schema-config: table '{}' not found in inferred schema", table_name),
             Some(schema) => {
-                // --- strategy override ---
-                // Must run before suffix_columns so the column layout is correct.
+                // Strategy must run before suffix_columns so the column layout is correct.
                 // NormalizeDynamicKeys and Flatten are deferred (need full schemas slice).
-                if let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") {
-                    match strategy_str.to_lowercase().as_str() {
-                        "pivot" => {
-                            if schema.wide_strategy != WideStrategy::Pivot {
-                                eprintln!("  Override strategy: {} → Pivot", table_name);
-                                apply_wide_strategy_columns(schema, WideStrategy::Pivot);
-                            }
-                        }
-                        "jsonb" => {
-                            if schema.wide_strategy != WideStrategy::Jsonb {
-                                eprintln!("  Override strategy: {} → Jsonb", table_name);
-                                apply_wide_strategy_columns(schema, WideStrategy::Jsonb);
-                            }
-                        }
-                        "columns" => {
-                            if schema.wide_strategy != WideStrategy::Columns {
-                                eprintln!("  Override strategy: {} → Columns", table_name);
-                                apply_wide_strategy_columns(schema, WideStrategy::Columns);
-                            }
-                        }
-                        // "structured_pivot" is handled via suffix_columns below
-                        "structured_pivot" => {}
-                        "normalize_dynamic_keys" => {
-                            let id_col = col_overrides
-                                .get("id_column")
-                                .and_then(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
-                                .unwrap_or_else(|| "key_id".to_string());
-                            deferred_normalize.push(DeferredNormalize {
-                                table_name: table_name.clone(),
-                                id_column: id_col,
-                            });
-                        }
-                        "flatten" => {
-                            let prefix = col_overrides
-                                .get("prefix")
-                                .and_then(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
-                                .unwrap_or_else(|| format!("{}_", table_name));
-                            let max_depth = col_overrides
-                                .get("max_depth")
-                                .and_then(|v| if let toml::Value::Integer(n) = v { Some(*n as u8) } else { None })
-                                .unwrap_or(1);
-                            deferred_flatten.push(DeferredFlatten {
-                                table_name: table_name.clone(),
-                                prefix,
-                                max_depth,
-                            });
-                        }
-                        other => {
-                            eprintln!(
-                                "WARNING: schema-config: unknown strategy '{}' for '{}', ignored",
-                                other, table_name
-                            );
-                        }
-                    }
-                }
-
-                // --- suffix_columns override → StructuredPivot ---
-                if let Some(toml::Value::Array(arr)) = col_overrides.get("suffix_columns") {
-                    let suffix_list: Vec<String> = arr
-                        .iter()
-                        .filter_map(|v| {
-                            if let toml::Value::String(s) = v {
-                                Some(s.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    if !suffix_list.is_empty() {
-                        // We need the TypeTracker map to infer types, but at config-apply time
-                        // the schema is already finalized (columns are resolved).
-                        // Build a dummy IndexMap from existing column types so
-                        // build_suffix_schema_from_list can widen types correctly.
-                        let mut type_map: indexmap::IndexMap<
-                            String,
-                            crate::schema::type_tracker::TypeTracker,
-                        > = indexmap::IndexMap::new();
-                        for col in schema.data_columns() {
-                            let mut tracker = crate::schema::type_tracker::TypeTracker::new(256);
-                            // Inject a fake value matching the resolved type so the tracker
-                            // returns the same type.  We prime the tracker's type_counts directly
-                            // by observing a representative value.
-                            prime_tracker_from_pg_type(&mut tracker, &col.pg_type);
-                            type_map.insert(col.original_name.clone(), tracker);
-                        }
-                        let suffix_schema =
-                            build_suffix_schema_from_list(&suffix_list, &type_map);
-                        eprintln!(
-                            "  Override strategy: {} → StructuredPivot (suffixes: {:?})",
-                            table_name, suffix_list
-                        );
-                        apply_structured_pivot_columns(schema, suffix_schema);
-                    }
-                }
-
-                // --- column-level type overrides ---
-                for (col_name, value) in col_overrides {
-                    if matches!(
-                        col_name.as_str(),
-                        "strategy" | "suffix_columns" | "id_column" | "prefix" | "max_depth"
-                    ) {
-                        continue;
-                    }
-                    let type_str = match value {
-                        toml::Value::String(s) => s.as_str(),
-                        _ => continue, // non-string values are not type overrides
-                    };
-                    match schema.columns.iter_mut().find(|c| &c.name == col_name) {
-                        None => {
-                            eprintln!(
-                                "WARNING: schema-config: column '{}.{}' not found",
-                                table_name, col_name
-                            );
-                        }
-                        Some(col) => match parse_pg_type(type_str) {
-                            None => {
-                                eprintln!(
-                                    "WARNING: schema-config: unknown type '{}' for '{}.{}', ignored",
-                                    type_str, table_name, col_name
-                                );
-                            }
-                            Some(pg_type) => {
-                                eprintln!(
-                                    "  Override: {}.{} {} → {}",
-                                    table_name,
-                                    col_name,
-                                    col.pg_type.as_sql(),
-                                    pg_type.as_sql()
-                                );
-                                col.pg_type = pg_type;
-                            }
-                        },
-                    }
-                }
+                apply_strategy_override(schema, table_name, col_overrides, &mut deferred_normalize, &mut deferred_flatten);
+                apply_suffix_columns_override(schema, table_name, col_overrides);
+                apply_column_type_overrides(schema, table_name, col_overrides);
             }
         }
     }
 
-    // Apply deferred operations that need the full schemas slice.
     for op in deferred_normalize {
         apply_normalize_dynamic_keys(schemas, &op.table_name, op.id_column)?;
     }
@@ -230,6 +89,106 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) ->
         apply_flatten(schemas, &op.table_name, &op.prefix, op.max_depth)?;
     }
     Ok(())
+}
+
+fn apply_strategy_override(
+    schema: &mut TableSchema,
+    table_name: &str,
+    col_overrides: &HashMap<String, toml::Value>,
+    deferred_normalize: &mut Vec<DeferredNormalize>,
+    deferred_flatten: &mut Vec<DeferredFlatten>,
+) {
+    let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") else { return };
+    match strategy_str.to_lowercase().as_str() {
+        "pivot" => {
+            if schema.wide_strategy != WideStrategy::Pivot {
+                eprintln!("  Override strategy: {} → Pivot", table_name);
+                apply_wide_strategy_columns(schema, WideStrategy::Pivot);
+            }
+        }
+        "jsonb" => {
+            if schema.wide_strategy != WideStrategy::Jsonb {
+                eprintln!("  Override strategy: {} → Jsonb", table_name);
+                apply_wide_strategy_columns(schema, WideStrategy::Jsonb);
+            }
+        }
+        "columns" => {
+            if schema.wide_strategy != WideStrategy::Columns {
+                eprintln!("  Override strategy: {} → Columns", table_name);
+                apply_wide_strategy_columns(schema, WideStrategy::Columns);
+            }
+        }
+        "structured_pivot" => {} // handled via suffix_columns below
+        "normalize_dynamic_keys" => {
+            let id_col = col_overrides
+                .get("id_column")
+                .and_then(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
+                .unwrap_or_else(|| "key_id".to_string());
+            deferred_normalize.push(DeferredNormalize { table_name: table_name.to_string(), id_column: id_col });
+        }
+        "flatten" => {
+            let prefix = col_overrides
+                .get("prefix")
+                .and_then(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
+                .unwrap_or_else(|| format!("{}_", table_name));
+            let max_depth = col_overrides
+                .get("max_depth")
+                .and_then(|v| if let toml::Value::Integer(n) = v { Some(*n as u8) } else { None })
+                .unwrap_or(1);
+            deferred_flatten.push(DeferredFlatten { table_name: table_name.to_string(), prefix, max_depth });
+        }
+        other => eprintln!("WARNING: schema-config: unknown strategy '{}' for '{}', ignored", other, table_name),
+    }
+}
+
+fn apply_suffix_columns_override(
+    schema: &mut TableSchema,
+    table_name: &str,
+    col_overrides: &HashMap<String, toml::Value>,
+) {
+    let Some(toml::Value::Array(arr)) = col_overrides.get("suffix_columns") else { return };
+    let suffix_list: Vec<String> = arr
+        .iter()
+        .filter_map(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
+        .collect();
+    if suffix_list.is_empty() { return; }
+
+    // At config-apply time the schema is already finalized (columns are resolved).
+    // Build a dummy TypeTracker map from existing column types so
+    // build_suffix_schema_from_list can widen types correctly.
+    let mut type_map: indexmap::IndexMap<String, crate::schema::type_tracker::TypeTracker> =
+        indexmap::IndexMap::new();
+    for col in schema.data_columns() {
+        let mut tracker = crate::schema::type_tracker::TypeTracker::new(256);
+        prime_tracker_from_pg_type(&mut tracker, &col.pg_type);
+        type_map.insert(col.original_name.clone(), tracker);
+    }
+    let suffix_schema = build_suffix_schema_from_list(&suffix_list, &type_map);
+    eprintln!("  Override strategy: {} → StructuredPivot (suffixes: {:?})", table_name, suffix_list);
+    apply_structured_pivot_columns(schema, suffix_schema);
+}
+
+fn apply_column_type_overrides(
+    schema: &mut TableSchema,
+    table_name: &str,
+    col_overrides: &HashMap<String, toml::Value>,
+) {
+    for (col_name, value) in col_overrides {
+        if matches!(col_name.as_str(), "strategy" | "suffix_columns" | "id_column" | "prefix" | "max_depth") {
+            continue;
+        }
+        let toml::Value::String(type_str) = value else { continue };
+        match schema.columns.iter_mut().find(|c| &c.name == col_name) {
+            None => eprintln!("WARNING: schema-config: column '{}.{}' not found", table_name, col_name),
+            Some(col) => match parse_pg_type(type_str) {
+                None => eprintln!("WARNING: schema-config: unknown type '{}' for '{}.{}', ignored", type_str, table_name, col_name),
+                Some(pg_type) => {
+                    eprintln!("  Override: {}.{} {} → {}", table_name, col_name, col.pg_type.as_sql(), pg_type.as_sql());
+                    col.pg_type = pg_type;
+                }
+            },
+        }
+    }
 }
 
 /// Appliquer les groupes de fusion définis dans la config.
