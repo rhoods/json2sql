@@ -1,3 +1,9 @@
+//! Serialization of Pass 1 results to/from a JSON snapshot file (the "inspect" output).
+//!
+//! [`SchemaSnapshot`] wraps schemas, column stats, and user strategy overrides.
+//! `SCHEMA_FORMAT_VERSION` is bumped when the on-disk format changes in a
+//! backwards-incompatible way — callers must discard and regenerate old snapshots.
+
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};

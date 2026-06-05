@@ -1,3 +1,9 @@
+//! PostgreSQL COPY text-format escaping.
+//!
+//! [`CopyEscaped`] is a newtype that guarantees its contents are safe for the COPY text
+//! protocol (no unescaped tabs, newlines, backslashes, or null bytes). Obtain instances
+//! only via [`escape_copy_text`] or [`CopyEscaped::from_safe_ascii`].
+
 /// A string guaranteed safe for PostgreSQL COPY text format.
 ///
 /// No tab (`\t`), newline (`\n`), carriage return (`\r`), backslash (`\\`),

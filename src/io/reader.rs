@@ -1,3 +1,10 @@
+//! JSON file streaming: auto-detects format (array vs. NDJSON), iterates top-level objects,
+//! and reports byte-level progress.
+//!
+//! [`JsonReader`] is the primary iterator; it parses via `simd_json` for performance.
+//! [`JsonFormat`] is detected from the first non-whitespace byte of the file —
+//! `[` for a JSON array, anything else for JSON-Lines (NDJSON).
+
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;

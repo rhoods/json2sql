@@ -1,3 +1,9 @@
+//! Per-column type distribution statistics collected during Pass 1 (inspect mode).
+//!
+//! [`ColumnStats`] records null counts and a histogram of observed JSON types for each
+//! data column. Mixed-type columns (`is_mixed() == true`) are candidates for anomalies
+//! in Pass 2 when values can't be coerced to the inferred PostgreSQL type.
+
 use crate::schema::type_tracker::PgType;
 
 /// Type distribution for one column observed during Pass 1.

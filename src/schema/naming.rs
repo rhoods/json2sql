@@ -1,3 +1,10 @@
+//! PostgreSQL identifier sanitization and collision resolution.
+//!
+//! [`NamingRegistry`] converts raw JSON field names to valid SQL identifiers (≤ 63 bytes),
+//! resolves duplicates with a short FNV-1a hash suffix, and caps table names at 53 chars
+//! (`PG_TABLE_MAX_IDENT`) so all derived identifiers (`pk_…`, `fk_…_parent`, `j2s_…_id`)
+//! stay within PostgreSQL's 63-byte `NAMEDATALEN` limit.
+
 use std::collections::HashMap;
 
 use super::PATH_SEP;

@@ -1,3 +1,10 @@
+//! Anomaly collection during Pass 2: gathers type coercion failures and dropped keys.
+//!
+//! [`AnomalyCollector`] is the central aggregator; workers communicate with it via
+//! [`AnomalyProxy`] (a channel-based handle). Per-table NDJSON anomaly files are written
+//! as events arrive — the full set is never buffered in memory, so large anomaly volumes
+//! don't cause OOM.
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};

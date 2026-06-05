@@ -1,3 +1,9 @@
+//! Detects suffix structure in wide-table key sets for the `StructuredPivot` strategy.
+//!
+//! Given keys like `energy`, `energy_100g`, `energy_unit`, identifies common suffixes
+//! (`_100g`, `_unit`) by frequency across distinct base prefixes, then groups keys by
+//! base to produce a [`SuffixSchema`] that drives the structured pivot table layout.
+
 use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;

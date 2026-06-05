@@ -1,3 +1,4 @@
+//! Central error type [`J2sError`] and `Result<T>` alias used throughout the crate.
 use thiserror::Error;
 
 #[derive(Debug, Error)]

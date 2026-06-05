@@ -1,3 +1,7 @@
+//! Pass 2 — data insertion into PostgreSQL.
+//!
+//! Workers stream the JSON a second time, coerce values via [`coercer`], and bulk-load
+//! rows via `COPY FROM STDIN`. See [`runner`] for the main entry points.
 pub mod coercer;
 pub(crate) mod insert;
 pub mod runner;

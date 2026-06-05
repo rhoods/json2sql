@@ -1,3 +1,9 @@
+//! TOML configuration file: user-defined type and strategy overrides applied before Pass 2.
+//!
+//! The config is optional. When present, `apply_overrides` validates each override against
+//! the finalized schema and mutates the relevant [`TableSchema`] entries in place.
+//! Unknown table or column names produce a hard error rather than silently doing nothing.
+
 use std::collections::HashMap;
 use std::path::Path;
 

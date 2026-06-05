@@ -1,3 +1,8 @@
+//! Converts a [`SchemaObserver`] into per-column [`ColumnStats`] for the inspect report.
+//!
+//! Called only in inspect mode (Pass 1 with `--inspect`); not part of the normal import
+//! pipeline. The public entry point is [`collect_stats`].
+
 use super::naming::{NamingRegistry};
 use super::observer::SchemaObserver;
 use super::stats::ColumnStats;

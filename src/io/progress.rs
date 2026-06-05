@@ -1,3 +1,8 @@
+//! Terminal progress bars for CLI mode (bytes read + rows processed), built on `indicatif`.
+//!
+//! Not used when the IHM channel is active — in that mode, [`crate::io::progress_event`]
+//! carries progress to the UI instead.
+
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 pub struct ProgressTracker {

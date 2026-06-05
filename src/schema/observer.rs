@@ -1,3 +1,10 @@
+//! Pass 1 observation: accumulates JSON structure into `TableEntry` records as the
+//! input is streamed.
+//!
+//! [`SchemaObserver`] is the per-worker accumulator; each JSON object updates the relevant
+//! `TableEntry` via its `observe` method. Multi-worker results are merged via
+//! `TableEntry::merge` before finalization.
+
 use indexmap::IndexMap;
 use serde_json::Value;
 

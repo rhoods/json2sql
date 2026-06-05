@@ -1,3 +1,7 @@
+//! CLI entry point for json2sql.
+//!
+//! Parses arguments via [`cli`], dispatches to Pass 1 + Pass 2 runners, and handles
+//! progress reporting and anomaly output for the terminal workflow.
 #![forbid(unsafe_code)]
 #![deny(dead_code)]
 #![deny(clippy::all)]

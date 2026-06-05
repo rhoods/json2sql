@@ -1,3 +1,8 @@
+//! Channel-based progress events streamed from Pass 1/2 runners to the IHM.
+//!
+//! The sender ([`ProgressTx`]) is optional — runners emit nothing when `None` (CLI mode).
+//! Events are consumed in a Dioxus coroutine to drive UI state updates.
+
 /// Events streamed by Pass 1 and Pass 2 runners to the IHM via an unbounded channel.
 ///
 /// The sender is optional — when None the runners emit nothing (CLI / batch mode).

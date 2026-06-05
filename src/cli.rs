@@ -1,3 +1,8 @@
+//! Command-line argument definitions for the json2sql CLI.
+//!
+//! Built with Clap. The root struct is [`Cli`]; the optional [`Commands`] enum selects
+//! the `inspect` subcommand (schema preview without data loading). When no subcommand is
+//! given, the default import pipeline runs.
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 

@@ -1,3 +1,9 @@
+//! Anomaly summary report: serializes aggregated anomaly counts to JSON or CSV.
+//!
+//! Individual anomaly rows live in the per-table NDJSON files written by
+//! [`crate::anomaly::collector`]. This module produces the summary (table → total count)
+//! written to `--anomaly-report`.
+
 use std::path::Path;
 
 use crate::cli::AnomalyFormat;

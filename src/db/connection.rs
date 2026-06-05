@@ -1,3 +1,6 @@
+//! PostgreSQL connection helper — wraps [`tokio_postgres::connect`] and spawns the
+//! background connection driver task.
+
 use tokio_postgres::{Client, NoTls};
 
 use crate::error::{J2sError, Result};

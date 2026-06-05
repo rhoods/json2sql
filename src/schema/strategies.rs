@@ -1,3 +1,9 @@
+//! Strategy name enum used to selectively disable auto-detection heuristics.
+//!
+//! Pass 1 accepts a `HashSet<StrategyName>` of strategies to skip; the finalizer
+//! bypasses the corresponding detection step for each disabled strategy. Useful for
+//! debugging an unexpected layout or forcing a specific materialization.
+
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

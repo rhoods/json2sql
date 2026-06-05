@@ -1,3 +1,11 @@
+//! Per-column type inference: accumulates observed JSON types across all rows and
+//! resolves them to a single PostgreSQL type.
+//!
+//! [`TypeTracker`] counts occurrences of each [`InferredType`] variant as the JSON is
+//! streamed. At finalization, `to_pg_type()` applies a widening hierarchy
+//! (Integer → BigInt → Float → Text) to pick the narrowest PostgreSQL type compatible
+//! with every observed value. The resolved type is stored as [`PgType`] in a `ColumnSchema`.
+
 use serde_json::Value;
 
 /// All types that can be inferred from a JSON value.
