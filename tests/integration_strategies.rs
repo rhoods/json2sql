@@ -1090,3 +1090,43 @@ fn test_disable_pivot_gives_jsonb_integration() {
     assert!(p1_disabled.schemas.iter().any(|s| s.wide_strategy == WideStrategy::Jsonb),
         "pivot disabled → WideStrategy::Jsonb attendu");
 }
+
+// disable structured_pivot → suffix detection skippée → fallback suggest_wide_strategy.
+// Fixture : nutrients avec 6 colonnes numériques à pattern _100g/_serving.
+// wide_column_threshold=4 : 6 colonnes > 4 → wide detection active.
+// Activé : StructuredPivot. Désactivé : Pivot (all-numeric fallback).
+#[test]
+fn test_disable_structured_pivot_gives_pivot_integration() {
+    use std::collections::HashSet;
+    use json2sql::schema::strategies::StrategyName;
+    use json2sql::schema::table_schema::WideStrategy;
+
+    let path = common::fixture("structured_pivot.jsonl");
+    let base_config = pass1::runner::Pass1Config {
+        wide_column_threshold: 4,
+        ..common::pass1_config("products")
+    };
+
+    // structured_pivot activé : StructuredPivot attendu sur products_nutrients
+    let p1_normal = pass1::runner::run(&path, &base_config, None).unwrap();
+    assert!(
+        p1_normal.schemas.iter().any(|s| matches!(s.wide_strategy, WideStrategy::StructuredPivot(_))),
+        "structured_pivot enabled → WideStrategy::StructuredPivot attendu sur products_nutrients"
+    );
+
+    // structured_pivot désactivé : aucun StructuredPivot, Pivot à la place (all-numeric)
+    let config_disabled = pass1::runner::Pass1Config {
+        disabled_strategies: HashSet::from([StrategyName::StructuredPivot]),
+        wide_column_threshold: 4,
+        ..common::pass1_config("products")
+    };
+    let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
+    assert!(
+        !p1_disabled.schemas.iter().any(|s| matches!(s.wide_strategy, WideStrategy::StructuredPivot(_))),
+        "structured_pivot disabled → aucun WideStrategy::StructuredPivot"
+    );
+    assert!(
+        p1_disabled.schemas.iter().any(|s| s.wide_strategy == WideStrategy::Pivot),
+        "structured_pivot disabled → WideStrategy::Pivot attendu (fallback all-numeric)"
+    );
+}

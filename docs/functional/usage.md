@@ -164,6 +164,7 @@ json2sql \
 | `--sibling-jaccard` | 0.5 | Similarité min des colonnes sœurs |
 | `--array-as-pg-array` | false | Tableaux scalaires → colonne `TEXT[]` |
 | `--depth-limit` | aucun | Avertissement si imbrication dépasse N niveaux |
+| `--disable-strategy` | aucun | Désactive une stratégie d'inférence optionnelle. Répétable. Valeurs : `sibling`, `pivot`, `structured_pivot`. La stratégie `split` (wide-table) est obligatoire et ne peut pas être désactivée. |
 
 ### Paramètres de chargement
 
@@ -173,6 +174,7 @@ json2sql \
 | `--parallel` | 1 | Connexions PostgreSQL parallèles pour le COPY (Phase B) |
 | `--temp-dir` | `$TMPDIR` | Répertoire pour les fichiers temporaires de Pass 2 |
 | `--transaction` | false | Enveloppe tout dans une transaction |
+| `--limit` | aucun | Arrête le dispatch Pass 2 après N objets racines. Pass 1 tourne toujours sur le fichier complet. `0` = créer les tables sans lignes. |
 
 ### Paramètres d'anomalies
 

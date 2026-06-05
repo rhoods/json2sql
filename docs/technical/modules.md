@@ -53,6 +53,7 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | `finalizer.rs` | `SchemaFinalizer` : transformations post-stream — construit les `TableSchema`, applique les stratégies, trie topologiquement. Contient `apply_column_limit_guard()`, `exclude_absorbed_children()` |
 | `cascading.rs` | Algorithme de détection et fusion des tables sœurs (`finalize_cascading`, `child_compatibility_score`, `pairwise_jaccard_min`). Builder manuel : `build_keyed_pivot_from_siblings(&[TableSchema], &[usize], key_col_name) -> Result<MergeResult, MergeError>` — produit `KeyedPivot` ou `MultiKeyedPivot` depuis une sélection utilisateur. |
 | `wide_strategies.rs` | Fonctions d'application des stratégies wide : `apply_wide_strategy_columns`, `apply_flatten`, `apply_jsonb_flatten`, `apply_normalize_dynamic_keys`, `build_union_columns`, `classify_key_shape` |
+| `strategies.rs` | `StrategyName` (enum des stratégies optionnelles désactivables : `Sibling`, `Pivot`, `StructuredPivot`), `StrategyError`, `parse_disabled_strategies()`. Utilisé par `Pass1Config` et `SchemaRegistry` pour gater les stratégies via `--disable-strategy`. |
 | `reporter.rs` | Lecture des résultats d'observation : `collect_stats()`, `anomaly_iter()`, `truncated_names()`, `column_collisions()` |
 | `registry.rs` | `SchemaRegistry` : façade publique (~100 lignes prod). Délègue à `observer`, `finalizer` et `reporter` |
 | `naming.rs` | Sanitisation des identifiants PG, déduplication, troncature à 63 bytes avec hash, détection de collisions de noms de colonnes |
