@@ -328,6 +328,7 @@ fn try_cluster_fallback(
     })
 }
 
+#[allow(clippy::too_many_lines)] // decision gate: multiple branches already delegated to helpers
 fn detect_mixed_collapse(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
@@ -454,6 +455,7 @@ fn effective_jaccard_for_regular(
     }
 }
 
+#[allow(clippy::too_many_lines)] // multi-path detection: filter → jaccard → child-compat → multi vs classic dispatch
 fn detect_homogeneous_collapse(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
@@ -507,6 +509,7 @@ fn detect_homogeneous_collapse(
 
 /// Build a classic `KeyedPivot` collapse: the pure-container parent absorbs all `regular`
 /// siblings into a single keyed pivot table.
+#[allow(clippy::too_many_lines)] // inline Collapse construction with log assembly
 fn build_classic_keyed_pivot_collapse(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
@@ -983,6 +986,7 @@ fn resolve_pivot_key_info(
     (key_col_name, key_shape, union_cols, sub_pivot_name)
 }
 
+#[allow(clippy::too_many_lines)] // sequential pipeline: jaccard gate → resolve → build TableSchema → collect co-siblings → reparent
 fn process_keyed_pivot_work_item(
     schemas: &mut [TableSchema],
     parent_idx: usize,
@@ -1167,6 +1171,7 @@ fn reparent_and_update_routes(
 /// has Jaccard ≥ `min_jaccard` against the cluster seed (first unassigned sibling).
 /// Only clusters with at least `min_size` members are returned.
 /// Indices are sorted by table name before processing for determinism.
+#[allow(clippy::too_many_lines)] // greedy O(n²) clustering algorithm, self-contained loop
 fn greedy_schema_clusters(
     schemas: &[TableSchema],
     indices: &[usize],
@@ -1272,19 +1277,15 @@ fn pg_truncate_name(raw: &str) -> String {
 /// When all siblings are data-bearing, applies a noise filter: columns present in fewer than
 /// `max(2, len/20)` schemas are excluded. Falls back to unfiltered sets if the filter
 /// removes all columns (fully disjoint schemas would otherwise produce a false 1.0 Jaccard).
-fn build_jaccard_col_sets<'a>(
+/// Apply a frequency-based noise filter to column sets: columns present in fewer than
+/// `max(2, len/20)` siblings are excluded. Falls back to unfiltered if the filter
+/// would empty every set (avoids masking genuine divergence).
+fn noise_filtered_col_sets<'a>(
     schemas: &'a [TableSchema],
     indices: &[usize],
-    all_data_bearing: bool,
 ) -> Vec<std::collections::HashSet<&'a str>> {
-    if !all_data_bearing {
-        return indices
-            .iter()
-            .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
-            .collect();
-    }
     let min_presence = (indices.len() / 20).max(2);
-    let mut col_freq: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut col_freq: std::collections::HashMap<&'a str, usize> = std::collections::HashMap::new();
     for &i in indices {
         for col in schemas[i].data_columns() {
             *col_freq.entry(col.original_name.as_str()).or_default() += 1;
@@ -1300,7 +1301,6 @@ fn build_jaccard_col_sets<'a>(
                 .collect()
         })
         .collect();
-    // If noise filter emptied every set, fall back to unfiltered to avoid masking divergence.
     if filtered.iter().all(|s| s.is_empty()) {
         indices
             .iter()
@@ -1309,6 +1309,20 @@ fn build_jaccard_col_sets<'a>(
     } else {
         filtered
     }
+}
+
+fn build_jaccard_col_sets<'a>(
+    schemas: &'a [TableSchema],
+    indices: &[usize],
+    all_data_bearing: bool,
+) -> Vec<std::collections::HashSet<&'a str>> {
+    if !all_data_bearing {
+        return indices
+            .iter()
+            .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
+            .collect();
+    }
+    noise_filtered_col_sets(schemas, indices)
 }
 
 /// Compute the minimum pairwise Jaccard similarity of data-column names across all pairs.
@@ -1403,6 +1417,29 @@ pub struct MergeResult {
     pub absorbed_names: Vec<String>,
 }
 
+/// Validate preconditions for a manual sibling merge.
+/// Returns the common parent name on success.
+fn validate_merge_inputs(schemas: &[TableSchema], indices: &[usize]) -> Result<String, MergeError> {
+    if indices.len() < 2 {
+        return Err(MergeError::TooFewTables(indices.len()));
+    }
+    for &i in indices {
+        let t = &schemas[i];
+        if t.parent_table.is_none() {
+            return Err(MergeError::NoParent(t.name.clone()));
+        }
+        if !t.columns.is_empty() && t.columns.iter().all(|c| c.is_generated) {
+            return Err(MergeError::RoutingTable(t.name.clone()));
+        }
+    }
+    let parent_name = schemas[indices[0]].parent_table.as_deref()
+        .expect("NoParent was checked for all tables above — parent_table is Some");
+    if indices.iter().any(|&i| schemas[i].parent_table.as_deref() != Some(parent_name)) {
+        return Err(MergeError::DifferentParents);
+    }
+    Ok(parent_name.to_string())
+}
+
 /// Build a `KeyedPivot` or `MultiKeyedPivot` strategy from a manual user selection of
 /// sibling tables. Infers key shape from table name suffixes; auto-detects whether to
 /// produce a single-group (`KeyedPivot`) or two-group (`MultiKeyedPivot`) strategy.
@@ -1412,28 +1449,9 @@ pub fn build_keyed_pivot_from_siblings(
     indices: &[usize],
     key_col_name: &str,
 ) -> Result<MergeResult, MergeError> {
-    if indices.len() < 2 {
-        return Err(MergeError::TooFewTables(indices.len()));
-    }
+    let parent_name = validate_merge_inputs(schemas, indices)?;
 
-    let tables: Vec<&TableSchema> = indices.iter().map(|&i| &schemas[i]).collect();
-
-    for t in &tables {
-        if t.parent_table.is_none() {
-            return Err(MergeError::NoParent(t.name.clone()));
-        }
-        if !t.columns.is_empty() && t.columns.iter().all(|c| c.is_generated) {
-            return Err(MergeError::RoutingTable(t.name.clone()));
-        }
-    }
-
-    let parent_name = tables[0].parent_table.as_deref()
-        .expect("NoParent was checked for all tables above — parent_table is Some");
-    if tables.iter().any(|t| t.parent_table.as_deref() != Some(parent_name)) {
-        return Err(MergeError::DifferentParents);
-    }
-
-    let names: Vec<&str> = tables.iter().map(|t| t.name.as_str()).collect();
+    let names: Vec<&str> = indices.iter().map(|&i| schemas[i].name.as_str()).collect();
     let absorbed_names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
 
     let keys = extract_key_suffixes(&names);
@@ -1444,7 +1462,7 @@ pub fn build_keyed_pivot_from_siblings(
     let has_non_numeric = is_numeric.iter().any(|&b| !b);
 
     let strategy = if has_numeric && has_non_numeric {
-        build_mixed_keyed_pivot_strategy(parent_name, key_col_name, &names, &key_refs, &is_numeric)
+        build_mixed_keyed_pivot_strategy(&parent_name, key_col_name, &names, &key_refs, &is_numeric)
     } else {
         WideStrategy::KeyedPivot(SiblingSchema {
             key_col_name: key_col_name.to_string(),
@@ -1454,9 +1472,10 @@ pub fn build_keyed_pivot_from_siblings(
         })
     };
 
-    Ok(MergeResult { parent_name: parent_name.to_string(), strategy, absorbed_names })
+    Ok(MergeResult { parent_name, strategy, absorbed_names })
 }
 
+#[allow(clippy::too_many_lines)] // symmetric two-group struct construction for MultiKeyedPivot
 fn build_mixed_keyed_pivot_strategy(
     parent_name: &str,
     key_col_name: &str,
