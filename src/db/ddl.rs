@@ -1,3 +1,12 @@
+//! DDL generation and constraint application for finalized table schemas.
+//!
+//! Pure generation functions (`generate_*`) return owned `String` values with no I/O.
+//! [`add_constraints`] is the async entry point that executes `ALTER TABLE` statements
+//! against PostgreSQL after the COPY phase of Pass 2 completes.
+//!
+//! [`generate_ddl_preview`] is used by the IHM to show the user what SQL will be executed
+//! before they confirm Pass 2.
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;

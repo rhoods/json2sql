@@ -1,3 +1,31 @@
+//! Core domain types for the finalized schema produced by Pass 1.
+//!
+//! The two central types are [`TableSchema`] (one SQL table and its materialization strategy)
+//! and [`ColumnSchema`] (one column with inferred PostgreSQL type). Both are serialized to the
+//! inspect JSON written between Pass 1 and Pass 2.
+//!
+//! ## WideStrategy
+//!
+//! Each [`TableSchema`] carries a [`WideStrategy`] that determines how Pass 2 materializes
+//! the table in PostgreSQL. The strategy is inferred by `finalize()` at the end of Pass 1
+//! and can be overridden by the user through the IHM before running Pass 2.
+//!
+//! | Strategy | When used | Output shape |
+//! |---|---|---|
+//! | `Columns` | default | one column per JSON key |
+//! | `Pivot` | homogeneous values, dynamic keys | `(key TEXT, value T)` EAV |
+//! | `Jsonb` | heterogeneous / irregular structure | single `JSONB` column |
+//! | `StructuredPivot` | keys share prefix + typed suffixes | one row per prefix group |
+//! | `KeyedPivot` | N sibling tables, same schema | merged table with key column |
+//! | `MultiKeyedPivot` | siblings with mixed key shapes | two synthetic pivot tables |
+//! | `AutoSplit` | root table with bi-modal key frequency | main table + `_wide` companion |
+//! | `Ignore` | key appears in < rare_threshold of rows | excluded from schema |
+//! | `NormalizeDynamicKeys` | arbitrary JSON keys → row IDs (IHM) | key becomes a column |
+//! | `Flatten` | inline child fields into parent (IHM) | child table removed |
+//! | `JsonbFlatten` | store child as JSONB on parent (IHM) | child table removed |
+//!
+//! See each variant's doc comment for a concrete JSON → SQL example.
+
 use std::collections::HashMap;
 
 use super::naming::PG_TABLE_MAX_IDENT;
@@ -73,32 +101,82 @@ pub struct SiblingGroup {
 }
 
 /// Strategy for handling "wide" tables — tables with many dynamic keys.
+///
+/// See the [module-level table](self) for a quick comparison and each variant's
+/// doc comment for a concrete JSON → SQL example.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum WideStrategy {
     /// Default: one SQL column per JSON key.
+    ///
+    /// Trigger: fewer than `wide_column_threshold` distinct keys observed across all rows.
+    ///
+    /// JSON: `{ "name": "Alice", "age": 30 }` in table `users`
+    /// → `users(name TEXT, age INTEGER)` — one row per JSON object.
     #[default]
     Columns,
-    /// EAV pivot: one row per key-value pair — columns: (key TEXT, value <type>).
-    /// Best when keys are dynamic but values share a compatible type (e.g. nutrients → all FLOAT).
+
+    /// EAV pivot: one row per key-value pair — columns: `(key TEXT, value <type>)`.
+    ///
+    /// Trigger: many dynamic keys, all values share a compatible PostgreSQL type
+    /// (e.g. a nutrient map where every value is a FLOAT).
+    ///
+    /// JSON: `{ "nutrients": { "energy": 250, "fat": 12, "salt": 0.3 } }`
+    /// → `products_nutrients(j2s_parent_id, key TEXT, value FLOAT)`
+    /// → rows: `("energy", 250)`, `("fat", 12)`, `("salt", 0.3)`.
     Pivot,
+
     /// Store the entire object as a single JSONB column.
-    /// Best when values are heterogeneous or structure is arbitrary.
+    ///
+    /// Trigger: values are heterogeneous (mixed types) or structure varies too much for EAV.
+    ///
+    /// JSON: `{ "meta": { "v": 2, "tags": ["a","b"], "active": true } }`
+    /// → `products_meta(j2s_parent_id, meta JSONB)`
+    /// → one row: `('{"v":2,"tags":["a","b"],"active":true}')`.
     Jsonb,
-    /// Structured pivot: group keys by common prefix, suffixes become typed columns.
-    /// e.g. calcium/calcium_100g/calcium_unit → one row per nutrient with per_100g, unit columns.
+
+    /// Structured pivot: keys share a common prefix; their suffixes become typed columns.
+    ///
+    /// Trigger: suffix detector finds ≥ N keys following a `{base}` / `{base}_{suffix}` pattern
+    /// (e.g. `energy`, `energy_100g`, `energy_unit`).
+    ///
+    /// JSON: `{ "energy": 250, "energy_100g": 1046, "energy_unit": "kcal",
+    ///          "fat": 12,     "fat_100g": 50,       "fat_unit": "g" }`
+    /// → `nutrients(j2s_parent_id, j2s_key TEXT, value INTEGER, per_100g FLOAT, unit TEXT)`
+    /// → rows: `("energy", 250, 1046, "kcal")`, `("fat", 12, 50, "g")`.
     StructuredPivot(SuffixSchema),
-    /// Sibling collapse: N child tables with the same schema are merged into 1 table.
-    /// The child key becomes a column; each child object's fields become columns (union).
-    /// e.g. products_images_1, products_images_2 → products_images with key_id + union cols.
+
+    /// Sibling collapse: N structurally similar child tables are merged into one canonical table.
+    ///
+    /// Trigger: ≥ `sibling_threshold` child tables whose column sets have pairwise Jaccard
+    /// similarity ≥ `min_jaccard`. The original sibling tables are removed from the schema.
+    ///
+    /// JSON: `{ "images": { "front": {"url":"a.jpg","w":100}, "back": {"url":"b.jpg","w":80} } }`
+    /// → `images(j2s_parent_id, key_id TEXT, url TEXT, w INTEGER)`
+    /// → rows: `("front","a.jpg",100)`, `("back","b.jpg",80)`.
     KeyedPivot(SiblingSchema),
-    /// Multi-group sibling collapse: children have two distinct key shapes (e.g. numeric "1","2"
-    /// and text "front_en","rev_fr"). Each shape group produces its own synthetic pivot table.
-    /// The parent itself stores no rows — it is a pure routing table in Pass 2.
+
+    /// Multi-group sibling collapse: siblings have two distinct key shapes (numeric + text).
+    ///
+    /// Trigger: same conditions as `KeyedPivot` but the key suffixes are a mix of integers
+    /// ("1","2") and slugs ("front","back"). Each shape group produces its own synthetic pivot
+    /// table; the parent itself becomes a pure routing table (no rows emitted in Pass 2).
+    ///
+    /// JSON: `{ "media": { "1": {"url":"a"}, "2": {"url":"b"}, "front": {"url":"c"} } }`
+    /// → `media_num(parent_fk, key_id INTEGER, url TEXT)` — rows: `(1,"a")`, `(2,"b")`
+    /// → `media_txt(parent_fk, key_id TEXT, url TEXT)` — row: `("front","c")`.
     MultiKeyedPivot(Vec<SiblingGroup>),
-    /// Root table split: stable keys (freq >= stable_threshold) stay as columns in the main
-    /// table; medium keys (rare_threshold <= freq < stable_threshold) go to a companion
-    /// `{name}_wide` Pivot table linked by the same anchor UUID.
-    /// Keys below rare_threshold are dropped entirely (see WideStrategy::Ignore).
+
+    /// Root table split: bi-modal key frequency → main table + `{name}_wide` EAV companion.
+    ///
+    /// Trigger: root table with many keys exhibiting a clear stable/rare frequency split.
+    /// - Keys with frequency ≥ `stable_threshold` → columns on the main table.
+    /// - Keys with `rare_threshold` ≤ freq < `stable_threshold` → EAV rows in `{name}_wide`.
+    /// - Keys with frequency < `rare_threshold` → dropped entirely.
+    ///
+    /// JSON (over 1000 rows; "name" always present, "desc" in 60%, "extra" in 0.5%):
+    /// → `products(j2s_id UUID, name TEXT, desc TEXT)` — stable + medium keys
+    /// → `products_wide(j2s_anchor UUID, key TEXT, value TEXT)` — medium-freq keys as EAV
+    /// (key "extra" silently dropped — below `rare_threshold`).
     AutoSplit {
         stable_threshold: f64,
         rare_threshold: f64,
@@ -107,29 +185,49 @@ pub enum WideStrategy {
         /// PostgreSQL name of the companion wide table, e.g. "products_wide".
         wide_table_name: String,
     },
-    /// Key is present in < rare_threshold of rows — excluded from all schemas and data.
-    /// Applied during finalize() before column building.
+
+    /// Key appears in fewer than `rare_threshold` of rows — excluded from all schemas and data.
+    ///
+    /// Applied during `finalize()` before column building. No table or column is produced.
+    /// The dropped key is recorded in the anomaly report so the user knows data was omitted.
     Ignore,
-    /// Normalize dynamic keys: each key in the object becomes a row, the key itself becomes
-    /// a typed ID column. Similar to KeyedPivot but applied manually via the IHM.
-    /// e.g. images.12584 → { image_id: "12584", url: ..., width: ... }
+
+    /// Normalize dynamic keys: each JSON key in the object becomes a row.
+    ///
+    /// Applied manually via the IHM (not auto-inferred). The key itself is stored as a typed
+    /// ID column; the remaining fields become regular columns (union across all keys).
+    ///
+    /// JSON: `{ "images": { "12584": {"url":"a.jpg","w":100}, "99001": {"url":"b.jpg","w":80} } }`
+    /// → `images(j2s_parent_id, image_id TEXT, url TEXT, w INTEGER)`
+    /// → rows: `("12584","a.jpg",100)`, `("99001","b.jpg",80)`.
     NormalizeDynamicKeys {
-        /// Name of the column that will hold the original JSON key (e.g. "image_id").
+        /// Name of the column that will hold the original JSON key (e.g. `"image_id"`).
         id_column: String,
     },
-    /// Flatten nested object: inlines the child object's scalar fields as columns in the
-    /// parent table. The child table is removed from the schema.
-    /// e.g. nutrients.calories → parent.nutrients_calories
-    /// Set temporarily during apply_flatten(); removed from schema by the end of that function.
+
+    /// Flatten nested object: inlines the child's scalar fields as columns in the parent table.
+    ///
+    /// Applied manually via the IHM. The child table is removed from the schema.
+    /// Each inlined column is prefixed with `prefix` (e.g. `"nutrients_"`).
+    ///
+    /// JSON: `{ "name": "X", "nutrients": { "calories": 250, "fat": 12 } }`
+    /// → `product(name TEXT, nutrients_calories INTEGER, nutrients_fat INTEGER)`
+    /// (child table `product_nutrients` removed).
     Flatten {
-        /// Prefix prepended to inlined column names (e.g. "nutrients_").
+        /// Prefix prepended to inlined column names (e.g. `"nutrients_"`).
         prefix: String,
         /// Maximum nesting depth to flatten. Currently only depth = 1 is implemented.
         max_depth: u8,
     },
-    /// Inline the child table's raw JSON into a JSONB column on the parent table.
-    /// The child table is removed from the schema; the parent gains a `{child_name} JSONB` column.
+
+    /// Store the child object or array as a JSONB column directly on the parent table.
+    ///
+    /// Applied manually via the IHM. The child table is removed from the schema.
     /// One-to-one child → single JSONB object; one-to-many → JSONB array.
+    ///
+    /// JSON: `{ "name": "X", "tags": ["a", "b", "c"] }`
+    /// → `product(name TEXT, tags JSONB)` — value stored as `'["a","b","c"]'`
+    /// (child table `product_tags` removed).
     JsonbFlatten,
 }
 
@@ -230,6 +328,7 @@ pub struct TableSchema {
 }
 
 impl TableSchema {
+    /// Create a new table schema with default (`Columns`) strategy and no columns.
     #[must_use]
     pub fn new(name: String, path: Vec<String>, depth: usize) -> Self {
         Self {
@@ -250,11 +349,19 @@ impl TableSchema {
         self.parent_table.is_none()
     }
 
+    /// Returns true if this is a junction table for a scalar array child.
+    ///
+    /// Junction tables have the schema `(j2s_parent_id, value <type>, j2s_order INT)` — there
+    /// are no user-facing data columns. They arise from JSON like `{ "tags": ["a", "b", "c"] }`.
     #[must_use]
     pub fn is_junction(&self) -> bool {
         matches!(self.child_kind, Some(ChildKind::ScalarArray))
     }
 
+    /// Returns true if Pass 2 should emit a `j2s_order` column for positional ordering.
+    ///
+    /// True for `ObjectArray` and `ScalarArray` children — any child that comes from a JSON array
+    /// where the position of each element is semantically meaningful.
     #[must_use]
     pub fn has_order_column(&self) -> bool {
         matches!(
@@ -263,7 +370,8 @@ impl TableSchema {
         )
     }
 
-    /// Return only data columns (excludes generated j2s_ columns).
+    /// Return only user-facing data columns, excluding all generated `j2s_*` columns
+    /// (`j2s_id`, `j2s_{parent}_id`, `j2s_order`). Used for Jaccard scoring and DDL output.
     pub fn data_columns(&self) -> impl Iterator<Item = &ColumnSchema> {
         self.columns.iter().filter(|c| !c.is_generated)
     }
@@ -290,8 +398,11 @@ impl WideStrategy {
         !matches!(self, WideStrategy::Columns)
     }
 
-    /// Returns the names of all child tables directly absorbed by this strategy.
-    /// For MultiKeyedPivot, this is the union of all groups' absorbed_names.
+    /// Returns the names of child tables explicitly absorbed by this strategy.
+    ///
+    /// Only `MultiKeyedPivot` carries an explicit absorbed-names list (one per `SiblingGroup`).
+    /// For `KeyedPivot`, the absorbed sibling tables are tracked separately in the schema list
+    /// (each sibling receives `WideStrategy::Ignore` during finalization) — returns empty here.
     #[must_use]
     pub fn absorbed_names(&self) -> Vec<&str> {
         match self {

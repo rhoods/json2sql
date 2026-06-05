@@ -1,3 +1,15 @@
+//! Pass 1 — schema inference: stream the JSON file once and build a finalized table schema.
+//!
+//! Entry points:
+//! - [`run`] — single-threaded, produces a [`Pass1Result`] with finalized schemas.
+//! - [`run_inspect`] — like `run` but also collects per-column value statistics.
+//! - [`run_parallel`] — multi-worker variant; merges per-worker registries at the end.
+//!
+//! Wide-table strategies ([`crate::schema::table_schema::WideStrategy`]) are selected
+//! during `finalize()` at the end of the pass — not row-by-row.
+//! The resulting [`Pass1Result::schemas`] are sorted topologically (parents before children)
+//! and are ready to be serialized or handed directly to Pass 2.
+
 use std::collections::HashSet;
 use std::path::Path;
 

@@ -1,3 +1,14 @@
+//! Pass 2 — data insertion: stream the JSON file a second time and write rows to PostgreSQL.
+//!
+//! Execution is split into two phases:
+//! - **Phase A** (streaming): workers read the JSON in parallel and write COPY-format rows
+//!   to per-table temp files. Large sinks are snapshotted to disk to bound memory usage.
+//! - **Phase B** (COPY): all temp files are bulk-loaded into PostgreSQL via `COPY FROM STDIN`,
+//!   then PK and FK constraints are applied.
+//!
+//! The main entry point is [`run`], which requires a Tokio runtime and an open
+//! [`tokio_postgres::Client`].
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
