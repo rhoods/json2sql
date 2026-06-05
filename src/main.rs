@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 #![deny(dead_code)]
+#![deny(clippy::all)]
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
 mod anomaly;
 mod cli;
 mod db;
@@ -94,14 +97,20 @@ fn write_inspect_outputs(
         eprintln!("✓ No type anomalies detected");
     }
     if let Some(out_path) = sample_output {
-        let file = std::fs::File::create(out_path).map_err(error::J2sError::Io)?;
-        let mut writer = std::io::BufWriter::new(file);
-        for obj in &result.sampled_objects {
-            serde_json::to_writer(&mut writer, obj).map_err(|e| error::J2sError::Json { source: e, position: 0 })?;
-            writeln!(writer).map_err(error::J2sError::Io)?;
-        }
-        eprintln!("Sample written: {} objects → {}", result.sampled_objects.len(), out_path.display());
+        write_sample_file(&result.sampled_objects, out_path)?;
     }
+    Ok(())
+}
+
+fn write_sample_file(objects: &[serde_json::Value], out_path: &std::path::Path) -> Result<()> {
+    use std::io::Write;
+    let file = std::fs::File::create(out_path).map_err(error::J2sError::Io)?;
+    let mut writer = std::io::BufWriter::new(file);
+    for obj in objects {
+        serde_json::to_writer(&mut writer, obj).map_err(|e| error::J2sError::Json { source: e, position: 0 })?;
+        writeln!(writer).map_err(error::J2sError::Io)?;
+    }
+    eprintln!("Sample written: {} objects → {}", objects.len(), out_path.display());
     Ok(())
 }
 
