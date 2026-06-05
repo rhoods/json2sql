@@ -1,3 +1,9 @@
+#![forbid(unsafe_code)]
+#![deny(dead_code)]
+#![deny(clippy::all)]
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
+
 mod config;
 mod screens;
 mod state;
