@@ -120,6 +120,7 @@ fn coerce_pg_array_element(value: &Value, pg_type: &PgType) -> String {
     }
 }
 
+#[allow(clippy::too_many_lines)] // exhaustive type dispatch per JSON variant
 fn coerce_integer(value: &Value) -> CoerceResult {
     match value {
         Value::Number(n) => {
@@ -155,6 +156,7 @@ fn coerce_integer(value: &Value) -> CoerceResult {
     }
 }
 
+#[allow(clippy::too_many_lines)] // exhaustive type dispatch per JSON variant
 fn coerce_bigint(value: &Value) -> CoerceResult {
     match value {
         Value::Number(n) => {
@@ -188,6 +190,7 @@ fn coerce_bigint(value: &Value) -> CoerceResult {
     }
 }
 
+#[allow(clippy::too_many_lines)] // exhaustive type dispatch per JSON variant
 fn coerce_float(value: &Value) -> CoerceResult {
     match value {
         Value::Number(n) => {

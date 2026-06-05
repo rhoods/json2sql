@@ -582,6 +582,25 @@ struct ParentCtx<'a> {
     array_children: bool,
 }
 
+fn make_pivot_preamble(parent_name: &str, array_children: bool) -> Vec<ColumnSchema> {
+    let fk_col = format!("j2s_{parent_name}_id");
+    let mut cols = vec![
+        ColumnSchema::generated("j2s_id", PgType::Uuid),
+        ColumnSchema {
+            name: fk_col.clone(),
+            original_name: fk_col,
+            pg_type: PgType::Uuid,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: true,
+        },
+    ];
+    if array_children {
+        cols.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
+    }
+    cols
+}
+
 fn build_multi_group_entry(
     g: &SubgroupData,
     parent: &ParentCtx<'_>,
@@ -590,12 +609,7 @@ fn build_multi_group_entry(
     obj_map: &std::collections::HashMap<String, Vec<usize>>,
     arr_map: &std::collections::HashMap<String, Vec<usize>>,
 ) -> (TableSchema, Vec<CoSiblingGroup>) {
-    let fk_col = format!("j2s_{}_id", parent.name);
-    let mut cols: Vec<ColumnSchema> = vec![
-        ColumnSchema::generated("j2s_id", PgType::Uuid),
-        ColumnSchema { name: fk_col.clone(), original_name: fk_col, pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: true },
-    ];
-    if parent.array_children { cols.push(ColumnSchema::generated("j2s_order", PgType::BigInt)); }
+    let mut cols = make_pivot_preamble(parent.name, parent.array_children);
     cols.push(ColumnSchema { name: g.key_col_name.clone(), original_name: g.key_col_name.clone(), pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false });
     for col in &g.union_cols { cols.push(col.clone()); }
     cols.push(ColumnSchema { name: "j2s_data".to_string(), original_name: "j2s_data".to_string(), pg_type: PgType::Jsonb, not_null: false, is_generated: true, is_parent_fk: false });
@@ -757,6 +771,10 @@ fn build_sibling_ctx(
     Some((ctx, is_mixed))
 }
 
+fn should_skip_parent(schemas: &[TableSchema], parent_idx: usize) -> bool {
+    !matches!(schemas[parent_idx].wide_strategy, WideStrategy::Columns | WideStrategy::AutoSplit { .. })
+}
+
 fn collect_sibling_collapses(
     schemas: &[TableSchema],
     work: &[(String, Vec<usize>, bool)],
@@ -773,12 +791,7 @@ fn collect_sibling_collapses(
             Some(&i) => i,
             None => continue,
         };
-        if matches!(schemas[parent_idx].wide_strategy, WideStrategy::KeyedPivot(_) | WideStrategy::MultiKeyedPivot(_)) {
-            continue;
-        }
-        if !matches!(schemas[parent_idx].wide_strategy, WideStrategy::Columns | WideStrategy::AutoSplit { .. }) {
-            continue;
-        }
+        if should_skip_parent(schemas, parent_idx) { continue; }
         let Some((ctx, is_mixed)) = build_sibling_ctx(
             schemas, parent_name.clone(), parent_idx, child_indices, *array_children, threshold, min_jaccard,
         ) else { continue; };
@@ -856,21 +869,7 @@ fn build_co_sibling_schema(
     union_cols: Vec<ColumnSchema>,
 ) -> (String, TableSchema) {
     let t_name = pg_truncate_name(&format!("{}_{}", group.synthetic_parent_name, group.json_key));
-    let fk_col = format!("j2s_{parent_name}_id");
-    let mut cols: Vec<ColumnSchema> = vec![
-        ColumnSchema::generated("j2s_id", PgType::Uuid),
-        ColumnSchema {
-            name: fk_col.clone(),
-            original_name: fk_col,
-            pg_type: PgType::Uuid,
-            not_null: true,
-            is_generated: true,
-            is_parent_fk: true,
-        },
-    ];
-    if group.array_children {
-        cols.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
-    }
+    let mut cols = make_pivot_preamble(&parent_name, group.array_children);
     cols.extend(union_cols);
     let mut t_path = parent_path;
     t_path.push(group.json_key.clone());
