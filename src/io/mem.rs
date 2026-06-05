@@ -1,4 +1,9 @@
-#![allow(dead_code)] // utility functions — not yet wired into production paths
+//! Surveillance mémoire système — RSS et pression RAM.
+//!
+//! Utilitaires prévus pour déclencher un flush anticipé des sinks quand la RAM est saturée
+//! (risque d'OOM sur les très grands fichiers). Non encore câblés dans les runners de prod —
+//! les fonctions sont conservées prêtes à l'emploi.
+#![allow(dead_code)]
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 

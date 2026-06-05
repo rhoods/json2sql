@@ -9,8 +9,7 @@ use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::anomaly::collect::{AnomalyEvent, AnomalyProxy};
-use crate::anomaly::collector::AnomalyCollector;
+use crate::anomaly::collector::{AnomalyCollector, AnomalyEvent, AnomalyProxy};
 use crate::db::copy_sink::{copy_snapshot_to_pg, merge_copy_to_db, TempFileSink};
 use crate::schema::PATH_SEP;
 use crate::db::ddl::{add_constraints, ConstraintWarning};
@@ -690,8 +689,7 @@ mod tests {
     /// and NDJSON files are created on disk.
     #[tokio::test]
     async fn anomaly_writer_task_creates_ndjson_files() {
-        use crate::anomaly::collect::{AnomalyCollect, AnomalyEvent, AnomalyProxy};
-        use crate::anomaly::collector::AnomalyCollector;
+        use crate::anomaly::collector::{AnomalyCollect, AnomalyCollector, AnomalyEvent, AnomalyProxy};
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();

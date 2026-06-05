@@ -1,3 +1,10 @@
+//! Coercition de types — conversion d'une valeur JSON vers le type PostgreSQL attendu.
+//!
+//! *Coercer* une valeur : tenter de la convertir vers le `PgType` inféré au Pass 1.
+//! Ex : la valeur JSON `"42"` est coercée vers `Integer` si le schéma attend un entier.
+//! En cas d'échec (valeur incompatible), retourne `CoerceResult::Anomaly` — la valeur
+//! est alors enregistrée comme anomalie et remplacée par NULL en base.
+
 use serde_json::Value;
 
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};

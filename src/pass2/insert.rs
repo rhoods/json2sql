@@ -1,9 +1,19 @@
+//! Écriture de lignes complètes en base — logique d'insertion par type de table.
+//!
+//! Ce module sait *quoi* écrire : une ligne root, une ligne wide (pivot, autosplit…),
+//! un objet enfant. Il sélectionne la stratégie via `insert_child_object` qui aiguille
+//! (*dispatch*) selon le `WideStrategy` de la table cible.
+//!
+//! Frontière avec `traversal.rs` : `insert.rs` gère l'écriture d'une ligne complète
+//! dans un contexte `InsertCtx`. `traversal.rs` gère la navigation dans les sous-arbres
+//! JSON (pivot, keyed pivot, routing entre tables).
+
 use std::collections::HashMap;
 
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::anomaly::collect::AnomalyCollect;
+use crate::anomaly::collector::AnomalyCollect;
 use crate::db::copy_sink::RowBuilder;
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::error::Result;
@@ -167,7 +177,7 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
         match value {
             Value::Object(nested) => {
                 if let Some(child_schema) = path_map.get(&child_key) {
-                    dispatch_child_object(path_map, ctx, child_schema, nested, value, row_id)?;
+                    insert_child_object(path_map, ctx, child_schema, nested, value, row_id)?;
                 }
             }
             Value::Array(arr) => {
@@ -183,7 +193,7 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
 
 /// Dispatch a child Object value to the appropriate insertion function based on its WideStrategy.
 #[allow(clippy::too_many_lines)] // exhaustive dispatch over all WideStrategy variants
-fn dispatch_child_object<S: RowSink, A: AnomalyCollect>(
+fn insert_child_object<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
     child_schema: &TableSchema,
@@ -303,7 +313,7 @@ fn recurse_children<S: RowSink, A: AnomalyCollect>(
         match value {
             Value::Object(nested) => {
                 if let Some(child_schema) = path_map.get(&child_key) {
-                    dispatch_child_object(path_map, ctx, child_schema, nested, value, row_id)?;
+                    insert_child_object(path_map, ctx, child_schema, nested, value, row_id)?;
                 }
             }
             Value::Array(arr) => {

@@ -1,10 +1,19 @@
+//! `SchemaRegistry` — façade publique du pipeline d'inférence de schéma.
+//!
+//! **Observer** : accumule les observations JSON ligne par ligne (Pass 1).
+//! **Finalizer** : transforme ces observations en `TableSchema` SQL définitifs.
+//! **Registry** : façade qui combine les deux et expose l'API publique aux runners.
+//!
+//! Les callers (pass1/runner.rs, UI) n'interagissent qu'avec `SchemaRegistry` —
+//! ils n'ont pas à connaître la séparation observer/finalizer.
+
 use std::collections::HashSet;
 use serde_json::Value;
 
 use super::finalizer::SchemaFinalizer;
 use super::naming::{ColumnCollision, NamingRegistry, TruncatedName};
 use super::observer::SchemaObserver;
-use super::reporter;
+use super::inspector;
 use super::stats::ColumnStats;
 use super::strategies::StrategyName;
 use super::type_tracker::TypeTracker;
@@ -76,7 +85,7 @@ impl SchemaRegistry {
     /// Collect type distribution statistics for every data column (excluding j2s_ generated columns).
     /// Call after `finalize()` — uses the same naming registry for consistent table/column names.
     pub fn collect_stats(&mut self) -> Vec<ColumnStats> {
-        reporter::collect_stats(&self.observer, &mut self.naming)
+        inspector::collect_stats(&self.observer, &mut self.naming)
     }
 
     #[must_use]
@@ -98,7 +107,7 @@ impl SchemaRegistry {
     }
 
     pub fn anomaly_iter(&self) -> impl Iterator<Item = (&str, &str, &TypeTracker)> {
-        reporter::anomaly_iter(&self.observer)
+        self.observer.anomaly_iter()
     }
 }
 

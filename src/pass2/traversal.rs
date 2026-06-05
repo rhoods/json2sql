@@ -1,9 +1,20 @@
+//! Navigation dans les sous-arbres JSON — pivot, keyed pivot, routing entre tables.
+//!
+//! Ce module sait *où aller* : il parcourt la hiérarchie JSON et *route* les valeurs
+//! vers les bons sinks selon la structure du schéma (pivot key, structured pivot, jsonb…).
+//! *Dispatcher* un nœud = choisir le handler selon son type JSON ou sa WideStrategy.
+//! *Router* une ligne = la rediriger vers la table cible correcte.
+//!
+//! Frontière avec `insert.rs` : `traversal.rs` navigue et dispatch depuis un contexte
+//! de traversal (sinks/anomalies explicites). `insert.rs` écrit une ligne complète
+//! depuis un `InsertCtx` bundlé.
+
 use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::anomaly::collect::AnomalyCollect;
+use crate::anomaly::collector::AnomalyCollect;
 use crate::db::copy_sink::RowBuilder;
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::error::Result;
@@ -95,7 +106,7 @@ pub(super) fn insert_jsonb_object<S: RowSink>(
     Ok(())
 }
 
-fn dispatch_object_child<S: RowSink>(
+fn dispatch_child_object<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
@@ -144,7 +155,7 @@ fn dispatch_jsonb_children<S: RowSink>(
         match child_value {
             Value::Object(_) => {
                 if let Some(child_schema) = path_map.get(&child_key) {
-                    dispatch_object_child(path_map, sinks, anomalies, child_schema, child_value, child_id)?;
+                    dispatch_child_object(path_map, sinks, anomalies, child_schema, child_value, child_id)?;
                 }
             }
             Value::Array(arr) => {

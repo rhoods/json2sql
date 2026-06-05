@@ -1,3 +1,13 @@
+//! `SchemaFinalizer` — transformation des observations brutes en schémas SQL définitifs.
+//!
+//! Reçoit les `TableEntry` accumulés par `SchemaObserver` et produit des `TableSchema`
+//! prêts pour le DDL et le Pass 2. Responsabilités : construction des colonnes, sélection
+//! de la stratégie wide-table (*pivot*, *autosplit*, *jsonb*…), détection et collapse des
+//! siblings, tri topologique (parents avant enfants).
+//!
+//! Frontière avec `wide_strategies.rs` : ce module *décide* quelle stratégie appliquer.
+//! `wide_strategies.rs` *génère* les colonnes résultantes de cette stratégie.
+
 use std::collections::HashSet;
 use indexmap::IndexMap;
 use rayon::prelude::*;

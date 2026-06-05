@@ -1,3 +1,10 @@
+//! Sink PostgreSQL COPY — buffer disque et construction de lignes CSV.
+//!
+//! Un *sink* est la destination finale dans le pipeline d'import (source → transform → sink).
+//! `TempFileSink` accumule les lignes CSV dans un fichier temporaire (spill à 4 MiB),
+//! puis les envoie en bloc via `COPY … FROM STDIN` à la fin du Pass 2.
+//! `RowBuilder` construit une ligne CSV COPY texte champ par champ (valeurs séparées par `\t`).
+
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};

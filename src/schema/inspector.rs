@@ -42,19 +42,6 @@ pub fn collect_stats(observer: &SchemaObserver, naming: &mut NamingRegistry) -> 
     result
 }
 
-/// Return anomaly info for reporting: (table_path_key, col_original_name, TypeTracker).
-pub fn anomaly_iter(observer: &SchemaObserver) -> impl Iterator<Item = (&str, &str, &TypeTracker)> {
-    observer.tables.values().flat_map(|entry| {
-        entry.columns.iter().filter_map(|(field, tracker)| {
-            if tracker.has_anomalies() {
-                Some((entry.path_key.as_str(), field.as_str(), tracker))
-            } else {
-                None
-            }
-        })
-    })
-}
-
 fn type_histogram(tracker: &TypeTracker) -> Vec<(String, u64)> {
     let mut hist: Vec<(String, u64)> = tracker
         .iter_types()

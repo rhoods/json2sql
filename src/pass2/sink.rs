@@ -1,3 +1,9 @@
+//! Trait `RowSink` — abstraction sur la destination d'écriture des lignes CSV COPY.
+//!
+//! Dans un pipeline de données, un *sink* est la destination finale (source → transform → sink).
+//! Ce trait découple la logique d'insertion (`pass2/insert.rs`) du système de fichiers,
+//! ce qui permet d'utiliser un buffer mémoire en test à la place d'un fichier disque.
+
 use std::sync::{Arc, Mutex};
 
 use crate::db::copy_sink::TempFileSink;

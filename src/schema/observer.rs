@@ -175,6 +175,20 @@ impl SchemaObserver {
         }
     }
 
+    /// Iterate over columns that have anomalies: (table_path_key, col_original_name, TypeTracker).
+    /// Used after Pass 1 to feed the anomaly report.
+    pub fn anomaly_iter(&self) -> impl Iterator<Item = (&str, &str, &TypeTracker)> {
+        self.tables.values().flat_map(|entry| {
+            entry.columns.iter().filter_map(|(field, tracker)| {
+                if tracker.has_anomalies() {
+                    Some((entry.path_key.as_str(), field.as_str(), tracker))
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
     fn ensure_table_key(&mut self, key: &str, parent_key: &str, child_kind: Option<ChildKind>) {
         self.tables.entry(key.to_string()).or_insert_with(|| {
             let path: Vec<String> = key.split(PATH_SEP).map(|s| s.to_string()).collect();

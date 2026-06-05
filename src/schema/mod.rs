@@ -12,7 +12,7 @@ pub mod naming;
 pub mod observer;
 pub mod persistence;
 pub mod registry;
-pub mod reporter;
+pub mod inspector;
 pub mod stats;
 pub mod suffix_detector;
 pub mod table_schema;

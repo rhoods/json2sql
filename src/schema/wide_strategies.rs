@@ -1,3 +1,14 @@
+//! Génération des colonnes pour les stratégies wide-table.
+//!
+//! **Pivot** : chaque clé JSON distincte devient une colonne (`key_fr`, `key_en`…).
+//! **Structured pivot** : variante où les colonnes sont groupées par suffixe détecté.
+//! **Keyed pivot** : pivot où la clé pivot est une colonne explicite (ex: code langue).
+//! **Flatten / JsonbFlatten** : les colonnes de la table enfant remontent dans le parent.
+//! **NormalizeDynamicKeys** : les clés dynamiques sont normalisées en table EAV.
+//!
+//! Frontière avec `finalizer.rs` : ce module génère les colonnes résultantes d'une
+//! stratégie donnée. `finalizer.rs` décide *quelle* stratégie appliquer à chaque table.
+
 use indexmap::IndexMap;
 
 use crate::error::{J2sError, Result};
