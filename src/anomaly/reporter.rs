@@ -6,8 +6,14 @@
 
 use std::path::Path;
 
-use crate::cli::AnomalyFormat;
 use crate::error::{J2sError, Result};
+
+/// Output format for the anomaly summary report.
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum AnomalyFormat {
+    Json,
+    Csv,
+}
 
 use super::collector::AnomalyCollector;
 

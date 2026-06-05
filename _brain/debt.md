@@ -33,6 +33,45 @@ Prochain palier : à définir.
 ### Fonctions extraites de `pass2/runner.rs::run` (2026-06-04)
 `WorkerConfig` struct · `InterimCopyHandle`/`WorkerHandle` type aliases · `trigger_budget_flush` · `run_worker` · `phase_copy` · `spawn_anomaly_writer` · `preflight_warn_nonempty` · `dispatch_loop` · `join_phase_a` · `finalize_dispatch` · `emit_completion_events` · `log_constraint_warnings`
 
+## Dette Complexité — fonctions restantes (inventaire 2026-06-05)
+
+Résultat de l'audit clippy `too_many_lines` — classées en trois catégories.
+
+### Catégorie B — Extractibles (phases séquentielles nommées) — à traiter
+
+| Priorité | Fichier | Fonction | Taille | Phases identifiées |
+|---|---|---|---|---|
+| 🔴 1 | `src/pass1/runner.rs:187` | `run_inspect` | ~51L | registry config → scan with limit → result assembly |
+| 🔴 2 | `src/schema/suffix_detector.rs:51` | `detect_suffix_schema` | ~? | build → filter → coverage → sanity → build-result |
+| 🟡 3 | `src/schema/cascading/detection.rs:282` | `detect_mixed_collapse` | ~48L | decision gate multi-branch déjà partiellement délégué |
+| 🟡 4 | `src/schema/cascading/detection.rs:409` | `detect_homogeneous_collapse` | ~54L | filter → jaccard → child-compat → multi vs classic dispatch |
+| 🟡 5 | `src/schema/cascading/detection.rs:940` | `process_keyed_pivot_work_item` | ~43L | jaccard gate → resolve → build TableSchema → co-siblings → reparent |
+| 🟢 6 | `src/pass2/runner.rs:176` | `run_worker` (async) | ~44L | receive → parse → insert → budget check |
+| 🟢 7 | `src/pass2/runner.rs:400` | `dispatch_loop` (async) | ~44L | dispatch + limit + progress bar + progress channel |
+| 🟢 8 | `src/schema/wide_strategies.rs:242` | `apply_normalize_dynamic_keys` | ~46L | find → collect → classify → mutate → log → exclude |
+
+### Catégorie A — Dispatch exhaustif sur enum — légitimes, ne pas refactoriser
+
+Ces fonctions sont longues parce qu'elles ont de nombreux variants — pas parce qu'elles font plusieurs choses. Extraire les bras en fonctions n'améliorerait pas la lisibilité.
+
+| Fichier | Fonction | Raison |
+|---|---|---|
+| `src/pass2/coercer.rs:26,131,167,201` | 4 fonctions coerce_* | dispatch exhaustif sur `PgType` variants |
+| `src/pass2/insert.rs:195` | dispatch WideStrategy | dispatch exhaustif sur `WideStrategy` variants |
+| `src/pass2/traversal.rs:307` | dispatch colonnes | boucle per-colonne avec branches distinctes |
+| `src/schema/config.rs:104` | `apply_strategy_override` | dispatch exhaustif sur strategy override variants |
+
+### Catégorie C — Algo compact ou couplage fort — ne pas toucher
+
+| Fichier | Fonction | Raison |
+|---|---|---|
+| `src/schema/cascading/scoring.rs:60` | algorithme glouton | O(n²) auto-contenu, découper = perte de lisibilité algo |
+| `src/io/reader.rs:200` | state machine inline | state machine lexicale, découper = régression de performance |
+| `src/schema/cascading/merge.rs:96` | construction symétrique | 2 groupes miroirs, pas de phases |
+| `src/pass2/runner.rs:444` | `join_phase_a` | accumulation d'erreurs non-factorisable |
+| `src/db/ddl.rs:233` | pipeline async DDL | pipeline séquentiel déjà optimal |
+| `src/pass2/runner.rs:130` | `trigger_budget_flush` | décision + spawn tightly coupled autour de `sink_arc` |
+
 ## Améliorations futures
 - Log des flush périodiques (`flush tablename (N rows)`)
 - Double barre progression ImportScreen (Phase A streaming / Phase B COPY) — voir ux-todo.md

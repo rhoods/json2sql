@@ -1,7 +1,7 @@
 //! CLI entry point for json2sql.
 //!
-//! Parses arguments via [`cli`], dispatches to Pass 1 + Pass 2 runners, and handles
-//! progress reporting and anomaly output for the terminal workflow.
+//! Parses arguments via [`cli`], converts to [`pipeline::PipelineConfig`], and dispatches
+//! to [`pipeline::run_pipeline`]. The `inspect` subcommand is handled inline here.
 #![forbid(unsafe_code)]
 #![deny(dead_code)]
 #![deny(clippy::all)]
@@ -14,6 +14,7 @@ mod error;
 mod io;
 mod pass1;
 mod pass2;
+mod pipeline;
 mod schema;
 
 use clap::Parser;
@@ -36,7 +37,38 @@ async fn main() -> anyhow::Result<()> {
             // Validate --disable-strategy flags before any file I/O.
             let disabled_strategies = parse_disabled_strategies(&cli.disable_strategy)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
-            run(cli, disabled_strategies).await.map_err(|e| anyhow::anyhow!("{}", e))
+            let root_table = cli.root_table_name();
+            let cfg = pipeline::PipelineConfig {
+                input: cli.input,
+                root_table,
+                db_url: cli.db_url,
+                pg_schema: cli.schema,
+                drop_existing: cli.drop_existing,
+                dry_run: cli.dry_run,
+                text_threshold: cli.text_threshold,
+                array_as_pg_array: cli.array_as_pg_array,
+                depth_limit: cli.depth_limit,
+                wide_column_threshold: cli.wide_column_threshold,
+                sibling_threshold: cli.sibling_threshold,
+                sibling_jaccard: cli.sibling_jaccard,
+                stable_threshold: cli.stable_threshold,
+                rare_threshold: cli.rare_threshold,
+                num_workers: cli.workers,
+                disabled_strategies,
+                parallel: cli.parallel,
+                anomaly_dir: cli.anomaly_dir,
+                temp_dir: cli.temp_dir,
+                limit: cli.limit,
+                anomaly_format: cli.anomaly_format,
+                anomaly_output: cli.anomaly_output,
+                max_anomaly_rate: cli.max_anomaly_rate,
+                schema_config: cli.schema_config,
+                schema_output: cli.schema_output,
+                schema_input: cli.schema_input,
+                schema_report: cli.schema_report,
+                schema_report_output: cli.schema_report_output,
+            };
+            pipeline::run_pipeline(cfg).await.map_err(|e| anyhow::anyhow!("{}", e))
         }
     }
 }
@@ -115,378 +147,5 @@ fn write_sample_file(objects: &[serde_json::Value], out_path: &std::path::Path) 
         writeln!(writer).map_err(error::J2sError::Io)?;
     }
     eprintln!("Sample written: {} objects → {}", objects.len(), out_path.display());
-    Ok(())
-}
-
-#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-// debt: 293L/cplx-35 — CLI orchestration glue; candidate for phase extraction once stable
-async fn run(cli: Cli, disabled_strategies: std::collections::HashSet<schema::strategies::StrategyName>) -> Result<()> {
-    let root_table = cli.root_table_name();
-
-    // -------------------------------------------------------------------------
-    // Resolve input: buffer stdin to a temp file if --input is omitted.
-    // The temp file must stay alive for the duration of run() (both passes).
-    // -------------------------------------------------------------------------
-    let (_stdin_temp, input_path) = match cli.input {
-        Some(ref path) => (None, path.clone()),
-        None => {
-            eprintln!("No --input specified, reading from stdin...");
-            let mut temp = tempfile::NamedTempFile::new().map_err(error::J2sError::Io)?;
-            std::io::copy(&mut std::io::stdin(), &mut temp)
-                .map_err(error::J2sError::Io)?;
-            let path = temp.path().to_path_buf();
-            eprintln!("Buffered stdin to temp file ({} bytes).", temp.as_file().metadata().map(|m| m.len()).unwrap_or(0));
-            (Some(temp), path)
-        }
-    };
-
-    // -------------------------------------------------------------------------
-    // Pass 1 — Schema inference (or load from snapshot)
-    // -------------------------------------------------------------------------
-    let mut pass1 = if let Some(ref schema_path) = cli.schema_input {
-        eprintln!("Loading schema snapshot from '{}'...", schema_path.display());
-        let snap = schema::persistence::load(schema_path)?;
-        eprintln!(
-            "Snapshot loaded: {} tables, {} rows originally scanned.",
-            snap.schemas.len(),
-            snap.total_rows
-        );
-        pass1::runner::Pass1Result {
-            schemas: snap.schemas,
-            total_rows: snap.total_rows,
-            stats: snap.stats,
-            truncated_names: snap.truncated_names,
-            column_collisions: snap.column_collisions,
-            overflow_warnings: Vec::new(), // guard already applied when snapshot was saved
-        }
-    } else {
-        eprintln!("Pass 1: inferring schema from '{}'...", input_path.display());
-        if cli.workers > 1 {
-            let (workers, capped) = pass1::runner::effective_workers(cli.workers);
-            if let Some(cap) = capped {
-                eprintln!(
-                    "WARNING: --workers {} exceeds available CPUs ({}); clamped to {}.",
-                    cli.workers, cap, cap
-                );
-            }
-            eprintln!("Using {} parallel workers for schema inference.", workers);
-            pass1::runner::run_parallel(
-                &input_path,
-                &pass1::runner::Pass1Config {
-                    root_table: root_table.clone(),
-                    text_threshold: cli.text_threshold,
-                    array_as_pg_array: cli.array_as_pg_array,
-                    wide_column_threshold: cli.wide_column_threshold,
-                    sibling_threshold: cli.sibling_threshold,
-                    sibling_jaccard: cli.sibling_jaccard,
-                    stable_threshold: cli.stable_threshold,
-                    rare_threshold: cli.rare_threshold,
-                    disabled_strategies: disabled_strategies.clone(),
-                    num_workers: Some(workers),
-                },
-                None,
-            )?
-        } else {
-            pass1::runner::run(
-                &input_path,
-                &pass1::runner::Pass1Config {
-                    root_table: root_table.clone(),
-                    text_threshold: cli.text_threshold,
-                    array_as_pg_array: cli.array_as_pg_array,
-                    wide_column_threshold: cli.wide_column_threshold,
-                    sibling_threshold: cli.sibling_threshold,
-                    sibling_jaccard: cli.sibling_jaccard,
-                    stable_threshold: cli.stable_threshold,
-                    rare_threshold: cli.rare_threshold,
-                    disabled_strategies,
-                    num_workers: None,
-                },
-                None,
-            )?
-        }
-    };
-
-    eprintln!("\nInferred schema ({} tables):", pass1.schemas.len());
-    for schema in &pass1.schemas {
-        eprintln!(
-            "  {} ({} columns){}",
-            schema.name,
-            schema.columns.len(),
-            schema
-                .parent_table
-                .as_deref()
-                .map(|p| format!(" → parent: {}", p))
-                .unwrap_or_default()
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // Truncated name warning
-    // -------------------------------------------------------------------------
-    if !pass1.truncated_names.is_empty() {
-        eprintln!(
-            "\nWARNING: {} table name(s) exceeded 63 chars and were truncated:",
-            pass1.truncated_names.len()
-        );
-        for t in &pass1.truncated_names {
-            eprintln!(
-                "  {} → {} (original: {})",
-                t.full_name, t.pg_name, t.original_path
-            );
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Column name collision warning
-    // -------------------------------------------------------------------------
-    if !pass1.column_collisions.is_empty() {
-        let total: usize = pass1.column_collisions.iter().map(|c| c.original_names.len()).sum();
-        eprintln!(
-            "\nWARNING: {} column name collision(s) resolved by hash suffix ({} fields affected):",
-            pass1.column_collisions.len(),
-            total
-        );
-        for collision in &pass1.column_collisions {
-            eprintln!(
-                "  table '{}': {} fields all sanitize to '{}' →",
-                collision.table_name, collision.original_names.len(), collision.sanitized_name
-            );
-            for (orig, resolved) in collision.original_names.iter().zip(&collision.resolved_names) {
-                eprintln!("    '{}' → '{}'", orig, resolved);
-            }
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Column overflow warning (tables auto-converted to JSONB)
-    // -------------------------------------------------------------------------
-    if !pass1.overflow_warnings.is_empty() {
-        eprintln!(
-            "\nWARNING: {} table(s) exceeded PostgreSQL's 1600-column limit and were converted to JSONB:",
-            pass1.overflow_warnings.len()
-        );
-        for w in &pass1.overflow_warnings {
-            eprintln!(
-                "  {} ({} data columns → single 'data JSONB' column)",
-                w.table_name, w.original_column_count
-            );
-        }
-        eprintln!("  Their child tables are preserved and will still receive data.");
-    }
-
-    // -------------------------------------------------------------------------
-    // Depth limit warning
-    // -------------------------------------------------------------------------
-    if let Some(limit) = cli.depth_limit {
-        let deep: Vec<_> = pass1
-            .schemas
-            .iter()
-            .filter(|s| s.depth > limit)
-            .collect();
-        if !deep.is_empty() {
-            eprintln!(
-                "\nWARNING: {} table(s) exceed depth limit of {}:",
-                deep.len(),
-                limit
-            );
-            for s in &deep {
-                eprintln!("  {} (depth {})", s.name, s.depth);
-            }
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Schema config — apply manual type overrides
-    // -------------------------------------------------------------------------
-    if let Some(ref config_path) = cli.schema_config {
-        eprintln!("\nApplying schema overrides from '{}'...", config_path.display());
-        let config = schema::config::SchemaConfig::from_file(config_path)?;
-        schema::config::apply_overrides(&mut pass1.schemas, &config)?;
-        schema::config::apply_group_overrides(&mut pass1.schemas, &config);
-        // Re-run exclusion: strategy overrides may have changed Columns → Jsonb/Pivot on a parent,
-        // which should now suppress all its child tables (they'd receive no data anyway).
-        schema::finalizer::exclude_absorbed_children(&mut pass1.schemas);
-        eprintln!(
-            "Schema after overrides: {} tables",
-            pass1.schemas.len()
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // Schema snapshot — save after overrides so the snapshot is Pass-2-ready
-    // -------------------------------------------------------------------------
-    if let Some(ref out_path) = cli.schema_output {
-        schema::persistence::save(
-            &pass1.schemas,
-            pass1.total_rows,
-            &pass1.truncated_names,
-            &pass1.column_collisions,
-            &pass1.stats,
-            out_path,
-        )?;
-        eprintln!("Schema snapshot saved to '{}'.", out_path.display());
-    }
-
-    // -------------------------------------------------------------------------
-    // Schema statistics report
-    // -------------------------------------------------------------------------
-    if cli.schema_report || cli.schema_report_output.is_some() {
-        if let Some(ref path) = cli.schema_report_output {
-            let mut file = std::fs::File::create(path).map_err(error::J2sError::Io)?;
-            schema::stats::write_text_report(&pass1.stats, pass1.total_rows, &mut file)
-                .map_err(error::J2sError::Io)?;
-        } else {
-            schema::stats::write_text_report(
-                &pass1.stats,
-                pass1.total_rows,
-                &mut std::io::stderr(),
-            )
-            .map_err(error::J2sError::Io)?;
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Dry-run — print DDL and exit
-    // -------------------------------------------------------------------------
-    if cli.dry_run {
-        println!("-- DDL generated by json2sql (dry-run, no database connection)\n");
-        for schema in &pass1.schemas {
-            println!("{};", db::ddl::generate_create_table(schema, &cli.schema, cli.drop_existing));
-            println!();
-        }
-        // FK constraints
-        for schema in &pass1.schemas {
-            if let Some(ref parent_name) = schema.parent_table {
-                let fk_col = schema
-                    .columns
-                    .iter()
-                    .find(|c| c.is_parent_fk)
-                    .map(|c| c.name.as_str())
-                    .unwrap_or("j2s_parent_id");
-                println!(
-                    "ALTER TABLE {schema_q}.{table_q}\n    ADD CONSTRAINT {constraint}\n    FOREIGN KEY ({fk_col_q})\n    REFERENCES {schema_q}.{parent_q} (j2s_id);",
-                    schema_q = db::ddl::quote_ident(&cli.schema),
-                    table_q = db::ddl::quote_ident(&schema.name),
-                    constraint = db::ddl::quote_ident(&format!("fk_{}_parent", schema.name)),
-                    fk_col_q = db::ddl::quote_ident(fk_col),
-                    parent_q = db::ddl::quote_ident(parent_name),
-                );
-                println!();
-            }
-        }
-        return Ok(());
-    }
-
-    // -------------------------------------------------------------------------
-    // Connect to PostgreSQL
-    // -------------------------------------------------------------------------
-    let db_url = cli.db_url.as_deref().ok_or_else(|| {
-        error::J2sError::InvalidInput(
-            "No database URL provided. Use --db-url or set DATABASE_URL, or pass --dry-run."
-                .to_string(),
-        )
-    })?;
-    eprintln!("\nConnecting to PostgreSQL...");
-    let client = db::connection::connect(db_url).await?;
-    eprintln!("Connected.");
-
-    // -------------------------------------------------------------------------
-    // Create tables
-    // -------------------------------------------------------------------------
-    eprintln!("\nCreating tables in schema '{}'...", cli.schema);
-    db::ddl::create_tables_no_constraints(&client, &pass1.schemas, &cli.schema, cli.drop_existing, None).await?;
-
-    // -------------------------------------------------------------------------
-    // Pass 2 — Data insertion
-    // -------------------------------------------------------------------------
-    eprintln!("\nPass 2: inserting data...");
-    let pass2_config = pass2::Pass2Config {
-        root_table: root_table.clone(),
-        pg_schema: cli.schema.clone(),
-        parallel: cli.parallel,
-        anomaly_dir: cli.anomaly_dir.clone(),
-        temp_dir: cli.temp_dir.clone(),
-        per_worker_budget: None,
-        min_interim_copy_bytes: None,
-        limit: cli.limit,
-    };
-    let pass2 = pass2::runner::run(&input_path, &pass1.schemas, &client, db_url, &pass2_config, None)
-    .await?;
-
-    // -------------------------------------------------------------------------
-    // Summary
-    // -------------------------------------------------------------------------
-    eprintln!("\n=== Import Summary ===");
-    let mut table_names: Vec<&String> = pass2.rows_per_table.keys().collect();
-    table_names.sort();
-    for name in &table_names {
-        let count = pass2.rows_per_table[*name];
-        eprintln!("  {}: {} rows", name, count);
-    }
-
-    let total_rows: u64 = pass2.rows_per_table.values().sum();
-    let total_anomalies = pass2.anomaly_collector.total_anomalies();
-    eprintln!("\nTotal rows inserted: {}", total_rows);
-    eprintln!("Total anomalies:     {}", total_anomalies);
-
-    if total_anomalies > 0 {
-        // Aggregate per-(table,col) summaries into per-table stats for display.
-        // `summaries()` returns one entry per column — summing them gives per-table totals.
-        let summaries = pass2.anomaly_collector.summaries();
-        let mut by_table: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
-        for s in &summaries {
-            // s.total_rows is the same for all columns of a given table (it's the
-            // table-level row counter from inc_total), so or_insert is correct here.
-            let e = by_table.entry(s.table.clone()).or_insert((0, s.total_rows));
-            e.0 += s.anomaly_count;
-        }
-        let mut table_stats: Vec<(String, u64, u64)> = by_table
-            .into_iter()
-            .map(|(t, (anom, rows))| (t, anom, rows))
-            .collect();
-        table_stats.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-
-        eprintln!("\nAnomalies by table (top 10):");
-        for (table, anom, rows) in table_stats.iter().take(10) {
-            let rate = if *rows > 0 { *anom as f64 / *rows as f64 * 100.0 } else { 0.0 };
-            eprintln!(
-                "  {:40} {:>8} anomalies / {:>10} rows ({:.2}%)",
-                table, anom, rows, rate,
-            );
-        }
-        if table_stats.len() > 10 {
-            eprintln!("  ... and {} more tables with anomalies", table_stats.len() - 10);
-        }
-        if let Some(ref dir) = cli.anomaly_dir {
-            eprintln!("\nAnomaly files written to: {}", dir.display());
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Anomaly report
-    // -------------------------------------------------------------------------
-    if total_anomalies > 0 || cli.anomaly_output.is_some() {
-        anomaly::reporter::write_report(
-            &pass2.anomaly_collector,
-            &cli.anomaly_format,
-            cli.anomaly_output.as_deref(),
-        )?;
-    }
-
-    // -------------------------------------------------------------------------
-    // Check anomaly rate threshold
-    // -------------------------------------------------------------------------
-    if let Some(max_rate) = cli.max_anomaly_rate {
-        let actual_rate = pass2.anomaly_collector.overall_anomaly_rate();
-        if actual_rate > max_rate {
-            return Err(error::J2sError::InvalidInput(format!(
-                "Anomaly rate {:.4}% exceeds threshold {:.4}%",
-                actual_rate * 100.0,
-                max_rate * 100.0
-            )));
-        }
-    }
-
-    eprintln!("\nDone.");
     Ok(())
 }

@@ -209,6 +209,21 @@ pub fn apply_group_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConf
     }
 }
 
+/// Apply all config overrides in sequence, then re-run child exclusion.
+///
+/// Strategy overrides may change a parent table from `Columns` to `Jsonb`/`Pivot`, which
+/// means its former child tables would receive no data. `exclude_absorbed_children` removes
+/// them so Pass 2 never tries to insert into non-existent tables.
+pub fn apply_overrides_complete(
+    schemas: &mut Vec<TableSchema>,
+    config: &SchemaConfig,
+) -> crate::error::Result<()> {
+    apply_overrides(schemas, config)?;
+    apply_group_overrides(schemas, config);
+    crate::schema::finalizer::exclude_absorbed_children(schemas);
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // struct construction pipeline: generated cols → key col → union cols → strategy
 fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> TableSchema {
     let refs: Vec<&TableSchema> = cloned.iter().collect();

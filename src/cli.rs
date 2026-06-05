@@ -3,7 +3,7 @@
 //! Built with Clap. The root struct is [`Cli`]; the optional [`Commands`] enum selects
 //! the `inspect` subcommand (schema preview without data loading). When no subcommand is
 //! given, the default import pipeline runs.
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 /// Subcommands (optional — omit for the default import mode).
@@ -186,11 +186,8 @@ pub struct Cli {
     pub limit: Option<u64>,
 }
 
-#[derive(Debug, Clone, ValueEnum)]
-pub enum AnomalyFormat {
-    Json,
-    Csv,
-}
+/// Re-exported from [`crate::anomaly::reporter`] so callers can use it via `cli::AnomalyFormat`.
+pub use crate::anomaly::reporter::AnomalyFormat;
 
 impl Cli {
     /// Derive root table name from input file or explicit --table flag

@@ -1,0 +1,416 @@
+//! CLI-independent import pipeline.
+//!
+//! [`PipelineConfig`] holds all resolved parameters (no `clap` types). [`run_pipeline`]
+//! orchestrates Pass 1 → overrides → Pass 2 and can be called directly from tests or
+//! other callers without going through the CLI.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use crate::anomaly::reporter::AnomalyFormat;
+use crate::error::{J2sError, Result};
+use crate::pass1::runner::{Pass1Config, Pass1Result};
+use crate::schema::strategies::StrategyName;
+
+/// All parameters for a full json2sql import, resolved from CLI args or built directly.
+pub struct PipelineConfig {
+    /// Input JSON file. `None` → read from stdin (buffered to a temp file).
+    pub input: Option<PathBuf>,
+    /// Root table name.
+    pub root_table: String,
+    /// PostgreSQL connection URL. Required unless `dry_run` is true.
+    pub db_url: Option<String>,
+    /// Target PostgreSQL schema (default: `"public"`).
+    pub pg_schema: String,
+    /// Drop existing tables before import.
+    pub drop_existing: bool,
+    /// Print DDL to stdout and return without connecting to any database.
+    pub dry_run: bool,
+    /// Minimum string length (bytes) to use `TEXT` instead of `VARCHAR`.
+    pub text_threshold: u32,
+    /// Store scalar arrays as PostgreSQL array columns instead of junction tables.
+    pub array_as_pg_array: bool,
+    /// Warn when nesting depth exceeds this value. `None` = disabled.
+    pub depth_limit: Option<usize>,
+    /// Wide-table column threshold for automatic `Pivot`/`Jsonb` strategy assignment.
+    pub wide_column_threshold: usize,
+    /// Minimum sibling count required for automatic `KeyedPivot` merging.
+    pub sibling_threshold: usize,
+    /// Minimum Jaccard similarity for sibling merging.
+    pub sibling_jaccard: f64,
+    /// Minimum key frequency to keep a column in the main table (AutoSplit).
+    pub stable_threshold: f64,
+    /// Keys below this frequency are dropped entirely.
+    pub rare_threshold: f64,
+    /// Number of Pass 1 worker threads (1 = sequential).
+    pub num_workers: usize,
+    /// Strategies to disable during Pass 1.
+    pub disabled_strategies: HashSet<StrategyName>,
+    /// Number of parallel PostgreSQL connections for Pass 2 COPY.
+    pub parallel: usize,
+    /// Directory for per-table NDJSON anomaly streaming files.
+    pub anomaly_dir: Option<PathBuf>,
+    /// Directory for temporary COPY files (default: system temp dir).
+    pub temp_dir: Option<PathBuf>,
+    /// Stop Pass 2 after N root objects. `None` = full import.
+    pub limit: Option<u64>,
+    /// Format for the anomaly summary report.
+    pub anomaly_format: AnomalyFormat,
+    /// Write the anomaly summary report to this file (stdout if `None`).
+    pub anomaly_output: Option<PathBuf>,
+    /// Abort if the anomaly rate exceeds this threshold (0.0–1.0). `None` = disabled.
+    pub max_anomaly_rate: Option<f64>,
+    /// TOML file with manual type overrides applied after Pass 1.
+    pub schema_config: Option<PathBuf>,
+    /// Save the Pass 1 schema snapshot to this file for later reuse.
+    pub schema_output: Option<PathBuf>,
+    /// Load a previously saved Pass 1 snapshot and skip Pass 1 entirely.
+    pub schema_input: Option<PathBuf>,
+    /// Print Pass 1 schema statistics to stderr.
+    pub schema_report: bool,
+    /// Write Pass 1 schema statistics to this file instead of stderr.
+    pub schema_report_output: Option<PathBuf>,
+}
+
+/// Run the full json2sql import pipeline.
+///
+/// Orchestrates stdin buffering → Pass 1 (schema inference or snapshot load) →
+/// schema override application → DDL creation → Pass 2 (data insertion) → reporting.
+pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
+    let (_stdin_temp, input_path) = resolve_input(std::mem::take(&mut cfg.input))?;
+    let mut pass1 = load_or_infer_schema(&cfg, &input_path)?;
+    report_pass1_warnings(&pass1, cfg.depth_limit);
+    post_process_schema(&mut pass1, &cfg)?;
+
+    if cfg.dry_run {
+        print_dry_run_ddl(&pass1.schemas, &cfg.pg_schema, cfg.drop_existing);
+        return Ok(());
+    }
+
+    let db_url = cfg.db_url.as_deref().ok_or_else(|| {
+        J2sError::InvalidInput(
+            "No database URL provided. Use --db-url or set DATABASE_URL, or pass dry_run=true."
+                .to_string(),
+        )
+    })?;
+    eprintln!("\nConnecting to PostgreSQL...");
+    let client = crate::db::connection::connect(db_url).await?;
+    eprintln!("Connected.");
+
+    eprintln!("\nCreating tables in schema '{}'...", cfg.pg_schema);
+    crate::db::ddl::create_tables_no_constraints(
+        &client,
+        &pass1.schemas,
+        &cfg.pg_schema,
+        cfg.drop_existing,
+        None,
+    )
+    .await?;
+
+    eprintln!("\nPass 2: inserting data...");
+    let pass2 = crate::pass2::runner::run(
+        &input_path,
+        &pass1.schemas,
+        &client,
+        db_url,
+        &crate::pass2::Pass2Config {
+            root_table: cfg.root_table.clone(),
+            pg_schema: cfg.pg_schema.clone(),
+            parallel: cfg.parallel,
+            anomaly_dir: cfg.anomaly_dir.clone(),
+            temp_dir: cfg.temp_dir.clone(),
+            per_worker_budget: None,
+            min_interim_copy_bytes: None,
+            limit: cfg.limit,
+        },
+        None,
+    )
+    .await?;
+
+    report_pass2_results(&pass2, cfg.anomaly_dir.as_deref())?;
+
+    let total_anomalies = pass2.anomaly_collector.total_anomalies();
+    if total_anomalies > 0 || cfg.anomaly_output.is_some() {
+        crate::anomaly::reporter::write_report(
+            &pass2.anomaly_collector,
+            &cfg.anomaly_format,
+            cfg.anomaly_output.as_deref(),
+        )?;
+    }
+
+    if let Some(max_rate) = cfg.max_anomaly_rate {
+        let actual_rate = pass2.anomaly_collector.overall_anomaly_rate();
+        if actual_rate > max_rate {
+            return Err(J2sError::InvalidInput(format!(
+                "Anomaly rate {:.4}% exceeds threshold {:.4}%",
+                actual_rate * 100.0,
+                max_rate * 100.0
+            )));
+        }
+    }
+
+    eprintln!("\nDone.");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+/// Buffer stdin to a named temp file when no explicit input path is given.
+/// Returns `(temp_file_guard, resolved_path)`. The guard must stay alive for
+/// the duration of the pipeline so the temp file is not deleted prematurely.
+fn resolve_input(
+    input: Option<PathBuf>,
+) -> Result<(Option<tempfile::NamedTempFile>, PathBuf)> {
+    match input {
+        Some(path) => Ok((None, path)),
+        None => {
+            eprintln!("No input specified, reading from stdin...");
+            let mut temp = tempfile::NamedTempFile::new().map_err(J2sError::Io)?;
+            std::io::copy(&mut std::io::stdin(), &mut temp).map_err(J2sError::Io)?;
+            let path = temp.path().to_path_buf();
+            eprintln!(
+                "Buffered stdin to temp file ({} bytes).",
+                temp.as_file().metadata().map(|m| m.len()).unwrap_or(0)
+            );
+            Ok((Some(temp), path))
+        }
+    }
+}
+
+/// Run Pass 1 or restore from snapshot, then print the inferred schema summary.
+fn load_or_infer_schema(cfg: &PipelineConfig, input_path: &Path) -> Result<Pass1Result> {
+    let pass1 = if let Some(ref schema_path) = cfg.schema_input {
+        eprintln!("Loading schema snapshot from '{}'...", schema_path.display());
+        let snap = crate::schema::persistence::load(schema_path)?;
+        eprintln!(
+            "Snapshot loaded: {} tables, {} rows originally scanned.",
+            snap.schemas.len(),
+            snap.total_rows
+        );
+        Pass1Result {
+            schemas: snap.schemas,
+            total_rows: snap.total_rows,
+            stats: snap.stats,
+            truncated_names: snap.truncated_names,
+            column_collisions: snap.column_collisions,
+            overflow_warnings: Vec::new(),
+        }
+    } else {
+        eprintln!("Pass 1: inferring schema from '{}'...", input_path.display());
+        let base_cfg = Pass1Config {
+            root_table: cfg.root_table.clone(),
+            text_threshold: cfg.text_threshold,
+            array_as_pg_array: cfg.array_as_pg_array,
+            wide_column_threshold: cfg.wide_column_threshold,
+            sibling_threshold: cfg.sibling_threshold,
+            sibling_jaccard: cfg.sibling_jaccard,
+            stable_threshold: cfg.stable_threshold,
+            rare_threshold: cfg.rare_threshold,
+            disabled_strategies: cfg.disabled_strategies.clone(),
+            num_workers: None,
+        };
+        if cfg.num_workers > 1 {
+            let (workers, capped) = crate::pass1::runner::effective_workers(cfg.num_workers);
+            if let Some(cap) = capped {
+                eprintln!(
+                    "WARNING: num_workers {} exceeds available CPUs ({}); clamped to {}.",
+                    cfg.num_workers, cap, cap
+                );
+            }
+            eprintln!("Using {} parallel workers for schema inference.", workers);
+            crate::pass1::runner::run_parallel(
+                input_path,
+                &Pass1Config { num_workers: Some(workers), ..base_cfg },
+                None,
+            )?
+        } else {
+            crate::pass1::runner::run(input_path, &base_cfg, None)?
+        }
+    };
+
+    eprintln!("\nInferred schema ({} tables):", pass1.schemas.len());
+    for schema in &pass1.schemas {
+        eprintln!(
+            "  {} ({} columns){}",
+            schema.name,
+            schema.columns.len(),
+            schema.parent_table.as_deref().map(|p| format!(" → parent: {p}")).unwrap_or_default()
+        );
+    }
+    Ok(pass1)
+}
+
+/// Emit Pass 1 warnings: truncated names, column collisions, overflow, depth limit.
+fn report_pass1_warnings(pass1: &Pass1Result, depth_limit: Option<usize>) {
+    if !pass1.truncated_names.is_empty() {
+        eprintln!(
+            "\nWARNING: {} table name(s) exceeded 63 chars and were truncated:",
+            pass1.truncated_names.len()
+        );
+        for t in &pass1.truncated_names {
+            eprintln!("  {} → {} (original: {})", t.full_name, t.pg_name, t.original_path);
+        }
+    }
+
+    if !pass1.column_collisions.is_empty() {
+        let total: usize = pass1.column_collisions.iter().map(|c| c.original_names.len()).sum();
+        eprintln!(
+            "\nWARNING: {} column name collision(s) resolved by hash suffix ({} fields affected):",
+            pass1.column_collisions.len(),
+            total
+        );
+        for collision in &pass1.column_collisions {
+            eprintln!(
+                "  table '{}': {} fields all sanitize to '{}' →",
+                collision.table_name, collision.original_names.len(), collision.sanitized_name
+            );
+            for (orig, resolved) in collision.original_names.iter().zip(&collision.resolved_names) {
+                eprintln!("    '{orig}' → '{resolved}'");
+            }
+        }
+    }
+
+    if !pass1.overflow_warnings.is_empty() {
+        eprintln!(
+            "\nWARNING: {} table(s) exceeded PostgreSQL's 1600-column limit and were converted to JSONB:",
+            pass1.overflow_warnings.len()
+        );
+        for w in &pass1.overflow_warnings {
+            eprintln!(
+                "  {} ({} data columns → single 'data JSONB' column)",
+                w.table_name, w.original_column_count
+            );
+        }
+        eprintln!("  Their child tables are preserved and will still receive data.");
+    }
+
+    if let Some(limit) = depth_limit {
+        let deep: Vec<_> = pass1.schemas.iter().filter(|s| s.depth > limit).collect();
+        if !deep.is_empty() {
+            eprintln!("\nWARNING: {} table(s) exceed depth limit of {}:", deep.len(), limit);
+            for s in &deep {
+                eprintln!("  {} (depth {})", s.name, s.depth);
+            }
+        }
+    }
+}
+
+/// Apply schema config overrides, save snapshot, and emit stats report.
+fn post_process_schema(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<()> {
+    if let Some(ref config_path) = cfg.schema_config {
+        eprintln!("\nApplying schema overrides from '{}'...", config_path.display());
+        let config = crate::schema::config::SchemaConfig::from_file(config_path)?;
+        crate::schema::config::apply_overrides_complete(&mut pass1.schemas, &config)?;
+        eprintln!("Schema after overrides: {} tables", pass1.schemas.len());
+    }
+
+    if let Some(ref out_path) = cfg.schema_output {
+        crate::schema::persistence::save(
+            &pass1.schemas,
+            pass1.total_rows,
+            &pass1.truncated_names,
+            &pass1.column_collisions,
+            &pass1.stats,
+            out_path,
+        )?;
+        eprintln!("Schema snapshot saved to '{}'.", out_path.display());
+    }
+
+    if cfg.schema_report || cfg.schema_report_output.is_some() {
+        if let Some(ref path) = cfg.schema_report_output {
+            let mut file = std::fs::File::create(path).map_err(J2sError::Io)?;
+            crate::schema::stats::write_text_report(&pass1.stats, pass1.total_rows, &mut file)
+                .map_err(J2sError::Io)?;
+        } else {
+            crate::schema::stats::write_text_report(
+                &pass1.stats,
+                pass1.total_rows,
+                &mut std::io::stderr(),
+            )
+            .map_err(J2sError::Io)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Print CREATE TABLE + ALTER TABLE FK DDL to stdout and return.
+fn print_dry_run_ddl(
+    schemas: &[crate::schema::table_schema::TableSchema],
+    pg_schema: &str,
+    drop_existing: bool,
+) {
+    println!("-- DDL generated by json2sql (dry-run, no database connection)\n");
+    for schema in schemas {
+        println!("{};", crate::db::ddl::generate_create_table(schema, pg_schema, drop_existing));
+        println!();
+    }
+    for schema in schemas {
+        if let Some(ref parent_name) = schema.parent_table {
+            let fk_col = schema
+                .columns
+                .iter()
+                .find(|c| c.is_parent_fk)
+                .map(|c| c.name.as_str())
+                .unwrap_or("j2s_parent_id");
+            println!(
+                "ALTER TABLE {schema_q}.{table_q}\n    ADD CONSTRAINT {constraint}\n    FOREIGN KEY ({fk_col_q})\n    REFERENCES {schema_q}.{parent_q} (j2s_id);",
+                schema_q = crate::db::ddl::quote_ident(pg_schema),
+                table_q  = crate::db::ddl::quote_ident(&schema.name),
+                constraint = crate::db::ddl::quote_ident(&format!("fk_{}_parent", schema.name)),
+                fk_col_q = crate::db::ddl::quote_ident(fk_col),
+                parent_q = crate::db::ddl::quote_ident(parent_name),
+            );
+            println!();
+        }
+    }
+}
+
+/// Print the import summary (rows per table + top anomaly tables).
+fn report_pass2_results(
+    pass2: &crate::pass2::runner::Pass2Result,
+    anomaly_dir: Option<&Path>,
+) -> Result<()> {
+    eprintln!("\n=== Import Summary ===");
+    let mut table_names: Vec<&String> = pass2.rows_per_table.keys().collect();
+    table_names.sort();
+    for name in &table_names {
+        eprintln!("  {name}: {} rows", pass2.rows_per_table[*name]);
+    }
+
+    let total_rows: u64 = pass2.rows_per_table.values().sum();
+    let total_anomalies = pass2.anomaly_collector.total_anomalies();
+    eprintln!("\nTotal rows inserted: {total_rows}");
+    eprintln!("Total anomalies:     {total_anomalies}");
+
+    if total_anomalies > 0 {
+        let summaries = pass2.anomaly_collector.summaries();
+        let mut by_table: std::collections::HashMap<String, (u64, u64)> =
+            std::collections::HashMap::new();
+        for s in &summaries {
+            let e = by_table.entry(s.table.clone()).or_insert((0, s.total_rows));
+            e.0 += s.anomaly_count;
+        }
+        let mut table_stats: Vec<(String, u64, u64)> = by_table
+            .into_iter()
+            .map(|(t, (anom, rows))| (t, anom, rows))
+            .collect();
+        table_stats.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        eprintln!("\nAnomalies by table (top 10):");
+        for (table, anom, rows) in table_stats.iter().take(10) {
+            let rate = if *rows > 0 { *anom as f64 / *rows as f64 * 100.0 } else { 0.0 };
+            eprintln!("  {table:40} {anom:>8} anomalies / {rows:>10} rows ({rate:.2}%)");
+        }
+        if table_stats.len() > 10 {
+            eprintln!("  ... and {} more tables with anomalies", table_stats.len() - 10);
+        }
+        if let Some(dir) = anomaly_dir {
+            eprintln!("\nAnomaly files written to: {}", dir.display());
+        }
+    }
+
+    Ok(())
+}

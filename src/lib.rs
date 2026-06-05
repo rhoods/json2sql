@@ -12,4 +12,5 @@ pub mod error;
 pub mod io;
 pub mod pass1;
 pub mod pass2;
+pub mod pipeline;
 pub mod schema;
