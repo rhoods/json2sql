@@ -117,6 +117,7 @@ impl WorkerConfig {
 
 /// When the worker budget is reached: snapshot large sinks → interim COPY task,
 /// spill small sinks to disk. Called from within the worker loop.
+#[allow(clippy::too_many_lines)] // per-sink decision + spawn tightly coupled around sink_arc
 fn trigger_budget_flush(
     sinks: &HashMap<String, Arc<Mutex<TempFileSink>>>,
     copy_handles: &mut Vec<InterimCopyHandle>,
@@ -162,6 +163,7 @@ fn trigger_budget_flush(
 /// Process one worker's stream of JSON byte chunks: parse, insert into sinks,
 /// and fire interim COPY snapshots when the per-worker budget is reached.
 /// Returns background COPY handles spawned during streaming.
+#[allow(clippy::too_many_lines)] // async event loop: receive → parse → insert → budget check
 async fn run_worker(
     mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     mut sinks: HashMap<String, Arc<Mutex<TempFileSink>>>,
@@ -244,6 +246,22 @@ async fn collect_copy_results(
 
 /// Phase B: unwrap shared sinks after streaming, distribute round-robin across
 /// `parallel` PG connections, COPY each table, then merge with interim rows.
+async fn copy_batch(batch: Vec<(String, Vec<TempFileSink>)>, url: String, ptx: Option<ProgressTx>) -> Result<Vec<(String, u64)>> {
+    use crate::db::connection::connect;
+    let conn = connect(&url).await?;
+    conn.execute("SET synchronous_commit = off", &[]).await
+        .map_err(crate::error::J2sError::Db)?;
+    let mut results = Vec::new();
+    for (table_name, sinks) in batch {
+        let rows = merge_copy_to_db(sinks, &conn).await?;
+        if let Some(ref tx) = ptx {
+            let _ = tx.send(ProgressEvent::Pass2Flush { table_name: table_name.clone(), rows_flushed: rows });
+        }
+        results.push((table_name, rows));
+    }
+    Ok(results)
+}
+
 async fn phase_copy(
     shared_sinks: HashMap<String, Arc<Mutex<TempFileSink>>>,
     parallel: usize,
@@ -262,26 +280,7 @@ async fn phase_copy(
     let mut copy_handles: Vec<CopyHandle> = Vec::with_capacity(parallel);
     for batch in table_batches {
         if batch.is_empty() { continue; }
-        let url = pg_url.to_string();
-        let ptx = progress_tx.clone();
-        copy_handles.push(tokio::task::spawn(async move {
-            use crate::db::connection::connect;
-            let conn = connect(&url).await?;
-            conn.execute("SET synchronous_commit = off", &[]).await
-                .map_err(crate::error::J2sError::Db)?;
-            let mut results = Vec::new();
-            for (table_name, sinks) in batch {
-                let rows = merge_copy_to_db(sinks, &conn).await?;
-                if let Some(ref tx) = ptx {
-                    let _ = tx.send(ProgressEvent::Pass2Flush {
-                        table_name: table_name.clone(),
-                        rows_flushed: rows,
-                    });
-                }
-                results.push((table_name, rows));
-            }
-            Ok(results)
-        }));
+        copy_handles.push(tokio::task::spawn(copy_batch(batch, pg_url.to_string(), progress_tx.clone())));
     }
 
     collect_copy_results(copy_handles, interim_rows).await
@@ -388,6 +387,7 @@ fn log_constraint_warnings(warnings: &[crate::db::ddl::ConstraintWarning], progr
 
 /// Dispatch raw JSON bytes from `reader` round-robin to workers.
 /// Returns `(rows_processed, worker_died)`.
+#[allow(clippy::too_many_lines)] // dense event loop: dispatch + limit + progress bar + progress channel
 async fn dispatch_loop(
     reader: &mut JsonReader,
     senders: &[tokio::sync::mpsc::Sender<Vec<u8>>],
@@ -431,6 +431,7 @@ async fn dispatch_loop(
 
 /// Join Phase A workers, await the anomaly writer, and collect interim COPY results.
 /// Returns `(merged_anomalies, interim_rows)`.
+#[allow(clippy::too_many_lines)] // sequential join pipeline, error accumulation pattern non-factorisable
 async fn join_phase_a(
     worker_handles: Vec<WorkerHandle>,
     anomaly_tx: tokio::sync::mpsc::UnboundedSender<AnomalyEvent>,
@@ -508,6 +509,7 @@ fn build_shared_sinks(
 ///       connections) as they fill up and when workers finish.
 ///   D — `add_constraints()` adds PRIMARY KEY (fatal on error) then
 ///       FOREIGN KEY (failures become `constraint_warnings`).
+#[allow(clippy::too_many_lines)] // top-level orchestrator: delegates to phase functions, not splittable further
 pub async fn run(
     path: &Path,
     schemas: &[TableSchema],

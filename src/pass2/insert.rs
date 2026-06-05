@@ -25,6 +25,7 @@ pub(crate) struct InsertCtx<'a, S, A> {
     pub(crate) anomalies: &'a mut A,
 }
 
+#[allow(clippy::too_many_lines)] // sequential phases of a single responsibility: resolve → fast-path → guard → coerce
 fn push_data_col<A: AnomalyCollect>(
     builder: &mut RowBuilder,
     anomalies: &mut A,
@@ -181,6 +182,7 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
 }
 
 /// Dispatch a child Object value to the appropriate insertion function based on its WideStrategy.
+#[allow(clippy::too_many_lines)] // exhaustive dispatch over all WideStrategy variants
 fn dispatch_child_object<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,

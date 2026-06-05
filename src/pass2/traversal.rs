@@ -241,6 +241,7 @@ pub(super) fn insert_structured_pivot_object<S: RowSink>(
 /// Route sub-objects and sub-arrays declared in `schema.child_routes` to their target tables.
 /// Called after writing each pivot row so that nested tables created by cascade merging
 /// receive their data with the correct parent FK.
+#[allow(clippy::too_many_lines)] // heterogeneous dispatch loop over child_routes, each arm calls a different strategy
 pub(super) fn dispatch_child_routes<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -292,6 +293,7 @@ struct KeyedPivotRowInput<'a> {
     sibling_schema: &'a SiblingSchema,
 }
 
+#[allow(clippy::too_many_lines)] // per-column loop with distinct branches for generated/key/data cols
 fn write_keyed_pivot_columns<A: AnomalyCollect>(
     builder: &mut RowBuilder,
     anomalies: &mut A,
