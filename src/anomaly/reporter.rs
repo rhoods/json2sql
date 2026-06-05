@@ -43,7 +43,7 @@ pub fn write_report(
     Ok(())
 }
 
-fn sort_summaries(summaries: &mut Vec<super::collector::AnomalySummary>) {
+fn sort_summaries(summaries: &mut [super::collector::AnomalySummary]) {
     summaries.sort_by(|a, b| {
         b.anomaly_count
             .cmp(&a.anomaly_count)

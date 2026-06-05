@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use crate::anomaly::reporter::AnomalyFormat;
 use crate::error::{J2sError, Result};
 use crate::pass1::runner::{Pass1Config, Pass1Result};
+use crate::schema::finalizer::OverflowWarning;
+use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::strategies::StrategyName;
+use crate::schema::table_schema::TableSchema;
 
 /// All parameters for a full json2sql import, resolved from CLI args or built directly.
 pub struct PipelineConfig {
@@ -93,25 +96,38 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
                 .to_string(),
         )
     })?;
+    let client = connect_and_create_tables(db_url, &pass1.schemas, &cfg.pg_schema, cfg.drop_existing).await?;
+    let pass2 = run_pass2(&input_path, &pass1.schemas, &client, db_url, &cfg).await?;
+    finalize_pass2(&pass2, &cfg)
+}
+
+async fn connect_and_create_tables(
+    db_url: &str,
+    schemas: &[TableSchema],
+    pg_schema: &str,
+    drop_existing: bool,
+) -> Result<tokio_postgres::Client> {
     eprintln!("\nConnecting to PostgreSQL...");
     let client = crate::db::connection::connect(db_url).await?;
     eprintln!("Connected.");
+    eprintln!("\nCreating tables in schema '{pg_schema}'...");
+    crate::db::ddl::create_tables_no_constraints(&client, schemas, pg_schema, drop_existing, None)
+        .await?;
+    Ok(client)
+}
 
-    eprintln!("\nCreating tables in schema '{}'...", cfg.pg_schema);
-    crate::db::ddl::create_tables_no_constraints(
-        &client,
-        &pass1.schemas,
-        &cfg.pg_schema,
-        cfg.drop_existing,
-        None,
-    )
-    .await?;
-
+async fn run_pass2(
+    input_path: &Path,
+    schemas: &[TableSchema],
+    client: &tokio_postgres::Client,
+    db_url: &str,
+    cfg: &PipelineConfig,
+) -> Result<crate::pass2::runner::Pass2Result> {
     eprintln!("\nPass 2: inserting data...");
-    let pass2 = crate::pass2::runner::run(
-        &input_path,
-        &pass1.schemas,
-        &client,
+    crate::pass2::runner::run(
+        input_path,
+        schemas,
+        client,
         db_url,
         &crate::pass2::Pass2Config {
             root_table: cfg.root_table.clone(),
@@ -125,9 +141,14 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
         },
         None,
     )
-    .await?;
+    .await
+}
 
-    report_pass2_results(&pass2, cfg.anomaly_dir.as_deref())?;
+fn finalize_pass2(
+    pass2: &crate::pass2::runner::Pass2Result,
+    cfg: &PipelineConfig,
+) -> Result<()> {
+    report_pass2_results(pass2, cfg.anomaly_dir.as_deref())?;
 
     let total_anomalies = pass2.anomaly_collector.total_anomalies();
     if total_anomalies > 0 || cfg.anomaly_output.is_some() {
@@ -182,54 +203,66 @@ fn resolve_input(
 /// Run Pass 1 or restore from snapshot, then print the inferred schema summary.
 fn load_or_infer_schema(cfg: &PipelineConfig, input_path: &Path) -> Result<Pass1Result> {
     let pass1 = if let Some(ref schema_path) = cfg.schema_input {
-        eprintln!("Loading schema snapshot from '{}'...", schema_path.display());
-        let snap = crate::schema::persistence::load(schema_path)?;
-        eprintln!(
-            "Snapshot loaded: {} tables, {} rows originally scanned.",
-            snap.schemas.len(),
-            snap.total_rows
-        );
-        Pass1Result {
-            schemas: snap.schemas,
-            total_rows: snap.total_rows,
-            stats: snap.stats,
-            truncated_names: snap.truncated_names,
-            column_collisions: snap.column_collisions,
-            overflow_warnings: Vec::new(),
-        }
+        restore_from_snapshot(schema_path)?
     } else {
-        eprintln!("Pass 1: inferring schema from '{}'...", input_path.display());
-        let base_cfg = Pass1Config {
-            root_table: cfg.root_table.clone(),
-            text_threshold: cfg.text_threshold,
-            array_as_pg_array: cfg.array_as_pg_array,
-            wide_column_threshold: cfg.wide_column_threshold,
-            sibling_threshold: cfg.sibling_threshold,
-            sibling_jaccard: cfg.sibling_jaccard,
-            stable_threshold: cfg.stable_threshold,
-            rare_threshold: cfg.rare_threshold,
-            disabled_strategies: cfg.disabled_strategies.clone(),
-            num_workers: None,
-        };
-        if cfg.num_workers > 1 {
-            let (workers, capped) = crate::pass1::runner::effective_workers(cfg.num_workers);
-            if let Some(cap) = capped {
-                eprintln!(
-                    "WARNING: num_workers {} exceeds available CPUs ({}); clamped to {}.",
-                    cfg.num_workers, cap, cap
-                );
-            }
-            eprintln!("Using {} parallel workers for schema inference.", workers);
-            crate::pass1::runner::run_parallel(
-                input_path,
-                &Pass1Config { num_workers: Some(workers), ..base_cfg },
-                None,
-            )?
-        } else {
-            crate::pass1::runner::run(input_path, &base_cfg, None)?
-        }
+        run_pass1_workers(input_path, cfg)?
     };
+    print_schema_summary(&pass1);
+    Ok(pass1)
+}
 
+fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
+    eprintln!("Loading schema snapshot from '{}'...", schema_path.display());
+    let snap = crate::schema::persistence::load(schema_path)?;
+    eprintln!(
+        "Snapshot loaded: {} tables, {} rows originally scanned.",
+        snap.schemas.len(),
+        snap.total_rows
+    );
+    Ok(Pass1Result {
+        schemas: snap.schemas,
+        total_rows: snap.total_rows,
+        stats: snap.stats,
+        truncated_names: snap.truncated_names,
+        column_collisions: snap.column_collisions,
+        overflow_warnings: Vec::new(),
+    })
+}
+
+fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Result> {
+    eprintln!("Pass 1: inferring schema from '{}'...", input_path.display());
+    let base_cfg = Pass1Config {
+        root_table: cfg.root_table.clone(),
+        text_threshold: cfg.text_threshold,
+        array_as_pg_array: cfg.array_as_pg_array,
+        wide_column_threshold: cfg.wide_column_threshold,
+        sibling_threshold: cfg.sibling_threshold,
+        sibling_jaccard: cfg.sibling_jaccard,
+        stable_threshold: cfg.stable_threshold,
+        rare_threshold: cfg.rare_threshold,
+        disabled_strategies: cfg.disabled_strategies.clone(),
+        num_workers: None,
+    };
+    if cfg.num_workers > 1 {
+        let (workers, capped) = crate::pass1::runner::effective_workers(cfg.num_workers);
+        if let Some(cap) = capped {
+            eprintln!(
+                "WARNING: num_workers {} exceeds available CPUs ({}); clamped to {}.",
+                cfg.num_workers, cap, cap
+            );
+        }
+        eprintln!("Using {} parallel workers for schema inference.", workers);
+        crate::pass1::runner::run_parallel(
+            input_path,
+            &Pass1Config { num_workers: Some(workers), ..base_cfg },
+            None,
+        )
+    } else {
+        crate::pass1::runner::run(input_path, &base_cfg, None)
+    }
+}
+
+fn print_schema_summary(pass1: &Pass1Result) {
     eprintln!("\nInferred schema ({} tables):", pass1.schemas.len());
     for schema in &pass1.schemas {
         eprintln!(
@@ -239,100 +272,122 @@ fn load_or_infer_schema(cfg: &PipelineConfig, input_path: &Path) -> Result<Pass1
             schema.parent_table.as_deref().map(|p| format!(" → parent: {p}")).unwrap_or_default()
         );
     }
-    Ok(pass1)
 }
 
 /// Emit Pass 1 warnings: truncated names, column collisions, overflow, depth limit.
 fn report_pass1_warnings(pass1: &Pass1Result, depth_limit: Option<usize>) {
-    if !pass1.truncated_names.is_empty() {
+    warn_truncated_names(&pass1.truncated_names);
+    warn_column_collisions(&pass1.column_collisions);
+    warn_overflow(&pass1.overflow_warnings);
+    warn_depth(&pass1.schemas, depth_limit);
+}
+
+fn warn_truncated_names(names: &[TruncatedName]) {
+    if names.is_empty() {
+        return;
+    }
+    eprintln!("\nWARNING: {} table name(s) exceeded 63 chars and were truncated:", names.len());
+    for t in names {
+        eprintln!("  {} → {} (original: {})", t.full_name, t.pg_name, t.original_path);
+    }
+}
+
+fn warn_column_collisions(collisions: &[ColumnCollision]) {
+    if collisions.is_empty() {
+        return;
+    }
+    let total: usize = collisions.iter().map(|c| c.original_names.len()).sum();
+    eprintln!(
+        "\nWARNING: {} column name collision(s) resolved by hash suffix ({} fields affected):",
+        collisions.len(),
+        total
+    );
+    for collision in collisions {
         eprintln!(
-            "\nWARNING: {} table name(s) exceeded 63 chars and were truncated:",
-            pass1.truncated_names.len()
+            "  table '{}': {} fields all sanitize to '{}' →",
+            collision.table_name, collision.original_names.len(), collision.sanitized_name
         );
-        for t in &pass1.truncated_names {
-            eprintln!("  {} → {} (original: {})", t.full_name, t.pg_name, t.original_path);
+        for (orig, resolved) in collision.original_names.iter().zip(&collision.resolved_names) {
+            eprintln!("    '{orig}' → '{resolved}'");
         }
     }
+}
 
-    if !pass1.column_collisions.is_empty() {
-        let total: usize = pass1.column_collisions.iter().map(|c| c.original_names.len()).sum();
-        eprintln!(
-            "\nWARNING: {} column name collision(s) resolved by hash suffix ({} fields affected):",
-            pass1.column_collisions.len(),
-            total
-        );
-        for collision in &pass1.column_collisions {
-            eprintln!(
-                "  table '{}': {} fields all sanitize to '{}' →",
-                collision.table_name, collision.original_names.len(), collision.sanitized_name
-            );
-            for (orig, resolved) in collision.original_names.iter().zip(&collision.resolved_names) {
-                eprintln!("    '{orig}' → '{resolved}'");
-            }
-        }
+fn warn_overflow(warnings: &[OverflowWarning]) {
+    if warnings.is_empty() {
+        return;
     }
-
-    if !pass1.overflow_warnings.is_empty() {
+    eprintln!(
+        "\nWARNING: {} table(s) exceeded PostgreSQL's 1600-column limit and were converted to JSONB:",
+        warnings.len()
+    );
+    for w in warnings {
         eprintln!(
-            "\nWARNING: {} table(s) exceeded PostgreSQL's 1600-column limit and were converted to JSONB:",
-            pass1.overflow_warnings.len()
+            "  {} ({} data columns → single 'data JSONB' column)",
+            w.table_name, w.original_column_count
         );
-        for w in &pass1.overflow_warnings {
-            eprintln!(
-                "  {} ({} data columns → single 'data JSONB' column)",
-                w.table_name, w.original_column_count
-            );
-        }
-        eprintln!("  Their child tables are preserved and will still receive data.");
     }
+    eprintln!("  Their child tables are preserved and will still receive data.");
+}
 
-    if let Some(limit) = depth_limit {
-        let deep: Vec<_> = pass1.schemas.iter().filter(|s| s.depth > limit).collect();
-        if !deep.is_empty() {
-            eprintln!("\nWARNING: {} table(s) exceed depth limit of {}:", deep.len(), limit);
-            for s in &deep {
-                eprintln!("  {} (depth {})", s.name, s.depth);
-            }
-        }
+fn warn_depth(schemas: &[TableSchema], depth_limit: Option<usize>) {
+    let Some(limit) = depth_limit else { return };
+    let deep: Vec<_> = schemas.iter().filter(|s| s.depth > limit).collect();
+    if deep.is_empty() {
+        return;
+    }
+    eprintln!("\nWARNING: {} table(s) exceed depth limit of {}:", deep.len(), limit);
+    for s in &deep {
+        eprintln!("  {} (depth {})", s.name, s.depth);
     }
 }
 
 /// Apply schema config overrides, save snapshot, and emit stats report.
 fn post_process_schema(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<()> {
-    if let Some(ref config_path) = cfg.schema_config {
-        eprintln!("\nApplying schema overrides from '{}'...", config_path.display());
-        let config = crate::schema::config::SchemaConfig::from_file(config_path)?;
-        crate::schema::config::apply_overrides_complete(&mut pass1.schemas, &config)?;
-        eprintln!("Schema after overrides: {} tables", pass1.schemas.len());
-    }
+    apply_schema_config(pass1, cfg)?;
+    save_schema_snapshot(pass1, cfg)?;
+    emit_schema_report(pass1, cfg)
+}
 
-    if let Some(ref out_path) = cfg.schema_output {
-        crate::schema::persistence::save(
-            &pass1.schemas,
-            pass1.total_rows,
-            &pass1.truncated_names,
-            &pass1.column_collisions,
-            &pass1.stats,
-            out_path,
-        )?;
-        eprintln!("Schema snapshot saved to '{}'.", out_path.display());
-    }
+fn apply_schema_config(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<()> {
+    let Some(ref config_path) = cfg.schema_config else { return Ok(()) };
+    eprintln!("\nApplying schema overrides from '{}'...", config_path.display());
+    let config = crate::schema::config::SchemaConfig::from_file(config_path)?;
+    crate::schema::config::apply_overrides_complete(&mut pass1.schemas, &config)?;
+    eprintln!("Schema after overrides: {} tables", pass1.schemas.len());
+    Ok(())
+}
 
-    if cfg.schema_report || cfg.schema_report_output.is_some() {
-        if let Some(ref path) = cfg.schema_report_output {
-            let mut file = std::fs::File::create(path).map_err(J2sError::Io)?;
-            crate::schema::stats::write_text_report(&pass1.stats, pass1.total_rows, &mut file)
-                .map_err(J2sError::Io)?;
-        } else {
-            crate::schema::stats::write_text_report(
-                &pass1.stats,
-                pass1.total_rows,
-                &mut std::io::stderr(),
-            )
+fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()> {
+    let Some(ref out_path) = cfg.schema_output else { return Ok(()) };
+    crate::schema::persistence::save(
+        &pass1.schemas,
+        pass1.total_rows,
+        &pass1.truncated_names,
+        &pass1.column_collisions,
+        &pass1.stats,
+        out_path,
+    )?;
+    eprintln!("Schema snapshot saved to '{}'.", out_path.display());
+    Ok(())
+}
+
+fn emit_schema_report(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()> {
+    if !cfg.schema_report && cfg.schema_report_output.is_none() {
+        return Ok(());
+    }
+    if let Some(ref path) = cfg.schema_report_output {
+        let mut file = std::fs::File::create(path).map_err(J2sError::Io)?;
+        crate::schema::stats::write_text_report(&pass1.stats, pass1.total_rows, &mut file)
             .map_err(J2sError::Io)?;
-        }
+    } else {
+        crate::schema::stats::write_text_report(
+            &pass1.stats,
+            pass1.total_rows,
+            &mut std::io::stderr(),
+        )
+        .map_err(J2sError::Io)?;
     }
-
     Ok(())
 }
 
@@ -368,6 +423,23 @@ fn print_dry_run_ddl(
     }
 }
 
+/// Aggregate anomaly summaries by table: returns `(table, anomaly_count, total_rows)` sorted
+/// by anomaly count descending, ties broken alphabetically.
+fn aggregate_anomaly_stats(
+    summaries: &[crate::anomaly::collector::AnomalySummary],
+) -> Vec<(String, u64, u64)> {
+    let mut by_table: std::collections::HashMap<String, (u64, u64)> =
+        std::collections::HashMap::new();
+    for s in summaries {
+        let e = by_table.entry(s.table.clone()).or_insert((0, s.total_rows));
+        e.0 += s.anomaly_count;
+    }
+    let mut stats: Vec<(String, u64, u64)> =
+        by_table.into_iter().map(|(t, (anom, rows))| (t, anom, rows)).collect();
+    stats.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    stats
+}
+
 /// Print the import summary (rows per table + top anomaly tables).
 fn report_pass2_results(
     pass2: &crate::pass2::runner::Pass2Result,
@@ -387,17 +459,7 @@ fn report_pass2_results(
 
     if total_anomalies > 0 {
         let summaries = pass2.anomaly_collector.summaries();
-        let mut by_table: std::collections::HashMap<String, (u64, u64)> =
-            std::collections::HashMap::new();
-        for s in &summaries {
-            let e = by_table.entry(s.table.clone()).or_insert((0, s.total_rows));
-            e.0 += s.anomaly_count;
-        }
-        let mut table_stats: Vec<(String, u64, u64)> = by_table
-            .into_iter()
-            .map(|(t, (anom, rows))| (t, anom, rows))
-            .collect();
-        table_stats.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let table_stats = aggregate_anomaly_stats(&summaries);
 
         eprintln!("\nAnomalies by table (top 10):");
         for (table, anom, rows) in table_stats.iter().take(10) {
@@ -413,4 +475,62 @@ fn report_pass2_results(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::anomaly::collector::AnomalySummary;
+
+    fn summary(table: &str, anomaly_count: u64, total_rows: u64) -> AnomalySummary {
+        AnomalySummary {
+            table: table.to_string(),
+            column: String::new(),
+            expected_type: String::new(),
+            anomaly_count,
+            total_rows,
+            anomaly_rate: 0.0,
+            examples: vec![],
+        }
+    }
+
+    #[test]
+    fn test_aggregate_anomaly_stats_sorts_by_count_desc() {
+        let summaries = vec![
+            summary("a", 5, 100),
+            summary("b", 20, 200),
+            summary("c", 1, 50),
+        ];
+        let stats = aggregate_anomaly_stats(&summaries);
+        assert_eq!(stats[0].0, "b");
+        assert_eq!(stats[1].0, "a");
+        assert_eq!(stats[2].0, "c");
+    }
+
+    #[test]
+    fn test_aggregate_anomaly_stats_merges_same_table() {
+        let summaries = vec![
+            summary("t", 3, 10),
+            summary("t", 7, 10),
+        ];
+        let stats = aggregate_anomaly_stats(&summaries);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0], ("t".to_string(), 10, 10));
+    }
+
+    #[test]
+    fn test_aggregate_anomaly_stats_tie_broken_by_name() {
+        let summaries = vec![
+            summary("z", 5, 100),
+            summary("a", 5, 100),
+        ];
+        let stats = aggregate_anomaly_stats(&summaries);
+        assert_eq!(stats[0].0, "a");
+        assert_eq!(stats[1].0, "z");
+    }
+
+    #[test]
+    fn test_aggregate_anomaly_stats_empty() {
+        assert!(aggregate_anomaly_stats(&[]).is_empty());
+    }
 }
