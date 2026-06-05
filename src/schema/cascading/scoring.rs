@@ -271,3 +271,70 @@ pub fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
     let col_sets = build_jaccard_col_sets(schemas, indices, all_data_bearing);
     min_jaccard_from_col_sets(&col_sets)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::super::table_schema::{ColumnSchema, TableSchema};
+    use super::super::super::type_tracker::PgType;
+
+    fn make_sibling(name: &str, parent: &str, data_keys: &[&str]) -> TableSchema {
+        let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
+        t.parent_table = Some(parent.to_string());
+        t.columns.push(ColumnSchema {
+            name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
+            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false,
+        });
+        t.columns.push(ColumnSchema {
+            name: "j2s_parent_id".to_string(), original_name: "j2s_parent_id".to_string(),
+            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: true,
+        });
+        for &k in data_keys {
+            t.columns.push(ColumnSchema {
+                name: k.to_string(), original_name: k.to_string(),
+                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+            });
+        }
+        t
+    }
+
+    // Large-group fast path (>200) uses col_sets[0] as Jaccard reference.
+    // Without sorting indices by name first, the reference changes with call-site order,
+    // producing different approximations for the same schema set.
+    //
+    // Scenario: 200 typical siblings {a,b,c,d,e} + alpha {a,b} + bravo {a,b,c}.
+    // - alpha-typical Jaccard = 2/5 = 0.4  (true minimum)
+    // - bravo-typical Jaccard = 3/5 = 0.6
+    // bravo-first (before fix): col_sets[0]={a,b,c} → min=0.6 (misses the 0.4 pair)
+    // alpha-first  (before fix): col_sets[0]={a,b}  → min=0.4
+    // After fix (sort by name): alpha is always [0] → min=0.4 for both orderings.
+    #[test]
+    fn test_pairwise_jaccard_large_group_order_independent() {
+        let mut schemas: Vec<TableSchema> = vec![
+            TableSchema::new("root".to_string(), vec!["root".to_string()], 0),
+            make_sibling("alpha", "root", &["a", "b"]),
+            make_sibling("bravo", "root", &["a", "b", "c"]),
+        ];
+        for i in 0..200_usize {
+            schemas.push(make_sibling(
+                &format!("typical_{i:03}"),
+                "root",
+                &["a", "b", "c", "d", "e"],
+            ));
+        }
+        let alpha_first: Vec<usize> = std::iter::once(1)
+            .chain(std::iter::once(2))
+            .chain(3..schemas.len())
+            .collect();
+        let bravo_first: Vec<usize> = std::iter::once(2)
+            .chain(std::iter::once(1))
+            .chain(3..schemas.len())
+            .collect();
+        let j_alpha = pairwise_jaccard_min(&schemas, &alpha_first);
+        let j_bravo = pairwise_jaccard_min(&schemas, &bravo_first);
+        assert_eq!(
+            j_alpha, j_bravo,
+            "pairwise_jaccard_min must be order-independent: alpha_first={j_alpha:.4}, bravo_first={j_bravo:.4}"
+        );
+    }
+}
