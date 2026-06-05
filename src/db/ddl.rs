@@ -26,25 +26,21 @@ fn pg_err(context: &str, e: tokio_postgres::Error) -> J2sError {
 
 
 
+/// Build the column definition strings for a schema (used by all CREATE TABLE variants).
+/// Only generated infrastructure columns get NOT NULL; data columns are always nullable.
+fn build_col_defs(schema: &TableSchema) -> Vec<String> {
+    schema.columns.iter().map(|col| {
+        let null_constraint = if col.not_null && col.is_generated { " NOT NULL" } else { "" };
+        format!("    {} {}{}", quote_ident(&col.name), col.pg_type.as_sql(), null_constraint)
+    }).collect()
+}
+
 /// Generate the CREATE TABLE SQL for a single schema.
 /// Uses `IF NOT EXISTS` when `drop_existing` is false (append / rerun mode).
 #[must_use]
 pub fn generate_create_table(schema: &TableSchema, pg_schema: &str, drop_existing: bool) -> String {
     let if_not_exists = if drop_existing { "" } else { "IF NOT EXISTS " };
-    let mut col_defs = Vec::new();
-
-    for col in &schema.columns {
-        // Only enforce NOT NULL for generated infrastructure columns (j2s_id, j2s_parent_id,
-        // j2s_order). User-data columns can produce NULL via coercion anomalies even when
-        // Pass 1 observed zero nulls, so we never add NOT NULL for them.
-        let null_constraint = if col.not_null && col.is_generated { " NOT NULL" } else { "" };
-        col_defs.push(format!(
-            "    {} {}{}",
-            quote_ident(&col.name),
-            col.pg_type.as_sql(),
-            null_constraint
-        ));
-    }
+    let mut col_defs = build_col_defs(schema);
 
     // Primary key constraint — name is guaranteed ≤ 63 chars because NamingRegistry
     // caps table names at PG_TABLE_MAX_IDENT (53): "pk_" (3) + 53 = 56 ≤ 63.
@@ -67,16 +63,7 @@ pub fn generate_create_table(schema: &TableSchema, pg_schema: &str, drop_existin
 /// Constraints are added separately via `add_constraints()` after data is loaded.
 #[must_use]
 pub fn generate_create_table_no_constraints(schema: &TableSchema, pg_schema: &str) -> String {
-    let mut col_defs = Vec::new();
-    for col in &schema.columns {
-        let null_constraint = if col.not_null && col.is_generated { " NOT NULL" } else { "" };
-        col_defs.push(format!(
-            "    {} {}{}",
-            quote_ident(&col.name),
-            col.pg_type.as_sql(),
-            null_constraint
-        ));
-    }
+    let col_defs = build_col_defs(schema);
     format!(
         "CREATE TABLE IF NOT EXISTS {}.{} (\n{}\n)",
         quote_ident(pg_schema),
@@ -233,8 +220,8 @@ async fn apply_constraints_chunk(
     Ok(warnings)
 }
 
-///
 /// PK failures are fatal.  FK failures become warnings.
+#[allow(clippy::too_many_lines)] // sequential async pipeline: early-return → setup → level-by-level parallel constraints
 pub async fn add_constraints(
     db_url: &str,
     schemas: &[TableSchema],
@@ -308,17 +295,7 @@ fn to_fk_warning(e: tokio_postgres::Error, table: &str) -> ConstraintWarning {
 #[allow(dead_code)]
 #[must_use]
 pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
-    let mut col_defs = Vec::new();
-
-    for col in &schema.columns {
-        let null_constraint = if col.not_null && col.is_generated { " NOT NULL" } else { "" };
-        col_defs.push(format!(
-            "    {} {}{}",
-            quote_ident(&col.name),
-            col.pg_type.as_sql(),
-            null_constraint
-        ));
-    }
+    let mut col_defs = build_col_defs(schema);
 
     col_defs.push(format!(
         "    CONSTRAINT {} PRIMARY KEY (j2s_id)",

@@ -166,21 +166,7 @@ pub async fn copy_snapshot_to_pg(snap: FlushSnapshot, client: &Client) -> Result
     };
     if let Some(ref p) = file_path { let _ = tokio::fs::remove_file(p).await; }
     if !file_data.is_empty() || !pending.is_empty() {
-        let sink = client
-            .copy_in::<_, Bytes>(&copy_sql)
-            .await
-            .map_err(|e| pg_err(&format!("COPY INTO {}", table_name), e))?;
-        let mut pinned = Box::pin(sink);
-        for chunk in file_data.chunks(1024 * 1024) {
-            pinned.send(Bytes::copy_from_slice(chunk)).await
-                .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
-        }
-        for chunk in pending.chunks(1024 * 1024) {
-            pinned.send(Bytes::copy_from_slice(chunk)).await
-                .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
-        }
-        pinned.close().await
-            .map_err(|e| pg_err(&format!("COPY close {}", table_name), e))?;
+        send_copy_data(client, &copy_sql, &table_name, &file_data, &pending).await?;
     }
     Ok(row_count)
 }

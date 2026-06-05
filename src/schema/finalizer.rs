@@ -59,16 +59,7 @@ impl SchemaFinalizer {
             .map(|e| e.parent_key.clone())
             .collect();
 
-        let disable_pivot = self.disabled_strategies.contains(&StrategyName::Pivot);
-        let disable_structured_pivot = self.disabled_strategies.contains(&StrategyName::StructuredPivot);
-        let config = FinalizerConfig {
-            wide_column_threshold: self.wide_column_threshold,
-            stable_threshold: self.stable_threshold,
-            rare_threshold: self.rare_threshold,
-            text_threshold,
-            disable_pivot,
-            disable_structured_pivot,
-        };
+        let config = build_finalizer_config(self, text_threshold);
 
         // Build schemas in parallel — each entry is independent after pre-registration.
         let entries: Vec<&TableEntry> = tables.values().collect();
@@ -123,6 +114,17 @@ fn collect_build_results(
     (schemas, all_collisions)
 }
 
+fn build_finalizer_config(finalizer: &SchemaFinalizer, text_threshold: u32) -> FinalizerConfig {
+    FinalizerConfig {
+        wide_column_threshold: finalizer.wide_column_threshold,
+        stable_threshold: finalizer.stable_threshold,
+        rare_threshold: finalizer.rare_threshold,
+        text_threshold,
+        disable_pivot: finalizer.disabled_strategies.contains(&StrategyName::Pivot),
+        disable_structured_pivot: finalizer.disabled_strategies.contains(&StrategyName::StructuredPivot),
+    }
+}
+
 struct FinalizerConfig {
     wide_column_threshold: usize,
     stable_threshold: f64,
@@ -130,6 +132,16 @@ struct FinalizerConfig {
     text_threshold: u32,
     disable_pivot: bool,
     disable_structured_pivot: bool,
+}
+
+fn push_generated_columns(schema: &mut TableSchema) {
+    schema.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+    if let Some(ref p) = schema.parent_table {
+        schema.columns.push(ColumnSchema::parent_fk(p));
+    }
+    if schema.has_order_column() {
+        schema.columns.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
+    }
 }
 
 /// Build the `TableSchema` for a single `TableEntry`.
@@ -153,13 +165,7 @@ fn build_entry_schema(
     schema.parent_table = parent_table;
     schema.child_kind = entry.child_kind.clone();
 
-    schema.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
-    if let Some(ref p) = schema.parent_table {
-        schema.columns.push(ColumnSchema::parent_fk(p));
-    }
-    if schema.has_order_column() {
-        schema.columns.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
-    }
+    push_generated_columns(&mut schema);
 
     // Junction tables have a single `value` column
     if schema.is_junction() {
@@ -217,11 +223,15 @@ fn build_data_columns(
         });
     }
 
+    push_array_columns(schema, entry, &col_registry);
+    local_collisions
+}
+
+fn push_array_columns(schema: &mut TableSchema, entry: &TableEntry, col_registry: &super::naming::ColumnNameRegistry) {
     for (original_field, elem_tracker) in &entry.array_columns {
         let elem_type = elem_tracker.to_pg_type();
-        let col_name = col_registry.resolve(original_field);
         schema.columns.push(ColumnSchema {
-            name: col_name,
+            name: col_registry.resolve(original_field),
             original_name: original_field.clone(),
             pg_type: PgType::Array(Box::new(elem_type)),
             not_null: false,
@@ -229,8 +239,6 @@ fn build_data_columns(
             is_parent_fk: false,
         });
     }
-
-    local_collisions
 }
 
 /// Apply a wide-table strategy to `schema` if the column count exceeds the threshold.

@@ -95,6 +95,7 @@ fn toml_str(map: &HashMap<String, toml::Value>, key: &str) -> Option<String> {
     map.get(key).and_then(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
 }
 
+#[allow(clippy::too_many_lines)] // exhaustive dispatch over all override strategy variants
 fn apply_strategy_override(
     schema: &mut TableSchema,
     table_name: &str,
@@ -202,6 +203,7 @@ pub fn apply_group_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConf
     }
 }
 
+#[allow(clippy::too_many_lines)] // struct construction pipeline: generated cols → key col → union cols → strategy
 fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> TableSchema {
     let refs: Vec<&TableSchema> = cloned.iter().collect();
     let first = &cloned[0];

@@ -27,6 +27,27 @@ impl ColumnStats {
     }
 }
 
+fn write_column_line(col: &ColumnStats, writer: &mut dyn std::io::Write) -> std::io::Result<()> {
+    if col.is_mixed() {
+        let histogram: Vec<String> = col
+            .type_histogram
+            .iter()
+            .map(|(t, n)| format!("{} {}", n, t))
+            .collect();
+        writeln!(
+            writer,
+            "  {:<30} {:<22} {} non-null  ** MIXED: {} **",
+            col.column_name, col.pg_type.as_sql(), col.non_null_count(), histogram.join(", ")
+        )
+    } else {
+        writeln!(
+            writer,
+            "  {:<30} {:<22} {} non-null",
+            col.column_name, col.pg_type.as_sql(), col.non_null_count(),
+        )
+    }
+}
+
 /// Write a human-readable schema statistics report to `writer`.
 pub fn write_text_report(
     stats: &[ColumnStats],
@@ -35,38 +56,13 @@ pub fn write_text_report(
 ) -> std::io::Result<()> {
     writeln!(writer, "=== Pass 1 Schema Statistics ===")?;
     writeln!(writer, "Total root rows: {}", total_rows)?;
-
-    // Group by table
     let mut current_table = "";
     for col in stats {
         if col.table_name != current_table {
             writeln!(writer, "\nTable: {}", col.table_name)?;
             current_table = &col.table_name;
         }
-
-        if col.is_mixed() {
-            let histogram: Vec<String> = col
-                .type_histogram
-                .iter()
-                .map(|(t, n)| format!("{} {}", n, t))
-                .collect();
-            writeln!(
-                writer,
-                "  {:<30} {:<22} {} non-null  ** MIXED: {} **",
-                col.column_name,
-                col.pg_type.as_sql(),
-                col.non_null_count(),
-                histogram.join(", ")
-            )?;
-        } else {
-            writeln!(
-                writer,
-                "  {:<30} {:<22} {} non-null",
-                col.column_name,
-                col.pg_type.as_sql(),
-                col.non_null_count(),
-            )?;
-        }
+        write_column_line(col, writer)?;
     }
     writeln!(writer)
 }

@@ -42,6 +42,7 @@ fn build_suffix_to_bases(all_keys: &[&str]) -> HashMap<String, HashSet<String>> 
 }
 
 /// Returns `None` if no structural pattern is found above threshold.
+#[allow(clippy::too_many_lines)] // multi-phase algorithm: build → filter → coverage → sanity → build-result
 #[must_use]
 pub fn detect_suffix_schema(
     columns: &IndexMap<String, TypeTracker>,

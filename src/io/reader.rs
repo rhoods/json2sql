@@ -190,6 +190,7 @@ impl JsonArrayReader {
     }
 
     /// Collect the rest of a `{...}` or `[...]` container (opener already in buf).
+    #[allow(clippy::too_many_lines)] // inline state machine: depth tracking + string escape handling for nested containers
     fn collect_container(&mut self, closer: u8) -> Result<()> {
         let mut depth: u32 = 1;
         let mut in_string = false;
