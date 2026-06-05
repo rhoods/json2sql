@@ -371,6 +371,7 @@ pub struct AppState {
     pub project: ProjectState,
     pub schema: SchemaState,
     pub import: ImportState,
+    #[allow(dead_code)]
     pub ui: UiState,
     /// Handle to the currently running Pass 1 or Pass 2 task.
     pub abort_handle: Option<tokio::task::AbortHandle>,

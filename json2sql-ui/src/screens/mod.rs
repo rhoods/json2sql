@@ -214,6 +214,7 @@ pub enum PickResult {
     Selected(std::path::PathBuf),
     Cancelled,
     /// Never returned by rfd (compiled-in library); kept for exhaustive matches.
+    #[allow(dead_code)]
     NotAvailable,
 }
 
