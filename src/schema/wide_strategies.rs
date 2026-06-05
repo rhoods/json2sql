@@ -228,6 +228,7 @@ fn find_object_child_indices(schemas: &[TableSchema], table_name: &str) -> Resul
     Ok(indices)
 }
 
+#[allow(clippy::too_many_lines)] // sequential mutation pipeline: find → collect → classify → mutate → log → exclude
 pub fn apply_normalize_dynamic_keys(
     schemas: &mut Vec<TableSchema>,
     table_name: &str,
@@ -274,26 +275,24 @@ pub fn apply_normalize_dynamic_keys(
 /// Apply Flatten strategy to a child table: inline its scalar columns into the parent table
 /// with the given prefix. The child table is removed from the schema after inlining.
 ///
+fn resolve_child_info(schemas: &[TableSchema], child_table_name: &str, caller: &str) -> Result<(usize, String, String)> {
+    let (idx, child) = schemas.iter().enumerate()
+        .find(|(_, s)| s.name == child_table_name)
+        .ok_or_else(|| J2sError::Schema(format!("{caller}: table '{child_table_name}' not found")))?;
+    let parent_name = child.parent_table.clone()
+        .ok_or_else(|| J2sError::Schema(format!("{caller}: '{child_table_name}' is a root table, cannot flatten into parent")))?;
+    let field_name = child.path.last().cloned().unwrap_or_else(|| child_table_name.to_string());
+    Ok((idx, parent_name, field_name))
+}
+
 fn collect_flatten_info(
     schemas: &[TableSchema],
     child_table_name: &str,
     prefix: &str,
 ) -> Result<(String, String, Vec<ColumnSchema>)> {
-    let child = schemas.iter().find(|s| s.name == child_table_name)
-        .ok_or_else(|| J2sError::Schema(format!("apply_flatten: table '{child_table_name}' not found")))?;
-
-    let parent_name = child.parent_table.clone()
-        .ok_or_else(|| J2sError::Schema(format!(
-            "apply_flatten: '{child_table_name}' is a root table, cannot flatten into parent"
-        )))?;
-
-    // The JSON field name is the last path segment of the child table
-    let field_name = child.path.last()
-        .cloned()
-        .unwrap_or_else(|| child_table_name.to_string());
-
+    let (child_idx, parent_name, field_name) = resolve_child_info(schemas, child_table_name, "apply_flatten")?;
     // Build prefixed copies of all data columns (max_depth=1: scalars only)
-    let new_cols: Vec<ColumnSchema> = child
+    let new_cols: Vec<ColumnSchema> = schemas[child_idx]
         .data_columns()
         .map(|col| ColumnSchema {
             name: format!("{prefix}{}", col.name),
@@ -304,7 +303,6 @@ fn collect_flatten_info(
             is_parent_fk: false,
         })
         .collect();
-
     Ok((parent_name, field_name, new_cols))
 }
 
@@ -358,22 +356,8 @@ pub fn apply_flatten(
 /// Inline a child table as a single JSONB column on the parent table.
 /// The child table is removed from the schema; the parent gains `{child_table_name} JSONB`.
 /// Used for WideStrategy::JsonbFlatten (IHM override "JSONB inline").
-#[allow(dead_code)]
 pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &str) -> Result<()> {
-    let (parent_name, field_name) = {
-        let child = schemas.iter().find(|s| s.name == child_table_name)
-            .ok_or_else(|| J2sError::Schema(format!("apply_jsonb_flatten: table '{}' not found", child_table_name)))?;
-        let parent = child.parent_table.clone()
-            .ok_or_else(|| J2sError::Schema(format!(
-                "apply_jsonb_flatten: '{}' is a root table, cannot inline into parent",
-                child_table_name
-            )))?;
-        // The JSON field name is the last path segment of the child table.
-        let field = child.path.last()
-            .cloned()
-            .unwrap_or_else(|| child_table_name.to_string());
-        (parent, field)
-    };
+    let (_, parent_name, field_name) = resolve_child_info(schemas, child_table_name, "apply_jsonb_flatten")?;
 
     // Mark child as JsonbFlatten so absorbs_children() returns true for its descendants
     if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
