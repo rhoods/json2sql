@@ -6,5 +6,5 @@ disallowed-methods = [
 ]
 
 cognitive-complexity-threshold = 25  # 3 violations at 25: cascading(57), runner(42), insert_object(41)
-too-many-lines-threshold = 50
+too-many-lines-threshold = 40
 too-many-arguments-threshold = 7     # 4 violations marked #[allow] pending T5 struct refactor

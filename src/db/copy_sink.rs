@@ -23,6 +23,31 @@ fn pg_err(context: &str, e: tokio_postgres::Error) -> J2sError {
     J2sError::DbContext(format!("{}: {}", context, detail))
 }
 
+async fn send_copy_data(
+    client: &Client,
+    copy_sql: &str,
+    table_name: &str,
+    file_data: &[u8],
+    pending: &[u8],
+) -> Result<()> {
+    let sink = client
+        .copy_in::<_, Bytes>(copy_sql)
+        .await
+        .map_err(|e| pg_err(&format!("COPY INTO {}", table_name), e))?;
+    let mut pinned = Box::pin(sink);
+    for chunk in file_data.chunks(1024 * 1024) {
+        pinned.send(Bytes::copy_from_slice(chunk))
+            .await
+            .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+    }
+    for chunk in pending.chunks(1024 * 1024) {
+        pinned.send(Bytes::copy_from_slice(chunk))
+            .await
+            .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+    }
+    pinned.close().await.map_err(|e| pg_err(&format!("COPY close {}", table_name), e))
+}
+
 /// NULL representation in PostgreSQL COPY text format.
 pub const COPY_NULL: &str = "\\N";
 /// Column delimiter in COPY text format.
@@ -355,29 +380,8 @@ impl TempFileSink {
             Vec::new()
         };
 
-        let has_data = !file_data.is_empty() || !self.pending.is_empty();
-        if has_data {
-            let sink = client
-                .copy_in::<_, Bytes>(&self.copy_sql)
-                .await
-                .map_err(|e| pg_err(&format!("COPY INTO {}", self.table_name), e))?;
-            let mut pinned = Box::pin(sink);
-            for chunk in file_data.chunks(1024 * 1024) {
-                pinned
-                    .send(Bytes::copy_from_slice(chunk))
-                    .await
-                    .map_err(|e| pg_err(&format!("COPY send {}", self.table_name), e))?;
-            }
-            for chunk in self.pending.chunks(1024 * 1024) {
-                pinned
-                    .send(Bytes::copy_from_slice(chunk))
-                    .await
-                    .map_err(|e| pg_err(&format!("COPY send {}", self.table_name), e))?;
-            }
-            pinned
-                .close()
-                .await
-                .map_err(|e| pg_err(&format!("COPY close {}", self.table_name), e))?;
+        if !file_data.is_empty() || !self.pending.is_empty() {
+            send_copy_data(client, &self.copy_sql, &self.table_name, &file_data, &self.pending).await?;
         }
 
         // Truncate the on-disk file for reuse; clear the in-memory buffer.
@@ -431,29 +435,8 @@ impl TempFileSink {
         // Delete the temp file before starting the COPY.
         drop(temp_file);
 
-        let has_data = !file_data.is_empty() || !pending.is_empty();
-        if has_data {
-            let sink = client
-                .copy_in::<_, Bytes>(&copy_sql)
-                .await
-                .map_err(|e| pg_err(&format!("COPY INTO {}", table_name), e))?;
-            let mut pinned = Box::pin(sink);
-            for chunk in file_data.chunks(1024 * 1024) {
-                pinned
-                    .send(Bytes::copy_from_slice(chunk))
-                    .await
-                    .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
-            }
-            for chunk in pending.chunks(1024 * 1024) {
-                pinned
-                    .send(Bytes::copy_from_slice(chunk))
-                    .await
-                    .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
-            }
-            pinned
-                .close()
-                .await
-                .map_err(|e| pg_err(&format!("COPY close {}", table_name), e))?;
+        if !file_data.is_empty() || !pending.is_empty() {
+            send_copy_data(client, &copy_sql, &table_name, &file_data, &pending).await?;
         }
 
         Ok(total_flushed + row_count)
@@ -465,16 +448,36 @@ impl TempFileSink {
 ///
 /// Reduces COPY overhead for tables whose rows are split across many workers:
 /// instead of N small COPYs, one COPY streams data from all N sinks in sequence.
+async fn stream_sink_to_copy(
+    pinned: &mut std::pin::Pin<Box<tokio_postgres::CopyInSink<Bytes>>>,
+    sink: TempFileSink,
+    table_name: &str,
+) -> Result<()> {
+    let TempFileSink { row_count, total_flushed, pending, writer, temp_file, .. } = sink;
+    if row_count == 0 && total_flushed == 0 { return Ok(()); }
+    drop(writer);
+    if let Some(ref guard) = temp_file {
+        let mut file = tokio::fs::File::open(&guard.0).await.map_err(J2sError::Io)?;
+        let mut buf = vec![0u8; 4 * 1024 * 1024];
+        loop {
+            let n = file.read(&mut buf).await.map_err(J2sError::Io)?;
+            if n == 0 { break; }
+            pinned.send(Bytes::copy_from_slice(&buf[..n])).await
+                .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+        }
+    }
+    drop(temp_file);
+    for chunk in pending.chunks(1024 * 1024) {
+        pinned.send(Bytes::copy_from_slice(chunk)).await
+            .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+    }
+    Ok(())
+}
+
 pub async fn merge_copy_to_db(sinks: Vec<TempFileSink>, client: &Client) -> Result<u64> {
     let total_rows: u64 = sinks.iter().map(|s| s.total_flushed + s.row_count).sum();
-    if total_rows == 0 {
-        return Ok(0);
-    }
-
-
-    // Precondition: all sinks target the same table (same copy_sql). Guaranteed by
-    // flush_task which groups sinks under table_pending[table_name]. total_rows > 0
-    // ensures sinks is non-empty, so first() always succeeds here.
+    if total_rows == 0 { return Ok(0); }
+    // Precondition: all sinks target the same table. Guaranteed by flush_task grouping.
     let first = sinks.first().expect("sinks non-empty (total_rows > 0)");
     debug_assert!(
         sinks.iter().all(|s| s.table_name == first.table_name),
@@ -482,39 +485,13 @@ pub async fn merge_copy_to_db(sinks: Vec<TempFileSink>, client: &Client) -> Resu
     );
     let copy_sql = first.copy_sql.clone();
     let table_name = first.table_name.clone();
-
-    let sink = client
-        .copy_in::<_, Bytes>(&copy_sql)
-        .await
+    let sink = client.copy_in::<_, Bytes>(&copy_sql).await
         .map_err(|e| pg_err(&format!("COPY INTO {}", table_name), e))?;
     let mut pinned = Box::pin(sink);
-
     for s in sinks {
-        let TempFileSink { row_count, total_flushed, pending, writer, temp_file, .. } = s;
-        if row_count == 0 && total_flushed == 0 {
-            continue;
-        }
-        drop(writer);
-        if let Some(ref guard) = temp_file {
-            let mut file = tokio::fs::File::open(&guard.0).await.map_err(J2sError::Io)?;
-            let mut buf = vec![0u8; 4 * 1024 * 1024];
-            loop {
-                let n = file.read(&mut buf).await.map_err(J2sError::Io)?;
-                if n == 0 { break; }
-                pinned.send(Bytes::copy_from_slice(&buf[..n])).await
-                    .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
-            }
-        }
-        drop(temp_file);
-        for chunk in pending.chunks(1024 * 1024) {
-            pinned.send(Bytes::copy_from_slice(chunk)).await
-                .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
-        }
+        stream_sink_to_copy(&mut pinned, s, &table_name).await?;
     }
-
-    pinned.close().await
-        .map_err(|e| pg_err(&format!("COPY close {}", table_name), e))?;
-
+    pinned.close().await.map_err(|e| pg_err(&format!("COPY close {}", table_name), e))?;
     Ok(total_rows)
 }
 

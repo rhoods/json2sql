@@ -95,6 +95,41 @@ pub(super) fn insert_jsonb_object<S: RowSink>(
     Ok(())
 }
 
+fn dispatch_object_child<S: RowSink>(
+    path_map: &HashMap<String, TableSchema>,
+    sinks: &mut HashMap<String, S>,
+    anomalies: &mut impl AnomalyCollect,
+    child_schema: &TableSchema,
+    child_value: &Value,
+    child_id: Uuid,
+) -> Result<()> {
+    let Value::Object(nested) = child_value else { return Ok(()); };
+    match &child_schema.wide_strategy {
+        WideStrategy::Pivot => insert_pivot_object(sinks, anomalies, child_schema, nested, child_id)?,
+        WideStrategy::Jsonb => insert_jsonb_object(path_map, sinks, anomalies, child_schema, child_value, child_id)?,
+        WideStrategy::StructuredPivot(suffix_schema) => {
+            insert_structured_pivot_object(sinks, anomalies, child_schema, nested, child_id, suffix_schema)?;
+        }
+        WideStrategy::KeyedPivot(sibling_schema) => {
+            insert_keyed_pivot_object(path_map, sinks, anomalies, child_schema, nested, child_id, sibling_schema)?;
+        }
+        WideStrategy::MultiKeyedPivot(groups) => {
+            insert_multi_keyed_pivot(path_map, sinks, anomalies, child_schema, nested, child_id, groups)?;
+        }
+        WideStrategy::NormalizeDynamicKeys { id_column } => {
+            insert_normalize_dynamic_keys(sinks, anomalies, child_schema, nested, child_id, id_column)?;
+        }
+        WideStrategy::Columns | WideStrategy::AutoSplit { .. } | WideStrategy::Ignore
+        | WideStrategy::Flatten { .. } | WideStrategy::JsonbFlatten => {
+            insert_object(
+                path_map, &mut InsertCtx { sinks, anomalies },
+                child_schema, nested, Uuid::now_v7(), Some(child_id), None,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn dispatch_jsonb_children<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -107,35 +142,9 @@ fn dispatch_jsonb_children<S: RowSink>(
     for (field, child_value) in obj {
         let child_key = format!("{}{}{}", parent_path_key, PATH_SEP, field);
         match child_value {
-            Value::Object(nested) => {
+            Value::Object(_) => {
                 if let Some(child_schema) = path_map.get(&child_key) {
-                    match &child_schema.wide_strategy {
-                        WideStrategy::Pivot => insert_pivot_object(sinks, anomalies, child_schema, nested, child_id)?,
-                        WideStrategy::Jsonb => insert_jsonb_object(path_map, sinks, anomalies, child_schema, child_value, child_id)?,
-                        WideStrategy::StructuredPivot(suffix_schema) => {
-                            insert_structured_pivot_object(sinks, anomalies, child_schema, nested, child_id, suffix_schema)?;
-                        }
-                        WideStrategy::KeyedPivot(sibling_schema) => {
-                            insert_keyed_pivot_object(path_map, sinks, anomalies, child_schema, nested, child_id, sibling_schema)?;
-                        }
-                        WideStrategy::MultiKeyedPivot(groups) => {
-                            insert_multi_keyed_pivot(path_map, sinks, anomalies, child_schema, nested, child_id, groups)?;
-                        }
-                        WideStrategy::NormalizeDynamicKeys { id_column } => {
-                            insert_normalize_dynamic_keys(sinks, anomalies, child_schema, nested, child_id, id_column)?;
-                        }
-                        WideStrategy::Columns
-                        | WideStrategy::AutoSplit { .. }
-                        | WideStrategy::Ignore
-                        | WideStrategy::Flatten { .. }
-                        | WideStrategy::JsonbFlatten => {
-                            let grandchild_id = Uuid::now_v7();
-                            insert_object(
-                                path_map, &mut InsertCtx { sinks, anomalies },
-                                child_schema, nested, grandchild_id, Some(child_id), None,
-                            )?;
-                        }
-                    }
+                    dispatch_object_child(path_map, sinks, anomalies, child_schema, child_value, child_id)?;
                 }
             }
             Value::Array(arr) => {

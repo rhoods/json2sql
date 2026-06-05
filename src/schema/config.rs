@@ -91,6 +91,10 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) ->
     Ok(())
 }
 
+fn toml_str(map: &HashMap<String, toml::Value>, key: &str) -> Option<String> {
+    map.get(key).and_then(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
+}
+
 fn apply_strategy_override(
     schema: &mut TableSchema,
     table_name: &str,
@@ -120,19 +124,12 @@ fn apply_strategy_override(
         }
         "structured_pivot" => {} // handled via suffix_columns below
         "normalize_dynamic_keys" => {
-            let id_col = col_overrides
-                .get("id_column")
-                .and_then(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
-                .unwrap_or_else(|| "key_id".to_string());
+            let id_col = toml_str(col_overrides, "id_column").unwrap_or_else(|| "key_id".to_string());
             deferred_normalize.push(DeferredNormalize { table_name: table_name.to_string(), id_column: id_col });
         }
         "flatten" => {
-            let prefix = col_overrides
-                .get("prefix")
-                .and_then(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
-                .unwrap_or_else(|| format!("{}_", table_name));
-            let max_depth = col_overrides
-                .get("max_depth")
+            let prefix = toml_str(col_overrides, "prefix").unwrap_or_else(|| format!("{}_", table_name));
+            let max_depth = col_overrides.get("max_depth")
                 .and_then(|v| if let toml::Value::Integer(n) = v { Some(*n as u8) } else { None })
                 .unwrap_or(1);
             deferred_flatten.push(DeferredFlatten { table_name: table_name.to_string(), prefix, max_depth });

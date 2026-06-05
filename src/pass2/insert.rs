@@ -230,6 +230,28 @@ fn dispatch_child_object<S: RowSink, A: AnomalyCollect>(
 
 /// Write medium-frequency key-value pairs as EAV rows in the AutoSplit companion wide table.
 /// Stable keys were already written as schema columns; rare keys are skipped entirely.
+fn push_wide_value<A: AnomalyCollect>(
+    wb: &mut RowBuilder,
+    anomalies: &mut A,
+    wide_table_name: &str,
+    value: &Value,
+    wide_id: Uuid,
+    wide_value_type: &Option<crate::schema::type_tracker::PgType>,
+) -> Result<()> {
+    match wide_value_type {
+        Some(pg_type) => match coerce(value, pg_type) {
+            CoerceResult::Ok(s) => wb.push_value(&s),
+            CoerceResult::Null => wb.push_null(),
+            CoerceResult::Anomaly { actual_value, actual_type } => {
+                anomalies.record(wide_table_name, "value", &wide_id.to_string(), &pg_type.as_sql(), &actual_value, actual_type)?;
+                wb.push_null();
+            }
+        },
+        None => wb.push_null(),
+    }
+    Ok(())
+}
+
 fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
@@ -245,35 +267,18 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
         .and_then(|ws| ws.find_by_original("value"))
         .map(|c| c.pg_type.clone());
     for (field, value) in obj {
-        if !medium_keys.contains(field.as_str()) {
-            continue;
-        }
-        if matches!(value, Value::Object(_) | Value::Array(_)) {
+        if !medium_keys.contains(field.as_str()) || matches!(value, Value::Object(_) | Value::Array(_)) {
             continue;
         }
         let wide_id = Uuid::now_v7();
         let mut wb = RowBuilder::new();
-        wb.push_uuid(wide_id);  // j2s_id
-        wb.push_uuid(row_id);   // j2s_parent_id (anchor)
-        // JSON field names can contain COPY-unsafe chars (\t, \n, \\, \0).
+        wb.push_uuid(wide_id);
+        wb.push_uuid(row_id);
         match escape_copy_text(field) {
             Some(escaped) => wb.push_value(&escaped),
             None => wb.push_null(),
         }
-        match &wide_value_type {
-            Some(pg_type) => match coerce(value, pg_type) {
-                CoerceResult::Ok(s) => wb.push_value(&s),
-                CoerceResult::Null => wb.push_null(),
-                CoerceResult::Anomaly { actual_value, actual_type } => {
-                    ctx.anomalies.record(
-                        wide_table_name, "value", &wide_id.to_string(),
-                        &pg_type.as_sql(), &actual_value, actual_type,
-                    )?;
-                    wb.push_null();
-                }
-            },
-            None => wb.push_null(),
-        }
+        push_wide_value(&mut wb, ctx.anomalies, wide_table_name, value, wide_id, &wide_value_type)?;
         ctx.anomalies.inc_total(wide_table_name);
         if let Some(sink) = ctx.sinks.get_mut(wide_table_name.as_str()) {
             sink.write_row(wb.finish())?;

@@ -211,6 +211,23 @@ pub fn classify_key_shape(keys: &[&str]) -> KeyShape {
 ///
 /// Equivalent to a user-triggered KeyedPivot with a custom ID column name.
 /// Call `exclude_absorbed_children` after to remove the now-absorbed child tables.
+fn find_object_child_indices(schemas: &[TableSchema], table_name: &str) -> Result<Vec<usize>> {
+    let indices: Vec<usize> = schemas.iter().enumerate()
+        .filter(|(_, s)| {
+            s.parent_table.as_deref() == Some(table_name)
+                && matches!(s.child_kind, Some(ChildKind::Object))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if indices.is_empty() {
+        return Err(J2sError::Schema(format!(
+            "apply_normalize_dynamic_keys: no Object children found for '{}'; strategy not applied",
+            table_name
+        )));
+    }
+    Ok(indices)
+}
+
 pub fn apply_normalize_dynamic_keys(
     schemas: &mut Vec<TableSchema>,
     table_name: &str,
@@ -218,24 +235,7 @@ pub fn apply_normalize_dynamic_keys(
 ) -> Result<()> {
     let target_idx = schemas.iter().position(|s| s.name == table_name)
         .ok_or_else(|| J2sError::Schema(format!("apply_normalize_dynamic_keys: table '{}' not found", table_name)))?;
-
-    let child_indices: Vec<usize> = schemas
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| {
-            s.parent_table.as_deref() == Some(table_name)
-                && matches!(s.child_kind, Some(ChildKind::Object))
-        })
-        .map(|(i, _)| i)
-        .collect();
-
-    if child_indices.is_empty() {
-        return Err(J2sError::Schema(format!(
-            "apply_normalize_dynamic_keys: no Object children found for '{}'; strategy not applied",
-            table_name
-        )));
-    }
-
+    let child_indices = find_object_child_indices(schemas, table_name)?;
     let children: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
     let union_cols = build_union_columns(&children);
 

@@ -77,21 +77,7 @@ impl SchemaFinalizer {
             .map(|entry| build_entry_schema(entry, naming, &tables_with_object_children, &config))
             .collect();
 
-        let mut schemas: Vec<TableSchema> = Vec::with_capacity(results.len());
-        let mut extra_schemas: Vec<TableSchema> = Vec::new();
-        let mut all_collisions: Vec<ColumnCollision> = Vec::new();
-        for (schema, extra, collisions) in results {
-            schemas.push(schema);
-            if let Some(e) = extra {
-                extra_schemas.push(e);
-            }
-            all_collisions.extend(collisions);
-        }
-
-        schemas.extend(extra_schemas);
-        // Secondary sort by name within each depth level ensures schema ordering
-        // is fully deterministic regardless of par_iter() task scheduling order.
-        schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
+        let (mut schemas, all_collisions) = collect_build_results(results);
 
         {
             let mut seen = std::collections::HashSet::new();
@@ -117,6 +103,24 @@ impl SchemaFinalizer {
 
         (schemas, all_collisions)
     }
+}
+
+fn collect_build_results(
+    results: Vec<(TableSchema, Option<TableSchema>, Vec<ColumnCollision>)>,
+) -> (Vec<TableSchema>, Vec<ColumnCollision>) {
+    let mut schemas: Vec<TableSchema> = Vec::with_capacity(results.len());
+    let mut extra_schemas: Vec<TableSchema> = Vec::new();
+    let mut all_collisions: Vec<ColumnCollision> = Vec::new();
+    for (schema, extra, collisions) in results {
+        schemas.push(schema);
+        if let Some(e) = extra { extra_schemas.push(e); }
+        all_collisions.extend(collisions);
+    }
+    schemas.extend(extra_schemas);
+    // Secondary sort by name within each depth level ensures schema ordering
+    // is fully deterministic regardless of par_iter() task scheduling order.
+    schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
+    (schemas, all_collisions)
 }
 
 struct FinalizerConfig {
@@ -270,6 +274,17 @@ fn apply_wide_strategy(
         return Some(apply_autosplit_strategy(schema, entry, config, row_count, data_col_count, ratio_stable));
     }
 
+    apply_non_autosplit_strategy(schema, entry, config, data_col_count, ratio_stable);
+    None
+}
+
+fn apply_non_autosplit_strategy(
+    schema: &mut TableSchema,
+    entry: &TableEntry,
+    config: &FinalizerConfig,
+    data_col_count: usize,
+    ratio_stable: f64,
+) {
     let suffix_schema = if config.disable_structured_pivot {
         None
     } else {
@@ -289,11 +304,41 @@ fn apply_wide_strategy(
         );
         apply_wide_strategy_columns(schema, strategy);
     }
-    None
 }
 
 /// Apply the P5 AutoSplit strategy: retain stable columns on the main table,
 /// build a companion `_wide` EAV table for medium-frequency keys.
+fn collect_medium_keys(
+    entry: &TableEntry,
+    row_count: f64,
+    rare_threshold: f64,
+    stable_threshold: f64,
+) -> std::collections::HashSet<String> {
+    entry.columns.iter()
+        .filter(|(_, t)| !t.is_object_field() && !t.is_array_field())
+        .filter(|(_, t)| {
+            let freq = t.total_count as f64 / row_count;
+            freq >= rare_threshold && freq < stable_threshold
+        })
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
+fn infer_medium_value_type(
+    entry: &TableEntry,
+    medium_keys: &std::collections::HashSet<String>,
+) -> PgType {
+    medium_keys.iter()
+        .filter_map(|k| entry.columns.get(k))
+        .fold(None::<PgType>, |acc, t| {
+            Some(match acc {
+                None => t.to_pg_type(),
+                Some(a) => widen_pg_types(a, &t.to_pg_type()),
+            })
+        })
+        .unwrap_or(PgType::Text)
+}
+
 fn apply_autosplit_strategy(
     schema: &mut TableSchema,
     entry: &TableEntry,
@@ -302,60 +347,25 @@ fn apply_autosplit_strategy(
     data_col_count: usize,
     ratio_stable: f64,
 ) -> TableSchema {
-    let medium_keys: std::collections::HashSet<String> = entry
-        .columns
-        .iter()
-        .filter(|(_, t)| !t.is_object_field() && !t.is_array_field())
-        .filter(|(_, t)| {
-            let freq = t.total_count as f64 / row_count;
-            freq >= config.rare_threshold && freq < config.stable_threshold
-        })
-        .map(|(k, _)| k.clone())
-        .collect();
-
+    let medium_keys = collect_medium_keys(entry, row_count, config.rare_threshold, config.stable_threshold);
     schema.columns.retain(|c| {
-        if c.is_generated {
-            return true;
-        }
-        entry
-            .columns
-            .get(&c.original_name)
+        c.is_generated || entry.columns.get(&c.original_name)
             .map(|t| t.total_count as f64 / row_count >= config.stable_threshold)
             .unwrap_or(false)
     });
-
     let stable_col_count = schema.data_columns().count();
-    let rare_count = data_col_count
-        .saturating_sub(stable_col_count)
-        .saturating_sub(medium_keys.len());
-
+    let rare_count = data_col_count.saturating_sub(stable_col_count).saturating_sub(medium_keys.len());
     // Strip any existing `_wide` suffix to avoid `foo_wide_wide`; fall back to `_eav` on collision.
     let base_name = schema.name.strip_suffix("_wide").unwrap_or(&schema.name);
     let wide_candidate = format!("{}_wide", base_name);
-    let wide_name = if wide_candidate == schema.name {
-        format!("{}_eav", base_name)
-    } else {
-        wide_candidate
-    };
-
+    let wide_name = if wide_candidate == schema.name { format!("{}_eav", base_name) } else { wide_candidate };
     eprintln!(
         "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: AutoSplit \
         ({} stable cols, {} medium → {}, {} rare dropped)",
         schema.name, data_col_count, ratio_stable * 100.0,
         stable_col_count, medium_keys.len(), wide_name, rare_count,
     );
-
-    let value_type = medium_keys
-        .iter()
-        .filter_map(|k| entry.columns.get(k))
-        .fold(None::<PgType>, |acc, t| {
-            Some(match acc {
-                None => t.to_pg_type(),
-                Some(a) => widen_pg_types(a, &t.to_pg_type()),
-            })
-        })
-        .unwrap_or(PgType::Text);
-
+    let value_type = infer_medium_value_type(entry, &medium_keys);
     build_wide_pivot_schema(schema, wide_name, value_type, medium_keys, config)
 }
 
@@ -437,26 +447,12 @@ pub fn apply_column_limit_guard(schemas: &mut [TableSchema]) -> Vec<OverflowWarn
 ///
 /// The schemas must be topologically sorted (parents before children) for the single-pass
 /// transitive exclusion to work correctly. Safe to call multiple times (idempotent).
-pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
-    // O(n): pre-build set of table names whose wide_strategy absorbs ALL children.
-    let absorbers: std::collections::HashSet<&str> = schemas
-        .iter()
-        .filter(|s| s.wide_strategy.absorbs_children())
-        .map(|s| s.name.as_str())
-        .collect();
-
-    // MultiKeyedPivot absorbs specific children by name (not all children of the parent).
-    let partial_absorbed: std::collections::HashSet<&str> = schemas
-        .iter()
-        .flat_map(|s| s.wide_strategy.absorbed_names())
-        .collect();
-
-    if absorbers.is_empty() && partial_absorbed.is_empty() {
-        return;
-    }
-
-    // Pass 1: build a preliminary exclusion set WITHOUT route_targets protection,
-    // so we know which tables are going away.
+fn collect_surviving_route_targets<'a>(
+    schemas: &'a [TableSchema],
+    absorbers: &std::collections::HashSet<&str>,
+    partial_absorbed: &std::collections::HashSet<&'a str>,
+) -> std::collections::HashSet<&'a str> {
+    // Pass 1: preliminary exclusion WITHOUT route_targets protection.
     let mut preliminary_excluded: std::collections::HashSet<&str> = partial_absorbed.clone();
     for schema in schemas.iter() {
         if let Some(ref parent) = schema.parent_table {
@@ -465,26 +461,25 @@ pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
             }
         }
     }
-
-    // Route targets that count are only those registered by tables that will SURVIVE.
-    // child_routes entries from excluded tables are stale — they point to subtrees that
-    // have been superseded by cascade-produced replacements and must not block exclusion.
-    let route_targets: std::collections::HashSet<&str> = schemas
-        .iter()
+    // Route targets from excluded tables are stale — only surviving tables' routes count.
+    schemas.iter()
         .filter(|s| !preliminary_excluded.contains(s.name.as_str()))
         .flat_map(|s| s.child_routes.values().map(|v| v.as_str()))
-        .collect();
+        .collect()
+}
 
-    // Pass 2: final exclusion pass, protecting only valid route targets.
-    let mut excluded: std::collections::HashSet<String> = partial_absorbed
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect();
-
+pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
+    let absorbers: std::collections::HashSet<&str> = schemas
+        .iter().filter(|s| s.wide_strategy.absorbs_children()).map(|s| s.name.as_str()).collect();
+    let partial_absorbed: std::collections::HashSet<&str> = schemas
+        .iter().flat_map(|s| s.wide_strategy.absorbed_names()).collect();
+    if absorbers.is_empty() && partial_absorbed.is_empty() { return; }
+    let route_targets = collect_surviving_route_targets(schemas, &absorbers, &partial_absorbed);
+    // Pass 2: final exclusion, protecting only valid route targets.
+    let mut excluded: std::collections::HashSet<String> =
+        partial_absorbed.into_iter().map(|s| s.to_string()).collect();
     for schema in schemas.iter() {
-        if route_targets.contains(schema.name.as_str()) {
-            continue; // Protected by a surviving parent's child_routes.
-        }
+        if route_targets.contains(schema.name.as_str()) { continue; }
         if let Some(ref parent) = schema.parent_table {
             if absorbers.contains(parent.as_str()) || excluded.contains(parent) {
                 excluded.insert(schema.name.clone());

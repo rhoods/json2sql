@@ -516,18 +516,15 @@ pub async fn run(
     config: &Pass2Config,
     progress_tx: Option<ProgressTx>,
 ) -> Result<Pass2Result> {
-    let parallel = config.parallel;
-    let limit = config.limit;
     let worker_budget = config.per_worker_budget.unwrap_or(PER_WORKER_FLUSH_THRESHOLD);
     let interim_copy_threshold = config.min_interim_copy_bytes.unwrap_or(MIN_SINK_COPY_BYTES);
 
-    validate_run_params(parallel)?;
+    validate_run_params(config.parallel)?;
     let total_bytes = file_size(path)?;
     let progress = progress_tx.is_none().then(|| ProgressTracker::new(total_bytes, "Pass 2"));
 
     let sep = PATH_SEP.to_string();
-    let path_map: HashMap<String, TableSchema> =
-        schemas.iter().map(|s| (s.path.join(&sep), s.clone())).collect();
+    let path_map: HashMap<String, TableSchema> = schemas.iter().map(|s| (s.path.join(&sep), s.clone())).collect();
     let root_schema = find_root_schema(schemas, &config.root_table, &sep)?;
 
     if let Some(ref dir) = config.anomaly_dir {
@@ -535,7 +532,7 @@ pub async fn run(
     }
     let (anomaly_tx, anomaly_writer_handle) = spawn_anomaly_writer(config.anomaly_dir.clone());
 
-    let parallel = parallel.max(1);
+    let parallel = config.parallel.max(1);
     preflight_warn_nonempty(schemas, client, &config.pg_schema, &progress_tx).await;
 
     let cancel = CancellationToken::new();
@@ -553,8 +550,7 @@ pub async fn run(
     );
 
     let stream_start = Instant::now();
-    let (rows_processed, worker_died) =
-        dispatch_loop(&mut reader, &senders, &progress_tx, &progress, limit, total_bytes).await?;
+    let (rows_processed, worker_died) = dispatch_loop(&mut reader, &senders, &progress_tx, &progress, config.limit, total_bytes).await?;
     drop(senders);
 
     finalize_dispatch(&progress_tx, &progress, rows_processed, reader.bytes_read(), total_bytes);

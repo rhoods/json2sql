@@ -575,6 +575,53 @@ fn apply_single_collapse(
         .collect()
 }
 
+struct ParentCtx<'a> {
+    name: &'a str,
+    path: &'a [String],
+    depth: usize,
+    array_children: bool,
+}
+
+fn build_multi_group_entry(
+    g: &SubgroupData,
+    parent: &ParentCtx<'_>,
+    schemas: &[TableSchema],
+    name_to_idx: &std::collections::HashMap<String, usize>,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> (TableSchema, Vec<CoSiblingGroup>) {
+    let fk_col = format!("j2s_{}_id", parent.name);
+    let mut cols: Vec<ColumnSchema> = vec![
+        ColumnSchema::generated("j2s_id", PgType::Uuid),
+        ColumnSchema { name: fk_col.clone(), original_name: fk_col, pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: true },
+    ];
+    if parent.array_children { cols.push(ColumnSchema::generated("j2s_order", PgType::BigInt)); }
+    cols.push(ColumnSchema { name: g.key_col_name.clone(), original_name: g.key_col_name.clone(), pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false });
+    for col in &g.union_cols { cols.push(col.clone()); }
+    cols.push(ColumnSchema { name: "j2s_data".to_string(), original_name: "j2s_data".to_string(), pg_type: PgType::Jsonb, not_null: false, is_generated: true, is_parent_fk: false });
+    let mut path = parent.path.to_vec();
+    path.push(if g.key_is_numeric { "num" } else { "key" }.to_string());
+    let sibling_schema = SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: parent.array_children, data_col_name: "j2s_data".to_string() };
+    let pivot_name = g.pivot_table_name.clone();
+    let absorbed_idx: Vec<usize> = g.absorbed_names.iter().filter_map(|n| name_to_idx.get(n.as_str()).copied()).collect();
+    let mut co_siblings: Vec<CoSiblingGroup> = Vec::new();
+    for (json_key, siblings, arr) in collect_children_by_key(schemas, &absorbed_idx, obj_map, arr_map) {
+        if siblings.len() >= 2 { co_siblings.push(CoSiblingGroup { synthetic_parent_name: pivot_name.clone(), json_key, sibling_indices: siblings, array_children: arr }); }
+    }
+    let schema = TableSchema {
+        name: pivot_name,
+        path,
+        parent_table: Some(parent.name.to_string()),
+        depth: parent.depth + 1,
+        columns: cols,
+        child_kind: Some(ChildKind::Object),
+        wide_strategy: WideStrategy::KeyedPivot(sibling_schema),
+        flatten_sources: std::collections::HashMap::new(),
+        child_routes: std::collections::HashMap::new(),
+    };
+    (schema, co_siblings)
+}
+
 fn apply_multi_collapse(
     schemas: &mut [TableSchema],
     collapse: &Collapse,
@@ -590,40 +637,20 @@ fn apply_multi_collapse(
         absorbed_names: g.absorbed_names.clone(),
     }).collect();
     schemas[collapse.parent_idx].wide_strategy = WideStrategy::MultiKeyedPivot(sibling_groups);
-    let parent_name = schemas[collapse.parent_idx].name.clone();
-    let parent_path = schemas[collapse.parent_idx].path.clone();
-    let parent_depth = schemas[collapse.parent_idx].depth;
+    let parent_ctx = ParentCtx {
+        name: &schemas[collapse.parent_idx].name.clone(),
+        path: &schemas[collapse.parent_idx].path.clone(),
+        depth: schemas[collapse.parent_idx].depth,
+        array_children: collapse.array_children,
+    };
     let mut new_schemas: Vec<TableSchema> = Vec::new();
     let mut co_siblings: Vec<CoSiblingGroup> = Vec::new();
     for g in groups {
-        let fk_col = format!("j2s_{}_id", parent_name);
-        let mut cols: Vec<ColumnSchema> = vec![
-            ColumnSchema::generated("j2s_id", PgType::Uuid),
-            ColumnSchema { name: fk_col.clone(), original_name: fk_col, pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: true },
-        ];
-        if collapse.array_children { cols.push(ColumnSchema::generated("j2s_order", PgType::BigInt)); }
-        cols.push(ColumnSchema { name: g.key_col_name.clone(), original_name: g.key_col_name.clone(), pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false });
-        for col in &g.union_cols { cols.push(col.clone()); }
-        cols.push(ColumnSchema { name: "j2s_data".to_string(), original_name: "j2s_data".to_string(), pg_type: PgType::Jsonb, not_null: false, is_generated: true, is_parent_fk: false });
-        let mut path = parent_path.clone();
-        path.push(if g.key_is_numeric { "num" } else { "key" }.to_string());
-        let sibling_schema = SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: collapse.array_children, data_col_name: "j2s_data".to_string() };
-        let pivot_name = g.pivot_table_name.clone();
-        let absorbed_idx: Vec<usize> = g.absorbed_names.iter().filter_map(|n| name_to_idx.get(n.as_str()).copied()).collect();
-        for (json_key, siblings, arr) in collect_children_by_key(schemas, &absorbed_idx, obj_map, arr_map) {
-            if siblings.len() >= 2 { co_siblings.push(CoSiblingGroup { synthetic_parent_name: pivot_name.clone(), json_key, sibling_indices: siblings, array_children: arr }); }
-        }
-        new_schemas.push(TableSchema {
-            name: pivot_name,
-            path,
-            parent_table: Some(parent_name.clone()),
-            depth: parent_depth + 1,
-            columns: cols,
-            child_kind: Some(ChildKind::Object),
-            wide_strategy: WideStrategy::KeyedPivot(sibling_schema),
-            flatten_sources: std::collections::HashMap::new(),
-            child_routes: std::collections::HashMap::new(),
-        });
+        let (schema, new_co) = build_multi_group_entry(
+            g, &parent_ctx, schemas, name_to_idx, obj_map, arr_map,
+        );
+        new_schemas.push(schema);
+        co_siblings.extend(new_co);
     }
     (new_schemas, co_siblings)
 }
@@ -730,64 +757,54 @@ fn build_sibling_ctx(
     Some((ctx, is_mixed))
 }
 
+fn collect_sibling_collapses(
+    schemas: &[TableSchema],
+    work: &[(String, Vec<usize>, bool)],
+    threshold: usize,
+    min_jaccard: f64,
+    name_to_idx: &std::collections::HashMap<String, usize>,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Vec<Collapse> {
+    let mut collapses: Vec<Collapse> = Vec::new();
+    for (parent_name, child_indices, array_children) in work {
+        if child_indices.len() < threshold { continue; }
+        let parent_idx = match name_to_idx.get(parent_name.as_str()) {
+            Some(&i) => i,
+            None => continue,
+        };
+        if matches!(schemas[parent_idx].wide_strategy, WideStrategy::KeyedPivot(_) | WideStrategy::MultiKeyedPivot(_)) {
+            continue;
+        }
+        if !matches!(schemas[parent_idx].wide_strategy, WideStrategy::Columns | WideStrategy::AutoSplit { .. }) {
+            continue;
+        }
+        let Some((ctx, is_mixed)) = build_sibling_ctx(
+            schemas, parent_name.clone(), parent_idx, child_indices, *array_children, threshold, min_jaccard,
+        ) else { continue; };
+        let collapse = if is_mixed {
+            detect_mixed_collapse(schemas, &ctx, obj_map, arr_map)
+        } else {
+            detect_homogeneous_collapse(schemas, &ctx, obj_map, arr_map)
+        };
+        if let Some(c) = collapse { collapses.push(c); }
+    }
+    collapses
+}
+
 fn run_sibling_wave(
     schemas: &mut Vec<TableSchema>,
     threshold: usize,
     min_jaccard: f64,
 ) -> Vec<CoSiblingGroup> {
     let (parent_to_object_children, parent_to_array_children) = build_parent_child_maps(schemas);
-
-    let mut collapses: Vec<Collapse> = Vec::new();
-
     let name_to_idx: std::collections::HashMap<String, usize> = schemas
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.name.clone(), i))
-        .collect();
-
-    let work = build_work_items(
-        schemas,
-        threshold,
-        &parent_to_object_children,
-        &parent_to_array_children,
+        .iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+    let work = build_work_items(schemas, threshold, &parent_to_object_children, &parent_to_array_children);
+    let collapses = collect_sibling_collapses(
+        schemas, &work, threshold, min_jaccard,
+        &name_to_idx, &parent_to_object_children, &parent_to_array_children,
     );
-
-
-    for (parent_name, child_indices, array_children) in &work {
-        if child_indices.len() < threshold {
-            continue;
-        }
-
-        let parent_idx = match name_to_idx.get(parent_name.as_str()) {
-            Some(&i) => i,
-            None => continue,
-        };
-
-        if matches!(
-            schemas[parent_idx].wide_strategy,
-            WideStrategy::KeyedPivot(_) | WideStrategy::MultiKeyedPivot(_)
-        ) {
-            continue;
-        }
-        if !matches!(
-            schemas[parent_idx].wide_strategy,
-            WideStrategy::Columns | WideStrategy::AutoSplit { .. }
-        ) {
-            continue;
-        }
-
-        let Some((ctx, is_mixed)) = build_sibling_ctx(
-            schemas, parent_name.clone(), parent_idx, child_indices, *array_children, threshold, min_jaccard,
-        ) else { continue; };
-
-        let collapse = if is_mixed {
-            detect_mixed_collapse(schemas, &ctx, &parent_to_object_children, &parent_to_array_children)
-        } else {
-            detect_homogeneous_collapse(schemas, &ctx, &parent_to_object_children, &parent_to_array_children)
-        };
-        if let Some(c) = collapse { collapses.push(c); }
-    }
-
     apply_collapses(schemas, collapses, &name_to_idx, &parent_to_object_children, &parent_to_array_children)
 }
 
@@ -945,21 +962,11 @@ fn reparent_siblings_individually(
 ///
 /// This function detects groups of ≥ `threshold` such orphans with Jaccard ≥ `min_jaccard`,
 /// creates a `{parent}_key` sub-pivot, re-parents the orphans under it, and updates the
-fn process_keyed_pivot_work_item(
-    schemas: &mut [TableSchema],
-    parent_idx: usize,
+fn resolve_pivot_key_info(
+    schemas: &[TableSchema],
     child_indices: &[usize],
-    min_jaccard: f64,
-    obj_map: &std::collections::HashMap<String, Vec<usize>>,
-    arr_map: &std::collections::HashMap<String, Vec<usize>>,
-) -> Option<(TableSchema, Vec<CoSiblingGroup>)> {
-    let jaccard = pairwise_jaccard_min(schemas, child_indices);
-    if jaccard < min_jaccard { return None; }
-
-    let parent_name = schemas[parent_idx].name.clone();
-    let parent_path = schemas[parent_idx].path.clone();
-    let parent_depth = schemas[parent_idx].depth;
-
+    parent_name: &str,
+) -> (String, KeyShape, Vec<ColumnSchema>, String) {
     let keys: Vec<String> = child_indices
         .iter()
         .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
@@ -970,11 +977,29 @@ fn process_keyed_pivot_work_item(
         KeyShape::IsoLang => "lang_code".to_string(),
         _ => "key".to_string(),
     };
-
     let children_refs: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
     let union_cols = build_union_columns(&children_refs);
-    let suffix = unique_cluster_suffix(&parent_name, "key", schemas);
+    let suffix = unique_cluster_suffix(parent_name, "key", schemas);
     let sub_pivot_name = format!("{parent_name}_{suffix}");
+    (key_col_name, key_shape, union_cols, sub_pivot_name)
+}
+
+fn process_keyed_pivot_work_item(
+    schemas: &mut [TableSchema],
+    parent_idx: usize,
+    child_indices: &[usize],
+    min_jaccard: f64,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Option<(TableSchema, Vec<CoSiblingGroup>)> {
+    let jaccard = pairwise_jaccard_min(schemas, child_indices);
+    if jaccard < min_jaccard { return None; }
+    let parent_name = schemas[parent_idx].name.clone();
+    let parent_depth = schemas[parent_idx].depth;
+    let mut sub_path = schemas[parent_idx].path.clone();
+    sub_path.push("key".to_string());
+    let (key_col_name, key_shape, union_cols, sub_pivot_name) =
+        resolve_pivot_key_info(schemas, child_indices, &parent_name);
     let fk_col = format!("j2s_{parent_name}_id");
     let sibling_schema = SiblingSchema {
         key_col_name: key_col_name.clone(),
@@ -983,16 +1008,9 @@ fn process_keyed_pivot_work_item(
         data_col_name: "j2s_data".to_string(),
     };
     let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
-    let mut sub_path = parent_path;
-    sub_path.push("key".to_string());
-
     let co_sibs = collect_pivot_co_siblings(schemas, child_indices, &sub_pivot_name, obj_map, arr_map);
     reparent_and_update_routes(schemas, parent_idx, child_indices, &sub_pivot_name);
-    eprintln!(
-        "  KeyedPivot post-pass: {} ({} orphan tables → sub-pivot {})",
-        parent_name, child_indices.len(), sub_pivot_name
-    );
-
+    eprintln!("  KeyedPivot post-pass: {} ({} orphan tables → sub-pivot {})", parent_name, child_indices.len(), sub_pivot_name);
     let t_schema = TableSchema {
         name: sub_pivot_name,
         path: sub_path,
@@ -1306,38 +1324,7 @@ fn build_jaccard_col_sets<'a>(
 ///    sibling[0] instead of all N*(N-1)/2 pairs. Semantically equivalent for the homogeneous
 ///    schemas typical of KeyedPivot detection (language codes, numeric IDs, genome keys).
 ///    Outliers are still detected: any sibling with 0 column overlap with sibling[0] returns 0.
-#[must_use]
-pub fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
-    if indices.len() < 2 {
-        return 1.0;
-    }
-
-    // Sort by name so col_sets[0] is always the alphabetically-first sibling —
-    // deterministic regardless of call-site ordering.
-    let mut sorted: Vec<usize> = indices.to_vec();
-    sorted.sort_unstable_by_key(|&i| &schemas[i].name);
-    let indices = sorted.as_slice();
-
-    // Fast path 1: pure containers — every sibling has no data columns.
-    // Check before allocating col_sets to skip HashSet construction entirely.
-    if indices.iter().all(|&i| schemas[i].data_columns().next().is_none()) {
-        return 1.0;
-    }
-
-    // Noise filter: when ALL siblings have data columns, filter out columns present
-    // in fewer than max(2, len/20) schemas. These are data-quality artefacts (e.g.
-    // a handful of records with extra fields from a different data pattern) whose
-    // presence in a minority of schemas would drag pairwise Jaccard near zero and
-    // block an otherwise valid sibling group from being detected.
-    //
-    // The filter is intentionally disabled when ANY sibling is a pure container
-    // (0 data cols): in that case the Jaccard correctly returns 0, signalling that
-    // the group is heterogeneous. T1 in finalize_siblings then handles exclusion
-    // of significant containers; the Jaccard must not mask that signal.
-    let all_data_bearing = indices.iter().all(|&i| schemas[i].data_columns().next().is_some());
-    let col_sets = build_jaccard_col_sets(schemas, indices, all_data_bearing);
-
-    // Fast path 2: large groups — compare each sibling against sibling[0] in O(n·m).
+fn min_jaccard_from_col_sets(col_sets: &[std::collections::HashSet<&str>]) -> f64 {
     const PAIRWISE_LIMIT: usize = 200;
     if col_sets.len() > PAIRWISE_LIMIT {
         let reference = &col_sets[0];
@@ -1348,15 +1335,11 @@ pub fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
             let j_val = if union == 0 { 1.0 } else { intersection as f64 / union as f64 };
             if j_val < min_j {
                 min_j = j_val;
-                if min_j == 0.0 {
-                    return 0.0;
-                }
+                if min_j == 0.0 { return 0.0; }
             }
         }
         return min_j;
     }
-
-    // Full pairwise for small groups — exact result.
     let mut min_j = 1.0_f64;
     for i in 0..col_sets.len() {
         for j in (i + 1)..col_sets.len() {
@@ -1365,13 +1348,29 @@ pub fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
             let j_val = if union == 0 { 1.0 } else { intersection as f64 / union as f64 };
             if j_val < min_j {
                 min_j = j_val;
-                if min_j == 0.0 {
-                    return 0.0; // Early exit — can't get lower
-                }
+                if min_j == 0.0 { return 0.0; }
             }
         }
     }
     min_j
+}
+
+#[must_use]
+pub fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
+    if indices.len() < 2 { return 1.0; }
+    // Sort by name so col_sets[0] is always the alphabetically-first sibling —
+    // deterministic regardless of call-site ordering.
+    let mut sorted: Vec<usize> = indices.to_vec();
+    sorted.sort_unstable_by_key(|&i| &schemas[i].name);
+    let indices = sorted.as_slice();
+    // Fast path 1: pure containers — every sibling has no data columns.
+    if indices.iter().all(|&i| schemas[i].data_columns().next().is_none()) { return 1.0; }
+    // Noise filter: when ALL siblings have data columns, filter out columns present
+    // in fewer than max(2, len/20) schemas. Intentionally disabled when any sibling
+    // is a pure container so Jaccard correctly signals heterogeneous groups.
+    let all_data_bearing = indices.iter().all(|&i| schemas[i].data_columns().next().is_some());
+    let col_sets = build_jaccard_col_sets(schemas, indices, all_data_bearing);
+    min_jaccard_from_col_sets(&col_sets)
 }
 
 // ---------------------------------------------------------------------------
@@ -1916,5 +1915,6 @@ mod tests {
         assert_eq!(g.key_col_name, "lang_code");
         assert!(matches!(g.key_shape, KeyShape::IsoLang));
     }
+
 }
 

@@ -5,57 +5,53 @@ use super::type_tracker::{InferredType, PgType, TypeTracker};
 
 /// Collect type distribution statistics for every data column (excluding j2s_ generated columns).
 /// Call after `finalize()` — all table names must already be registered in `naming`.
+fn collect_entry_stats(
+    entry: &super::observer::TableEntry,
+    table_name: &str,
+) -> Vec<ColumnStats> {
+    let mut stats = Vec::new();
+    for (original_field, tracker) in &entry.columns {
+        if tracker.is_object_field() || tracker.is_array_field() { continue; }
+        stats.push(ColumnStats {
+            table_name: table_name.to_string(),
+            column_name: NamingRegistry::column_name(original_field),
+            pg_type: tracker.to_pg_type(),
+            total_count: tracker.total_count,
+            null_count: tracker.null_count,
+            type_histogram: type_histogram(tracker),
+        });
+    }
+    if let Some(ref tracker) = entry.scalar_tracker {
+        stats.push(ColumnStats {
+            table_name: table_name.to_string(),
+            column_name: "value".to_string(),
+            pg_type: tracker.to_pg_type(),
+            total_count: tracker.total_count,
+            null_count: tracker.null_count,
+            type_histogram: type_histogram(tracker),
+        });
+    }
+    for (original_field, tracker) in &entry.array_columns {
+        let elem_type = tracker.to_pg_type();
+        stats.push(ColumnStats {
+            table_name: table_name.to_string(),
+            column_name: NamingRegistry::column_name(original_field),
+            pg_type: PgType::Array(Box::new(elem_type)),
+            total_count: tracker.total_count,
+            null_count: tracker.null_count,
+            type_histogram: type_histogram(tracker),
+        });
+    }
+    stats
+}
+
 pub fn collect_stats(observer: &SchemaObserver, naming: &mut NamingRegistry) -> Vec<ColumnStats> {
     let mut result = Vec::new();
-
     for entry in observer.tables.values() {
         let table_name = naming.table_name_from_dot_key(&entry.path_key);
-
-        for (original_field, tracker) in &entry.columns {
-            if tracker.is_object_field() || tracker.is_array_field() {
-                continue;
-            }
-            let col_name = NamingRegistry::column_name(original_field);
-            result.push(ColumnStats {
-                table_name: table_name.clone(),
-                column_name: col_name,
-                pg_type: tracker.to_pg_type(),
-                total_count: tracker.total_count,
-                null_count: tracker.null_count,
-                type_histogram: type_histogram(tracker),
-            });
-        }
-
-        if let Some(ref tracker) = entry.scalar_tracker {
-            result.push(ColumnStats {
-                table_name: table_name.clone(),
-                column_name: "value".to_string(),
-                pg_type: tracker.to_pg_type(),
-                total_count: tracker.total_count,
-                null_count: tracker.null_count,
-                type_histogram: type_histogram(tracker),
-            });
-        }
-
-        for (original_field, tracker) in &entry.array_columns {
-            let col_name = NamingRegistry::column_name(original_field);
-            let elem_type = tracker.to_pg_type();
-            result.push(ColumnStats {
-                table_name: table_name.clone(),
-                column_name: col_name,
-                pg_type: PgType::Array(Box::new(elem_type)),
-                total_count: tracker.total_count,
-                null_count: tracker.null_count,
-                type_histogram: type_histogram(tracker),
-            });
-        }
+        result.extend(collect_entry_stats(entry, &table_name));
     }
-
-    result.sort_by(|a, b| {
-        a.table_name
-            .cmp(&b.table_name)
-            .then(a.column_name.cmp(&b.column_name))
-    });
+    result.sort_by(|a, b| a.table_name.cmp(&b.table_name).then(a.column_name.cmp(&b.column_name)));
     result
 }
 

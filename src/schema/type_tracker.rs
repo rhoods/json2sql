@@ -203,32 +203,24 @@ impl TypeTracker {
     /// Resolve to the final PostgreSQL type.
     /// Merging rules: the "widest" type wins.
     #[must_use]
+    fn string_pg_type(&self, has_float: bool, has_bigint: bool, has_int: bool) -> PgType {
+        // max_len tracks observed string lengths only. For mixed string+numeric fields,
+        // pass2 also formats numbers as strings — use conservative upper bounds so VarChar
+        // is always wide enough without false positives in the anomaly detector.
+        let num_repr_len = if has_float { 25u32 } else if has_bigint { 20u32 } else if has_int { 11u32 } else { 0u32 };
+        let effective_max = self.max_len.max(num_repr_len);
+        if effective_max > self.text_threshold {
+            PgType::Text
+        } else {
+            PgType::VarChar(((effective_max as f64 * 1.2).ceil() as u32).max(1))
+        }
+    }
+
     pub fn to_pg_type(&self) -> PgType {
         let has = |t: InferredType| self.type_counts[t as usize] > 0;
 
-        // If any text/string type is dominant, use string types
         if has(InferredType::Text) || has(InferredType::Varchar) {
-            // max_len tracks observed string lengths only. For mixed string+numeric
-            // fields, pass2 also formats numbers as strings — those representations
-            // aren't tracked in observe(). Use conservative upper bounds so VarChar
-            // is always wide enough to hold number-to-string output without false
-            // positives in the anomaly detector.
-            let num_repr_len = if has(InferredType::Float) {
-                25u32   // longest Ryu-formatted f64: "1.7976931348623157e308" ≈ 22 chars
-            } else if has(InferredType::BigInt) {
-                20u32   // longest i64: "-9223372036854775808"
-            } else if has(InferredType::Integer) {
-                11u32   // longest i32: "-2147483648"
-            } else {
-                0u32
-            };
-            let effective_max = self.max_len.max(num_repr_len);
-            if effective_max > self.text_threshold {
-                return PgType::Text;
-            } else {
-                let sized = (effective_max as f64 * 1.2).ceil() as u32;
-                return PgType::VarChar(sized.max(1));
-            }
+            return self.string_pg_type(has(InferredType::Float), has(InferredType::BigInt), has(InferredType::Integer));
         }
 
         // Numeric widening: float > bigint > int
