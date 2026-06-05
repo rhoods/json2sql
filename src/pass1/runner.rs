@@ -16,6 +16,8 @@ use crate::schema::stats::ColumnStats;
 use crate::schema::strategies::StrategyName;
 use crate::schema::table_schema::TableSchema;
 
+const PROGRESS_INTERVAL: u64 = 1_000;
+
 /// All parameters controlling a Pass 1 run.
 pub struct Pass1Config {
     pub root_table: String,
@@ -78,6 +80,32 @@ pub fn run(
     build_pass1_result(registry, total_rows, progress_tx)
 }
 
+fn report_progress(
+    progress: Option<&ProgressTracker>,
+    progress_tx: &Option<ProgressTx>,
+    total_rows: u64,
+    bytes_read: u64,
+    total_bytes: u64,
+) {
+    if let Some(bar) = progress {
+        bar.inc_rows(1);
+        bar.set_bytes(bytes_read);
+    }
+    if let Some(ref tx) = progress_tx {
+        if total_rows.is_multiple_of(PROGRESS_INTERVAL) {
+            let _ = tx.send(ProgressEvent::Pass1Progress { rows_scanned: total_rows, bytes_read, total_bytes });
+        }
+    }
+}
+
+fn flush_final_progress(progress_tx: &Option<ProgressTx>, total_rows: u64, bytes_read: u64, total_bytes: u64) {
+    if let Some(ref tx) = progress_tx {
+        if total_rows > 0 && !total_rows.is_multiple_of(PROGRESS_INTERVAL) {
+            let _ = tx.send(ProgressEvent::Pass1Progress { rows_scanned: total_rows, bytes_read, total_bytes });
+        }
+    }
+}
+
 fn scan_json_rows(
     reader: &mut JsonReader,
     registry: &mut SchemaRegistry,
@@ -87,9 +115,6 @@ fn scan_json_rows(
     total_bytes: u64,
 ) -> Result<u64> {
     let mut total_rows = 0u64;
-    // Emit a progress event every 1000 rows to keep the channel lean.
-    const PROGRESS_INTERVAL: u64 = 1_000;
-
     while let Some(item) = reader.next() {
         let value = item?;
         match value {
@@ -104,30 +129,9 @@ fn scan_json_rows(
                 )));
             }
         }
-        if let Some(bar) = progress {
-            bar.inc_rows(1);
-            bar.set_bytes(reader.bytes_read());
-        }
-        if let Some(ref tx) = progress_tx {
-            if total_rows.is_multiple_of(PROGRESS_INTERVAL) {
-                let _ = tx.send(ProgressEvent::Pass1Progress {
-                    rows_scanned: total_rows,
-                    bytes_read: reader.bytes_read(),
-                    total_bytes,
-                });
-            }
-        }
+        report_progress(progress, progress_tx, total_rows, reader.bytes_read(), total_bytes);
     }
-
-    if let Some(ref tx) = progress_tx {
-        if total_rows > 0 && !total_rows.is_multiple_of(PROGRESS_INTERVAL) {
-            let _ = tx.send(ProgressEvent::Pass1Progress {
-                rows_scanned: total_rows,
-                bytes_read: reader.bytes_read(),
-                total_bytes,
-            });
-        }
-    }
+    flush_final_progress(progress_tx, total_rows, reader.bytes_read(), total_bytes);
     Ok(total_rows)
 }
 
@@ -168,6 +172,7 @@ pub struct InspectResult {
 /// - Disables sibling detection and wide-table heuristics (thresholds set to usize::MAX / 0)
 ///
 /// Useful for quickly understanding the structure of a large file before a full import.
+#[allow(clippy::too_many_lines)] // sequential phases: registry config → scan with limit → result assembly
 pub fn run_inspect(
     path: &std::path::Path,
     config: &Pass1Config,
@@ -271,35 +276,9 @@ pub fn run_parallel(
     if let Some(e) = reader_err { return Err(e); }
     if let Some(e) = worker_err { return Err(e); }
 
-    const PROGRESS_INTERVAL: u64 = 1_000;
-    if let Some(ref tx_prog) = progress_tx {
-        if total_rows > 0 && !total_rows.is_multiple_of(PROGRESS_INTERVAL) {
-            let _ = tx_prog.send(ProgressEvent::Pass1Progress {
-                rows_scanned: total_rows,
-                bytes_read: total_bytes,
-                total_bytes,
-            });
-        }
-    }
-
+    flush_final_progress(&progress_tx, total_rows, total_bytes, total_bytes);
     eprintln!("Pass 1 complete (parallel, {} workers): {} rows, building schema...", num_workers, total_rows);
-
-    let mut merged = merged;
-    let mut schemas = merged.finalize();
-    let overflow_warnings = apply_column_limit_guard(&mut schemas);
-    let stats = merged.collect_stats();
-    let truncated_names = merged.truncated_names().to_vec();
-    let column_collisions = merged.column_collisions().to_vec();
-
-    let tables_count = schemas.len();
-    let columns_count = schemas.iter().map(|s| s.columns.len()).sum::<usize>();
-    eprintln!("Schema: {} tables, {} total columns", tables_count, columns_count);
-
-    if let Some(ref tx_prog) = progress_tx {
-        let _ = tx_prog.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
-    }
-
-    Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings })
+    build_pass1_result(merged, total_rows, progress_tx)
 }
 
 /// Spawn `num_workers` threads, each consuming JSON object bytes from `rx` and building
