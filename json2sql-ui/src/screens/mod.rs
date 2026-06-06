@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 pub mod setup;
 pub mod analysis;
 pub mod strategy;
@@ -41,7 +42,8 @@ where
 
 /// Pre-computed display data for one table row.
 /// Built by [`build_table_rows`] from raw schema + state. Contains no RSX — purely testable.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TableRowViewModel {
     pub index:       usize,
     pub name:        String,
@@ -74,6 +76,7 @@ pub struct TableRowViewModel {
 /// - `visible: false` rows are excluded from rendering but retained for index stability.
 /// - `overflow_names`: tables auto-promoted to Jsonb by Pass 1 without user override.
 /// - `selected_indices`: set of selected row indices (empty → all unselected).
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn build_table_rows(
     schemas:          &[TableSchema],
     overrides:        &HashMap<String, WideStrategy>,
@@ -134,7 +137,7 @@ pub fn build_table_rows(
         let is_selected = selected_indices.contains(&i);
         let row_cls: &'static str = if is_selected { "sel" } else if is_routing || is_absorbed { "muted" } else { "" };
 
-        let visible = !(show_warn_only && !has_warn)
+        let visible = (!show_warn_only || has_warn)
             && (filter_lc.is_empty() || table.name.to_lowercase().contains(&filter_lc));
 
         TableRowViewModel {
@@ -161,7 +164,23 @@ pub fn build_table_rows(
 /// Depth-first display order for `schemas`: roots alphabetically, then their
 /// children alphabetically directly underneath, recursively.
 /// Tables whose parent is absent from `schemas` are appended at the end.
+#[allow(clippy::too_many_lines)]
 pub fn tree_display_order(schemas: &[TableSchema]) -> Vec<usize> {
+    fn dfs(
+        i: usize,
+        schemas: &[TableSchema],
+        children_of: &HashMap<&str, Vec<usize>>,
+        order: &mut Vec<usize>,
+        visited: &mut Vec<bool>,
+    ) {
+        if visited[i] { return; }
+        visited[i] = true;
+        order.push(i);
+        if let Some(children) = children_of.get(schemas[i].name.as_str()) {
+            for &c in children { dfs(c, schemas, children_of, order, visited); }
+        }
+    }
+
     let name_set: HashSet<&str> = schemas.iter().map(|t| t.name.as_str()).collect();
     let mut children_of: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut true_roots:   Vec<usize> = Vec::new();
@@ -184,21 +203,6 @@ pub fn tree_display_order(schemas: &[TableSchema]) -> Vec<usize> {
     let mut order   = Vec::with_capacity(schemas.len());
     let mut visited = vec![false; schemas.len()];
 
-    fn dfs(
-        i: usize,
-        schemas: &[TableSchema],
-        children_of: &HashMap<&str, Vec<usize>>,
-        order: &mut Vec<usize>,
-        visited: &mut Vec<bool>,
-    ) {
-        if visited[i] { return; }
-        visited[i] = true;
-        order.push(i);
-        if let Some(children) = children_of.get(schemas[i].name.as_str()) {
-            for &c in children { dfs(c, schemas, children_of, order, visited); }
-        }
-    }
-
     for &r in &true_roots  { dfs(r, schemas, &children_of, &mut order, &mut visited); }
     for &r in &orphan_roots { dfs(r, schemas, &children_of, &mut order, &mut visited); }
 
@@ -219,10 +223,7 @@ pub enum PickResult {
 }
 
 fn option_to_pick_result(opt: Option<std::path::PathBuf>) -> PickResult {
-    match opt {
-        Some(path) => PickResult::Selected(path),
-        None => PickResult::Cancelled,
-    }
+    opt.map_or(PickResult::Cancelled, PickResult::Selected)
 }
 
 /// Parse a glob pattern string like `"*.json *.jsonl"` into rfd extension list `["json", "jsonl"]`.
@@ -262,7 +263,7 @@ pub async fn pick_save_file(default_name: &str) -> PickResult {
     option_to_pick_result(handle.map(|h| h.path().to_path_buf()))
 }
 
-pub fn strategy_label(s: &WideStrategy) -> &'static str {
+pub const fn strategy_label(s: &WideStrategy) -> &'static str {
     match s {
         WideStrategy::Columns                     => "DEFAULT",
         WideStrategy::Pivot                       => "PIVOT",
@@ -296,8 +297,8 @@ pub fn compute_last_child(order: &[usize], schemas: &[TableSchema]) -> Vec<bool>
     result
 }
 
-/// Returns (css_badge_class_suffix, short_label) for the new design-system `.badge` classes.
-pub fn strategy_badge(s: &WideStrategy) -> (&'static str, &'static str) {
+/// Returns (`css_badge_class_suffix`, `short_label`) for the new design-system `.badge` classes.
+pub const fn strategy_badge(s: &WideStrategy) -> (&'static str, &'static str) {
     match s {
         WideStrategy::Columns                     => ("default",   "default"),
         WideStrategy::Jsonb                       => ("jsonb",     "jsonb"),
@@ -318,7 +319,7 @@ pub fn strategy_badge(s: &WideStrategy) -> (&'static str, &'static str) {
 ///
 /// The original slice is never mutated — returns a fresh Vec ready for DDL
 /// generation and pass2 import.  Three passes are needed because some strategies
-/// (NormalizeDynamicKeys, JsonbFlatten) require the full schema slice and remove
+/// (`NormalizeDynamicKeys`, `JsonbFlatten`) require the full schema slice and remove
 /// child tables, so they must run after the single-table pass.
 /// Compute a progress percentage from `done` units out of `total`.
 /// Returns 0 if total is 0, clamps to 100 if done >= total.
@@ -334,16 +335,17 @@ pub fn progress_pct(done: u64, total: u64) -> u32 {
 /// Returns the CSS class for a progress bar track.
 /// `indeterminate` (scanning animation) only when waiting to start (pct == 0 and not done).
 /// Once progress begins, the bar fills deterministically via `width:{pct}%`.
-pub fn progress_bar_class(done: bool, pct: u32) -> &'static str {
+pub const fn progress_bar_class(done: bool, pct: u32) -> &'static str {
     if !done && pct == 0 { "prog thick indeterminate" } else { "prog thick" }
 }
 
-/// A labeled progress bar used in AnalysisScreen and ImportScreen.
+/// A labeled progress bar used in `AnalysisScreen` and `ImportScreen`.
 ///
 /// - `pct`   : 0–100
 /// - `done`  : if true, bar is solid (no animation)
 /// - `label` : caption line below the bar (bytes/rows/ETA)
 /// - `phase` : short phase name shown as a prefix badge (e.g. "Streaming")
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[component]
 pub fn ProgressBar(pct: u32, done: bool, label: String, phase: String) -> Element {
     let cls = progress_bar_class(done, pct);
@@ -365,6 +367,7 @@ pub fn ProgressBar(pct: u32, done: bool, label: String, phase: String) -> Elemen
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn build_effective_schemas(
     schemas: &[TableSchema],
     strategy_overrides: &HashMap<String, WideStrategy>,

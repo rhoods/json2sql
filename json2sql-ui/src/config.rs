@@ -51,8 +51,7 @@ impl Default for ProjectConfig {
             temp_dir: None,
             workers: 1,
             pass2_parallel: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
+                .map_or(4, std::num::NonZero::get)
                 .min(8),
             disabled_strategies: Vec::new(),
             import_limit: None,
@@ -80,16 +79,16 @@ impl ProjectConfig {
     }
 
     pub fn apply_to(&self, p: &mut ProjectState) {
-        p.source_file = self.source_file.clone();
-        p.pg.host = self.pg_host.clone();
+        p.source_file.clone_from(&self.source_file);
+        p.pg.host.clone_from(&self.pg_host);
         p.pg.port = self.pg_port;
-        p.pg.database = self.pg_database.clone();
-        p.pg.username = self.pg_username.clone();
+        p.pg.database.clone_from(&self.pg_database);
+        p.pg.username.clone_from(&self.pg_username);
         // password intentionally NOT restored
-        p.pg_schema = self.pg_schema.clone();
+        p.pg_schema.clone_from(&self.pg_schema);
         p.drop_existing = self.drop_existing;
-        p.anomaly_dir = self.anomaly_dir.clone();
-        p.temp_dir = self.temp_dir.clone();
+        p.anomaly_dir.clone_from(&self.anomaly_dir);
+        p.temp_dir.clone_from(&self.temp_dir);
         p.workers = self.workers;
         p.pass2_parallel = self.pass2_parallel;
         // Silently ignore invalid entries — config file may predate a strategy rename

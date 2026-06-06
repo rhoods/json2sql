@@ -1,9 +1,10 @@
-/// Screen 3 — Strategy Editor
-///
-/// Three-pane split layout (left 320px · center fluid · right 340px):
-///   left   — flat sortable table list with badges + filter
-///   center — column detail (single) or selection summary (multi)
-///   right  — strategy configurator (single) or bulk apply (multi)
+//! Screen 3 — Strategy Editor
+//!
+//! Three-pane split layout (left 320px · center fluid · right 340px):
+//!   left   — flat sortable table list with badges + filter
+//!   center — column detail (single) or selection summary (multi)
+//!   right  — strategy configurator (single) or bulk apply (multi)
+#![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 
 use dioxus::prelude::*;
 
@@ -19,11 +20,12 @@ use crate::state::{AppScreen, AppState};
 // Component
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[component]
 pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let mut left_collapsed:  Signal<bool>            = use_signal(|| false);
     let mut right_collapsed: Signal<bool>            = use_signal(|| false);
-    let mut filter_text:     Signal<String>          = use_signal(|| String::new());
+    let mut filter_text:     Signal<String>          = use_signal(String::new);
     let mut warn_only:       Signal<bool>            = use_signal(|| false);
     let mut normalize_col:   Signal<String>          = use_signal(|| "id".to_string());
     let save_feedback:   Signal<Option<Result<String, String>>> = use_signal(|| None);
@@ -139,22 +141,19 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             let stats = s.schema.pass1_stats.clone();
                             let overrides = s.schema.strategy_overrides.clone();
                             drop(s);
-                            let mut fb = save_feedback.clone();
+                            let mut fb = save_feedback;
                             spawn(async move {
-                                match pick_save_file("schema.json").await {
-                                    PickResult::Selected(path) => {
-                                        let result = json2sql::schema::persistence::save_with_overrides(
-                                            &schemas, total_rows, &truncated, &collisions, &stats, &overrides, &path,
-                                        );
-                                        match result {
-                                            Ok(()) => fb.set(Some(Ok(
-                                                path.file_name().and_then(|n| n.to_str())
-                                                    .unwrap_or("schema.json").to_string()
-                                            ))),
-                                            Err(e) => fb.set(Some(Err(e.to_string()))),
-                                        }
+                                if let PickResult::Selected(path) = pick_save_file("schema.json").await {
+                                    let result = json2sql::schema::persistence::save_with_overrides(
+                                        &schemas, total_rows, &truncated, &collisions, &stats, &overrides, &path,
+                                    );
+                                    match result {
+                                        Ok(()) => fb.set(Some(Ok(
+                                            path.file_name().and_then(|n| n.to_str())
+                                                .unwrap_or("schema.json").to_string()
+                                        ))),
+                                        Err(e) => fb.set(Some(Err(e.to_string()))),
                                     }
-                                    _ => {}
                                 }
                             });
                         },

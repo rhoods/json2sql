@@ -14,7 +14,7 @@ use json2sql::schema::table_schema::{TableSchema, WideStrategy};
 // Screen navigation
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum AppScreen {
     #[default]
     Setup,
@@ -61,7 +61,7 @@ impl PgConfig {
     ///
     /// Returns `Zeroizing<String>` so the heap allocation containing the password
     /// is overwritten when the value is dropped, not only when `PgConfig` itself
-    /// is dropped (which would be too late for URL copies passed to connect()).
+    /// is dropped (which would be too late for URL copies passed to `connect()`).
     pub fn to_url(&self) -> Zeroizing<String> {
         // IPv6 addresses must be bracketed; encode host for all other special chars.
         let host = if self.host.contains(':') && !self.host.starts_with('[') {
@@ -77,7 +77,7 @@ impl PgConfig {
         ))
     }
 
-    pub fn is_complete(&self) -> bool {
+    pub const fn is_complete(&self) -> bool {
         !self.host.is_empty()
             && !self.database.is_empty()
             && !self.username.is_empty()
@@ -85,11 +85,12 @@ impl PgConfig {
     }
 }
 
-/// Maximum log lines kept in memory per pass (ring-buffer via VecDeque).
+/// Maximum log lines kept in memory per pass (ring-buffer via `VecDeque`).
 const LOG_MAX: usize = 500;
 
 /// Format a byte count as a human-readable string using SI units (powers of 1 000).
 /// Shows KB for < 1 MB so sub-megabyte values are never displayed as "0 MB".
+#[allow(clippy::cast_precision_loss)]
 pub fn format_bytes(b: u64) -> String {
     if b >= 1_000_000_000 {
         format!("{:.1} GB", b as f64 / 1_000_000_000.0)
@@ -146,6 +147,7 @@ impl Pass1Progress {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Pass2Progress {
     pub rows_processed: u64,
     pub bytes_read: u64,
@@ -155,7 +157,7 @@ pub struct Pass2Progress {
     pub log_lines: VecDeque<String>,
     pub done: bool,
     pub total_anomalies: u64,
-    /// Per-table anomaly counts populated from Pass2AnomalyUpdate events.
+    /// Per-table anomaly counts populated from `Pass2AnomalyUpdate` events.
     pub anomaly_counts_per_table: std::collections::HashMap<String, u64>,
     /// FK constraints that failed after import (non-fatal; PK failures are errors).
     pub constraint_warning_count: u64,
@@ -163,7 +165,7 @@ pub struct Pass2Progress {
     pub ddl_table_count: usize,
     pub ddl_done: usize,
     pub ddl_complete: bool,
-    /// True once all workers have finished COPY — set on ConstraintsStart.
+    /// True once all workers have finished COPY — set on `ConstraintsStart`.
     /// Used to show Phase A and Phase B as complete independently of constraints.
     pub copy_complete: bool,
     // Constraints phase (PK + FK after data load)
@@ -189,7 +191,7 @@ impl Pass2Progress {
 pub struct ProjectState {
     pub source_file: Option<PathBuf>,
     pub pg: PgConfig,
-    /// Target PostgreSQL schema (default: "public").
+    /// Target `PostgreSQL` schema (default: "public").
     pub pg_schema: String,
     /// Drop and recreate tables before import (destructive — clean slate).
     pub drop_existing: bool,
@@ -205,7 +207,7 @@ pub struct ProjectState {
     pub pg_error: Option<String>,
     /// Number of worker threads for Pass 1 schema inference (1 = sequential).
     pub workers: usize,
-    /// Number of parallel PostgreSQL connections for Pass 2 COPY.
+    /// Number of parallel `PostgreSQL` connections for Pass 2 COPY.
     pub pass2_parallel: usize,
     /// Optional strategies disabled before analysis. Empty set = all strategies active (default).
     pub disabled_strategies: HashSet<StrategyName>,
@@ -227,8 +229,7 @@ impl Default for ProjectState {
             pg_error: None,
             workers: 1,
             pass2_parallel: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
+                .map_or(4, std::num::NonZero::get)
                 .min(8),
             disabled_strategies: HashSet::new(),
             import_limit: None,
@@ -254,9 +255,9 @@ pub struct SchemaState {
     pub pass1_progress: Pass1Progress,
     /// Original schemas from pass1 — never mutated after being set.
     pub schemas: Vec<TableSchema>,
-    /// Tables auto-converted to JSONB (exceeded PostgreSQL 1600-column limit).
+    /// Tables auto-converted to JSONB (exceeded `PostgreSQL` 1600-column limit).
     pub overflow_warnings: Vec<OverflowWarning>,
-    /// User-chosen strategy overrides: table_name → WideStrategy.
+    /// User-chosen strategy overrides: `table_name` → `WideStrategy`.
     pub strategy_overrides: HashMap<String, WideStrategy>,
     /// Set of table indices currently selected in the Strategy panel.
     pub selected_table_indices: HashSet<usize>,
@@ -365,7 +366,7 @@ pub struct UiState {
 // Root application state
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AppState {
     pub screen: AppScreen,
     pub project: ProjectState,
@@ -377,21 +378,8 @@ pub struct AppState {
     pub abort_handle: Option<tokio::task::AbortHandle>,
 }
 
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            screen: AppScreen::default(),
-            project: ProjectState::default(),
-            schema: SchemaState::default(),
-            import: ImportState::default(),
-            ui: UiState::default(),
-            abort_handle: None,
-        }
-    }
-}
-
 impl AppState {
-    /// Populate AppState from a loaded SchemaSnapshot.
+    /// Populate `AppState` from a loaded `SchemaSnapshot`.
     pub fn load_snapshot(&mut self, snapshot: json2sql::schema::persistence::SchemaSnapshot) {
         // Dedup defensively: snapshots saved before the finalizer fix may contain
         // duplicate table names → add_constraints() would fail with 42P16.
@@ -411,7 +399,7 @@ impl AppState {
     }
 
     /// Remove a loaded snapshot and restore the default Pass 1 flow.
-    /// Preserves source_file, pg config, and pg_schema — only clears schema data.
+    /// Preserves `source_file`, pg config, and `pg_schema` — only clears schema data.
     pub fn clear_snapshot(&mut self) {
         self.schema.clear();
     }
@@ -438,8 +426,9 @@ impl AppState {
     }
 
     /// Apply a `ProgressEvent` coming from a Pass 1 / Pass 2 runner.
+    #[allow(clippy::too_many_lines)]
     pub fn apply_progress_event(&mut self, event: ProgressEvent) {
-        use ProgressEvent::*;
+        use ProgressEvent::{Pass1Progress, Pass1Done, Pass2Progress, Pass2Flush, Pass2AnomalyUpdate, Pass2Log, Pass2Done, Pass2Error, DdlStart, DdlProgress, DdlDone, ConstraintsStart, ConstraintsProgress, ConstraintsDone};
         match event {
             Pass1Progress { rows_scanned, bytes_read, total_bytes } => {
                 self.schema.pass1_progress.rows_scanned = rows_scanned;
@@ -458,8 +447,7 @@ impl AppState {
                 self.schema.pass1_progress.columns_count = columns_count;
                 self.schema.pass1_progress.done = true;
                 self.schema.pass1_progress.push_log(format!(
-                    "Schema complete: {} tables, {} columns",
-                    tables_count, columns_count
+                    "Schema complete: {tables_count} tables, {columns_count} columns"
                 ));
             }
             Pass2Progress { rows_processed, bytes_read, total_bytes } => {
@@ -470,8 +458,7 @@ impl AppState {
             Pass2Flush { table_name, rows_flushed } => {
                 *self.import.pass2_progress.rows_per_table.entry(table_name.clone()).or_default() += rows_flushed;
                 self.import.pass2_progress.push_log(format!(
-                    "flush {} ({} rows)",
-                    table_name, rows_flushed
+                    "flush {table_name} ({rows_flushed} rows)"
                 ));
             }
             Pass2AnomalyUpdate { table_name, count } => {
@@ -487,14 +474,12 @@ impl AppState {
                 self.import.pass2_progress.constraint_warning_count = constraint_warning_count;
                 self.import.pass2_progress.done = true;
                 self.import.pass2_progress.push_log(format!(
-                    "Import complete: {} rows, {} anomalies, {} FK warnings",
-                    total_rows, anomaly_count, constraint_warning_count
+                    "Import complete: {total_rows} rows, {anomaly_count} anomalies, {constraint_warning_count} FK warnings"
                 ));
             }
             Pass2Error { table_name, message } => {
                 self.import.pass2_progress.push_log(format!(
-                    "Error in {}: {}",
-                    table_name, message
+                    "Error in {table_name}: {message}"
                 ));
             }
             DdlStart { table_count } => {
@@ -551,7 +536,7 @@ pub struct JaccardDisplay {
     pub common: usize,
     /// Total distinct data-column names across all selected tables (union).
     pub union_count: usize,
-    /// True when all selected tables share the same non-None parent_table.
+    /// True when all selected tables share the same non-None `parent_table`.
     pub same_parent: bool,
     /// The common parent name when `same_parent` is true.
     pub parent_name: Option<String>,
@@ -584,7 +569,7 @@ pub fn compute_jaccard_display(schemas: &[TableSchema], indices: &[usize]) -> Ja
 
     let parents: Vec<Option<&str>> = tables.iter().map(|t| t.parent_table.as_deref()).collect();
     let same_parent = parents[0].is_some() && parents.iter().all(|p| *p == parents[0]);
-    let parent_name = if same_parent { parents[0].map(|s| s.to_string()) } else { None };
+    let parent_name = if same_parent { parents[0].map(std::string::ToString::to_string) } else { None };
 
     JaccardDisplay { score, common, union_count, same_parent, parent_name }
 }
@@ -625,8 +610,7 @@ pub fn select_children_visible(
         .filter(|&i| {
             schemas.get(i)
                 .and_then(|t| t.parent_table.as_ref())
-                .map(|p| p == &parent.name)
-                .unwrap_or(false)
+                .is_some_and(|p| p == &parent.name)
         })
         .collect()
 }

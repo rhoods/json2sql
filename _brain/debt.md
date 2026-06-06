@@ -72,6 +72,31 @@ Ces fonctions sont longues parce qu'elles ont de nombreux variants — pas parce
 | `src/db/ddl.rs:233` | pipeline async DDL | pipeline séquentiel déjà optimal |
 | `src/pass2/runner.rs:130` | `trigger_budget_flush` | décision + spawn tightly coupled autour de `sink_arc` |
 
+## Dette Complexité — fonctions trop longues json2sql-ui (inventaire 2026-06-06)
+
+Résultat de l'audit clippy `too_many_lines` sur le crate UI — classées par catégorie.
+
+### Catégorie B — Extractibles — à traiter
+
+| Priorité | Fichier | Fonction | Taille | Phases identifiées |
+|---|---|---|---|---|
+| 🔴 1 | `json2sql-ui/src/screens/mod.rs:79` | `build_table_rows` | 60L + 8 args/7 | filtrage → calcul badge/depth/connector → construction ViewModel |
+| 🟡 2 | `json2sql-ui/src/screens/mod.rs:368` | `build_effective_schemas` | 48L | itération schemas → application overrides → merge JSONB flatten |
+
+### Catégorie A — Dispatch exhaustif — légitimes, ne pas refactoriser
+
+| Fichier | Fonction | Raison |
+|---|---|---|
+| `json2sql-ui/src/state.rs:429` | `apply_progress_event` | dispatch exhaustif sur tous les variants `ProgressEvent` |
+
+### Catégorie C — Algo compact ou couplage fort — ne pas toucher
+
+| Fichier | Fonction | Raison |
+|---|---|---|
+| `json2sql-ui/src/screens/preview.rs:296` | `tokenize_ddl` | lexer état-par-état, découper = perte de lisibilité |
+| `json2sql-ui/src/screens/mod.rs:166` | `tree_display_order` | DFS tree walk auto-contenu |
+| `json2sql-ui/src/main.rs:24` | `main` | config desktop + injection JS — couplage fort Dioxus |
+
 ## Améliorations futures
 - Log des flush périodiques (`flush tablename (N rows)`)
 - Double barre progression ImportScreen (Phase A streaming / Phase B COPY) — voir ux-todo.md

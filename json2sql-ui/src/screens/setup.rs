@@ -1,7 +1,8 @@
-/// Screen 1 — Project Setup (vertical stepper wizard)
-///
-/// 4 accordion step-cards: Source · Optional outputs · Target · Advanced.
-/// CSS classes come from the embedded design system (assets/styles.css).
+//! Screen 1 — Project Setup (vertical stepper wizard)
+//!
+//! 4 accordion step-cards: Source · Optional outputs · Target · Advanced.
+//! CSS classes come from the embedded design system (assets/styles.css).
+#![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 use dioxus::prelude::*;
 
 use json2sql::schema::strategies::StrategyName;
@@ -12,6 +13,7 @@ use crate::state::{format_bytes, AppScreen, AppState};
 // Component
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[component]
 pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     // ── Accordion state ───────────────────────────────────────────────────
@@ -56,11 +58,10 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     // ── Derived values ────────────────────────────────────────────────────
     let source_file     = state.read().project.source_file.clone();
     let source_label    = source_file.as_ref()
-        .and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "No file selected".to_string());
+        .and_then(|p| p.file_name()).map_or_else(|| "No file selected".to_string(), |n| n.to_string_lossy().into_owned());
     let size_bytes      = *source_size.read();
     let size_label      = size_bytes.map(format_bytes);
-    let source_large    = size_bytes.map(|b| b > 5 * 1_073_741_824).unwrap_or(false);
+    let source_large    = size_bytes.is_some_and(|b| b > 5 * 1_073_741_824);
 
     let snapshot_loaded = state.read().schema.schema_snapshot_loaded;
     let snapshot_tables = state.read().schema.schemas.len();
@@ -74,17 +75,15 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let drop_existing   = state.read().project.drop_existing;
     let workers         = state.read().project.workers;
     let pass2_parallel  = state.read().project.pass2_parallel;
-    let available_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let available_cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
 
     let anomaly_dir = state.read().project.anomaly_dir.clone();
     let anomaly_label = anomaly_dir.as_ref()
-        .and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "None (anomalies discarded)".to_string());
+        .and_then(|p| p.file_name()).map_or_else(|| "None (anomalies discarded)".to_string(), |n| n.to_string_lossy().into_owned());
 
     let temp_dir = state.read().project.temp_dir.clone();
     let temp_label = temp_dir.as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "System default (/tmp)".to_string());
+        .map_or_else(|| "System default (/tmp)".to_string(), |p| p.display().to_string());
     let pg_host_is_local = {
         let h = state.read().project.pg.host.clone();
         h == "localhost" || h == "127.0.0.1" || h == "::1"
@@ -211,7 +210,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                                 PickResult::Selected(path) => {
                                                     state.write().project.source_file = Some(path);
                                                     crate::config::try_save(&state.read().project);
-                                                    active_step.set(if !state.read().project.pg.is_complete() { 2 } else { 3 });
+                                                    active_step.set(if state.read().project.pg.is_complete() { 3 } else { 2 });
                                                 }
                                                 PickResult::Cancelled => {}
                                                 PickResult::NotAvailable => {
@@ -963,7 +962,7 @@ fn PgConnectionForm(mut state: Signal<AppState>) -> Element {
                 }
             }
             // Connection result alert
-            if let Some(true) = pg_ok {
+            if pg_ok == Some(true) {
                 div { class: "alert success compact mt-sm",
                     span { "✓" }
                     div { "Connected to "
@@ -972,7 +971,7 @@ fn PgConnectionForm(mut state: Signal<AppState>) -> Element {
                         code { style: "font-family:'JetBrains Mono',monospace;", "{pg_schema}" }
                     }
                 }
-            } else if let Some(false) = pg_ok {
+            } else if pg_ok == Some(false) {
                 div { class: "alert danger compact mt-sm",
                     span { "✗" }
                     div {
@@ -991,19 +990,19 @@ fn PgConnectionForm(mut state: Signal<AppState>) -> Element {
 // Disk space warning logic (pure, testable)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum DiskWarnLevel {
-    /// free >= source_size * 1.2 — safe
+    /// free >= `source_size` * 1.2 — safe
     Green,
-    /// free >= source_size — marginal
+    /// free >= `source_size` — marginal
     Yellow,
-    /// free < source_size — insufficient
+    /// free < `source_size` — insufficient
     Red,
 }
 
 /// Classify available disk space relative to the source file size.
-/// Returns `None` if source_size is 0 (no file selected yet).
-pub fn disk_warning_level(free: u64, source_size: u64) -> Option<DiskWarnLevel> {
+/// Returns `None` if `source_size` is 0 (no file selected yet).
+pub const fn disk_warning_level(free: u64, source_size: u64) -> Option<DiskWarnLevel> {
     if source_size == 0 { return None; }
     if free >= source_size * 12 / 10 {
         Some(DiskWarnLevel::Green)

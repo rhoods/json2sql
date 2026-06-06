@@ -1,12 +1,12 @@
-/// Screen 2 — Schema Analysis (Pass 1) — dashboard cards style.
-///
-/// Layout:
-///   subbar + breadcrumb + pulsing dot
-///   4-up stat tiles (tables · columns · records · log lines)
-///   large progress card
-///   two-column grid: schema overview | latest events log
-///   bottom bar: Cancel · Continue →
-
+//! Screen 2 — Schema Analysis (Pass 1) — dashboard cards style.
+//!
+//! Layout:
+//!   subbar + breadcrumb + pulsing dot
+//!   4-up stat tiles (tables · columns · records · log lines)
+//!   large progress card
+//!   two-column grid: schema overview | latest events log
+//!   bottom bar: Cancel · Continue →
+#![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 use dioxus::prelude::*;
 
 use json2sql::io::progress_event::ProgressEvent;
@@ -18,6 +18,7 @@ use crate::state::{
     PASS1_SIBLING_JACCARD, PASS1_STABLE_THRESHOLD, PASS1_RARE_THRESHOLD,
 };
 
+#[allow(clippy::cast_precision_loss)]
 fn format_count(n: u64) -> String {
     if n >= 1_000_000 { format!("{:.1}M rec/s", n as f64 / 1_000_000.0) }
     else if n >= 1_000 { format!("{:.1}K rec/s", n as f64 / 1_000.0) }
@@ -28,6 +29,7 @@ fn format_count(n: u64) -> String {
 // Component
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[component]
 pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
     // ── Elapsed timer ─────────────────────────────────────────────────────
@@ -36,10 +38,10 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
     // ── Pass 1 runner ────────────────────────────────────────────────────
     // once-flag: set synchronously (before first await) to prevent double-launch
     // if Dioxus remounts this component before abort_handle is written.
-    let once = use_signal(|| false);
+    let mut once = use_signal(|| false);
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
         if *once.peek() { return; }
-        once.clone().set(true);
+        once.set(true);
         if state.read().abort_handle.is_some() { return; }
         state.write().schema.pass1_progress = crate::state::Pass1Progress::default();
 
@@ -51,8 +53,7 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
             };
             let root = path.file_stem()
                 .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "root".to_string());
+                .map_or_else(|| "root".to_string(), std::string::ToString::to_string);
             let workers = state.read().project.workers;
             (path, root, workers)
         };
@@ -124,30 +125,33 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         else if progress.total_bytes > 0 {
             progress_pct(progress.bytes_read, progress.total_bytes)
         } else if progress.rows_scanned > 0 {
-            ((progress.rows_scanned / 1_000) as u32).min(89)
+            #[allow(clippy::cast_possible_truncation)]
+            { ((progress.rows_scanned / 1_000) as u32).min(89) }
         } else { 0 };
 
-    let rate = if elapsed > 0 { progress.rows_scanned / elapsed as u64 } else { 0 };
+    let rate = if elapsed > 0 { progress.rows_scanned / u64::from(elapsed) } else { 0 };
     let eta_str = if pct > 0 && pct < 100 && elapsed > 0 {
-        let remaining = elapsed as u64 * (100 - pct as u64) / pct as u64;
+        let remaining = u64::from(elapsed) * (100 - u64::from(pct)) / u64::from(pct);
         format!("~{:02}:{:02}", remaining / 60, remaining % 60)
     } else if done { "done".to_string() } else { "—".to_string() };
 
     let elapsed_str = format!("{:02}:{:02}", elapsed / 60, elapsed % 60);
     let rows_str = if progress.rows_scanned > 0 {
         let n = progress.rows_scanned;
+        #[allow(clippy::cast_precision_loss)]
         if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
         else if n >= 1_000 { format!("{}K", n / 1_000) }
         else { n.to_string() }
     } else { "0".to_string() };
 
     let file_pct_str = if progress.total_bytes > 0 {
-        format!("{}", format_bytes(progress.bytes_read))
+        format_bytes(progress.bytes_read)
     } else { String::new() };
 
     let status_label = if done { "Schema ready" } else { "Analyzing schema" };
     let scanning_label = if done { "Pass 1 complete" } else { "Pass 1 · scanning" };
 
+    #[allow(clippy::cast_precision_loss)]
     let cols_str = if progress.columns_count >= 1_000_000 {
         format!("{:.1}M", progress.columns_count as f64 / 1_000_000.0)
     } else if progress.columns_count >= 1_000 {
@@ -161,7 +165,7 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         "—".to_string()
     };
     let rate_str = if rate > 0 {
-        format_count(rate as u64)
+        format_count(rate)
     } else {
         "—".to_string()
     };

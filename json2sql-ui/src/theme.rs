@@ -2,7 +2,7 @@
 /// Full stylesheet embedded at compile time from `assets/styles.css`.
 /// This is the single source of truth for all visual styles:
 /// design tokens, component classes, layout primitives, and webkit2gtk overrides.
-pub fn design_css() -> &'static str {
+pub const fn design_css() -> &'static str {
     include_str!("../assets/styles.css")
 }
 

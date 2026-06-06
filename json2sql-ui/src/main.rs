@@ -21,6 +21,7 @@ use screens::{
 };
 
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let fonts_link = r#"<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -86,6 +87,7 @@ document.addEventListener('DOMContentLoaded', function () {{\n\
         .launch(App);
 }
 
+#[allow(clippy::disallowed_methods)]
 #[component]
 fn App() -> Element {
     // Global state — one Signal shared across all screens via props.

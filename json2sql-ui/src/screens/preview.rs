@@ -1,9 +1,10 @@
-/// Screen 4 — SQL Schema Preview (read-only)
-///
-/// Three-pane split layout:
-///   left  300px (collapsible) — table list with strategy badges
-///   center fluid              — generated DDL with syntax highlighting
-///   right 300px (collapsible) — selected table summary + strategy diff
+//! Screen 4 — SQL Schema Preview (read-only)
+//!
+//! Three-pane split layout:
+//!   left  300px (collapsible) — table list with strategy badges
+//!   center fluid              — generated DDL with syntax highlighting
+//!   right 300px (collapsible) — selected table summary + strategy diff
+#![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 
 use dioxus::prelude::*;
 
@@ -17,6 +18,7 @@ use crate::state::{AppScreen, AppState};
 // Component
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[component]
 pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
     let (schemas_orig, strategy_overrides) = {
@@ -291,6 +293,7 @@ struct DdlToken {
     text: String,
 }
 
+#[allow(clippy::too_many_lines)]
 fn tokenize_ddl(line: &str) -> Vec<DdlToken> {
     const KW: &[&str] = &[
         "CREATE", "TABLE", "IF", "NOT", "EXISTS",

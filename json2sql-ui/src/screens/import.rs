@@ -1,9 +1,10 @@
-/// Screen 5 — Import (Pass 2)
-///
-/// Layout:
-///   subbar  — breadcrumb + pulse + elapsed
-///   split-60-40 (left: real-time log · right: per-table row counts)
-///   bottom  — overall progress bar + caption + action buttons
+//! Screen 5 — Import (Pass 2)
+//!
+//! Layout:
+//!   subbar  — breadcrumb + pulse + elapsed
+//!   split-60-40 (left: real-time log · right: per-table row counts)
+//!   bottom  — overall progress bar + caption + action buttons
+#![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 
 use dioxus::prelude::*;
 
@@ -17,16 +18,17 @@ use crate::state::{format_bytes, AppScreen, AppState};
 // Component
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[component]
 pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     // ── Elapsed timer ─────────────────────────────────────────────────────
     let elapsed_secs = crate::screens::use_elapsed_timer(move || state.read().import.pass2_progress.done);
 
     // ── Pass 2 runner ────────────────────────────────────────────────────
-    let once = use_signal(|| false);
+    let mut once = use_signal(|| false);
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
         if *once.peek() { return; }
-        once.clone().set(true);
+        once.set(true);
         if state.read().abort_handle.is_some() {
             return;
         }
@@ -96,12 +98,8 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             if done { break; }
         }
 
-        match handle.await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                state.write().import.pass2_progress.push_log(format!("Import error: {e}"));
-            }
-            Err(_) => {}
+        if let Ok(Err(e)) = handle.await {
+            state.write().import.pass2_progress.push_log(format!("Import error: {e}"));
         }
 
         state.write().abort_handle = None;
@@ -187,7 +185,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         .iter()
         .map(|(k, v)| (k.clone(), *v))
         .collect();
-    table_rows.sort_by(|a, b| b.1.cmp(&a.1));
+    table_rows.sort_by_key(|r| std::cmp::Reverse(r.1));
     let total_rows: u64   = table_rows.iter().map(|(_, n)| n).sum();
     let table_count       = table_rows.len();
     let anomaly_dir_label = state.read().project.anomaly_dir
