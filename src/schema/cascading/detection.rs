@@ -73,11 +73,15 @@ pub fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usize, min_
     let co_siblings_0 = run_sibling_wave(schemas, threshold, min_jaccard);
 
     // ── Waves 1+: cascade ────────────────────────────────────────────────────
+    // Maps and name_to_idx are rebuilt once per wave (not per group — #8/#9).
     let mut pending: Vec<CoSiblingGroup> = co_siblings_0;
     while !pending.is_empty() {
+        let (obj_map, arr_map) = build_parent_child_maps(schemas);
+        let name_to_idx: std::collections::HashMap<String, usize> =
+            schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         let mut next_pending: Vec<CoSiblingGroup> = Vec::new();
         for group in pending {
-            let produced = process_co_sibling_group(schemas, &group);
+            let produced = process_co_sibling_group(schemas, &group, &obj_map, &arr_map, &name_to_idx);
             next_pending.extend(produced);
         }
         pending = next_pending;
@@ -90,9 +94,12 @@ pub fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usize, min_
     let co_siblings_bis = run_sibling_wave(schemas, threshold, min_jaccard);
     let mut pending_bis: Vec<CoSiblingGroup> = co_siblings_bis;
     while !pending_bis.is_empty() {
+        let (obj_map, arr_map) = build_parent_child_maps(schemas);
+        let name_to_idx: std::collections::HashMap<String, usize> =
+            schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         let mut next_pending: Vec<CoSiblingGroup> = Vec::new();
         for group in pending_bis {
-            let produced = process_co_sibling_group(schemas, &group);
+            let produced = process_co_sibling_group(schemas, &group, &obj_map, &arr_map, &name_to_idx);
             next_pending.extend(produced);
         }
         pending_bis = next_pending;
@@ -106,9 +113,12 @@ pub fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usize, min_
     let post_co_siblings = run_keyed_pivot_children_wave(schemas, threshold, min_jaccard);
     let mut pending: Vec<CoSiblingGroup> = post_co_siblings;
     while !pending.is_empty() {
+        let (obj_map, arr_map) = build_parent_child_maps(schemas);
+        let name_to_idx: std::collections::HashMap<String, usize> =
+            schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         let mut next_pending: Vec<CoSiblingGroup> = Vec::new();
         for group in pending {
-            let produced = process_co_sibling_group(schemas, &group);
+            let produced = process_co_sibling_group(schemas, &group, &obj_map, &arr_map, &name_to_idx);
             next_pending.extend(produced);
         }
         pending = next_pending;
@@ -818,24 +828,29 @@ fn run_sibling_wave(
 fn process_co_sibling_group(
     schemas: &mut Vec<TableSchema>,
     group: &CoSiblingGroup,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+    name_to_idx: &std::collections::HashMap<String, usize>,
 ) -> Vec<CoSiblingGroup> {
     if group.sibling_indices.len() < 2 {
-        handle_single_co_sibling(schemas, group);
+        handle_single_co_sibling(schemas, group, name_to_idx);
         return Vec::new();
     }
 
-    let (obj_map, arr_map) = build_parent_child_maps(schemas);
-    let Some(parent_idx) = schemas.iter().position(|s| s.name == group.synthetic_parent_name) else { return Vec::new() };
-
-    merge_co_sibling_group(schemas, group, parent_idx, &obj_map, &arr_map)
+    let Some(&parent_idx) = name_to_idx.get(&group.synthetic_parent_name) else { return Vec::new() };
+    merge_co_sibling_group(schemas, group, parent_idx, obj_map, arr_map)
 }
 
 /// Re-parent a sole co-sibling to its synthetic pivot and register it in `child_routes`.
-fn handle_single_co_sibling(schemas: &mut [TableSchema], group: &CoSiblingGroup) {
+fn handle_single_co_sibling(
+    schemas: &mut [TableSchema],
+    group: &CoSiblingGroup,
+    name_to_idx: &std::collections::HashMap<String, usize>,
+) {
     let Some(&idx) = group.sibling_indices.first() else { return };
     let child_name = schemas[idx].name.clone();
     schemas[idx].parent_table = Some(group.synthetic_parent_name.clone());
-    if let Some(pi) = schemas.iter().position(|s| s.name == group.synthetic_parent_name) {
+    if let Some(&pi) = name_to_idx.get(&group.synthetic_parent_name) {
         schemas[pi].child_routes.insert(group.json_key.clone(), child_name);
     }
 }
@@ -886,8 +901,8 @@ fn cascade_grandchildren_to_next_wave(
         } else if let Some(&sole_idx) = siblings.first() {
             let child_name = schemas[sole_idx].name.clone();
             schemas[sole_idx].parent_table = Some(t_name.to_string());
-            let t_pos = schemas.iter().position(|s| s.name == t_name)
-                .expect("t_name was just pushed to schemas");
+            // t_name was pushed to schemas immediately before this function was called.
+            let t_pos = schemas.len() - 1;
             schemas[t_pos].child_routes.insert(json_key, child_name);
         }
     }
@@ -1781,7 +1796,10 @@ mod tests {
             array_children: false,
         };
         // Co-siblings with disjoint schemas must still produce a single routable table.
-        process_co_sibling_group(&mut schemas, &group);
+        let (obj_map, arr_map) = build_parent_child_maps(&schemas);
+        let name_to_idx: std::collections::HashMap<String, usize> =
+            schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+        process_co_sibling_group(&mut schemas, &group, &obj_map, &arr_map, &name_to_idx);
         let pivot_idx = schemas.iter().position(|s| s.name == "pivot").unwrap();
         assert!(
             schemas[pivot_idx].child_routes.contains_key("desc"),
@@ -1792,5 +1810,54 @@ mod tests {
             schemas.iter().any(|s| s.name == target_name),
             "target table '{}' must exist in schemas", target_name
         );
+    }
+
+    #[test]
+    fn test_two_co_sibling_groups_same_wave_both_merged() {
+        // Regression test for #8/#9: two CoSiblingGroups processed in the same BFS wave
+        // must both produce routable child_routes entries on their respective parents,
+        // even when maps and name_to_idx are built once for the whole wave.
+        //
+        // Setup: two independent synthetic pivots each with 2 co-siblings sharing a key.
+        //   pivot_a has co-siblings [a_desc_v1, a_desc_v2] for key "desc"
+        //   pivot_b has co-siblings [b_info_v1, b_info_v2] for key "info"
+        use crate::schema::table_schema::{KeyShape, SiblingSchema};
+        let make_pivot = |name: &str| {
+            let mut t = make_parent(name);
+            t.wide_strategy = WideStrategy::KeyedPivot(SiblingSchema {
+                key_col_name: "key".to_string(),
+                key_shape: KeyShape::Slug,
+                array_children: false,
+                data_col_name: "j2s_data".to_string(),
+            });
+            t
+        };
+        let mut schemas = vec![
+            make_pivot("pivot_a"),                                          // 0
+            make_child_with_key("a_desc_v1", "pivot_a", "desc", &["x"]),    // 1
+            make_child_with_key("a_desc_v2", "pivot_a", "desc", &["y"]),    // 2
+            make_pivot("pivot_b"),                                          // 3
+            make_child_with_key("b_info_v1", "pivot_b", "info", &["p"]),    // 4
+            make_child_with_key("b_info_v2", "pivot_b", "info", &["q"]),    // 5
+        ];
+        let groups = vec![
+            CoSiblingGroup { synthetic_parent_name: "pivot_a".to_string(), json_key: "desc".to_string(), sibling_indices: vec![1, 2], array_children: false },
+            CoSiblingGroup { synthetic_parent_name: "pivot_b".to_string(), json_key: "info".to_string(), sibling_indices: vec![4, 5], array_children: false },
+        ];
+        // Build maps once for the wave (simulating the perf fix)
+        let (obj_map, arr_map) = build_parent_child_maps(&schemas);
+        let name_to_idx: std::collections::HashMap<String, usize> =
+            schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+        for group in &groups {
+            process_co_sibling_group(&mut schemas, group, &obj_map, &arr_map, &name_to_idx);
+        }
+        let pa = schemas.iter().find(|s| s.name == "pivot_a").unwrap();
+        assert!(pa.child_routes.contains_key("desc"), "pivot_a must have child_routes['desc']");
+        let pb = schemas.iter().find(|s| s.name == "pivot_b").unwrap();
+        assert!(pb.child_routes.contains_key("info"), "pivot_b must have child_routes['info']");
+        let ta_name = &pa.child_routes["desc"];
+        let tb_name = &pb.child_routes["info"];
+        assert!(schemas.iter().any(|s| &s.name == ta_name), "T table for pivot_a/desc must exist");
+        assert!(schemas.iter().any(|s| &s.name == tb_name), "T table for pivot_b/info must exist");
     }
 }
