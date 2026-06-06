@@ -184,13 +184,22 @@ pub struct InspectResult {
 /// - Disables sibling detection and wide-table heuristics (thresholds set to `usize::MAX` / 0)
 ///
 /// Useful for quickly understanding the structure of a large file before a full import.
-#[allow(clippy::too_many_lines)] // sequential phases: registry config → scan with limit → result assembly
 pub fn run_inspect(
     path: &std::path::Path,
     config: &Pass1Config,
     limit: usize,
 ) -> Result<InspectResult> {
-    let mut registry = SchemaRegistry::new(
+    let mut registry = build_inspect_registry(config);
+    let (reader, _format) = JsonReader::open(path)?;
+    let (rows_scanned, sampled_objects) =
+        scan_objects_with_limit(reader, &mut registry, &config.root_table, limit)?;
+    let anomaly_count = registry.anomaly_iter().count();
+    let schemas = registry.finalize();
+    Ok(InspectResult { schemas, rows_scanned, anomaly_count, sampled_objects })
+}
+
+fn build_inspect_registry(config: &Pass1Config) -> SchemaRegistry {
+    SchemaRegistry::new(
         config.text_threshold,
         false,        // array_as_pg_array: always false in inspect mode
         usize::MAX,   // wide_column_threshold: disable wide detection
@@ -199,35 +208,32 @@ pub fn run_inspect(
         0.0,          // stable_threshold
         0.0,          // rare_threshold
         HashSet::from([StrategyName::Sibling]),
-    );
+    )
+}
 
-    let (reader, _format) = JsonReader::open(path)?;
+fn scan_objects_with_limit(
+    reader: JsonReader,
+    registry: &mut SchemaRegistry,
+    root_table: &str,
+    limit: usize,
+) -> Result<(u64, Vec<Value>)> {
     let mut rows_scanned = 0u64;
     let mut sampled_objects: Vec<Value> = Vec::new();
-
     for item in reader {
-        if rows_scanned >= limit as u64 {
-            break;
-        }
+        if rows_scanned >= limit as u64 { break; }
         let value = item?;
         match value {
             Value::Object(ref obj) => {
-                registry.observe_root(&config.root_table, obj);
+                registry.observe_root(root_table, obj);
                 rows_scanned += 1;
                 sampled_objects.push(Value::Object(obj.clone()));
             }
-            other => {
-                return Err(crate::error::J2sError::InvalidInput(format!(
-                    "Expected JSON object at root level, found: {other}"
-                )));
-            }
+            other => return Err(crate::error::J2sError::InvalidInput(format!(
+                "Expected JSON object at root level, found: {other}"
+            ))),
         }
     }
-
-    let anomaly_count = registry.anomaly_iter().count();
-    let schemas = registry.finalize();
-
-    Ok(InspectResult { schemas, rows_scanned, anomaly_count, sampled_objects })
+    Ok((rows_scanned, sampled_objects))
 }
 
 /// Clamp `requested` workers to the number of logical CPUs available.
@@ -491,6 +497,15 @@ mod tests {
         let path = fixture("users.jsonl"); // 3 rows
         let result = run_inspect(&path, &inspect_config("users"), 1000).unwrap();
         assert_eq!(result.sampled_objects.len(), 3);
+    }
+
+    #[test]
+    fn test_inspect_errors_on_non_object_root() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "42").unwrap(); // scalar, not object
+        let result = run_inspect(tmp.path(), &inspect_config("t"), 10);
+        assert!(result.is_err(), "scalar at root level must be an error");
     }
 
     // ── run_parallel tests ──────────────────────────────────────────────────

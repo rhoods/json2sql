@@ -234,7 +234,15 @@ fn find_object_child_indices(schemas: &[TableSchema], table_name: &str) -> Resul
     Ok(indices)
 }
 
-#[allow(clippy::too_many_lines)] // sequential mutation pipeline: find → collect → classify → mutate → log → exclude
+fn rebuild_normalize_columns(target: &mut TableSchema, union_cols: Vec<ColumnSchema>, id_column: &str) {
+    target.columns.retain(|c| c.is_generated);
+    target.columns.push(ColumnSchema {
+        name: id_column.to_string(), original_name: id_column.to_string(),
+        pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false,
+    });
+    target.columns.extend(union_cols);
+}
+
 pub fn apply_normalize_dynamic_keys(
     schemas: &mut Vec<TableSchema>,
     table_name: &str,
@@ -245,35 +253,15 @@ pub fn apply_normalize_dynamic_keys(
     let child_indices = find_object_child_indices(schemas, table_name)?;
     let children: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
     let union_cols = build_union_columns(&children);
-
-    let keys: Vec<String> = child_indices
-        .iter()
-        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
-        .collect();
+    let keys: Vec<String> = child_indices.iter()
+        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default()).collect();
     let key_shape = classify_key_shape(&keys.iter().map(std::string::String::as_str).collect::<Vec<_>>());
-
-    let target = &mut schemas[target_idx];
-    target.columns.retain(|c| c.is_generated);
-    target.columns.push(ColumnSchema {
-        name: id_column.clone(),
-        original_name: id_column.clone(),
-        pg_type: PgType::Text,
-        not_null: true,
-        is_generated: false,
-        is_parent_fk: false,
-    });
-    for col in union_cols {
-        target.columns.push(col);
-    }
+    rebuild_normalize_columns(&mut schemas[target_idx], union_cols, &id_column);
     eprintln!(
         "  NormalizeDynamicKeys: {} ({} child tables → 1, id_col: {} [{}])",
-        table_name,
-        child_indices.len(),
-        id_column,
-        key_shape,
+        table_name, child_indices.len(), id_column, key_shape,
     );
-    target.wide_strategy = WideStrategy::NormalizeDynamicKeys { id_column };
-
+    schemas[target_idx].wide_strategy = WideStrategy::NormalizeDynamicKeys { id_column };
     exclude_absorbed_children(schemas);
     Ok(())
 }
@@ -394,4 +382,45 @@ pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &st
     // Remove the child table and its absorbed descendants
     schemas.retain(|s| !matches!(s.wide_strategy, WideStrategy::JsonbFlatten));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::type_tracker::PgType;
+
+    fn gen_col(name: &str, is_parent_fk: bool) -> ColumnSchema {
+        ColumnSchema {
+            name: name.to_string(), original_name: name.to_string(),
+            pg_type: PgType::Text, not_null: false,
+            is_generated: true, is_parent_fk,
+        }
+    }
+
+    fn data_col(name: &str) -> ColumnSchema {
+        ColumnSchema {
+            name: name.to_string(), original_name: name.to_string(),
+            pg_type: PgType::Text, not_null: false,
+            is_generated: false, is_parent_fk: false,
+        }
+    }
+
+    #[test]
+    fn test_rebuild_normalize_columns_retains_generated_and_adds_id_and_union() {
+        let mut target = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        target.columns.push(gen_col("j2s_id", false));
+        target.columns.push(gen_col("j2s_parent_id", true));
+        target.columns.push(data_col("old_data")); // non-generated, must be dropped
+
+        let union = vec![data_col("col_a"), data_col("col_b")];
+        rebuild_normalize_columns(&mut target, union, "image_id");
+
+        let names: Vec<&str> = target.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"j2s_id"),       "generated col must be kept");
+        assert!(names.contains(&"j2s_parent_id"), "generated col must be kept");
+        assert!(names.contains(&"image_id"),      "id_column must be added");
+        assert!(names.contains(&"col_a"),         "union col must be added");
+        assert!(names.contains(&"col_b"),         "union col must be added");
+        assert!(!names.contains(&"old_data"),     "non-generated col must be dropped");
+    }
 }

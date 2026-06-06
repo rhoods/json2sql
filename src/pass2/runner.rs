@@ -171,9 +171,42 @@ fn trigger_budget_flush(
 }
 
 /// Process one worker's stream of JSON byte chunks: parse, insert into sinks,
+fn parse_json_object(bytes: &mut [u8]) -> Result<serde_json::Map<String, Value>> {
+    match simd_json::from_slice::<Value>(bytes) {
+        Ok(Value::Object(o)) => Ok(o),
+        Ok(other) => Err(J2sError::InvalidInput(format!(
+            "Expected JSON object at root level, found: {other}"
+        ))),
+        Err(e) => Err(J2sError::InvalidInput(format!(
+            "JSON parse error in worker: {e}"
+        ))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // 8 mutable state refs from run_worker — no natural grouping
+fn process_worker_item(
+    mut bytes: Vec<u8>,
+    sinks: &mut HashMap<String, Arc<Mutex<TempFileSink>>>,
+    proxy: &mut AnomalyProxy,
+    copy_handles: &mut Vec<InterimCopyHandle>,
+    path_map: &HashMap<String, TableSchema>,
+    root_schema: &TableSchema,
+    cfg: &WorkerConfig,
+    my_bytes: &mut u64,
+) -> Result<()> {
+    let obj_len = bytes.len() as u64;
+    let obj = parse_json_object(&mut bytes)?;
+    insert_object(path_map, &mut InsertCtx { sinks, anomalies: proxy }, root_schema, &obj, Uuid::now_v7(), None, None)?;
+    *my_bytes += obj_len;
+    if *my_bytes >= cfg.worker_budget {
+        *my_bytes = 0;
+        trigger_budget_flush(sinks, copy_handles, cfg);
+    }
+    Ok(())
+}
+
 /// and fire interim COPY snapshots when the per-worker budget is reached.
 /// Returns background COPY handles spawned during streaming.
-#[allow(clippy::too_many_lines)] // async event loop: receive → parse → insert → budget check
 async fn run_worker(
     mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     mut sinks: HashMap<String, Arc<Mutex<TempFileSink>>>,
@@ -186,32 +219,13 @@ async fn run_worker(
     let mut proxy = AnomalyProxy::new(anomaly_tx);
     let mut copy_handles: Vec<InterimCopyHandle> = Vec::new();
     let mut my_bytes: u64 = 0;
-
     loop {
-        let mut bytes = tokio::select! {
+        let bytes = tokio::select! {
             () = cancel.cancelled() => break,
             msg = rx.recv() => match msg { Some(b) => b, None => break },
         };
-        let obj_len = bytes.len() as u64;
-        let obj = match simd_json::from_slice::<serde_json::Value>(&mut bytes) {
-            Ok(Value::Object(o)) => o,
-            Ok(other) => return Err(J2sError::InvalidInput(format!(
-                "Expected JSON object at root level, found: {other}"
-            ))),
-            Err(e) => return Err(J2sError::InvalidInput(format!(
-                "JSON parse error in worker: {e}"
-            ))),
-        };
-
-        insert_object(&path_map, &mut InsertCtx { sinks: &mut sinks, anomalies: &mut proxy }, &root_schema, &obj, Uuid::now_v7(), None, None)?;
-
-        my_bytes += obj_len;
-        if my_bytes >= cfg.worker_budget {
-            my_bytes = 0;
-            trigger_budget_flush(&sinks, &mut copy_handles, &cfg);
-        }
+        process_worker_item(bytes, &mut sinks, &mut proxy, &mut copy_handles, &path_map, &root_schema, &cfg, &mut my_bytes)?;
     }
-
     for sink_arc in sinks.values() {
         let _ = sink_arc.lock().expect("sink mutex is not poisoned").force_spill();
     }
@@ -395,9 +409,23 @@ fn log_constraint_warnings(warnings: &[crate::db::ddl::ConstraintWarning], progr
     }
 }
 
+fn update_row_progress(
+    progress: Option<&ProgressTracker>,
+    progress_tx: Option<&ProgressTx>,
+    rows_processed: u64,
+    bytes_read: u64,
+    total_bytes: u64,
+) {
+    if let Some(bar) = progress { bar.inc_rows(1); }
+    if rows_processed.is_multiple_of(PROGRESS_INTERVAL) {
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(ProgressEvent::Pass2Progress { rows_processed, bytes_read, total_bytes });
+        }
+    }
+}
+
 /// Dispatch raw JSON bytes from `reader` round-robin to workers.
 /// Returns `(rows_processed, worker_died)`.
-#[allow(clippy::too_many_lines)] // dense event loop: dispatch + limit + progress bar + progress channel
 async fn dispatch_loop(
     reader: &mut JsonReader,
     senders: &[tokio::sync::mpsc::Sender<Vec<u8>>],
@@ -418,22 +446,9 @@ async fn dispatch_loop(
                 break 'dispatch;
             }
             rows_processed += 1;
-            if limit.is_some_and(|n| rows_processed >= n) {
-                break 'dispatch;
-            }
+            if limit.is_some_and(|n| rows_processed >= n) { break 'dispatch; }
             robin = (robin + 1) % parallel;
-            if let Some(bar) = progress {
-                bar.inc_rows(1);
-            }
-            if rows_processed.is_multiple_of(PROGRESS_INTERVAL) {
-                if let Some(tx) = progress_tx {
-                    let _ = tx.send(ProgressEvent::Pass2Progress {
-                        rows_processed,
-                        bytes_read: reader.bytes_read(),
-                        total_bytes,
-                    });
-                }
-            }
+            update_row_progress(progress, progress_tx, rows_processed, reader.bytes_read(), total_bytes);
         }
     }
     Ok((rows_processed, worker_died))
@@ -761,6 +776,46 @@ mod tests {
             assert_eq!(v["table"], "products");
             assert_eq!(v["column"], "price");
         }
+    }
+
+    #[test]
+    fn test_update_row_progress_sends_at_interval() {
+        use crate::io::progress_event::ProgressEvent;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
+        // rows_processed == PROGRESS_INTERVAL → must send
+        super::update_row_progress(None, Some(&tx), super::PROGRESS_INTERVAL, 0, 0);
+        assert!(rx.try_recv().is_ok(), "must send at interval boundary");
+    }
+
+    #[test]
+    fn test_update_row_progress_silent_between_intervals() {
+        use crate::io::progress_event::ProgressEvent;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
+        // rows_processed == 1 → not a multiple of PROGRESS_INTERVAL (which is > 1)
+        super::update_row_progress(None, Some(&tx), 1, 0, 0);
+        assert!(rx.try_recv().is_err(), "must not send between interval boundaries");
+    }
+
+    #[test]
+    fn test_parse_json_object_valid() {
+        let mut bytes = b"{\"k\":1}".to_vec();
+        let result = super::parse_json_object(&mut bytes);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains_key("k"));
+    }
+
+    #[test]
+    fn test_parse_json_object_scalar_is_error() {
+        let mut bytes = b"42".to_vec();
+        let result = super::parse_json_object(&mut bytes);
+        assert!(result.is_err(), "scalar at root level must be an error");
+    }
+
+    #[test]
+    fn test_parse_json_object_invalid_json_is_error() {
+        let mut bytes = b"{broken".to_vec();
+        let result = super::parse_json_object(&mut bytes);
+        assert!(result.is_err(), "invalid JSON must be an error");
     }
 
 }

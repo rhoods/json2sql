@@ -279,52 +279,57 @@ fn try_cluster_fallback(
     })
 }
 
-#[allow(clippy::too_many_lines)] // decision gate: multiple branches already delegated to helpers
+fn filter_routing_tables(
+    schemas: &[TableSchema],
+    non_numeric_idx: &[usize],
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+    threshold: usize,
+) -> Vec<usize> {
+    non_numeric_idx.iter().copied().filter(|&i| {
+        let name = &schemas[i].name;
+        let is_pure = schemas[i].data_columns().next().is_none();
+        let child_count = obj_map.get(name).map_or(0, std::vec::Vec::len)
+            + arr_map.get(name).map_or(0, std::vec::Vec::len);
+        !(is_pure && child_count >= threshold)
+    }).collect()
+}
+
+fn build_non_num_clusters(
+    schemas: &[TableSchema],
+    non_num_regular: &[usize],
+    ctx: &SiblingDetectCtx,
+) -> Vec<Vec<usize>> {
+    greedy_schema_clusters(schemas, non_num_regular, ctx.min_jaccard, ctx.threshold)
+        .into_iter()
+        .filter(|c| pairwise_jaccard_min(schemas, c) >= ctx.min_jaccard)
+        .collect()
+}
+
 fn detect_mixed_collapse(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
     obj_map: &std::collections::HashMap<String, Vec<usize>>,
     arr_map: &std::collections::HashMap<String, Vec<usize>>,
 ) -> Option<Collapse> {
-    let non_num_regular: Vec<usize> = ctx.non_numeric_idx
-        .iter()
-        .copied()
-        .filter(|&i| {
-            let name = &schemas[i].name;
-            let is_pure = schemas[i].data_columns().next().is_none();
-            let child_count = obj_map.get(name).map_or(0, std::vec::Vec::len)
-                + arr_map.get(name).map_or(0, std::vec::Vec::len);
-            !(is_pure && child_count >= ctx.threshold)
-        })
-        .collect();
-
+    let non_num_regular = filter_routing_tables(schemas, &ctx.non_numeric_idx, obj_map, arr_map, ctx.threshold);
     let num_ok = ctx.numeric_idx.len() >= ctx.threshold
         && pairwise_jaccard_min(schemas, &ctx.numeric_idx) >= ctx.min_jaccard;
     let non_ok = non_num_regular.len() >= ctx.threshold
         && pairwise_jaccard_min(schemas, &non_num_regular) >= ctx.min_jaccard;
-
     if !num_ok && !non_ok {
         return try_unified_fallback(schemas, ctx, obj_map, arr_map);
     }
-
     let num_ok = num_ok
         && child_compatibility_score(schemas, &ctx.numeric_idx, obj_map, arr_map) >= ctx.min_jaccard;
     let non_ok = non_ok
         && child_compatibility_score(schemas, &non_num_regular, obj_map, arr_map) >= ctx.min_jaccard;
-
-    let non_num_clusters: Vec<Vec<usize>> = if !non_ok && !non_num_regular.is_empty() {
-        greedy_schema_clusters(schemas, &non_num_regular, ctx.min_jaccard, ctx.threshold)
-            .into_iter()
-            .filter(|c| pairwise_jaccard_min(schemas, c) >= ctx.min_jaccard)
-            .collect()
+    let non_num_clusters = if !non_ok && !non_num_regular.is_empty() {
+        build_non_num_clusters(schemas, &non_num_regular, ctx)
     } else {
         Vec::new()
     };
-
-    if !num_ok && !non_ok && non_num_clusters.is_empty() {
-        return None;
-    }
-
+    if !num_ok && !non_ok && non_num_clusters.is_empty() { return None; }
     Some(assemble_mixed_collapse(schemas, ctx, num_ok, non_ok, &non_num_regular, &non_num_clusters))
 }
 
@@ -406,55 +411,49 @@ fn effective_jaccard_for_regular(
     }
 }
 
-#[allow(clippy::too_many_lines)] // multi-path detection: filter → jaccard → child-compat → multi vs classic dispatch
+/// Child-compatibility gate bypass threshold: skip the gate when Jaccard similarity is very high.
+const HIGH_JACCARD: f64 = 0.9;
+
+fn build_synthetic_pivot_collapse(
+    schemas: &[TableSchema],
+    ctx: &SiblingDetectCtx,
+    regular: Vec<usize>,
+) -> Option<Collapse> {
+    let key_is_numeric = !ctx.numeric_idx.is_empty();
+    if ctx.parent_has_data && !key_is_numeric { return None; }
+    let suffix = if key_is_numeric { "num" } else { "key" };
+    let groups = vec![make_subgroup(schemas, &ctx.parent_name, &regular, key_is_numeric, suffix)];
+    Some(Collapse {
+        parent_idx: ctx.parent_idx,
+        array_children: ctx.array_children,
+        log_msg: format!(
+            "  Synthetic pivot for parent with data/sig-containers: {} ({} tables → 1)",
+            ctx.parent_name, regular.len(),
+        ),
+        kind: CollapseKind::Multi { groups },
+        absorbed_indices: regular,
+    })
+}
+
 fn detect_homogeneous_collapse(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
     obj_map: &std::collections::HashMap<String, Vec<usize>>,
     arr_map: &std::collections::HashMap<String, Vec<usize>>,
 ) -> Option<Collapse> {
-    // Child-compatibility gate — bypassed when Jaccard is very high (≥ 0.9).
-    const HIGH_JACCARD: f64 = 0.9;
     let regular = filter_significant_siblings(schemas, ctx, obj_map, arr_map);
-
-    if regular.len() < ctx.threshold {
-        return None;
-    }
-
+    if regular.len() < ctx.threshold { return None; }
     let actual_jaccard = effective_jaccard_for_regular(schemas, ctx, &regular);
-
-    if actual_jaccard < ctx.min_jaccard {
-        return try_cluster_fallback(schemas, ctx, &regular);
-    }
-
+    if actual_jaccard < ctx.min_jaccard { return try_cluster_fallback(schemas, ctx, &regular); }
     if actual_jaccard < HIGH_JACCARD
         && child_compatibility_score(schemas, &regular, obj_map, arr_map) < ctx.min_jaccard
     {
         return None;
     }
-
     let has_sig_containers = regular.len() < ctx.child_indices.len();
-
     if ctx.parent_has_data || has_sig_containers {
-        let key_is_numeric = !ctx.numeric_idx.is_empty();
-        if ctx.parent_has_data && !key_is_numeric {
-            return None;
-        }
-        let suffix = if key_is_numeric { "num" } else { "key" };
-        let groups = vec![make_subgroup(schemas, &ctx.parent_name, &regular, key_is_numeric, suffix)];
-        return Some(Collapse {
-            parent_idx: ctx.parent_idx,
-            array_children: ctx.array_children,
-            log_msg: format!(
-                "  Synthetic pivot for parent with data/sig-containers: {} ({} tables → 1)",
-                ctx.parent_name, regular.len(),
-            ),
-            kind: CollapseKind::Multi { groups },
-            absorbed_indices: regular,
-        });
+        return build_synthetic_pivot_collapse(schemas, ctx, regular);
     }
-
-    // Classic KeyedPivot: pure container parent becomes the pivot.
     Some(build_classic_keyed_pivot_collapse(schemas, ctx, regular))
 }
 
@@ -930,7 +929,27 @@ fn resolve_pivot_key_info(
     (key_col_name, key_shape, union_cols, sub_pivot_name)
 }
 
-#[allow(clippy::too_many_lines)] // sequential pipeline: jaccard gate → resolve → build TableSchema → collect co-siblings → reparent
+fn build_sub_pivot_schema(
+    sub_pivot_name: String,
+    parent_name: String,
+    sub_path: Vec<String>,
+    parent_depth: usize,
+    cols: Vec<ColumnSchema>,
+    sibling_schema: SiblingSchema,
+) -> TableSchema {
+    TableSchema {
+        name: sub_pivot_name,
+        path: sub_path,
+        parent_table: Some(parent_name),
+        depth: parent_depth + 1,
+        columns: cols,
+        child_kind: Some(ChildKind::Object),
+        wide_strategy: WideStrategy::KeyedPivot(sibling_schema),
+        flatten_sources: std::collections::HashMap::new(),
+        child_routes: std::collections::HashMap::new(),
+    }
+}
+
 fn process_keyed_pivot_work_item(
     schemas: &mut [TableSchema],
     parent_idx: usize,
@@ -948,28 +967,12 @@ fn process_keyed_pivot_work_item(
     let (key_col_name, key_shape, union_cols, sub_pivot_name) =
         resolve_pivot_key_info(schemas, child_indices, &parent_name);
     let fk_col = format!("j2s_{parent_name}_id");
-    let sibling_schema = SiblingSchema {
-        key_col_name: key_col_name.clone(),
-        key_shape,
-        array_children: false,
-        data_col_name: "j2s_data".to_string(),
-    };
+    let sibling_schema = SiblingSchema { key_col_name: key_col_name.clone(), key_shape, array_children: false, data_col_name: "j2s_data".to_string() };
     let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
     let co_sibs = collect_pivot_co_siblings(schemas, child_indices, &sub_pivot_name, obj_map, arr_map);
     reparent_and_update_routes(schemas, parent_idx, child_indices, &sub_pivot_name);
     eprintln!("  KeyedPivot post-pass: {} ({} orphan tables → sub-pivot {})", parent_name, child_indices.len(), sub_pivot_name);
-    let t_schema = TableSchema {
-        name: sub_pivot_name,
-        path: sub_path,
-        parent_table: Some(parent_name),
-        depth: parent_depth + 1,
-        columns: cols,
-        child_kind: Some(ChildKind::Object),
-        wide_strategy: WideStrategy::KeyedPivot(sibling_schema),
-        flatten_sources: std::collections::HashMap::new(),
-        child_routes: std::collections::HashMap::new(),
-    };
-    Some((t_schema, co_sibs))
+    Some((build_sub_pivot_schema(sub_pivot_name, parent_name, sub_path, parent_depth, cols, sibling_schema), co_sibs))
 }
 
 /// parent's `child_routes` to point to the sub-pivot.  Their own children are returned as
@@ -1340,5 +1343,98 @@ mod tests {
         let g = make_subgroup(&schemas, "p", &[0, 1, 2], false, "key");
         assert_eq!(g.key_col_name, "lang_code");
         assert!(matches!(g.key_shape, KeyShape::IsoLang));
+    }
+
+    #[test]
+    fn test_build_sub_pivot_schema_wires_fields() {
+        use crate::schema::table_schema::{SiblingSchema, KeyShape};
+        let sib = SiblingSchema {
+            key_col_name: "key".to_string(),
+            key_shape: KeyShape::Slug,
+            array_children: false,
+            data_col_name: "j2s_data".to_string(),
+        };
+        let schema = build_sub_pivot_schema(
+            "p_pivot".to_string(),
+            "p".to_string(),
+            vec!["p".to_string(), "key".to_string()],
+            1,
+            vec![],
+            sib,
+        );
+        assert_eq!(schema.name, "p_pivot");
+        assert_eq!(schema.parent_table.as_deref(), Some("p"));
+        assert_eq!(schema.depth, 2);
+        assert!(matches!(schema.wide_strategy, WideStrategy::KeyedPivot(_)));
+    }
+
+    #[test]
+    fn test_build_synthetic_pivot_numeric_keys_produces_multi() {
+        let parent = make_parent("p");
+        let schemas = vec![
+            parent,
+            make_child_with_key("p_1", "p", "1", &["v"]),
+            make_child_with_key("p_2", "p", "2", &["v"]),
+            make_child_with_key("p_3", "p", "3", &["v"]),
+        ];
+        let ctx = make_ctx(&schemas, 0, vec![1, 2, 3], 3, 0.5);
+        let result = build_synthetic_pivot_collapse(&schemas, &ctx, vec![1, 2, 3]);
+        assert!(result.is_some(), "numeric keys must produce a synthetic pivot");
+        if let Some(Collapse { kind: CollapseKind::Multi { groups }, .. }) = result {
+            assert_eq!(groups.len(), 1);
+            assert!(groups[0].key_is_numeric);
+        } else {
+            panic!("expected Multi collapse");
+        }
+    }
+
+    #[test]
+    fn test_build_synthetic_pivot_parent_data_non_numeric_returns_none() {
+        let mut parent = make_parent("p");
+        parent.columns.push(ColumnSchema {
+            name: "extra".to_string(), original_name: "extra".to_string(),
+            pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+        });
+        let schemas = vec![
+            parent,
+            make_child_with_key("p_fr", "p", "fr", &["label"]),
+            make_child_with_key("p_en", "p", "en", &["label"]),
+            make_child_with_key("p_de", "p", "de", &["label"]),
+        ];
+        let ctx = make_ctx(&schemas, 0, vec![1, 2, 3], 3, 0.5);
+        // parent has data + non-numeric keys → must return None
+        let result = build_synthetic_pivot_collapse(&schemas, &ctx, vec![1, 2, 3]);
+        assert!(result.is_none(), "parent with data and non-numeric keys must return None");
+    }
+
+    #[test]
+    fn test_filter_routing_tables_excludes_pure_with_enough_children() {
+        // A pure schema (no data columns) with >= threshold child routes is a "routing table"
+        // and must be excluded from non_num_regular.
+        let mut routing = make_sibling("p_x", "p", &[]); // pure: no data cols
+        routing.child_routes.insert("key".to_string(), "child".to_string());
+        routing.child_routes.insert("key2".to_string(), "child2".to_string());
+        let normal = make_sibling("p_y", "p", &["label"]); // has data
+        let schemas = vec![make_parent("p"), routing, normal];
+        // indices 1 (routing) and 2 (normal) are non-numeric siblings
+        let non_numeric_idx = vec![1usize, 2];
+        let mut obj_map = std::collections::HashMap::new();
+        obj_map.insert("p_x".to_string(), vec![0usize, 1]); // 2 children >= threshold 2
+        let arr_map = std::collections::HashMap::new();
+        let result = filter_routing_tables(&schemas, &non_numeric_idx, &obj_map, &arr_map, 2);
+        assert!(!result.contains(&1), "routing table must be excluded");
+        assert!(result.contains(&2), "table with data columns must be kept");
+    }
+
+    #[test]
+    fn test_filter_routing_tables_keeps_pure_with_few_children() {
+        let mut routing = make_sibling("p_x", "p", &[]); // pure
+        routing.child_routes.insert("key".to_string(), "child".to_string());
+        let schemas = vec![make_parent("p"), routing];
+        let non_numeric_idx = vec![1usize];
+        let obj_map = std::collections::HashMap::new(); // 0 children → below threshold
+        let arr_map = std::collections::HashMap::new();
+        let result = filter_routing_tables(&schemas, &non_numeric_idx, &obj_map, &arr_map, 2);
+        assert!(result.contains(&1), "pure table with few children is not a routing table");
     }
 }

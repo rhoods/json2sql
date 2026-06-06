@@ -48,8 +48,26 @@ fn build_suffix_to_bases(all_keys: &[&str]) -> HashMap<String, HashSet<String>> 
     suffix_to_bases
 }
 
+fn collect_base_set(candidates: &[(String, HashSet<String>)]) -> HashSet<String> {
+    candidates.iter().flat_map(|(_, bases)| bases.iter().cloned()).collect()
+}
+
+fn filter_by_coverage(
+    candidates: Vec<(String, HashSet<String>)>,
+    base_set: &HashSet<String>,
+    coverage_threshold: f64,
+) -> Vec<(String, HashSet<String>)> {
+    let total_bases = base_set.len();
+    candidates
+        .into_iter()
+        .filter(|(_, bases)| {
+            let covered = bases.iter().filter(|b| base_set.contains(*b)).count();
+            covered as f64 / total_bases as f64 >= coverage_threshold
+        })
+        .collect()
+}
+
 /// Returns `None` if no structural pattern is found above threshold.
-#[allow(clippy::too_many_lines)] // multi-phase algorithm: build → filter → coverage → sanity → build-result
 #[must_use]
 pub fn detect_suffix_schema(
     columns: &IndexMap<String, TypeTracker>,
@@ -58,59 +76,19 @@ pub fn detect_suffix_schema(
 ) -> Option<SuffixSchema> {
     let all_keys: Vec<&str> = columns.keys().map(std::string::String::as_str).collect();
     let key_set: HashSet<&str> = all_keys.iter().copied().collect();
-
-    let suffix_to_bases = build_suffix_to_bases(&all_keys);
-
-    // Phase 2: filter to candidate suffixes (>= MIN_BASES distinct bases)
-    let candidates: Vec<(String, HashSet<String>)> = suffix_to_bases
+    let candidates: Vec<(String, HashSet<String>)> = build_suffix_to_bases(&all_keys)
         .into_iter()
         .filter(|(_, bases)| bases.len() >= MIN_BASES)
         .collect();
-
-    if candidates.is_empty() {
-        return None;
-    }
-
-    // Phase 3: determine the global base set
-    // A key is a base if it appears as the "stem" in any candidate decomposition.
-    let base_set: HashSet<String> = candidates
-        .iter()
-        .flat_map(|(_, bases)| bases.iter().cloned())
-        .collect();
-
-    let total_bases = base_set.len();
-    if total_bases == 0 {
-        return None;
-    }
-
-    // Phase 4: compute coverage and retain suffixes above threshold
-    let mut retained: Vec<(String, HashSet<String>)> = candidates
-        .into_iter()
-        .filter(|(_, bases)| {
-            let covered = bases.iter().filter(|b| base_set.contains(*b)).count();
-            covered as f64 / total_bases as f64 >= coverage_threshold
-        })
-        .collect();
-
-    if retained.is_empty() {
-        return None;
-    }
-
-    // Sort by suffix string for deterministic output
+    if candidates.is_empty() { return None; }
+    let base_set = collect_base_set(&candidates);
+    if base_set.is_empty() { return None; }
+    let mut retained = filter_by_coverage(candidates, &base_set, coverage_threshold);
+    if retained.is_empty() { return None; }
     retained.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Sanity check: the decomposition must cover a meaningful fraction of all keys.
-    // If the entire key set is just noise (every key is unique), skip.
     let total_accounted: usize = retained.iter().map(|(_, bases)| bases.len()).sum::<usize>()
-        + base_set
-            .iter()
-            .filter(|b| key_set.contains(b.as_str()))
-            .count();
-    if total_accounted < 2 {
-        return None;
-    }
-
-    // Phase 5: build SuffixColumn list + base "value" column type.
+        + base_set.iter().filter(|b| key_set.contains(b.as_str())).count();
+    if total_accounted < 2 { return None; }
     let (suffix_cols, value_type) = build_suffix_cols_and_value_type(&retained, &base_set, columns);
     Some(SuffixSchema { suffix_cols, value_type })
 }
@@ -221,6 +199,29 @@ mod tests {
         let mut t = TypeTracker::new(256);
         t.observe(&serde_json::Value::String("g".to_string()));
         t
+    }
+
+    #[test]
+    fn test_filter_by_coverage_keeps_high_coverage() {
+        let base_set: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let candidates = vec![
+            ("_unit".to_string(), HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()])),
+            ("_rare".to_string(), HashSet::from(["a".to_string()])),
+        ];
+        let retained = filter_by_coverage(candidates, &base_set, 0.5);
+        let names: Vec<&str> = retained.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(names.contains(&"_unit"), "_unit covers 3/3 = 100% — must be retained");
+        assert!(!names.contains(&"_rare"), "_rare covers 1/3 = 33% — must be filtered out");
+    }
+
+    #[test]
+    fn test_collect_base_set_unions_all_bases() {
+        let candidates = vec![
+            ("_a".to_string(), HashSet::from(["x".to_string(), "y".to_string()])),
+            ("_b".to_string(), HashSet::from(["y".to_string(), "z".to_string()])),
+        ];
+        let base_set = collect_base_set(&candidates);
+        assert_eq!(base_set.len(), 3, "x, y, z must all be in the base set");
     }
 
     #[test]
