@@ -69,6 +69,78 @@ pub struct TableRowViewModel {
     pub anomaly_count: u64,
 }
 
+/// Input context for [`build_table_rows`]. Groups the per-call parameters so the
+/// function signature stays within the `too_many_arguments` threshold.
+pub struct TableRowsCtx<'a> {
+    pub overrides:        &'a HashMap<String, WideStrategy>,
+    pub overflow_names:   &'a HashSet<String>,
+    pub selected_indices: &'a HashSet<usize>,
+    pub absorbed_names:   &'a HashSet<String>,
+    pub filter:           &'a str,
+    pub show_warn_only:   bool,
+    pub anomaly_counts:   &'a HashMap<String, u64>,
+}
+
+struct RowFlags {
+    is_routing:  bool,
+    is_absorbed: bool,
+    has_warn:    bool,
+    badge_cls:   &'static str,
+    badge_lbl:   &'static str,
+}
+
+impl RowFlags {
+    fn compute(table: &TableSchema, ctx: &TableRowsCtx<'_>) -> Self {
+        let user_overrode = ctx.overrides.contains_key(&table.name);
+        let effective = ctx.overrides.get(&table.name).cloned()
+            .unwrap_or_else(|| table.wide_strategy.clone());
+        let is_absorbed = ctx.absorbed_names.contains(&table.name);
+        let is_overflow = !user_overrode
+            && matches!(effective, WideStrategy::Jsonb)
+            && ctx.overflow_names.contains(&table.name);
+        let is_routing = !user_overrode
+            && matches!(effective, WideStrategy::MultiKeyedPivot(_))
+            && table.columns.iter().all(|c| c.is_generated);
+        let has_warn = is_overflow || is_routing;
+        let (badge_cls, badge_lbl) = if is_absorbed { ("muted", "merged") }
+            else if is_routing { ("muted", "ROUTE") }
+            else if is_overflow { ("warn", "JSONB ⚠") }
+            else { strategy_badge(&effective) };
+        Self { is_routing, is_absorbed, has_warn, badge_cls, badge_lbl }
+    }
+}
+
+fn build_row(
+    pos: usize,
+    i: usize,
+    schemas: &[TableSchema],
+    is_last: &[bool],
+    parent_names: &HashSet<&str>,
+    filter_lc: &str,
+    ctx: &TableRowsCtx<'_>,
+) -> TableRowViewModel {
+    let table = &schemas[i];
+    let flags = RowFlags::compute(table, ctx);
+    let col_count = table.columns.len();
+    let is_wide = col_count > crate::state::PASS1_WIDE_COLUMN_THRESHOLD;
+    let connector: &'static str = if table.depth == 0 { "" }
+        else if is_last[pos] { "└─ " } else { "├─ " };
+    let is_selected = ctx.selected_indices.contains(&i);
+    let row_cls: &'static str = if is_selected { "sel" }
+        else if flags.is_routing || flags.is_absorbed { "muted" } else { "" };
+    let visible = (!ctx.show_warn_only || flags.has_warn)
+        && (filter_lc.is_empty() || table.name.to_lowercase().contains(filter_lc));
+    TableRowViewModel {
+        index: i, name: table.name.clone(),
+        badge_cls: flags.badge_cls, badge_lbl: flags.badge_lbl,
+        col_count, is_wide, depth: table.depth, connector,
+        indent_px: table.depth * 12, is_selected,
+        is_routing: flags.is_routing, has_warn: flags.has_warn, row_cls, visible,
+        has_children: parent_names.contains(table.name.as_str()),
+        anomaly_count: ctx.anomaly_counts.get(&table.name).copied().unwrap_or(0),
+    }
+}
+
 /// Build the view-model for every table row.
 ///
 /// - Computes badge, overflow/routing flags, tree connectors and indentation.
@@ -76,89 +148,16 @@ pub struct TableRowViewModel {
 /// - `visible: false` rows are excluded from rendering but retained for index stability.
 /// - `overflow_names`: tables auto-promoted to Jsonb by Pass 1 without user override.
 /// - `selected_indices`: set of selected row indices (empty → all unselected).
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub fn build_table_rows(
-    schemas:          &[TableSchema],
-    overrides:        &HashMap<String, WideStrategy>,
-    overflow_names:   &HashSet<String>,
-    selected_indices: &HashSet<usize>,
-    absorbed_names:   &HashSet<String>,
-    filter:           &str,
-    show_warn_only:   bool,
-    anomaly_counts:   &HashMap<String, u64>,
-) -> Vec<TableRowViewModel> {
-    let order   = tree_display_order(schemas);
+pub fn build_table_rows(schemas: &[TableSchema], ctx: &TableRowsCtx<'_>) -> Vec<TableRowViewModel> {
+    let order = tree_display_order(schemas);
     let is_last = compute_last_child(&order, schemas);
-    let filter_lc = filter.to_lowercase();
+    let filter_lc = ctx.filter.to_lowercase();
     let parent_names: HashSet<&str> = schemas.iter()
         .filter_map(|t| t.parent_table.as_deref())
         .collect();
-
-    order.iter().enumerate().map(|(pos, &i)| {
-        let table = &schemas[i];
-
-        let user_overrode = overrides.contains_key(&table.name);
-        let effective = overrides.get(&table.name).cloned()
-            .unwrap_or_else(|| table.wide_strategy.clone());
-
-        let is_overflow = !user_overrode
-            && matches!(effective, WideStrategy::Jsonb)
-            && overflow_names.contains(&table.name);
-
-        let is_routing = !user_overrode
-            && matches!(effective, WideStrategy::MultiKeyedPivot(_))
-            && table.columns.iter().all(|c| c.is_generated);
-
-        let has_warn = is_overflow || is_routing;
-
-        let is_absorbed = absorbed_names.contains(&table.name);
-
-        let (badge_cls, badge_lbl) = if is_absorbed {
-            ("muted", "merged")
-        } else if is_routing {
-            ("muted", "ROUTE")
-        } else if is_overflow {
-            ("warn", "JSONB ⚠")
-        } else {
-            strategy_badge(&effective)
-        };
-
-        let col_count = table.columns.len();
-        let is_wide   = col_count > crate::state::PASS1_WIDE_COLUMN_THRESHOLD;
-
-        let connector: &'static str = if table.depth == 0 {
-            ""
-        } else if is_last[pos] {
-            "└─ "
-        } else {
-            "├─ "
-        };
-
-        let is_selected = selected_indices.contains(&i);
-        let row_cls: &'static str = if is_selected { "sel" } else if is_routing || is_absorbed { "muted" } else { "" };
-
-        let visible = (!show_warn_only || has_warn)
-            && (filter_lc.is_empty() || table.name.to_lowercase().contains(&filter_lc));
-
-        TableRowViewModel {
-            index: i,
-            name: table.name.clone(),
-            badge_cls,
-            badge_lbl,
-            col_count,
-            is_wide,
-            depth: table.depth,
-            connector,
-            indent_px: table.depth * 12,
-            is_selected,
-            is_routing,
-            has_warn,
-            row_cls,
-            visible,
-            has_children: parent_names.contains(table.name.as_str()),
-            anomaly_count: anomaly_counts.get(&table.name).copied().unwrap_or(0),
-        }
-    }).collect()
+    order.iter().enumerate()
+        .map(|(pos, &i)| build_row(pos, i, schemas, &is_last, &parent_names, &filter_lc, ctx))
+        .collect()
 }
 
 /// Depth-first display order for `schemas`: roots alphabetically, then their
@@ -713,7 +712,11 @@ mod tests {
     }
 
     fn empty_rows(schemas: &[TableSchema]) -> Vec<TableRowViewModel> {
-        build_table_rows(schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &HashSet::new(), "", false, &HashMap::new())
+        let (ov, ov_n, sel, abs, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
+        build_table_rows(schemas, &TableRowsCtx {
+            overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
+            absorbed_names: &abs, filter: "", show_warn_only: false, anomaly_counts: &an,
+        })
     }
 
     // --- build_table_rows tests ---
@@ -733,7 +736,11 @@ mod tests {
     fn overflow_without_override_sets_warn_badge() {
         let schemas = vec![make_overflow_table("big")];
         let overflow = HashSet::from(["big".to_string()]);
-        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), &HashSet::new(), "", false, &HashMap::new());
+        let (ov, sel, abs, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashMap::new());
+        let rows = build_table_rows(&schemas, &TableRowsCtx {
+            overrides: &ov, overflow_names: &overflow, selected_indices: &sel,
+            absorbed_names: &abs, filter: "", show_warn_only: false, anomaly_counts: &an,
+        });
         assert!(rows[0].has_warn);
         assert_eq!(rows[0].badge_cls, "warn");
         assert_eq!(rows[0].badge_lbl, "JSONB ⚠");
@@ -745,7 +752,11 @@ mod tests {
         let overflow = HashSet::from(["big".to_string()]);
         let mut overrides = HashMap::new();
         overrides.insert("big".to_string(), WideStrategy::Jsonb);
-        let rows = build_table_rows(&schemas, &overrides, &overflow, &HashSet::new(), &HashSet::new(), "", false, &HashMap::new());
+        let (sel, abs, an) = (HashSet::new(), HashSet::new(), HashMap::new());
+        let rows = build_table_rows(&schemas, &TableRowsCtx {
+            overrides: &overrides, overflow_names: &overflow, selected_indices: &sel,
+            absorbed_names: &abs, filter: "", show_warn_only: false, anomaly_counts: &an,
+        });
         assert!(!rows[0].has_warn, "user override must suppress overflow flag");
         assert_ne!(rows[0].badge_cls, "warn");
     }
@@ -763,7 +774,11 @@ mod tests {
     #[test]
     fn filter_text_hides_non_matching() {
         let schemas = vec![make_table("orders", None), make_table("users", None)];
-        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &HashSet::new(), "user", false, &HashMap::new());
+        let (ov, ov_n, sel, abs, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
+        let rows = build_table_rows(&schemas, &TableRowsCtx {
+            overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
+            absorbed_names: &abs, filter: "user", show_warn_only: false, anomaly_counts: &an,
+        });
         assert!(!rows[0].visible, "orders should be hidden");
         assert!(rows[1].visible, "users should match");
     }
@@ -779,7 +794,11 @@ mod tests {
     fn show_warn_only_hides_clean_rows() {
         let schemas = vec![make_table("clean", None), make_overflow_table("big")];
         let overflow = HashSet::from(["big".to_string()]);
-        let rows = build_table_rows(&schemas, &HashMap::new(), &overflow, &HashSet::new(), &HashSet::new(), "", true, &HashMap::new());
+        let (ov, sel, abs, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashMap::new());
+        let rows = build_table_rows(&schemas, &TableRowsCtx {
+            overrides: &ov, overflow_names: &overflow, selected_indices: &sel,
+            absorbed_names: &abs, filter: "", show_warn_only: true, anomaly_counts: &an,
+        });
         assert!(!rows[0].visible, "clean table must be hidden");
         assert!(rows[1].visible,  "warn table must be visible");
     }
@@ -788,7 +807,11 @@ mod tests {
     fn selected_row_has_sel_class() {
         let schemas = vec![make_table("a", None), make_table("b", None)];
         let selected = HashSet::from([1usize]);
-        let rows = build_table_rows(&schemas, &HashMap::new(), &HashSet::new(), &selected, &HashSet::new(), "", false, &HashMap::new());
+        let (ov, ov_n, abs, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashMap::new());
+        let rows = build_table_rows(&schemas, &TableRowsCtx {
+            overrides: &ov, overflow_names: &ov_n, selected_indices: &selected,
+            absorbed_names: &abs, filter: "", show_warn_only: false, anomaly_counts: &an,
+        });
         assert_eq!(rows[0].row_cls, "");
         assert_eq!(rows[1].row_cls, "sel");
         assert!(rows[1].is_selected);
@@ -856,10 +879,11 @@ mod tests {
             make_table("child_b", Some("parent")),
         ];
         let absorbed = HashSet::from(["child_a".to_string(), "child_b".to_string()]);
-        let rows = build_table_rows(
-            &schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &absorbed, "", false,
-            &HashMap::new(),
-        );
+        let (ov, ov_n, sel, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashMap::new());
+        let rows = build_table_rows(&schemas, &TableRowsCtx {
+            overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
+            absorbed_names: &absorbed, filter: "", show_warn_only: false, anomaly_counts: &an,
+        });
         assert!(rows[0].visible,                    "parent must be visible");
         assert!(rows[1].visible,                    "absorbed child_a must remain visible");
         assert_eq!(rows[1].badge_lbl, "merged",     "absorbed must show merged badge");
@@ -871,10 +895,11 @@ mod tests {
     fn non_absorbed_table_has_normal_badge() {
         let schemas = vec![make_table("standalone", None)];
         let absorbed: HashSet<String> = HashSet::new();
-        let rows = build_table_rows(
-            &schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &absorbed, "", false,
-            &HashMap::new(),
-        );
+        let (ov, ov_n, sel, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashMap::new());
+        let rows = build_table_rows(&schemas, &TableRowsCtx {
+            overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
+            absorbed_names: &absorbed, filter: "", show_warn_only: false, anomaly_counts: &an,
+        });
         assert!(rows[0].visible);
         assert_ne!(rows[0].badge_lbl, "merged");
     }
@@ -884,10 +909,11 @@ mod tests {
         let schemas = vec![make_table("orders", None), make_table("users", None)];
         let mut anomalies = HashMap::new();
         anomalies.insert("orders".to_string(), 7u64);
-        let rows = build_table_rows(
-            &schemas, &HashMap::new(), &HashSet::new(), &HashSet::new(), &HashSet::new(), "", false,
-            &anomalies,
-        );
+        let (ov, ov_n, sel, abs) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new());
+        let rows = build_table_rows(&schemas, &TableRowsCtx {
+            overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
+            absorbed_names: &abs, filter: "", show_warn_only: false, anomaly_counts: &anomalies,
+        });
         assert_eq!(rows[0].anomaly_count, 7, "orders must carry anomaly count");
         assert_eq!(rows[1].anomaly_count, 0, "users has no anomaly");
     }

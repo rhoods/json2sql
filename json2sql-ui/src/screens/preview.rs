@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 
 use json2sql::db::ddl::generate_ddl_preview;
 
-use crate::screens::{build_effective_schemas, build_table_rows, strategy_badge};
+use crate::screens::{build_effective_schemas, build_table_rows, strategy_badge, TableRowsCtx};
 use crate::screens::table_list::TableListPanel;
 use crate::state::{AppScreen, AppState};
 
@@ -128,14 +128,14 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
 
                     div { class: "pane-body no-pad",
                         TableListPanel {
-                            rows: build_table_rows(
-                                &schemas, &strategy_overrides,
-                                &std::collections::HashSet::new(),
-                                &std::collections::HashSet::from([idx]),
-                                &state.read().schema.absorbed_names,
-                                "", false,
-                                &state.read().import.pass2_progress.anomaly_counts_per_table,
-                            ),
+                            rows: build_table_rows(&schemas, &TableRowsCtx {
+                                overrides: &strategy_overrides,
+                                overflow_names: &std::collections::HashSet::new(),
+                                selected_indices: &std::collections::HashSet::from([idx]),
+                                absorbed_names: &state.read().schema.absorbed_names,
+                                filter: "", show_warn_only: false,
+                                anomaly_counts: &state.read().import.pass2_progress.anomaly_counts_per_table,
+                            }),
                             show_checkboxes: false,
                             on_select_children: move |_| {},
                             on_select: move |(i, _): (usize, _)| {

@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 use dioxus::prelude::Modifiers;
 use json2sql::schema::table_schema::WideStrategy;
 
-use crate::screens::{build_table_rows, pick_save_file, strategy_badge, strategy_label, PickResult};
+use crate::screens::{build_table_rows, pick_save_file, strategy_badge, strategy_label, PickResult, TableRowsCtx};
 use crate::state::{compute_jaccard_display, select_children_visible};
 use crate::screens::table_list::TableListPanel;
 use crate::state::{AppScreen, AppState};
@@ -92,10 +92,11 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
     // Pre-compute rows and visible index list so the Shift+click handler can capture it.
     let anomaly_counts = state.read().import.pass2_progress.anomaly_counts_per_table.clone();
-    let table_rows = build_table_rows(
-        &schemas, &overrides_snap, &overflow_names, &selected_indices, &absorbed_names, &filter, show_warn,
-        &anomaly_counts,
-    );
+    let table_rows = build_table_rows(&schemas, &TableRowsCtx {
+        overrides: &overrides_snap, overflow_names: &overflow_names,
+        selected_indices: &selected_indices, absorbed_names: &absorbed_names,
+        filter: &filter, show_warn_only: show_warn, anomaly_counts: &anomaly_counts,
+    });
     let visible_indices: Vec<usize> = table_rows.iter()
         .filter(|r| r.visible)
         .map(|r| r.index)

@@ -37,18 +37,20 @@ Prochain palier : à définir.
 
 Résultat de l'audit clippy `too_many_lines` — classées en trois catégories.
 
-### Catégorie B — Extractibles (phases séquentielles nommées) — à traiter
+### ~~Catégorie B — Extractibles (phases séquentielles nommées)~~ ✅ SOLDÉE (vérifié 2026-06-06)
 
-| Priorité | Fichier | Fonction | Taille | Phases identifiées |
-|---|---|---|---|---|
-| 🔴 1 | `src/pass1/runner.rs:187` | `run_inspect` | ~51L | registry config → scan with limit → result assembly |
-| 🔴 2 | `src/schema/suffix_detector.rs:51` | `detect_suffix_schema` | ~? | build → filter → coverage → sanity → build-result |
-| 🟡 3 | `src/schema/cascading/detection.rs:282` | `detect_mixed_collapse` | ~48L | decision gate multi-branch déjà partiellement délégué |
-| 🟡 4 | `src/schema/cascading/detection.rs:409` | `detect_homogeneous_collapse` | ~54L | filter → jaccard → child-compat → multi vs classic dispatch |
-| 🟡 5 | `src/schema/cascading/detection.rs:940` | `process_keyed_pivot_work_item` | ~43L | jaccard gate → resolve → build TableSchema → co-siblings → reparent |
-| 🟢 6 | `src/pass2/runner.rs:176` | `run_worker` (async) | ~44L | receive → parse → insert → budget check |
-| 🟢 7 | `src/pass2/runner.rs:400` | `dispatch_loop` (async) | ~44L | dispatch + limit + progress bar + progress channel |
-| 🟢 8 | `src/schema/wide_strategies.rs:242` | `apply_normalize_dynamic_keys` | ~46L | find → collect → classify → mutate → log → exclude |
+Toutes les fonctions sont ≤ 30L — clippy core tourne à zéro violation `too_many_lines`.
+
+| Fonction | Taille actuelle | État |
+|---|---|---|
+| `run_inspect` | 14L | ✅ |
+| `detect_suffix_schema` | 25L | ✅ |
+| `detect_mixed_collapse` | 27L | ✅ |
+| `detect_homogeneous_collapse` | 25L | ✅ |
+| `process_keyed_pivot_work_item` | 27L | ✅ |
+| `run_worker` | 25L | ✅ |
+| `dispatch_loop` | 31L | ✅ clippy silencieux |
+| `apply_normalize_dynamic_keys` | 26L | ✅ |
 
 ### Catégorie A — Dispatch exhaustif sur enum — légitimes, ne pas refactoriser
 
@@ -80,8 +82,8 @@ Résultat de l'audit clippy `too_many_lines` sur le crate UI — classées par c
 
 | Priorité | Fichier | Fonction | Taille | Phases identifiées |
 |---|---|---|---|---|
-| 🔴 1 | `json2sql-ui/src/screens/mod.rs:79` | `build_table_rows` | 60L + 8 args/7 | filtrage → calcul badge/depth/connector → construction ViewModel |
-| 🟡 2 | `json2sql-ui/src/screens/mod.rs:368` | `build_effective_schemas` | 48L | itération schemas → application overrides → merge JSONB flatten |
+| ~~🔴 1~~ ✅ | ~~`json2sql-ui/src/screens/mod.rs:80`~~ | ~~`build_table_rows`~~ | ~~88L~~ → 10L | Livré 2026-06-06 : `TableRowsCtx<'a>` + `RowFlags::compute` + `build_row`. `#[allow]` retiré, clippy UI zéro violation. |
+| ~~🟡 2~~ ✅ | ~~`json2sql-ui/src/screens/mod.rs:371`~~ | ~~`build_effective_schemas`~~ | ~~48L~~ → 65L | Clippy UI silencieux — pas de violation détectée. |
 
 ### Catégorie A — Dispatch exhaustif — légitimes, ne pas refactoriser
 
@@ -97,9 +99,9 @@ Résultat de l'audit clippy `too_many_lines` sur le crate UI — classées par c
 | `json2sql-ui/src/screens/mod.rs:166` | `tree_display_order` | DFS tree walk auto-contenu |
 | `json2sql-ui/src/main.rs:24` | `main` | config desktop + injection JS — couplage fort Dioxus |
 
-## Améliorations futures
-- Log des flush périodiques (`flush tablename (N rows)`)
-- Double barre progression ImportScreen (Phase A streaming / Phase B COPY) — voir ux-todo.md
+## ~~Améliorations futures~~ ✅ résolues (confirmé 2026-06-06)
+
+~~Log des flush périodiques~~ · ~~Double barre progression ImportScreen~~
 
 ## Backlog sibling detection — analyse sur schema_261_tables.json (2026-05-26)
 
