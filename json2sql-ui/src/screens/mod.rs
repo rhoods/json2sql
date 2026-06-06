@@ -421,6 +421,84 @@ pub fn build_effective_schemas(
         }
     }
 
+    // Pass 4: MultiKeyedPivot — create child pivot TableSchemas for each SiblingGroup.
+    // The automatic detection path (apply_multi_collapse) creates these schemas; the IHM
+    // path only stores the WideStrategy override and marks absorbed siblings as Ignore.
+    // Without this pass, Pass 2 cannot find the pivot tables in path_map → all data lost.
+    // Absorbed siblings are still in `result` here (removed by the retain below), so we
+    // can compute union columns from them.
+    {
+        use json2sql::schema::table_schema::{ChildKind, ColumnSchema, SiblingSchema, WideStrategy as WS};
+        use json2sql::schema::type_tracker::PgType;
+        use json2sql::schema::wide_strategies::build_union_columns;
+
+        let multi_targets: Vec<(String, Vec<json2sql::schema::table_schema::SiblingGroup>)> =
+            strategy_overrides.iter().filter_map(|(name, strategy)| {
+                if let WS::MultiKeyedPivot(groups) = strategy {
+                    Some((name.clone(), groups.clone()))
+                } else {
+                    None
+                }
+            }).collect();
+
+        let mut new_schemas: Vec<TableSchema> = Vec::new();
+        for (parent_name, groups) in multi_targets {
+            let Some(parent_idx) = result.iter().position(|s| s.name == parent_name) else { continue };
+            let parent_depth = result[parent_idx].depth;
+            let parent_path  = result[parent_idx].path.clone();
+
+            for group in &groups {
+                // Skip if pivot schema already exists (idempotent).
+                if result.iter().chain(new_schemas.iter()).any(|s| s.name == group.pivot_table) {
+                    continue;
+                }
+                let absorbed: Vec<&TableSchema> = group.absorbed_names.iter()
+                    .filter_map(|n| result.iter().find(|s| s.name.as_str() == n.as_str()))
+                    .collect();
+                let union_cols = build_union_columns(&absorbed);
+
+                let fk_col = format!("j2s_{parent_name}_id");
+                let mut cols = vec![
+                    ColumnSchema::generated("j2s_id", PgType::Uuid),
+                    ColumnSchema { name: fk_col.clone(), original_name: fk_col, pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: true },
+                ];
+                if group.sibling_schema.array_children {
+                    cols.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
+                }
+                cols.push(ColumnSchema { name: group.sibling_schema.key_col_name.clone(), original_name: group.sibling_schema.key_col_name.clone(), pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false });
+                cols.extend(union_cols);
+                cols.push(ColumnSchema { name: "j2s_data".to_string(), original_name: "j2s_data".to_string(), pg_type: PgType::Jsonb, not_null: false, is_generated: true, is_parent_fk: false });
+
+                let mut pivot_path = parent_path.clone();
+                let seg = if group.path_segment.is_empty() {
+                    if group.key_is_numeric { "num".to_string() } else { "key".to_string() }
+                } else {
+                    group.path_segment.clone()
+                };
+                pivot_path.push(seg);
+
+                let child_kind = if group.sibling_schema.array_children { ChildKind::ObjectArray } else { ChildKind::Object };
+                new_schemas.push(TableSchema {
+                    name: group.pivot_table.clone(),
+                    path: pivot_path,
+                    parent_table: Some(parent_name.clone()),
+                    depth: parent_depth + 1,
+                    columns: cols,
+                    child_kind: Some(child_kind),
+                    wide_strategy: WS::KeyedPivot(SiblingSchema {
+                        key_col_name: group.sibling_schema.key_col_name.clone(),
+                        key_shape: group.sibling_schema.key_shape.clone(),
+                        array_children: group.sibling_schema.array_children,
+                        data_col_name: group.sibling_schema.data_col_name.clone(),
+                    }),
+                    flatten_sources: std::collections::HashMap::new(),
+                    child_routes: std::collections::HashMap::new(),
+                });
+            }
+        }
+        result.extend(new_schemas);
+    }
+
     // Remove tables explicitly skipped by the user.
     result.retain(|s| !matches!(strategy_overrides.get(&s.name), Some(WideStrategy::Ignore)));
 
@@ -662,6 +740,86 @@ mod tests {
         assert!(result.iter().any(|s| s.name == "b"));
     }
 
+    #[test]
+    fn multikeyedpivot_override_creates_child_pivot_schemas() {
+        // JSON en entrée (merge manuel IHM) :
+        //   { "1": {"url":"…"}, "front": {"url":"…"} }
+        //
+        // Avec le bug — apply_wide_strategy_columns strip le parent mais ne crée aucun pivot :
+        //   CREATE TABLE img ();  -- colonnes générées seulement
+        //   -- img_key_num et img_key_txt n'existent pas → Pass 2 perd toutes les données
+        //
+        // Après fix :
+        //   CREATE TABLE img ();  -- routing table (colonnes générées seulement)
+        //   CREATE TABLE img_key_num (j2s_id uuid, j2s_img_id uuid, key text, url text, j2s_data jsonb);
+        //   CREATE TABLE img_key_txt (j2s_id uuid, j2s_img_id uuid, key text, url text, j2s_data jsonb);
+        use json2sql::schema::table_schema::{ChildKind, ColumnSchema, KeyShape, SiblingGroup, SiblingSchema};
+        use json2sql::schema::type_tracker::PgType;
+
+        let col_url = || ColumnSchema {
+            name: "url".to_string(), original_name: "url".to_string(),
+            pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+        };
+        let gen_col = |n: &str| ColumnSchema {
+            name: n.to_string(), original_name: n.to_string(),
+            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false,
+        };
+
+        let parent = make_table("img", None);
+        let mut img_1 = make_table("img_1", Some("img"));
+        img_1.columns = vec![gen_col("j2s_id"), gen_col("j2s_parent_id"), col_url()];
+        let mut img_front = make_table("img_front", Some("img"));
+        img_front.columns = vec![gen_col("j2s_id"), gen_col("j2s_parent_id"), col_url()];
+
+        let schemas = vec![parent, img_1, img_front];
+
+        let sibling_num = SiblingSchema {
+            key_col_name: "key".to_string(), key_shape: KeyShape::Numeric,
+            array_children: false, data_col_name: "j2s_data".to_string(),
+        };
+        let sibling_txt = SiblingSchema {
+            key_col_name: "key".to_string(), key_shape: KeyShape::Slug,
+            array_children: false, data_col_name: "j2s_data".to_string(),
+        };
+        let mut overrides = HashMap::new();
+        overrides.insert("img".to_string(), WideStrategy::MultiKeyedPivot(vec![
+            SiblingGroup {
+                pivot_table: "img_key_num".to_string(), key_is_numeric: true,
+                sibling_schema: sibling_num, absorbed_names: vec!["img_1".to_string()],
+                path_segment: "key_num".to_string(),
+                absorbed_path_segments: vec!["1".to_string()],
+            },
+            SiblingGroup {
+                pivot_table: "img_key_txt".to_string(), key_is_numeric: false,
+                sibling_schema: sibling_txt, absorbed_names: vec!["img_front".to_string()],
+                path_segment: "key_txt".to_string(),
+                absorbed_path_segments: vec!["front".to_string()],
+            },
+        ]));
+        overrides.insert("img_1".to_string(), WideStrategy::Ignore);
+        overrides.insert("img_front".to_string(), WideStrategy::Ignore);
+
+        let result = build_effective_schemas(&schemas, &overrides);
+
+        assert!(!result.iter().any(|s| s.name == "img_1"),    "absorbed sibling must be removed");
+        assert!(!result.iter().any(|s| s.name == "img_front"), "absorbed sibling must be removed");
+
+        assert!(result.iter().any(|s| s.name == "img_key_num"),
+            "pivot schema img_key_num must be created; got: {:?}", result.iter().map(|s| &s.name).collect::<Vec<_>>());
+        assert!(result.iter().any(|s| s.name == "img_key_txt"),
+            "pivot schema img_key_txt must be created; got: {:?}", result.iter().map(|s| &s.name).collect::<Vec<_>>());
+
+        let num_pivot = result.iter().find(|s| s.name == "img_key_num").unwrap();
+        assert!(matches!(num_pivot.wide_strategy, WideStrategy::KeyedPivot(_)),
+            "img_key_num must have WideStrategy::KeyedPivot");
+        assert_eq!(num_pivot.parent_table.as_deref(), Some("img"));
+
+        let txt_pivot = result.iter().find(|s| s.name == "img_key_txt").unwrap();
+        assert!(matches!(txt_pivot.wide_strategy, WideStrategy::KeyedPivot(_)),
+            "img_key_txt must have WideStrategy::KeyedPivot");
+        assert_eq!(txt_pivot.parent_table.as_deref(), Some("img"));
+    }
+
     // --- build_table_rows helpers ---
 
     fn make_table_depth(name: &str, parent: Option<&str>, depth: usize) -> TableSchema {
@@ -684,6 +842,8 @@ mod tests {
                 data_col_name: "data".to_string(),
             },
             absorbed_names: vec![],
+            path_segment: "key".to_string(),
+            absorbed_path_segments: vec![],
         }]);
         t.columns.push(ColumnSchema {
             name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
@@ -799,8 +959,11 @@ mod tests {
             overrides: &ov, overflow_names: &overflow, selected_indices: &sel,
             absorbed_names: &abs, filter: "", show_warn_only: true, anomaly_counts: &an,
         });
-        assert!(!rows[0].visible, "clean table must be hidden");
-        assert!(rows[1].visible,  "warn table must be visible");
+        // tree_display_order sorts alphabetically: "big" appears before "clean".
+        let clean = rows.iter().find(|r| r.name == "clean").unwrap();
+        let big   = rows.iter().find(|r| r.name == "big").unwrap();
+        assert!(!clean.visible, "clean table must be hidden");
+        assert!(big.visible,    "warn table must be visible");
     }
 
     #[test]

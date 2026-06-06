@@ -77,7 +77,7 @@ pub fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usize, min_
     while !pending.is_empty() {
         let mut next_pending: Vec<CoSiblingGroup> = Vec::new();
         for group in pending {
-            let produced = process_co_sibling_group(schemas, threshold, min_jaccard, &group);
+            let produced = process_co_sibling_group(schemas, &group);
             next_pending.extend(produced);
         }
         pending = next_pending;
@@ -92,7 +92,7 @@ pub fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usize, min_
     while !pending_bis.is_empty() {
         let mut next_pending: Vec<CoSiblingGroup> = Vec::new();
         for group in pending_bis {
-            let produced = process_co_sibling_group(schemas, threshold, min_jaccard, &group);
+            let produced = process_co_sibling_group(schemas, &group);
             next_pending.extend(produced);
         }
         pending_bis = next_pending;
@@ -108,7 +108,7 @@ pub fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usize, min_
     while !pending.is_empty() {
         let mut next_pending: Vec<CoSiblingGroup> = Vec::new();
         for group in pending {
-            let produced = process_co_sibling_group(schemas, threshold, min_jaccard, &group);
+            let produced = process_co_sibling_group(schemas, &group);
             next_pending.extend(produced);
         }
         pending = next_pending;
@@ -173,7 +173,8 @@ fn collect_children_by_key(
             if let Some(children) = child_map.get(name) {
                 for &ci in children {
                     if let Some(key) = schemas[ci].path.last() {
-                        let entry = key_map.entry(key.clone()).or_insert_with(|| (Vec::new(), is_arr));
+                        let entry = key_map.entry(key.clone()).or_insert_with(|| (Vec::new(), false));
+                        entry.1 |= is_arr;
                         entry.0.push(ci);
                     }
                 }
@@ -248,6 +249,28 @@ fn try_unified_fallback(
     })
 }
 
+/// Returns a suffix not colliding with existing `{parent}_{suffix}` schemas nor with
+/// suffixes already chosen in the current call (tracked via `used`).
+fn pick_unique_suffix(
+    parent: &str,
+    desired: &str,
+    schemas: &[TableSchema],
+    used: &std::collections::HashSet<String>,
+) -> String {
+    let taken = |s: &str| {
+        used.contains(s) || schemas.iter().any(|t| t.name == format!("{parent}_{s}"))
+    };
+    if !taken(desired) {
+        return desired.to_string();
+    }
+    let mut n = 2usize;
+    loop {
+        let candidate = format!("{desired}_{n}");
+        if !taken(&candidate) { return candidate; }
+        n += 1;
+    }
+}
+
 fn try_cluster_fallback(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
@@ -265,10 +288,12 @@ fn try_cluster_fallback(
     if valid_clusters.len() < 2 { return None; }
     let mut groups: Vec<SubgroupData> = Vec::new();
     let mut all_absorbed = Vec::new();
+    let mut used_suffixes: std::collections::HashSet<String> = std::collections::HashSet::new();
     for cluster in &valid_clusters {
         let prefix = siblings_key_prefix(schemas, cluster);
         let desired = if prefix.is_empty() { format!("cluster_{}", groups.len()) } else { format!("{prefix}_key") };
-        let suffix = unique_cluster_suffix(&ctx.parent_name, &desired, schemas);
+        let suffix = pick_unique_suffix(&ctx.parent_name, &desired, schemas, &used_suffixes);
+        used_suffixes.insert(suffix.clone());
         all_absorbed.extend_from_slice(cluster);
         groups.push(make_subgroup(schemas, &ctx.parent_name, cluster, false, &suffix));
     }
@@ -345,18 +370,24 @@ fn assemble_mixed_collapse(
 ) -> Collapse {
     let mut groups: Vec<SubgroupData> = Vec::new();
     let mut all_absorbed: Vec<usize> = Vec::new();
+    let mut used_suffixes: std::collections::HashSet<String> = std::collections::HashSet::new();
     if num_ok {
+        let suffix = pick_unique_suffix(&ctx.parent_name, "num", schemas, &used_suffixes);
+        used_suffixes.insert(suffix.clone());
         all_absorbed.extend_from_slice(&ctx.numeric_idx);
-        groups.push(make_subgroup(schemas, &ctx.parent_name, &ctx.numeric_idx, true, "num"));
+        groups.push(make_subgroup(schemas, &ctx.parent_name, &ctx.numeric_idx, true, &suffix));
     }
     if non_ok {
+        let suffix = pick_unique_suffix(&ctx.parent_name, "key", schemas, &used_suffixes);
+        used_suffixes.insert(suffix.clone());
         all_absorbed.extend_from_slice(non_num_regular);
-        groups.push(make_subgroup(schemas, &ctx.parent_name, non_num_regular, false, "key"));
+        groups.push(make_subgroup(schemas, &ctx.parent_name, non_num_regular, false, &suffix));
     }
     for (i, cluster) in non_num_clusters.iter().enumerate() {
         let prefix = siblings_key_prefix(schemas, cluster);
         let desired = if prefix.is_empty() { format!("cluster_{i}") } else { format!("{prefix}_key") };
-        let suffix = unique_cluster_suffix(&ctx.parent_name, &desired, schemas);
+        let suffix = pick_unique_suffix(&ctx.parent_name, &desired, schemas, &used_suffixes);
+        used_suffixes.insert(suffix.clone());
         all_absorbed.extend_from_slice(cluster);
         groups.push(make_subgroup(schemas, &ctx.parent_name, cluster, false, &suffix));
     }
@@ -423,8 +454,9 @@ fn build_synthetic_pivot_collapse(
 ) -> Option<Collapse> {
     let key_is_numeric = !ctx.numeric_idx.is_empty();
     if ctx.parent_has_data && !key_is_numeric { return None; }
-    let suffix = if key_is_numeric { "num" } else { "key" };
-    let groups = vec![make_subgroup(schemas, &ctx.parent_name, &regular, key_is_numeric, suffix)];
+    let raw_suffix = if key_is_numeric { "num" } else { "key" };
+    let suffix = unique_cluster_suffix(&ctx.parent_name, raw_suffix, schemas);
+    let groups = vec![make_subgroup(schemas, &ctx.parent_name, &regular, key_is_numeric, &suffix)];
     Some(Collapse {
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
@@ -785,8 +817,6 @@ fn run_sibling_wave(
 /// overwrite for each sibling, leaving only the last sibling routable.
 fn process_co_sibling_group(
     schemas: &mut Vec<TableSchema>,
-    _threshold: usize,
-    _min_jaccard: f64,
     group: &CoSiblingGroup,
 ) -> Vec<CoSiblingGroup> {
     if group.sibling_indices.len() < 2 {
@@ -1510,7 +1540,218 @@ mod tests {
         assert_eq!(segs, vec!["back", "front", "top"]);
     }
 
+    // --- Bugs #1/#2/#4/#6: collisions de suffixes dans les boucles de clustering ---
+
+    #[test]
+    fn test_try_cluster_fallback_same_key_prefix_distinct_pivot_names() {
+        // JSON en entrée :
+        //   { "img_back": {"col_a":"…"}, "img_front": {"col_a":"…"},
+        //     "img_side": {"col_b":"…"}, "img_top":   {"col_b":"…"} }
+        //
+        // Avec le bug — les deux clusters reçoivent pivot_table_name = "p_img_key".
+        // apply_multi_collapse pousse deux TableSchema "p_img_key" dans schemas ;
+        // Pass 2 écrase le premier en path_map → cluster 1 silencieusement perdu :
+        //   CREATE TABLE p_img_key (j2s_id uuid, j2s_p_id uuid, key text, col_b text, j2s_data jsonb);
+        //   -- col_a / img_back / img_front jamais importés
+        //
+        // Après fix — deux tables distinctes, toutes les données importées :
+        //   CREATE TABLE p_img_key   (j2s_id uuid, j2s_p_id uuid, key text, col_a text, j2s_data jsonb);
+        //   CREATE TABLE p_img_key_2 (j2s_id uuid, j2s_p_id uuid, key text, col_b text, j2s_data jsonb);
+        let parent = make_parent("p");
+        let schemas = vec![
+            parent,
+            make_child_with_key("p_img_back",  "p", "img_back",  &["col_a"]),
+            make_child_with_key("p_img_front", "p", "img_front", &["col_a"]),
+            make_child_with_key("p_img_side",  "p", "img_side",  &["col_b"]),
+            make_child_with_key("p_img_top",   "p", "img_top",   &["col_b"]),
+        ];
+        let ctx = make_ctx(&schemas, 0, vec![1, 2, 3, 4], 2, 0.5);
+        let result = try_cluster_fallback(&schemas, &ctx, &[1, 2, 3, 4]);
+        let Some(Collapse { kind: CollapseKind::Multi { groups }, .. }) = result else {
+            panic!("expected Multi collapse with 2 clusters");
+        };
+        assert_eq!(groups.len(), 2, "expected exactly 2 clusters");
+        assert_ne!(
+            groups[0].pivot_table_name, groups[1].pivot_table_name,
+            "same key prefix must produce distinct pivot_table_names; got {:?} and {:?}",
+            groups[0].pivot_table_name, groups[1].pivot_table_name,
+        );
+        assert_ne!(
+            groups[0].path_segment, groups[1].path_segment,
+            "same key prefix must produce distinct path_segments; got {:?} and {:?}",
+            groups[0].path_segment, groups[1].path_segment,
+        );
+    }
+
+    #[test]
+    fn test_assemble_mixed_collapse_same_prefix_clusters_distinct_pivot_names() {
+        // JSON en entrée :
+        //   { "1": {"val":"…"}, "2": {"val":"…"},
+        //     "tag_fr": {"label":"…"}, "tag_en": {"label":"…"},
+        //     "tag_de": {"size":"…"},  "tag_it":  {"size":"…"} }
+        //
+        // Avec le bug — les deux clusters non-numériques reçoivent pivot_table_name = "p_tag_key" :
+        //   CREATE TABLE p_num     (j2s_id uuid, j2s_p_id uuid, key_id text, val text,  j2s_data jsonb);
+        //   CREATE TABLE p_tag_key (j2s_id uuid, j2s_p_id uuid, key   text, size text, j2s_data jsonb);
+        //   -- label / tag_fr / tag_en jamais importés (cluster 0 écrasé par cluster 1)
+        //
+        // Après fix :
+        //   CREATE TABLE p_num       (j2s_id uuid, j2s_p_id uuid, key_id text, val   text, j2s_data jsonb);
+        //   CREATE TABLE p_tag_key   (j2s_id uuid, j2s_p_id uuid, key   text, label text, j2s_data jsonb);
+        //   CREATE TABLE p_tag_key_2 (j2s_id uuid, j2s_p_id uuid, key   text, size  text, j2s_data jsonb);
+        let parent = make_parent("p");
+        let schemas = vec![
+            parent,
+            make_child_with_key("p_1",      "p", "1",      &["val"]),
+            make_child_with_key("p_2",      "p", "2",      &["val"]),
+            make_child_with_key("p_tag_fr", "p", "tag_fr", &["label"]),
+            make_child_with_key("p_tag_en", "p", "tag_en", &["label"]),
+            make_child_with_key("p_tag_de", "p", "tag_de", &["size"]),
+            make_child_with_key("p_tag_it", "p", "tag_it", &["size"]),
+        ];
+        let ctx = make_ctx(&schemas, 0, vec![1, 2, 3, 4, 5, 6], 2, 0.5);
+        let non_num_clusters = vec![vec![3usize, 4], vec![5usize, 6]];
+        let collapse = assemble_mixed_collapse(&schemas, &ctx, true, false, &[], &non_num_clusters);
+        let CollapseKind::Multi { groups } = collapse.kind else { panic!("expected Multi") };
+        let cluster_groups: Vec<_> = groups.iter().filter(|g| !g.key_is_numeric).collect();
+        assert_eq!(cluster_groups.len(), 2, "expected 2 non-numeric cluster groups");
+        assert_ne!(
+            cluster_groups[0].pivot_table_name, cluster_groups[1].pivot_table_name,
+            "clusters with same key prefix must get distinct pivot names; got {:?} and {:?}",
+            cluster_groups[0].pivot_table_name, cluster_groups[1].pivot_table_name,
+        );
+    }
+
+    #[test]
+    fn test_assemble_mixed_collapse_existing_num_no_collision() {
+        // JSON en entrée : clés numériques "1", "2" sous p.
+        // Précondition : la table p_num existe déjà dans schemas (autre chemin JSON).
+        //
+        // Avec le bug — "num" est hardcodé sans vérifier schemas :
+        //   CREATE TABLE p_num (j2s_id uuid, j2s_p_id uuid, key_id text, val text, j2s_data jsonb);
+        //   -- deux TableSchema "p_num" dans le vecteur ; path_map n'en garde qu'un
+        //   -- → les données de l'un des deux sont silencieusement perdues
+        //
+        // Après fix :
+        //   CREATE TABLE p_num   (...);  -- ancienne table inchangée
+        //   CREATE TABLE p_num_2 (j2s_id uuid, j2s_p_id uuid, key_id text, val text, j2s_data jsonb);
+        let parent = make_parent("p");
+        let mut existing_num = make_parent("p_num");
+        existing_num.parent_table = Some("p".to_string());
+        let schemas = vec![
+            parent,
+            existing_num,
+            make_child_with_key("p_1", "p", "1", &["val"]),
+            make_child_with_key("p_2", "p", "2", &["val"]),
+        ];
+        let ctx = make_ctx(&schemas, 0, vec![2, 3], 2, 0.5);
+        let collapse = assemble_mixed_collapse(&schemas, &ctx, true, false, &[], &[]);
+        let CollapseKind::Multi { groups } = collapse.kind else { panic!("expected Multi") };
+        let num_group = groups.iter().find(|g| g.key_is_numeric).unwrap();
+        assert_ne!(
+            num_group.pivot_table_name, "p_num",
+            "pivot_table_name must not collide with existing p_num; got {:?}",
+            num_group.pivot_table_name,
+        );
+    }
+
+    #[test]
+    fn test_build_synthetic_pivot_existing_num_no_collision() {
+        // JSON en entrée : parent p avec données propres + clés numériques "1", "2", "3".
+        // Précondition : la table p_num existe déjà dans schemas.
+        //
+        // Avec le bug — "num" hardcodé dans build_synthetic_pivot_collapse :
+        //   CREATE TABLE p_num (j2s_id uuid, j2s_p_id uuid, key_id text, v text, j2s_data jsonb);
+        //   -- deux TableSchema "p_num" → path_map écrase l'un ; données perdues
+        //
+        // Après fix :
+        //   CREATE TABLE p_num   (...);  -- ancienne table inchangée
+        //   CREATE TABLE p_num_2 (j2s_id uuid, j2s_p_id uuid, key_id text, v text, j2s_data jsonb);
+        let parent = make_parent("p");
+        let mut existing_num = make_parent("p_num");
+        existing_num.parent_table = Some("p".to_string());
+        let schemas = vec![
+            parent,
+            existing_num,
+            make_child_with_key("p_1", "p", "1", &["v"]),
+            make_child_with_key("p_2", "p", "2", &["v"]),
+            make_child_with_key("p_3", "p", "3", &["v"]),
+        ];
+        let ctx = make_ctx(&schemas, 0, vec![2, 3, 4], 3, 0.5);
+        let result = build_synthetic_pivot_collapse(&schemas, &ctx, vec![2, 3, 4]);
+        let Some(Collapse { kind: CollapseKind::Multi { groups }, .. }) = result else {
+            panic!("expected Some(Multi)");
+        };
+        assert_eq!(groups.len(), 1);
+        assert_ne!(
+            groups[0].pivot_table_name, "p_num",
+            "pivot_table_name must not collide with existing p_num; got {:?}",
+            groups[0].pivot_table_name,
+        );
+    }
+
     // --- Finding 3: child_routes.insert écrasé pour co-siblings avec le même json_key ---
+
+    #[test]
+    #[test]
+    fn test_collect_children_by_key_object_and_array_conflict_sets_array_children() {
+        // Input JSON scenario:
+        //   { "sibling_a": { "info": { "x": 1 } },          -- Object child
+        //     "sibling_b": { "info": [{ "x": 1 }, { "x": 2 }] } }  -- ObjectArray child
+        //
+        // Bug (or_insert_with always locks flag from first insertion, obj_map iterated first):
+        //   CREATE TABLE parent_info (   -- child_kind = Object (WRONG)
+        //     j2s_id UUID,
+        //     j2s_parent_id UUID NOT NULL,
+        //     x TEXT
+        //     -- j2s_order absent, array elements lost
+        //   );
+        //
+        // After fix (entry.1 |= is_arr):
+        //   CREATE TABLE parent_info (   -- child_kind = ObjectArray (correct)
+        //     j2s_id UUID,
+        //     j2s_parent_id UUID NOT NULL,
+        //     j2s_order BIGINT,          -- preserved
+        //     x TEXT
+        //   );
+        let sibling_a = {
+            let mut t = make_sibling("sibling_a", "parent", &["v"]);
+            t.path = vec!["parent".to_string(), "sibling_a".to_string()];
+            t
+        };
+        let sibling_b = {
+            let mut t = make_sibling("sibling_b", "parent", &["v"]);
+            t.path = vec!["parent".to_string(), "sibling_b".to_string()];
+            t
+        };
+        let child_obj = {
+            let mut t = make_sibling("parent_info", "sibling_a", &["x"]);
+            t.path = vec!["parent".to_string(), "sibling_a".to_string(), "info".to_string()];
+            t
+        };
+        let child_arr = {
+            let mut t = make_sibling("sibling_b_info", "sibling_b", &["x"]);
+            t.path = vec!["parent".to_string(), "sibling_b".to_string(), "info".to_string()];
+            t
+        };
+        let schemas = vec![sibling_a, sibling_b, child_obj, child_arr];
+        // sibling_a (idx 0) → obj child at idx 2; sibling_b (idx 1) → arr child at idx 3
+        let mut obj_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        obj_map.insert("sibling_a".to_string(), vec![2]);
+        let mut arr_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        arr_map.insert("sibling_b".to_string(), vec![3]);
+
+        let result = collect_children_by_key(&schemas, &[0, 1], &obj_map, &arr_map);
+
+        // Key "info" should appear once (merged from both siblings)
+        let info = result.iter().find(|(k, _, _)| k == "info")
+            .expect("key 'info' must appear in result");
+        assert_eq!(info.0, "info");
+        assert!(info.2, "array_children must be true when any co-sibling exposes key as ObjectArray");
+        assert_eq!(info.1.len(), 2, "both child indices must be included");
+    }
 
     #[test]
     fn test_process_co_sibling_low_jaccard_still_merges_and_routes() {
@@ -1539,8 +1780,8 @@ mod tests {
             sibling_indices: vec![1, 2],
             array_children: false,
         };
-        // min_jaccard=0.9 → Jaccard(color vs length)=0.0 < 0.9 (previously would reparent individually)
-        process_co_sibling_group(&mut schemas, 2, 0.9, &group);
+        // Co-siblings with disjoint schemas must still produce a single routable table.
+        process_co_sibling_group(&mut schemas, &group);
         let pivot_idx = schemas.iter().position(|s| s.name == "pivot").unwrap();
         assert!(
             schemas[pivot_idx].child_routes.contains_key("desc"),

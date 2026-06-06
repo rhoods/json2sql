@@ -809,6 +809,7 @@ mod tests {
             column_collisions: vec![],
             stats: vec![],
             strategy_overrides: HashMap::new(),
+            overflow_warnings: vec![],
         });
 
         s.clear_snapshot();
@@ -833,6 +834,7 @@ mod tests {
             truncated_names: vec![],
             column_collisions: vec![],
             stats: vec![],
+            overflow_warnings: vec![],
             strategy_overrides: {
                 let mut m = HashMap::new();
                 m.insert("t".to_string(), WideStrategy::Jsonb);
@@ -865,6 +867,7 @@ mod tests {
             truncated_names: vec![],
             column_collisions: vec![],
             stats: vec![],
+            overflow_warnings: vec![],
             strategy_overrides: HashMap::new(),
         };
         let mut s = AppState::default();
@@ -1029,10 +1032,13 @@ mod tests {
             make_schema_with_cols("p_b", Some("p"), &["x", "y", "w"]),
         ];
         let d = compute_jaccard_display(&schemas, &[0, 1]);
-        // intersection {x,y} = 2, union {x,y,z,w} = 4 → 0.5
-        assert_eq!(d.common, 2);
-        assert_eq!(d.union_count, 4);
-        assert!((d.score - 0.5).abs() < 1e-9);
+        // union_count and common are computed before noise-filtering.
+        assert_eq!(d.common, 2);      // {x,y} present in both
+        assert_eq!(d.union_count, 4); // {x,y,z,w}
+        // pairwise_jaccard_min applies noise-filtering: with n=2 schemas,
+        // min_presence = max(2, 2/20) = 2, so z and w are filtered out.
+        // Filtered sets: p_a={x,y}, p_b={x,y} → Jaccard = 1.0.
+        assert!((d.score - 1.0).abs() < 1e-9);
         assert!(d.same_parent);
     }
 
