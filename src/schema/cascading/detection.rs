@@ -167,7 +167,23 @@ fn build_parent_child_maps(
 }
 
 /// Collect the children of `sibling_indices` grouped by their last JSON path segment.
-/// Returns `(json_key, child_indices)` pairs sorted by key.
+/// Returns `(json_key, child_indices, array_children)` triples sorted by key.
+/// `array_children` is `true` when at least one sibling exposes the key as an ObjectArray.
+///
+/// Example input:
+/// ```json
+/// { "sibling_a": { "info": { "x": "foo" } },
+///   "sibling_b": { "info": [{ "x": "bar" }, { "x": "baz" }] } }
+/// ```
+/// Produces key "info" with `array_children = true`:
+/// ```sql
+/// CREATE TABLE parent_info (
+///     j2s_id         UUID,
+///     j2s_parent_id  UUID NOT NULL,
+///     j2s_order      BIGINT,
+///     x              TEXT
+/// );
+/// ```
 fn collect_children_by_key(
     schemas: &[TableSchema],
     sibling_indices: &[usize],
@@ -281,6 +297,19 @@ fn pick_unique_suffix(
     }
 }
 
+/// Split `regular` into schema-compatible clusters when global Jaccard is too low.
+/// Returns `None` if fewer than 2 valid clusters are found.
+///
+/// Example input:
+/// ```json
+/// { "img_back":  {"col_a": "…"}, "img_front": {"col_a": "…"},
+///   "img_side":  {"col_b": "…"}, "img_top":   {"col_b": "…"} }
+/// ```
+/// Two incompatible clusters despite the same "img_" prefix → two distinct pivot tables:
+/// ```sql
+/// CREATE TABLE p_img_key   (j2s_id uuid, j2s_p_id uuid, key text, col_a text, j2s_data jsonb);
+/// CREATE TABLE p_img_key_2 (j2s_id uuid, j2s_p_id uuid, key text, col_b text, j2s_data jsonb);
+/// ```
 fn try_cluster_fallback(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
@@ -370,6 +399,29 @@ fn detect_mixed_collapse(
     Some(assemble_mixed_collapse(schemas, ctx, num_ok, non_ok, &non_num_regular, &non_num_clusters))
 }
 
+/// Assemble a `MultiKeyedPivot` collapse from pre-classified numeric/non-numeric groups.
+/// Each group gets a unique suffix via `pick_unique_suffix` to avoid name collisions.
+///
+/// **Scenario 1 — numeric + two incompatible non-numeric clusters:**
+/// ```json
+/// { "1":      {"val":   "a"}, "2":      {"val":   "b"},
+///   "tag_fr": {"label": "x"}, "tag_en": {"label": "y"},
+///   "tag_de": {"size":  "m"}, "tag_it": {"size":  "n"} }
+/// ```
+/// ```sql
+/// CREATE TABLE p_num       (j2s_id uuid, j2s_p_id uuid, key_id text, val   text, j2s_data jsonb);
+/// CREATE TABLE p_tag_key   (j2s_id uuid, j2s_p_id uuid, key   text, label text, j2s_data jsonb);
+/// CREATE TABLE p_tag_key_2 (j2s_id uuid, j2s_p_id uuid, key   text, size  text, j2s_data jsonb);
+/// ```
+///
+/// **Scenario 2 — `p_num` already exists in schemas (collision avoidance):**
+/// ```json
+/// { "1": {"val": "a"}, "2": {"val": "b"} }
+/// ```
+/// ```sql
+/// -- p_num already exists, new pivot gets a distinct name:
+/// CREATE TABLE p_num_2 (j2s_id uuid, j2s_p_id uuid, key_id text, val text, j2s_data jsonb);
+/// ```
 fn assemble_mixed_collapse(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
@@ -457,6 +509,26 @@ fn effective_jaccard_for_regular(
 /// Child-compatibility gate bypass threshold: skip the gate when Jaccard similarity is very high.
 const HIGH_JACCARD: f64 = 0.9;
 
+/// Build a synthetic `MultiKeyedPivot` when the parent carries its own data or has
+/// significant containers — the parent cannot be repurposed as a pivot table itself.
+/// Returns `None` when the parent has data and the keys are non-numeric.
+///
+/// Input — a JSON object where the parent has its own data alongside numeric children:
+/// ```json
+/// {
+///   "own_col": "x",
+///   "1": {"v": "a"},
+///   "2": {"v": "b"},
+///   "3": {"v": "c"}
+/// }
+/// ```
+/// Output — the parent keeps its own columns; a separate pivot table is created for the children:
+/// ```sql
+/// CREATE TABLE p     (j2s_id uuid, own_col text);
+/// CREATE TABLE p_num (j2s_id uuid, j2s_p_id uuid, key_id text, v text);
+/// ```
+/// (`j2s_data jsonb` is always appended by the engine as an overflow column.)
+/// If `p_num` already exists in schemas, the pivot is named `p_num_2` (and so on).
 fn build_synthetic_pivot_collapse(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
@@ -1707,7 +1779,6 @@ mod tests {
 
     // --- Finding 3: child_routes.insert écrasé pour co-siblings avec le même json_key ---
 
-    #[test]
     #[test]
     fn test_collect_children_by_key_object_and_array_conflict_sets_array_children() {
         // Input JSON scenario:

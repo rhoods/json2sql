@@ -115,3 +115,18 @@ Second passage `run_sibling_wave` après le cascade BFS. `finalize_cascading`.
 ScalarArray inclus dans `build_parent_child_maps` → `arr_map`.
 `src/schema/cascading.rs` ligne ~153 : `Some(ChildKind::ObjectArray) | Some(ChildKind::ScalarArray)`.
 2 tests ajoutés dans `registry.rs`.
+
+## Dette Design — suppression de `j2s_data jsonb` quand inutile (2026-06-06)
+
+**Constat :** `j2s_data jsonb` est aujourd'hui ajoutée à toutes les tables comme colonne de débordement,
+même quand tous les champs JSON sont déjà mappés en colonnes typées explicites.
+
+**Impact :** chaque insert doit sérialiser l'objet JSON complet en jsonb pour chaque ligne — coût inutile
+quand aucun champ ne déborde.
+
+**Action :** conditionner l'ajout de `j2s_data` à la présence effective de champs non-mappés.
+Identifier le point d'injection (rechercher `j2s_data` dans `src/schema/` et `src/pass2/`) et ajouter
+un flag de schéma `has_overflow: bool` calculé en fin de Pass 1.
+
+**Précaution :** vérifier l'impact sur Pass 2 (`insert.rs`) qui lit peut-être toujours `j2s_data`
+comme colonne attendue — adapter la logique d'écriture en conséquence.
