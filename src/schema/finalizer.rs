@@ -1,4 +1,5 @@
 //! `SchemaFinalizer` — transformation des observations brutes en schémas SQL définitifs.
+#![allow(clippy::cast_precision_loss)]
 //!
 //! Reçoit les `TableEntry` accumulés par `SchemaObserver` et produit des `TableSchema`
 //! prêts pour le DDL et le Pass 2. Responsabilités : construction des colonnes, sélection
@@ -21,7 +22,7 @@ use super::type_tracker::{widen_pg_types, PgType};
 use super::cascading::finalize_cascading;
 use super::wide_strategies::{apply_structured_pivot_columns, apply_wide_strategy_columns, suggest_wide_strategy};
 
-/// Transforms raw observations (from SchemaObserver) into finalized TableSchema objects.
+/// Transforms raw observations (from `SchemaObserver`) into finalized `TableSchema` objects.
 ///
 /// Responsible for: schema construction, wide-table strategies, sibling detection,
 /// naming, topological sorting. Stateless with respect to the observation phase.
@@ -36,7 +37,7 @@ pub struct SchemaFinalizer {
 
 impl SchemaFinalizer {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         wide_column_threshold: usize,
         sibling_threshold: usize,
         sibling_jaccard: f64,
@@ -65,7 +66,7 @@ impl SchemaFinalizer {
         // Pre-compute set of path_keys that have at least one Object/ObjectArray child.
         let tables_with_object_children: std::collections::HashSet<String> = tables
             .values()
-            .filter(|e| matches!(e.child_kind, Some(ChildKind::Object) | Some(ChildKind::ObjectArray)))
+            .filter(|e| matches!(e.child_kind, Some(ChildKind::Object | ChildKind::ObjectArray)))
             .map(|e| e.parent_key.clone())
             .collect();
 
@@ -173,7 +174,7 @@ fn build_entry_schema(
 
     let mut schema = TableSchema::new(pg_name.clone(), entry.path.clone(), depth);
     schema.parent_table = parent_table;
-    schema.child_kind = entry.child_kind.clone();
+    schema.child_kind.clone_from(&entry.child_kind);
 
     push_generated_columns(&mut schema);
 
@@ -254,7 +255,7 @@ fn push_array_columns(schema: &mut TableSchema, entry: &TableEntry, col_registry
 /// Apply a wide-table strategy to `schema` if the column count exceeds the threshold.
 ///
 /// Only eligible for direct Object children (not ObjectArray/ScalarArray).
-/// Returns a companion `_wide` table if the AutoSplit strategy is chosen.
+/// Returns a companion `_wide` table if the `AutoSplit` strategy is chosen.
 fn apply_wide_strategy(
     schema: &mut TableSchema,
     entry: &TableEntry,
@@ -324,7 +325,7 @@ fn apply_non_autosplit_strategy(
     }
 }
 
-/// Apply the P5 AutoSplit strategy: retain stable columns on the main table,
+/// Apply the P5 `AutoSplit` strategy: retain stable columns on the main table,
 /// build a companion `_wide` EAV table for medium-frequency keys.
 fn collect_medium_keys(
     entry: &TableEntry,
@@ -349,10 +350,7 @@ fn infer_medium_value_type(
     medium_keys.iter()
         .filter_map(|k| entry.columns.get(k))
         .fold(None::<PgType>, |acc, t| {
-            Some(match acc {
-                None => t.to_pg_type(),
-                Some(a) => widen_pg_types(a, &t.to_pg_type()),
-            })
+            Some(acc.map_or_else(|| t.to_pg_type(), |a| widen_pg_types(a, &t.to_pg_type())))
         })
         .unwrap_or(PgType::Text)
 }
@@ -368,15 +366,14 @@ fn apply_autosplit_strategy(
     let medium_keys = collect_medium_keys(entry, row_count, config.rare_threshold, config.stable_threshold);
     schema.columns.retain(|c| {
         c.is_generated || entry.columns.get(&c.original_name)
-            .map(|t| t.total_count as f64 / row_count >= config.stable_threshold)
-            .unwrap_or(false)
+            .is_some_and(|t| t.total_count as f64 / row_count >= config.stable_threshold)
     });
     let stable_col_count = schema.data_columns().count();
     let rare_count = data_col_count.saturating_sub(stable_col_count).saturating_sub(medium_keys.len());
     // Strip any existing `_wide` suffix to avoid `foo_wide_wide`; fall back to `_eav` on collision.
     let base_name = schema.name.strip_suffix("_wide").unwrap_or(&schema.name);
-    let wide_candidate = format!("{}_wide", base_name);
-    let wide_name = if wide_candidate == schema.name { format!("{}_eav", base_name) } else { wide_candidate };
+    let wide_candidate = format!("{base_name}_wide");
+    let wide_name = if wide_candidate == schema.name { format!("{base_name}_eav") } else { wide_candidate };
     eprintln!(
         "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: AutoSplit \
         ({} stable cols, {} medium → {}, {} rare dropped)",
@@ -417,18 +414,18 @@ fn build_wide_pivot_schema(
     wide_schema
 }
 
-/// PostgreSQL hard limit on columns per table.
+/// `PostgreSQL` hard limit on columns per table.
 pub const PG_MAX_COLUMNS: usize = 1600;
 
 /// A wide table with this fraction or more of stable columns is kept as-is (Columns strategy).
 /// Below this, the table is split or pivoted.
 const WIDE_TABLE_HIGH_STABLE_RATIO: f64 = 0.5;
 
-/// Minimum fraction of columns that must share a common suffix pattern to trigger StructuredPivot.
+/// Minimum fraction of columns that must share a common suffix pattern to trigger `StructuredPivot`.
 const SUFFIX_MIN_COVERAGE: f64 = 0.3;
 
 /// Fraction of keys that must be numeric (or ISO-language codes) to classify a key shape as
-/// KeyShape::Numeric / KeyShape::IsoLang rather than Slug or Mixed.
+/// `KeyShape::Numeric` / `KeyShape::IsoLang` rather than Slug or Mixed.
 /// Recorded when a table is auto-converted to JSONB by `apply_column_limit_guard`.
 #[derive(Debug, Clone)]
 pub struct OverflowWarning {
@@ -461,7 +458,7 @@ pub fn apply_column_limit_guard(schemas: &mut [TableSchema]) -> Vec<OverflowWarn
     warnings
 }
 
-/// (Pivot, Jsonb, StructuredPivot, KeyedPivot). AutoSplit does NOT absorb children.
+/// (Pivot, Jsonb, `StructuredPivot`, `KeyedPivot`). `AutoSplit` does NOT absorb children.
 ///
 /// The schemas must be topologically sorted (parents before children) for the single-pass
 /// transitive exclusion to work correctly. Safe to call multiple times (idempotent).
@@ -472,7 +469,7 @@ fn collect_surviving_route_targets<'a>(
 ) -> std::collections::HashSet<&'a str> {
     // Pass 1: preliminary exclusion WITHOUT route_targets protection.
     let mut preliminary_excluded: std::collections::HashSet<&str> = partial_absorbed.clone();
-    for schema in schemas.iter() {
+    for schema in schemas {
         if let Some(ref parent) = schema.parent_table {
             if absorbers.contains(parent.as_str()) || preliminary_excluded.contains(parent.as_str()) {
                 preliminary_excluded.insert(schema.name.as_str());
@@ -482,7 +479,7 @@ fn collect_surviving_route_targets<'a>(
     // Route targets from excluded tables are stale — only surviving tables' routes count.
     schemas.iter()
         .filter(|s| !preliminary_excluded.contains(s.name.as_str()))
-        .flat_map(|s| s.child_routes.values().map(|v| v.as_str()))
+        .flat_map(|s| s.child_routes.values().map(std::string::String::as_str))
         .collect()
 }
 
@@ -495,7 +492,7 @@ pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
     let route_targets = collect_surviving_route_targets(schemas, &absorbers, &partial_absorbed);
     // Pass 2: final exclusion, protecting only valid route targets.
     let mut excluded: std::collections::HashSet<String> =
-        partial_absorbed.into_iter().map(|s| s.to_string()).collect();
+        partial_absorbed.into_iter().map(std::string::ToString::to_string).collect();
     for schema in schemas.iter() {
         if route_targets.contains(schema.name.as_str()) { continue; }
         if let Some(ref parent) = schema.parent_table {

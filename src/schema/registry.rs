@@ -18,8 +18,8 @@ use super::stats::ColumnStats;
 use super::strategies::StrategyName;
 use super::type_tracker::TypeTracker;
 
-/// Façade: ties together SchemaObserver (observation) and SchemaFinalizer (finalization).
-/// Keeps the existing public API intact for callers that use SchemaRegistry directly.
+/// Façade: ties together `SchemaObserver` (observation) and `SchemaFinalizer` (finalization).
+/// Keeps the existing public API intact for callers that use `SchemaRegistry` directly.
 pub struct SchemaRegistry {
     observer: SchemaObserver,
     naming: NamingRegistry,
@@ -102,7 +102,7 @@ impl SchemaRegistry {
     /// Used after parallel Pass 1: each worker builds its own registry, then
     /// they are all merged into one before calling `finalize()`.
     /// The `NamingRegistry` is NOT merged — it is recomputed by `finalize()`.
-    pub fn merge(&mut self, other: SchemaRegistry) {
+    pub fn merge(&mut self, other: Self) {
         self.observer.merge(other.observer);
     }
 

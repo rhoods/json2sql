@@ -1,10 +1,10 @@
-//! PostgreSQL COPY text-format escaping.
+//! `PostgreSQL` COPY text-format escaping.
 //!
 //! [`CopyEscaped`] is a newtype that guarantees its contents are safe for the COPY text
 //! protocol (no unescaped tabs, newlines, backslashes, or null bytes). Obtain instances
 //! only via [`escape_copy_text`] or [`CopyEscaped::from_safe_ascii`].
 
-/// A string guaranteed safe for PostgreSQL COPY text format.
+/// A string guaranteed safe for `PostgreSQL` COPY text format.
 ///
 /// No tab (`\t`), newline (`\n`), carriage return (`\r`), backslash (`\\`),
 /// or null byte (`\0`) in unescaped form — all have been replaced by their
@@ -30,10 +30,9 @@ impl CopyEscaped {
         let s = s.into();
         debug_assert!(
             !s.contains(['\t', '\n', '\r', '\\', '\0']),
-            "from_safe_ascii called with unsafe value: {:?}",
-            s
+            "from_safe_ascii called with unsafe value: {s:?}"
         );
-        CopyEscaped(s)
+        Self(s)
     }
 
     #[must_use]
@@ -48,10 +47,10 @@ impl AsRef<str> for CopyEscaped {
     }
 }
 
-/// Escape a string for PostgreSQL COPY text format.
+/// Escape a string for `PostgreSQL` COPY text format.
 ///
 /// Escapes `\t`, `\n`, `\r`, `\\`. Returns `None` if `s` contains a null
-/// byte — PostgreSQL rejects null bytes in text columns and callers should
+/// byte — `PostgreSQL` rejects null bytes in text columns and callers should
 /// treat this as an anomaly (→ NULL) rather than silently stripping.
 #[must_use]
 pub fn escape_copy_text(s: &str) -> Option<CopyEscaped> {

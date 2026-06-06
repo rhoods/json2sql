@@ -30,7 +30,7 @@ pub enum J2sError {
 
 impl From<serde_json::Error> for J2sError {
     fn from(e: serde_json::Error) -> Self {
-        J2sError::Json {
+        Self::Json {
             position: e.column() as u64,
             source: e,
         }

@@ -1,9 +1,10 @@
 //! Per-column type inference: accumulates observed JSON types across all rows and
-//! resolves them to a single PostgreSQL type.
+#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+//! resolves them to a single `PostgreSQL` type.
 //!
 //! [`TypeTracker`] counts occurrences of each [`InferredType`] variant as the JSON is
 //! streamed. At finalization, `to_pg_type()` applies a widening hierarchy
-//! (Integer → BigInt → Float → Text) to pick the narrowest PostgreSQL type compatible
+//! (Integer → `BigInt` → Float → Text) to pick the narrowest `PostgreSQL` type compatible
 //! with every observed value. The resolved type is stored as [`PgType`] in a `ColumnSchema`.
 
 use serde_json::Value;
@@ -34,19 +35,19 @@ impl InferredType {
     pub const COUNT: usize = 12;
 
     /// All variants in index order, for iteration.
-    pub const ALL: [InferredType; Self::COUNT] = [
-        InferredType::Null,
-        InferredType::Boolean,
-        InferredType::Integer,
-        InferredType::BigInt,
-        InferredType::Float,
-        InferredType::Uuid,
-        InferredType::Date,
-        InferredType::Timestamp,
-        InferredType::Varchar,
-        InferredType::Text,
-        InferredType::Object,
-        InferredType::Array,
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::Null,
+        Self::Boolean,
+        Self::Integer,
+        Self::BigInt,
+        Self::Float,
+        Self::Uuid,
+        Self::Date,
+        Self::Timestamp,
+        Self::Varchar,
+        Self::Text,
+        Self::Object,
+        Self::Array,
     ];
 }
 
@@ -61,7 +62,7 @@ const _: () = {
     }
 };
 
-/// The resolved PostgreSQL type for a column.
+/// The resolved `PostgreSQL` type for a column.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PgType {
     Integer,
@@ -73,9 +74,9 @@ pub enum PgType {
     Timestamp,
     VarChar(u32), // computed as ceil(max_len * 1.2), min 1
     Text,
-    /// PostgreSQL array of a scalar type, e.g. TEXT[], INTEGER[]
-    Array(Box<PgType>),
-    /// PostgreSQL JSONB — used by WideStrategy::Jsonb tables
+    /// `PostgreSQL` array of a scalar type, e.g. TEXT[], INTEGER[]
+    Array(Box<Self>),
+    /// `PostgreSQL` JSONB — used by `WideStrategy::Jsonb` tables
     Jsonb,
 }
 
@@ -83,17 +84,17 @@ impl PgType {
     #[must_use]
     pub fn as_sql(&self) -> String {
         match self {
-            PgType::Integer => "INTEGER".to_string(),
-            PgType::BigInt => "BIGINT".to_string(),
-            PgType::DoublePrecision => "DOUBLE PRECISION".to_string(),
-            PgType::Boolean => "BOOLEAN".to_string(),
-            PgType::Uuid => "UUID".to_string(),
-            PgType::Date => "DATE".to_string(),
-            PgType::Timestamp => "TIMESTAMP".to_string(),
-            PgType::VarChar(n) => format!("VARCHAR({})", n),
-            PgType::Text => "TEXT".to_string(),
-            PgType::Array(elem) => format!("{}[]", elem.as_sql()),
-            PgType::Jsonb => "JSONB".to_string(),
+            Self::Integer => "INTEGER".to_string(),
+            Self::BigInt => "BIGINT".to_string(),
+            Self::DoublePrecision => "DOUBLE PRECISION".to_string(),
+            Self::Boolean => "BOOLEAN".to_string(),
+            Self::Uuid => "UUID".to_string(),
+            Self::Date => "DATE".to_string(),
+            Self::Timestamp => "TIMESTAMP".to_string(),
+            Self::VarChar(n) => format!("VARCHAR({n})"),
+            Self::Text => "TEXT".to_string(),
+            Self::Array(elem) => format!("{}[]", elem.as_sql()),
+            Self::Jsonb => "JSONB".to_string(),
         }
     }
 }
@@ -119,7 +120,7 @@ pub struct TypeTracker {
 
 impl TypeTracker {
     #[must_use]
-    pub fn new(text_threshold: u32) -> Self {
+    pub const fn new(text_threshold: u32) -> Self {
         Self {
             total_count: 0,
             null_count: 0,
@@ -161,8 +162,8 @@ impl TypeTracker {
     }
 
     /// Merge observations from `other` into `self`.
-    /// Used to combine per-worker TypeTrackers after parallel Pass 1.
-    pub fn merge(&mut self, other: &TypeTracker) {
+    /// Used to combine per-worker `TypeTrackers` after parallel Pass 1.
+    pub fn merge(&mut self, other: &Self) {
         self.total_count += other.total_count;
         self.null_count  += other.null_count;
         for i in 0..InferredType::COUNT {
@@ -204,11 +205,11 @@ impl TypeTracker {
     }
 
     #[must_use]
-    pub fn is_not_null(&self) -> bool {
+    pub const fn is_not_null(&self) -> bool {
         self.null_count == 0
     }
 
-    /// Resolve to the final PostgreSQL type.
+    /// Resolve to the final `PostgreSQL` type.
     /// Merging rules: the "widest" type wins.
     #[must_use]
     fn string_pg_type(&self, has_float: bool, has_bigint: bool, has_int: bool) -> PgType {
@@ -220,7 +221,7 @@ impl TypeTracker {
         if effective_max > self.text_threshold {
             PgType::Text
         } else {
-            PgType::VarChar(((effective_max as f64 * 1.2).ceil() as u32).max(1))
+            PgType::VarChar(((f64::from(effective_max) * 1.2).ceil() as u32).max(1))
         }
     }
 
@@ -277,7 +278,7 @@ impl TypeTracker {
         self.active_type_count() > 1
     }
 
-    /// Iterate over (InferredType, count) pairs for non-zero, non-Null types.
+    /// Iterate over (`InferredType`, count) pairs for non-zero, non-Null types.
     pub fn iter_types(&self) -> impl Iterator<Item = (InferredType, u64)> + '_ {
         InferredType::ALL
             .iter()
@@ -298,16 +299,15 @@ impl TypeTracker {
 // Public utilities
 // ---------------------------------------------------------------------------
 
-/// Return the "wider" of two PgTypes — the one that can represent all values of both.
+/// Return the "wider" of two `PgTypes` — the one that can represent all values of both.
 #[must_use]
 pub fn widen_pg_types(a: PgType, b: &PgType) -> PgType {
     if a == *b {
         return a;
     }
     match (&a, b) {
-        (PgType::Text, _) | (_, PgType::Text) => PgType::Text,
-        (PgType::VarChar(_), _) | (_, PgType::VarChar(_)) => PgType::Text,
-        (PgType::Jsonb, _) | (_, PgType::Jsonb) => PgType::Text,
+        (PgType::Text | PgType::VarChar(_) | PgType::Jsonb, _)
+        | (_, PgType::Text | PgType::VarChar(_) | PgType::Jsonb) => PgType::Text,
         (PgType::DoublePrecision, _) | (_, PgType::DoublePrecision) => PgType::DoublePrecision,
         (PgType::BigInt, _) | (_, PgType::BigInt) => PgType::BigInt,
         _ => PgType::Text,
@@ -322,7 +322,7 @@ fn infer_number_type(n: &serde_json::Number) -> InferredType {
     if n.is_f64() {
         // Check if it's actually a whole number stored as float
         if let Some(f) = n.as_f64() {
-            if f.fract() == 0.0 && f >= i32::MIN as f64 && f <= i32::MAX as f64 {
+            if f.fract() == 0.0 && f >= f64::from(i32::MIN) && f <= f64::from(i32::MAX) {
                 return InferredType::Integer;
             }
             if f.fract() == 0.0 {
@@ -332,7 +332,7 @@ fn infer_number_type(n: &serde_json::Number) -> InferredType {
         return InferredType::Float;
     }
     if let Some(i) = n.as_i64() {
-        if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
+        if i32::try_from(i).is_ok() {
             return InferredType::Integer;
         }
         return InferredType::BigInt;
@@ -400,7 +400,7 @@ fn is_date_bytes(b: &[u8]) -> bool {
 }
 
 #[inline]
-fn is_digit(c: u8) -> bool {
+const fn is_digit(c: u8) -> bool {
     c.is_ascii_digit()
 }
 

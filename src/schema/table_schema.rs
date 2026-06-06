@@ -1,13 +1,13 @@
 //! Core domain types for the finalized schema produced by Pass 1.
 //!
 //! The two central types are [`TableSchema`] (one SQL table and its materialization strategy)
-//! and [`ColumnSchema`] (one column with inferred PostgreSQL type). Both are serialized to the
+//! and [`ColumnSchema`] (one column with inferred `PostgreSQL` type). Both are serialized to the
 //! inspect JSON written between Pass 1 and Pass 2.
 //!
-//! ## WideStrategy
+//! ## `WideStrategy`
 //!
 //! Each [`TableSchema`] carries a [`WideStrategy`] that determines how Pass 2 materializes
-//! the table in PostgreSQL. The strategy is inferred by `finalize()` at the end of Pass 1
+//! the table in `PostgreSQL`. The strategy is inferred by `finalize()` at the end of Pass 1
 //! and can be overridden by the user through the IHM before running Pass 2.
 //!
 //! | Strategy | When used | Output shape |
@@ -19,7 +19,7 @@
 //! | `KeyedPivot` | N sibling tables, same schema | merged table with key column |
 //! | `MultiKeyedPivot` | siblings with mixed key shapes | two synthetic pivot tables |
 //! | `AutoSplit` | root table with bi-modal key frequency | main table + `_wide` companion |
-//! | `Ignore` | key appears in < rare_threshold of rows | excluded from schema |
+//! | `Ignore` | key appears in < `rare_threshold` of rows | excluded from schema |
 //! | `NormalizeDynamicKeys` | arbitrary JSON keys → row IDs (IHM) | key becomes a column |
 //! | `Flatten` | inline child fields into parent (IHM) | child table removed |
 //! | `JsonbFlatten` | store child as JSONB on parent (IHM) | child table removed |
@@ -31,34 +31,34 @@ use std::collections::HashMap;
 use super::naming::PG_TABLE_MAX_IDENT;
 use super::type_tracker::PgType;
 
-/// One suffix column in a StructuredPivot table.
+/// One suffix column in a `StructuredPivot` table.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SuffixColumn {
     /// The raw suffix string as it appears in JSON keys, e.g. "_100g"
     pub suffix: String,
-    /// The PostgreSQL column name derived from the suffix, e.g. "c_100g"
+    /// The `PostgreSQL` column name derived from the suffix, e.g. "`c_100g`"
     pub col_name: String,
-    /// The inferred PostgreSQL type for this suffix column
+    /// The inferred `PostgreSQL` type for this suffix column
     pub pg_type: PgType,
 }
 
-/// Describes the suffix decomposition detected for a StructuredPivot table.
+/// Describes the suffix decomposition detected for a `StructuredPivot` table.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SuffixSchema {
     /// Detected suffix columns, sorted by suffix string
     pub suffix_cols: Vec<SuffixColumn>,
-    /// PostgreSQL type for the "base value" column (key with no suffix)
+    /// `PostgreSQL` type for the "base value" column (key with no suffix)
     pub value_type: PgType,
 }
 
 /// Shape of the sibling keys — used to name the key column semantically.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KeyShape {
     /// All keys are pure integers: "1", "2", "42"
     Numeric,
     /// All keys are 2-3 char alpha codes (ISO language/country): "fr", "en", "deu"
     IsoLang,
-    /// Keys are slugs or compound strings: "en_glass", "palm_oil"
+    /// Keys are slugs or compound strings: "`en_glass`", "`palm_oil`"
     Slug,
     /// Mix of numeric and ISO codes
     Mixed,
@@ -68,28 +68,28 @@ fn default_data_col_name() -> String {
     "j2s_data".to_string()
 }
 
-/// Metadata for a KeyedPivot table (sibling tables collapsed into one).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Metadata for a `KeyedPivot` table (sibling tables collapsed into one).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SiblingSchema {
-    /// Name of the column that holds the original sibling key (e.g. "key_id", "lang_code", "key")
+    /// Name of the column that holds the original sibling key (e.g. "`key_id`", "`lang_code`", "key")
     pub key_col_name: String,
     /// Detected shape of the sibling keys
     pub key_shape: KeyShape,
-    /// True when the collapsed siblings were ObjectArray children (each key maps to an array of
-    /// objects). Pass 2 iterates the array and emits one row per element with j2s_order.
+    /// True when the collapsed siblings were `ObjectArray` children (each key maps to an array of
+    /// objects). Pass 2 iterates the array and emits one row per element with `j2s_order`.
     #[serde(default)]
     pub array_children: bool,
     /// Name of the JSONB column that stores the raw child object/array.
-    /// Defaults to "data"; falls back to "j2s_data" if "data" collides with a union column.
+    /// Defaults to "data"; falls back to "`j2s_data`" if "data" collides with a union column.
     #[serde(default = "default_data_col_name")]
     pub data_col_name: String,
 }
 
-/// One key-shape subgroup within a MultiKeyedPivot parent.
+/// One key-shape subgroup within a `MultiKeyedPivot` parent.
 /// Each group produces its own synthetic pivot table in the schema.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SiblingGroup {
-    /// Name of the synthetic pivot table (e.g. "products_images_num").
+    /// Name of the synthetic pivot table (e.g. "`products_images_num`").
     pub pivot_table: String,
     /// If true, this group handles numeric-keyed children; false = non-numeric.
     pub key_is_numeric: bool,
@@ -117,7 +117,7 @@ pub enum WideStrategy {
 
     /// EAV pivot: one row per key-value pair — columns: `(key TEXT, value <type>)`.
     ///
-    /// Trigger: many dynamic keys, all values share a compatible PostgreSQL type
+    /// Trigger: many dynamic keys, all values share a compatible `PostgreSQL` type
     /// (e.g. a nutrient map where every value is a FLOAT).
     ///
     /// JSON: `{ "nutrients": { "energy": 250, "fat": 12, "salt": 0.3 } }`
@@ -182,7 +182,7 @@ pub enum WideStrategy {
         rare_threshold: f64,
         /// Pre-computed set of medium-frequency keys written to the _wide table in Pass 2.
         medium_keys: std::collections::HashSet<String>,
-        /// PostgreSQL name of the companion wide table, e.g. "products_wide".
+        /// `PostgreSQL` name of the companion wide table, e.g. "`products_wide`".
         wide_table_name: String,
     },
 
@@ -234,13 +234,13 @@ pub enum WideStrategy {
 /// A column in a finalized table schema.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ColumnSchema {
-    /// Sanitized PostgreSQL column name (<= 63 chars)
+    /// Sanitized `PostgreSQL` column name (<= 63 chars)
     pub name: String,
     /// Original JSON field name
     pub original_name: String,
     pub pg_type: PgType,
     pub not_null: bool,
-    /// True for j2s_id, j2s_{parent}_id, j2s_order — these are never in the JSON
+    /// True for `j2s_id`, j2s_{parent}_id, `j2s_order` — these are never in the JSON
     pub is_generated: bool,
     /// True only for the FK column pointing to the parent table (j2s_{parent}_id).
     /// Allows reliable identification independent of the column name.
@@ -273,7 +273,7 @@ impl ColumnSchema {
             "parent_name '{}' is {} chars — NamingRegistry should have truncated it to ≤{}",
             parent_name, parent_name.len(), PG_TABLE_MAX_IDENT
         );
-        let col_name = format!("j2s_{}_id", parent_name);
+        let col_name = format!("j2s_{parent_name}_id");
         Self {
             name: col_name.clone(),
             original_name: col_name,
@@ -286,22 +286,22 @@ impl ColumnSchema {
 }
 
 /// Describes the kind of child relationship.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChildKind {
     /// Nested JSON object → one-to-one or one-to-many relationship
     Object,
     /// Array of objects → one-to-many
     ObjectArray,
-    /// Array of scalars → junction table with (j2s_{parent}_id, value, j2s_order)
+    /// Array of scalars → junction table with (j2s_{parent}_id, value, `j2s_order`)
     ScalarArray,
 }
 
 /// A fully resolved table schema ready for DDL generation and data loading.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TableSchema {
-    /// PostgreSQL table name (sanitized, <= 63 chars)
+    /// `PostgreSQL` table name (sanitized, <= 63 chars)
     pub name: String,
-    /// Original path segments, e.g. ["users", "orders", "items"]
+    /// Original path segments, e.g. `["users", "orders", "items"]`
     pub path: Vec<String>,
     /// Columns in declaration order (generated j2s_ columns come first)
     pub columns: Vec<ColumnSchema>,
@@ -314,15 +314,15 @@ pub struct TableSchema {
     /// How wide-table keys are stored (auto-detected or user-overridden).
     pub wide_strategy: WideStrategy,
     /// Maps prefixed column name → source JSON field for columns inlined via Flatten strategy.
-    /// e.g. "nutrients_calories" → "nutrients" means: look up obj["nutrients"]["calories"].
+    /// e.g. `nutrients_calories` → `nutrients` means: look up `obj["nutrients"]["calories"]`.
     /// Empty for tables that have no flattened children.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub flatten_sources: HashMap<String, String>,
     /// Cascaded routing: maps a JSON sub-key found inside a sibling pivot row to the child
     /// table that should receive that sub-object. Populated by `finalize_cascading` for two cases:
-    ///   1. Co-sibling children merged into a synthetic pivot T (child_routes["k"] = T.name)
+    ///   1. Co-sibling children merged into a synthetic pivot T (`child_routes["k"]` = T.name)
     ///   2. Independent children re-parented from an absorbed sibling to this pivot table
-    ///      Empty for all non-cascaded tables (routing falls back to path_map in Pass 2).
+    ///      Empty for all non-cascaded tables (routing falls back to `path_map` in Pass 2).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub child_routes: HashMap<String, String>,
 }
@@ -345,7 +345,7 @@ impl TableSchema {
     }
 
     #[must_use]
-    pub fn is_root(&self) -> bool {
+    pub const fn is_root(&self) -> bool {
         self.parent_table.is_none()
     }
 
@@ -354,7 +354,7 @@ impl TableSchema {
     /// Junction tables have the schema `(j2s_parent_id, value <type>, j2s_order INT)` — there
     /// are no user-facing data columns. They arise from JSON like `{ "tags": ["a", "b", "c"] }`.
     #[must_use]
-    pub fn is_junction(&self) -> bool {
+    pub const fn is_junction(&self) -> bool {
         matches!(self.child_kind, Some(ChildKind::ScalarArray))
     }
 
@@ -363,10 +363,10 @@ impl TableSchema {
     /// True for `ObjectArray` and `ScalarArray` children — any child that comes from a JSON array
     /// where the position of each element is semantically meaningful.
     #[must_use]
-    pub fn has_order_column(&self) -> bool {
+    pub const fn has_order_column(&self) -> bool {
         matches!(
             self.child_kind,
-            Some(ChildKind::ObjectArray) | Some(ChildKind::ScalarArray)
+            Some(ChildKind::ObjectArray | ChildKind::ScalarArray)
         )
     }
 
@@ -394,8 +394,8 @@ impl WideStrategy {
     /// Returns true if this strategy changes the default column-per-key layout.
     #[allow(dead_code)]
     #[must_use]
-    pub fn is_wide(&self) -> bool {
-        !matches!(self, WideStrategy::Columns)
+    pub const fn is_wide(&self) -> bool {
+        !matches!(self, Self::Columns)
     }
 
     /// Returns the names of child tables explicitly absorbed by this strategy.
@@ -406,9 +406,9 @@ impl WideStrategy {
     #[must_use]
     pub fn absorbed_names(&self) -> Vec<&str> {
         match self {
-            WideStrategy::MultiKeyedPivot(groups) => groups
+            Self::MultiKeyedPivot(groups) => groups
                 .iter()
-                .flat_map(|g| g.absorbed_names.iter().map(|s| s.as_str()))
+                .flat_map(|g| g.absorbed_names.iter().map(std::string::String::as_str))
                 .collect(),
             _ => vec![],
         }
@@ -416,19 +416,19 @@ impl WideStrategy {
 
     /// Returns true if child tables should be excluded from the schema because their
     /// data is absorbed into this table's wide column (Pivot / Jsonb / etc.).
-    /// AutoSplit does NOT absorb children — they remain as separate tables.
-    /// NormalizeDynamicKeys and Flatten absorb their child tables.
+    /// `AutoSplit` does NOT absorb children — they remain as separate tables.
+    /// `NormalizeDynamicKeys` and Flatten absorb their child tables.
     #[must_use]
-    pub fn absorbs_children(&self) -> bool {
+    pub const fn absorbs_children(&self) -> bool {
         matches!(
             self,
-            WideStrategy::Pivot
-                | WideStrategy::Jsonb
-                | WideStrategy::StructuredPivot(_)
-                | WideStrategy::KeyedPivot(_)
-                | WideStrategy::NormalizeDynamicKeys { .. }
-                | WideStrategy::Flatten { .. }
-                | WideStrategy::JsonbFlatten
+            Self::Pivot
+                | Self::Jsonb
+                | Self::StructuredPivot(_)
+                | Self::KeyedPivot(_)
+                | Self::NormalizeDynamicKeys { .. }
+                | Self::Flatten { .. }
+                | Self::JsonbFlatten
         )
         // MultiKeyedPivot: absorption handled via SiblingGroup.absorbed_names,
         // not through this flag — the parent itself absorbs nothing directly.
@@ -438,10 +438,10 @@ impl WideStrategy {
 impl std::fmt::Display for KeyShape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            KeyShape::Numeric => write!(f, "NUMERIC"),
-            KeyShape::IsoLang => write!(f, "ISO_LANG"),
-            KeyShape::Slug    => write!(f, "SLUG"),
-            KeyShape::Mixed   => write!(f, "MIXED"),
+            Self::Numeric => write!(f, "NUMERIC"),
+            Self::IsoLang => write!(f, "ISO_LANG"),
+            Self::Slug    => write!(f, "SLUG"),
+            Self::Mixed   => write!(f, "MIXED"),
         }
     }
 }

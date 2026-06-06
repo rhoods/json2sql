@@ -19,7 +19,7 @@ Fonctions annotées `#[allow(clippy::too_many_lines/cognitive_complexity)]` — 
 | ~~🟢 8~~ ✅ | ~~`pass1/runner.rs::run_parallel`~~ | ~~123~~ | — | Livré 2026-06-04 : spawn_worker_threads + read_and_dispatch + join_and_merge_workers |
 
 Gate CI : `cargo clippy -- -D warnings -D clippy::too_many_lines -D clippy::cognitive_complexity`
-Seuil actuel : **60 lignes** (abaissé depuis 80 le 2026-06-04).
+Seuil actuel : **30 lignes** (abaissé depuis 60, défini dans `clippy.toml`).
 Prochain palier : à définir.
 
 ### Fonctions extraites de `cascading.rs::run_sibling_wave` (2026-06-04)

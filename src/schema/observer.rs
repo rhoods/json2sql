@@ -14,7 +14,7 @@ use super::type_tracker::TypeTracker;
 
 /// One entry per table discovered during Pass 1 observation, keyed by PATH_SEP-joined path.
 #[derive(Debug)]
-pub(crate) struct TableEntry {
+pub struct TableEntry {
     pub(crate) path_key: String,
     pub(crate) path: Vec<String>,
     pub(crate) parent_key: String,
@@ -22,7 +22,7 @@ pub(crate) struct TableEntry {
     pub(crate) child_kind: Option<ChildKind>,
     /// For scalar junction tables, the element type tracker.
     pub(crate) scalar_tracker: Option<TypeTracker>,
-    /// Element type trackers for scalar arrays stored as PG array columns (array_as_pg_array mode).
+    /// Element type trackers for scalar arrays stored as PG array columns (`array_as_pg_array` mode).
     pub(crate) array_columns: IndexMap<String, TypeTracker>,
     pub(crate) row_count: u64,
 }
@@ -42,7 +42,7 @@ impl TableEntry {
         }
     }
 
-    pub(crate) fn merge(&mut self, other: TableEntry) {
+    pub(crate) fn merge(&mut self, other: Self) {
         self.row_count += other.row_count;
         for (name, tracker) in other.columns {
             if let Some(existing) = self.columns.get_mut(&name) {
@@ -115,13 +115,13 @@ impl SchemaObserver {
             for (field, value) in map {
                 match value {
                     Value::Object(nested) => {
-                        let child_key = format!("{}{}{}", path_key, PATH_SEP, field);
+                        let child_key = format!("{path_key}{PATH_SEP}{field}");
                         self.ensure_table_key(&child_key, &path_key, Some(ChildKind::Object));
                         stack.push((child_key, nested));
                     }
                     Value::Array(arr) => {
                         if !arr.is_empty() {
-                            let child_key = format!("{}{}{}", path_key, PATH_SEP, field);
+                            let child_key = format!("{path_key}{PATH_SEP}{field}");
                             self.observe_array_field(&mut stack, &path_key, field, arr, &child_key);
                         }
                     }
@@ -172,7 +172,7 @@ impl SchemaObserver {
 
     /// Merge all observations from `other` into `self`.
     /// Used after parallel Pass 1: each worker builds its own observer, then they are merged.
-    pub fn merge(&mut self, other: SchemaObserver) {
+    pub fn merge(&mut self, other: Self) {
         for (key, other_entry) in other.tables {
             if let Some(entry) = self.tables.get_mut(&key) {
                 entry.merge(other_entry);
@@ -182,7 +182,7 @@ impl SchemaObserver {
         }
     }
 
-    /// Iterate over columns that have anomalies: (table_path_key, col_original_name, TypeTracker).
+    /// Iterate over columns that have anomalies: (`table_path_key`, `col_original_name`, `TypeTracker`).
     /// Used after Pass 1 to feed the anomaly report.
     pub fn anomaly_iter(&self) -> impl Iterator<Item = (&str, &str, &TypeTracker)> {
         self.tables.values().flat_map(|entry| {
@@ -198,7 +198,7 @@ impl SchemaObserver {
 
     fn ensure_table_key(&mut self, key: &str, parent_key: &str, child_kind: Option<ChildKind>) {
         self.tables.entry(key.to_string()).or_insert_with(|| {
-            let path: Vec<String> = key.split(PATH_SEP).map(|s| s.to_string()).collect();
+            let path: Vec<String> = key.split(PATH_SEP).map(std::string::ToString::to_string).collect();
             TableEntry::new(path, parent_key.to_string(), child_kind)
         });
     }

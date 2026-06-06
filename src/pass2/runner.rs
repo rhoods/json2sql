@@ -1,9 +1,9 @@
-//! Pass 2 — data insertion: stream the JSON file a second time and write rows to PostgreSQL.
+//! Pass 2 — data insertion: stream the JSON file a second time and write rows to `PostgreSQL`.
 //!
 //! Execution is split into two phases:
 //! - **Phase A** (streaming): workers read the JSON in parallel and write COPY-format rows
 //!   to per-table temp files. Large sinks are snapshotted to disk to bound memory usage.
-//! - **Phase B** (COPY): all temp files are bulk-loaded into PostgreSQL via `COPY FROM STDIN`,
+//! - **Phase B** (COPY): all temp files are bulk-loaded into `PostgreSQL` via `COPY FROM STDIN`,
 //!   then PK and FK constraints are applied.
 //!
 //! The main entry point is [`run`], which requires a Tokio runtime and an open
@@ -50,7 +50,7 @@ pub struct Pass2Timing {
 impl Pass2Timing {
     #[allow(dead_code)]
     #[must_use]
-    pub fn total_ms(&self) -> u64 {
+    pub const fn total_ms(&self) -> u64 {
         self.streaming_ms + self.copy_ms
     }
 }
@@ -76,7 +76,7 @@ const PROGRESS_INTERVAL: u64 = 1_000;
 pub const PER_WORKER_FLUSH_THRESHOLD: u64 = 256 * 1024 * 1024; // 256 MiB
 
 /// Minimum bytes a sink must hold before it gets an interim COPY to PG.
-/// Sinks below this are force-spilled to disk (RAM freed) and COPYed in Phase B.
+/// Sinks below this are force-spilled to disk (RAM freed) and `COPYed` in Phase B.
 /// Prevents COPY overhead (~5 ms/table) on tables with very few rows.
 const MIN_SINK_COPY_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
 
@@ -114,14 +114,14 @@ struct WorkerConfig {
 }
 
 impl WorkerConfig {
-    fn new(
+    const fn new(
         pg_url: String,
         progress_tx: Option<ProgressTx>,
         copy_sem: Arc<tokio::sync::Semaphore>,
         worker_budget: u64,
         interim_copy_threshold: u64,
     ) -> Self {
-        WorkerConfig { pg_url, progress_tx, copy_sem, worker_budget, interim_copy_threshold }
+        Self { pg_url, progress_tx, copy_sem, worker_budget, interim_copy_threshold }
     }
 }
 
@@ -189,7 +189,7 @@ async fn run_worker(
 
     loop {
         let mut bytes = tokio::select! {
-            _ = cancel.cancelled() => break,
+            () = cancel.cancelled() => break,
             msg = rx.recv() => match msg { Some(b) => b, None => break },
         };
         let obj_len = bytes.len() as u64;
@@ -276,21 +276,21 @@ async fn phase_copy(
     shared_sinks: HashMap<String, Arc<Mutex<TempFileSink>>>,
     parallel: usize,
     pg_url: &str,
-    progress_tx: &Option<ProgressTx>,
+    progress_tx: Option<&ProgressTx>,
     interim_rows: HashMap<String, u64>,
 ) -> Result<HashMap<String, u64>> {
-    let mut all_sinks = unwrap_and_sort_sinks(shared_sinks);
+    let all_sinks = unwrap_and_sort_sinks(shared_sinks);
 
     let mut table_batches: Vec<Vec<(String, Vec<TempFileSink>)>> =
         (0..parallel).map(|_| Vec::new()).collect();
-    for (i, (table_name, sink)) in all_sinks.drain(..).enumerate() {
+    for (i, (table_name, sink)) in all_sinks.into_iter().enumerate() {
         table_batches[i % parallel].push((table_name, vec![sink]));
     }
 
     let mut copy_handles: Vec<CopyHandle> = Vec::with_capacity(parallel);
     for batch in table_batches {
         if batch.is_empty() { continue; }
-        copy_handles.push(tokio::task::spawn(copy_batch(batch, pg_url.to_string(), progress_tx.clone())));
+        copy_handles.push(tokio::task::spawn(copy_batch(batch, pg_url.to_string(), progress_tx.cloned())));
     }
 
     collect_copy_results(copy_handles, interim_rows).await
@@ -322,7 +322,7 @@ async fn preflight_warn_nonempty(
     schemas: &[crate::schema::table_schema::TableSchema],
     client: &Client,
     pg_schema: &str,
-    progress_tx: &Option<ProgressTx>,
+    progress_tx: Option<&ProgressTx>,
 ) {
     let mut nonempty: Vec<String> = Vec::new();
     for s in schemas.iter().filter(|s| s.is_root()) {
@@ -343,7 +343,7 @@ async fn preflight_warn_nonempty(
             nonempty.join(", ")
         );
         eprintln!("{msg}");
-        if let Some(ref tx) = progress_tx {
+        if let Some(tx) = progress_tx {
             let _ = tx.send(ProgressEvent::Pass2Log(msg));
         }
     }
@@ -351,21 +351,21 @@ async fn preflight_warn_nonempty(
 
 /// Send the final progress update and finish the progress bar after the dispatch loop.
 fn finalize_dispatch(
-    progress_tx: &Option<ProgressTx>,
-    progress: &Option<ProgressTracker>,
+    progress_tx: Option<&ProgressTx>,
+    progress: Option<&ProgressTracker>,
     rows_processed: u64,
     bytes_read: u64,
     total_bytes: u64,
 ) {
-    if let Some(ref tx) = progress_tx {
+    if let Some(tx) = progress_tx {
         if rows_processed > 0 && !rows_processed.is_multiple_of(PROGRESS_INTERVAL) {
             let _ = tx.send(ProgressEvent::Pass2Progress { rows_processed, bytes_read, total_bytes });
         }
     }
-    if let Some(ref bar) = progress { bar.finish(); }
+    if let Some(bar) = progress { bar.finish(); }
 }
 
-/// Emit per-table anomaly updates and the final Pass2Done event.
+/// Emit per-table anomaly updates and the final `Pass2Done` event.
 fn emit_completion_events(
     tx: &ProgressTx,
     anomalies: &AnomalyCollector,
@@ -383,13 +383,13 @@ fn emit_completion_events(
 }
 
 /// Log FK constraint warnings to stderr and the progress channel.
-fn log_constraint_warnings(warnings: &[crate::db::ddl::ConstraintWarning], progress_tx: &Option<ProgressTx>) {
+fn log_constraint_warnings(warnings: &[crate::db::ddl::ConstraintWarning], progress_tx: Option<&ProgressTx>) {
     if warnings.is_empty() { return; }
     eprintln!("WARNING: {} FK constraint(s) could not be applied after import:", warnings.len());
     for w in warnings {
         let msg = format!("FK warning — {} : {}", w.table, w.message);
         eprintln!("  {msg}");
-        if let Some(ref tx) = progress_tx {
+        if let Some(tx) = progress_tx {
             let _ = tx.send(ProgressEvent::Pass2Log(msg));
         }
     }
@@ -401,8 +401,8 @@ fn log_constraint_warnings(warnings: &[crate::db::ddl::ConstraintWarning], progr
 async fn dispatch_loop(
     reader: &mut JsonReader,
     senders: &[tokio::sync::mpsc::Sender<Vec<u8>>],
-    progress_tx: &Option<ProgressTx>,
-    progress: &Option<ProgressTracker>,
+    progress_tx: Option<&ProgressTx>,
+    progress: Option<&ProgressTracker>,
     limit: Option<u64>,
     total_bytes: u64,
 ) -> Result<(u64, bool)> {
@@ -422,11 +422,11 @@ async fn dispatch_loop(
                 break 'dispatch;
             }
             robin = (robin + 1) % parallel;
-            if let Some(ref bar) = progress {
+            if let Some(bar) = progress {
                 bar.inc_rows(1);
             }
             if rows_processed.is_multiple_of(PROGRESS_INTERVAL) {
-                if let Some(ref tx) = progress_tx {
+                if let Some(tx) = progress_tx {
                     let _ = tx.send(ProgressEvent::Pass2Progress {
                         rows_processed,
                         bytes_read: reader.bytes_read(),
@@ -485,7 +485,7 @@ async fn join_phase_a(
 }
 
 /// Run Pass 2: stream the file into per-worker temp-file buffers, COPY to
-/// PostgreSQL, then add PRIMARY KEY and FOREIGN KEY constraints.
+/// `PostgreSQL`, then add PRIMARY KEY and FOREIGN KEY constraints.
 ///
 /// **The caller is responsible for creating tables** (without constraints)
 /// via `db::ddl::create_tables_no_constraints()` before calling this function.
@@ -502,20 +502,20 @@ fn build_shared_sinks(
     schemas: &[TableSchema],
     pg_schema: &str,
     temp_dir: Option<&Path>,
-) -> Result<HashMap<String, Arc<Mutex<TempFileSink>>>> {
+) -> HashMap<String, Arc<Mutex<TempFileSink>>> {
     schemas
         .iter()
-        .map(|s| Ok((
+        .map(|s| (
             s.name.clone(),
-            Arc::new(Mutex::new(TempFileSink::new(s, pg_schema, temp_dir)?)),
-        )))
+            Arc::new(Mutex::new(TempFileSink::new(s, pg_schema, temp_dir))),
+        ))
         .collect()
 }
 
 /// Internal phases:
 ///   B — N workers (parallel ≥ 1) stream root objects round-robin into
 ///       per-table `TempFileSink` buffers. A dedicated flush task runs
-///       concurrently, COPYing sinks to PG (up to `parallel` simultaneous
+///       concurrently, `COPYing` sinks to PG (up to `parallel` simultaneous
 ///       connections) as they fill up and when workers finish.
 ///   D — `add_constraints()` adds PRIMARY KEY (fatal on error) then
 ///       FOREIGN KEY (failures become `constraint_warnings`).
@@ -545,7 +545,7 @@ pub async fn run(
     let (anomaly_tx, anomaly_writer_handle) = spawn_anomaly_writer(config.anomaly_dir.clone());
 
     let parallel = config.parallel.max(1);
-    preflight_warn_nonempty(schemas, client, &config.pg_schema, &progress_tx).await;
+    preflight_warn_nonempty(schemas, client, &config.pg_schema, progress_tx.as_ref()).await;
 
     let cancel = CancellationToken::new();
     let _cancel_guard = cancel.clone().drop_guard();
@@ -555,17 +555,18 @@ pub async fn run(
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
     let root_schema_arc: Arc<TableSchema> = Arc::new(root_schema.clone());
     let copy_sem: Arc<tokio::sync::Semaphore> = Arc::new(tokio::sync::Semaphore::new(parallel));
-    let shared_sinks = build_shared_sinks(schemas, &config.pg_schema, config.temp_dir.as_deref())?;
+    let shared_sinks = build_shared_sinks(schemas, &config.pg_schema, config.temp_dir.as_deref());
     let worker_cfg = WorkerConfig::new(pg_url.to_string(), progress_tx.clone(), copy_sem.clone(), worker_budget, interim_copy_threshold);
     let (senders, worker_handles) = spawn_pass2_workers(
-        parallel, &shared_sinks, &anomaly_tx, path_map_arc, root_schema_arc, cancel, worker_cfg,
+        parallel, &shared_sinks, &anomaly_tx, &path_map_arc, &root_schema_arc, &cancel, &worker_cfg,
     );
 
     let stream_start = Instant::now();
-    let (rows_processed, worker_died) = dispatch_loop(&mut reader, &senders, &progress_tx, &progress, config.limit, total_bytes).await?;
+    let (rows_processed, worker_died) = dispatch_loop(&mut reader, &senders, progress_tx.as_ref(), progress.as_ref(), config.limit, total_bytes).await?;
     drop(senders);
 
-    finalize_dispatch(&progress_tx, &progress, rows_processed, reader.bytes_read(), total_bytes);
+    finalize_dispatch(progress_tx.as_ref(), progress.as_ref(), rows_processed, reader.bytes_read(), total_bytes);
+    #[allow(clippy::cast_possible_truncation)]
     let streaming_ms = stream_start.elapsed().as_millis() as u64;
     eprintln!("Pass 2 streaming done ({parallel} workers). Flushing remaining rows to PostgreSQL...");
 
@@ -574,27 +575,28 @@ pub async fn run(
 
     // Phase B — COPY remaining data to PG.
     let copy_start = Instant::now();
-    let rows_per_table = phase_copy(shared_sinks, parallel, pg_url, &progress_tx, interim_rows).await?;
+    let rows_per_table = phase_copy(shared_sinks, parallel, pg_url, progress_tx.as_ref(), interim_rows).await?;
 
     // Phase D — Constraints: PK (fatal), FK (warnings).
     let constraint_warnings = add_constraints(pg_url, schemas, &config.pg_schema, parallel, progress_tx.as_ref()).await?;
-    log_constraint_warnings(&constraint_warnings, &progress_tx);
+    log_constraint_warnings(&constraint_warnings, progress_tx.as_ref());
 
-    build_pass2_result(merged_anomalies, rows_per_table, constraint_warnings, progress_tx, copy_start, streaming_ms)
+    build_pass2_result(merged_anomalies, rows_per_table, constraint_warnings, progress_tx.as_ref(), copy_start, streaming_ms)
 }
 
 fn build_pass2_result(
     mut merged_anomalies: AnomalyCollector,
     rows_per_table: HashMap<String, u64>,
     constraint_warnings: Vec<ConstraintWarning>,
-    progress_tx: Option<ProgressTx>,
+    progress_tx: Option<&ProgressTx>,
     copy_start: Instant,
     streaming_ms: u64,
 ) -> Result<Pass2Result> {
-    if let Some(ref tx) = progress_tx {
+    if let Some(tx) = progress_tx {
         emit_completion_events(tx, &merged_anomalies, &rows_per_table, &constraint_warnings);
     }
     merged_anomalies.finish()?;
+    #[allow(clippy::cast_possible_truncation)]
     let copy_ms = copy_start.elapsed().as_millis() as u64;
     eprintln!("Pass 2 timing: streaming={streaming_ms}ms, copy={copy_ms}ms, total={}ms", streaming_ms + copy_ms);
     Ok(Pass2Result {
@@ -611,10 +613,10 @@ fn spawn_pass2_workers(
     parallel: usize,
     shared_sinks: &HashMap<String, Arc<Mutex<TempFileSink>>>,
     anomaly_tx: &tokio::sync::mpsc::UnboundedSender<AnomalyEvent>,
-    path_map_arc: Arc<HashMap<String, TableSchema>>,
-    root_schema_arc: Arc<TableSchema>,
-    cancel: CancellationToken,
-    worker_cfg: WorkerConfig,
+    path_map_arc: &Arc<HashMap<String, TableSchema>>,
+    root_schema_arc: &Arc<TableSchema>,
+    cancel: &CancellationToken,
+    worker_cfg: &WorkerConfig,
 ) -> (Vec<tokio::sync::mpsc::Sender<Vec<u8>>>, Vec<WorkerHandle>) {
     const CHANNEL_CAP: usize = 256;
     let mut senders = Vec::with_capacity(parallel);

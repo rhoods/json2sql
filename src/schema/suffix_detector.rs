@@ -1,4 +1,5 @@
 //! Detects suffix structure in wide-table key sets for the `StructuredPivot` strategy.
+#![allow(clippy::cast_precision_loss)]
 //!
 //! Given keys like `energy`, `energy_100g`, `energy_unit`, identifies common suffixes
 //! (`_100g`, `_unit`) by frequency across distinct base prefixes, then groups keys by
@@ -19,7 +20,7 @@ const MIN_BASES: usize = 2;
 ///
 /// Algorithm:
 /// 1. For every key, enumerate all possible (base, suffix) splits on `_`.
-/// 2. A suffix is candidate if it appears with >= MIN_BASES distinct bases.
+/// 2. A suffix is candidate if it appears with >= `MIN_BASES` distinct bases.
 /// 3. Determine the base set = all strings that appear as a base in any candidate decomposition.
 /// 4. Compute coverage per suffix = |bases with this suffix| / |total base set|.
 /// 5. Retain suffixes with coverage >= `coverage_threshold`.
@@ -55,7 +56,7 @@ pub fn detect_suffix_schema(
     coverage_threshold: f64,
     _text_threshold: u32,
 ) -> Option<SuffixSchema> {
-    let all_keys: Vec<&str> = columns.keys().map(|s| s.as_str()).collect();
+    let all_keys: Vec<&str> = columns.keys().map(std::string::String::as_str).collect();
     let key_set: HashSet<&str> = all_keys.iter().copied().collect();
 
     let suffix_to_bases = build_suffix_to_bases(&all_keys);
@@ -124,7 +125,7 @@ fn build_suffix_cols_and_value_type(
     for (suffix, bases) in retained {
         let pg_type = bases
             .iter()
-            .filter_map(|base| columns.get(format!("{}{}", base, suffix).as_str()))
+            .filter_map(|base| columns.get(format!("{base}{suffix}").as_str()))
             .fold(None::<PgType>, |acc, tracker| {
                 let t = tracker.to_pg_type();
                 Some(match acc { None => t, Some(a) => widen_pg_types(a, &t) })
@@ -148,7 +149,7 @@ fn build_suffix_cols_and_value_type(
     (suffix_cols, value_type)
 }
 
-/// Build a SuffixSchema from an explicit list of suffix strings.
+/// Build a `SuffixSchema` from an explicit list of suffix strings.
 fn build_suffix_column(raw_suffix: &str, columns: &IndexMap<String, TypeTracker>) -> SuffixColumn {
     let suffix = if raw_suffix.starts_with('_') {
         raw_suffix.to_string()
@@ -184,7 +185,7 @@ pub fn build_suffix_schema_from_list(
         .collect();
 
     // Base value type from bare keys (keys not ending with any declared suffix)
-    let suffix_strs: HashSet<&str> = suffix_list.iter().map(|s| s.as_str()).collect();
+    let suffix_strs: HashSet<&str> = suffix_list.iter().map(std::string::String::as_str).collect();
     let value_type = columns
         .iter()
         .filter(|(key, _)| !suffix_strs.iter().any(|s| key.ends_with(*s)))

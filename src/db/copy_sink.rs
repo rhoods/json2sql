@@ -1,4 +1,4 @@
-//! Sink PostgreSQL COPY — buffer disque et construction de lignes CSV.
+//! Sink `PostgreSQL` COPY — buffer disque et construction de lignes CSV.
 //!
 //! Un *sink* est la destination finale dans le pipeline d'import (source → transform → sink).
 //! `TempFileSink` accumule les lignes CSV dans un fichier temporaire (spill à 4 MiB),
@@ -18,17 +18,9 @@ use tokio_postgres::Client;
 use uuid::Uuid;
 
 use crate::db::copy_text::CopyEscaped;
+use crate::db::error::pg_err;
 use crate::error::{J2sError, Result};
 use crate::schema::table_schema::TableSchema;
-
-fn pg_err(context: &str, e: tokio_postgres::Error) -> J2sError {
-    let detail = if let Some(db) = e.as_db_error() {
-        format!("{} (code: {})", db.message(), db.code().code())
-    } else {
-        e.to_string()
-    };
-    J2sError::DbContext(format!("{}: {}", context, detail))
-}
 
 async fn send_copy_data(
     client: &Client,
@@ -40,27 +32,27 @@ async fn send_copy_data(
     let sink = client
         .copy_in::<_, Bytes>(copy_sql)
         .await
-        .map_err(|e| pg_err(&format!("COPY INTO {}", table_name), e))?;
+        .map_err(|e| pg_err(&format!("COPY INTO {table_name}"), &e))?;
     let mut pinned = Box::pin(sink);
     for chunk in file_data.chunks(1024 * 1024) {
         pinned.send(Bytes::copy_from_slice(chunk))
             .await
-            .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+            .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
     }
     for chunk in pending.chunks(1024 * 1024) {
         pinned.send(Bytes::copy_from_slice(chunk))
             .await
-            .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+            .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
     }
-    pinned.close().await.map_err(|e| pg_err(&format!("COPY close {}", table_name), e))
+    pinned.close().await.map_err(|e| pg_err(&format!("COPY close {table_name}"), &e))
 }
 
-/// NULL representation in PostgreSQL COPY text format.
+/// NULL representation in `PostgreSQL` COPY text format.
 pub const COPY_NULL: &str = "\\N";
 /// Column delimiter in COPY text format.
 pub const COPY_DELIMITER: u8 = b'\t';
 /// Row data accumulates in memory up to this size before being spilled to disk.
-/// Large batches amortize the syscall overhead of write() and open()/close().
+/// Large batches amortize the syscall overhead of `write()` and `open()/close()`.
 const SPILL_THRESHOLD: usize = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -158,7 +150,7 @@ pub struct FlushSnapshot {
     pub table_name: String,
 }
 
-/// Copy the data in `snap` to PostgreSQL, then delete the spill file.
+/// Copy the data in `snap` to `PostgreSQL`, then delete the spill file.
 /// Returns the number of rows sent (= `snap.row_count`).
 pub async fn copy_snapshot_to_pg(snap: FlushSnapshot, client: &Client) -> Result<u64> {
     let FlushSnapshot { copy_sql, file_path, pending, row_count, table_name } = snap;
@@ -182,7 +174,7 @@ pub async fn copy_snapshot_to_pg(snap: FlushSnapshot, client: &Client) -> Result
 // TempFileSink
 // ---------------------------------------------------------------------------
 
-/// Buffers rows for one table during Pass 2, then COPYs them to PostgreSQL.
+/// Buffers rows for one table during Pass 2, then COPYs them to `PostgreSQL`.
 ///
 /// # Memory vs. disk buffering
 ///
@@ -197,7 +189,7 @@ pub async fn copy_snapshot_to_pg(snap: FlushSnapshot, client: &Client) -> Result
 /// reopened on the next spill. This makes hibernation cheap — just a
 /// `close()` syscall — regardless of how many rows are buffered.
 ///
-/// This design avoids flushing small BufWriter buffers on every insert, which
+/// This design avoids flushing small `BufWriter` buffers on every insert, which
 /// was the bottleneck in the previous implementation.
 pub struct TempFileSink {
     pub table_name: String,
@@ -209,20 +201,20 @@ pub struct TempFileSink {
     /// when to trigger an interim COPY to bound per-worker disk usage.
     pub bytes_buffered: u64,
     /// In-memory row data. Survives hibernation. Spilled to disk when it grows
-    /// past SPILL_THRESHOLD.
+    /// past `SPILL_THRESHOLD`.
     pending: Vec<u8>,
     /// Raw file descriptor. Open only while a spill is in progress.
     /// None = FD released (hibernated or no spill yet).
     writer: Option<File>,
     /// Keeps the temp file alive between spills. None until the first spill.
     temp_file: Option<TempFilePath>,
-    /// Directory for the spill temp file. None = system default (std::env::temp_dir()).
+    /// Directory for the spill temp file. None = system default (`std::env::temp_dir()`).
     temp_dir: Option<PathBuf>,
     copy_sql: String,
 }
 
 impl TempFileSink {
-    pub fn new(schema: &TableSchema, pg_schema: &str, temp_dir: Option<&Path>) -> Result<Self> {
+    pub fn new(schema: &TableSchema, pg_schema: &str, temp_dir: Option<&Path>) -> Self {
         let col_names: Vec<String> = schema
             .columns
             .iter()
@@ -236,7 +228,7 @@ impl TempFileSink {
             col_names.join(", ")
         );
 
-        Ok(Self {
+        Self {
             table_name: schema.name.clone(),
             row_count: 0,
             total_flushed: 0,
@@ -244,16 +236,16 @@ impl TempFileSink {
             pending: Vec::new(),
             writer: None,
             temp_file: None,
-            temp_dir: temp_dir.map(|p| p.to_path_buf()),
+            temp_dir: temp_dir.map(std::path::Path::to_path_buf),
             copy_sql,
-        })
+        }
     }
 
     /// Returns true when a temp-file FD is currently held open (i.e. a spill
     /// is in progress or has just completed and hibernate has not been called).
     #[allow(dead_code)] // public API — not yet used in binary, available for future callers
     #[must_use]
-    pub fn is_open(&self) -> bool {
+    pub const fn is_open(&self) -> bool {
         self.writer.is_some()
     }
 
@@ -263,9 +255,8 @@ impl TempFileSink {
     ///
     /// No-op when no FD is held.
     #[allow(dead_code)] // public API — not yet used in binary, available for future callers
-    pub fn hibernate(&mut self) -> Result<()> {
+    pub fn hibernate(&mut self) {
         self.writer = None; // drop File → close FD; pending stays in memory
-        Ok(())
     }
 
     /// Open (or reopen) the temp file for appending.
@@ -328,7 +319,7 @@ impl TempFileSink {
         self.writer = None; // close FD if open (auto-hibernate may have done this already)
         let snap = FlushSnapshot {
             copy_sql: self.copy_sql.clone(),
-            file_path: self.temp_file.take().map(|p| p.into_path_no_delete()),
+            file_path: self.temp_file.take().map(TempFilePath::into_path_no_delete),
             pending: std::mem::take(&mut self.pending),
             row_count: self.row_count,
             table_name: self.table_name.clone(),
@@ -338,15 +329,15 @@ impl TempFileSink {
         Some(snap)
     }
 
-    /// Record that `rows` were successfully COPYed to PG by a background task.
+    /// Record that `rows` were successfully `COPYed` to PG by a background task.
     /// Must be called after [`copy_snapshot_to_pg`] succeeds.
-    pub fn apply_flush(&mut self, rows: u64) {
+    pub const fn apply_flush(&mut self, rows: u64) {
         self.total_flushed += rows;
     }
 
-    pub fn write_row(&mut self, row: Vec<u8>) -> Result<()> {
+    pub fn write_row(&mut self, row: &[u8]) -> Result<()> {
         self.bytes_buffered += row.len() as u64;
-        self.pending.extend_from_slice(&row);
+        self.pending.extend_from_slice(row);
         self.row_count += 1;
         if self.pending.len() >= SPILL_THRESHOLD {
             self.spill()?;
@@ -354,7 +345,7 @@ impl TempFileSink {
         Ok(())
     }
 
-    /// Send all buffered rows to PostgreSQL, then reset the sink for reuse.
+    /// Send all buffered rows to `PostgreSQL`, then reset the sink for reuse.
     /// Data may be split between the temp file (previous spills) and `pending`
     /// (rows accumulated since the last spill).
     #[allow(dead_code)]
@@ -394,12 +385,12 @@ impl TempFileSink {
         Ok(flushed)
     }
 
-    /// Flush all remaining rows to PostgreSQL.
+    /// Flush all remaining rows to `PostgreSQL`.
     /// Returns total rows sent (periodic flushes + this final call).
     #[allow(dead_code)]
     pub async fn copy_to_db(self, client: &Client) -> Result<u64> {
         // Destructure — TempFileSink has no Drop; TempFilePath (in temp_file) does.
-        let TempFileSink {
+        let Self {
             row_count,
             total_flushed,
             bytes_buffered: _,
@@ -436,8 +427,8 @@ impl TempFileSink {
     }
 }
 
-/// Send all buffered rows from multiple sinks to PostgreSQL in a single COPY
-/// session. All sinks must target the same table (same copy_sql / schema).
+/// Send all buffered rows from multiple sinks to `PostgreSQL` in a single COPY
+/// session. All sinks must target the same table (same `copy_sql` / schema).
 ///
 /// Reduces COPY overhead for tables whose rows are split across many workers:
 /// instead of N small COPYs, one COPY streams data from all N sinks in sequence.
@@ -456,13 +447,13 @@ async fn stream_sink_to_copy(
             let n = file.read(&mut buf).await.map_err(J2sError::Io)?;
             if n == 0 { break; }
             pinned.send(Bytes::copy_from_slice(&buf[..n])).await
-                .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+                .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
         }
     }
     drop(temp_file);
     for chunk in pending.chunks(1024 * 1024) {
         pinned.send(Bytes::copy_from_slice(chunk)).await
-            .map_err(|e| pg_err(&format!("COPY send {}", table_name), e))?;
+            .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
     }
     Ok(())
 }
@@ -479,12 +470,12 @@ pub async fn merge_copy_to_db(sinks: Vec<TempFileSink>, client: &Client) -> Resu
     let copy_sql = first.copy_sql.clone();
     let table_name = first.table_name.clone();
     let sink = client.copy_in::<_, Bytes>(&copy_sql).await
-        .map_err(|e| pg_err(&format!("COPY INTO {}", table_name), e))?;
+        .map_err(|e| pg_err(&format!("COPY INTO {table_name}"), &e))?;
     let mut pinned = Box::pin(sink);
     for s in sinks {
         stream_sink_to_copy(&mut pinned, s, &table_name).await?;
     }
-    pinned.close().await.map_err(|e| pg_err(&format!("COPY close {}", table_name), e))?;
+    pinned.close().await.map_err(|e| pg_err(&format!("COPY close {table_name}"), &e))?;
     Ok(total_rows)
 }
 
@@ -504,7 +495,7 @@ mod tests {
             is_generated: false,
             is_parent_fk: false,
         });
-        TempFileSink::new(&schema, "public", None).unwrap()
+        TempFileSink::new(&schema, "public", None)
     }
 
     /// Returns true if any /proc/self/fd/N symlink resolves to `path`.
@@ -521,7 +512,7 @@ mod tests {
     #[test]
     fn no_fd_below_spill_threshold() {
         let mut sink = make_sink();
-        sink.write_row(b"row\n".to_vec()).unwrap();
+        sink.write_row(b"row\n").unwrap();
         assert!(!sink.is_open(), "no FD should be opened below spill threshold");
         assert!(sink.temp_file.is_none(), "no temp file should be created below threshold");
     }
@@ -532,10 +523,10 @@ mod tests {
     fn write_after_hibernate_appends() {
         let mut sink = make_sink();
 
-        sink.write_row(b"row1\n".to_vec()).unwrap();
-        sink.hibernate().unwrap();
-        sink.write_row(b"row2\n".to_vec()).unwrap();
-        sink.hibernate().unwrap();
+        sink.write_row(b"row1\n").unwrap();
+        sink.hibernate();
+        sink.write_row(b"row2\n").unwrap();
+        sink.hibernate();
 
         assert_eq!(sink.row_count, 2);
         assert_eq!(&sink.pending, b"row1\nrow2\n");
@@ -549,7 +540,7 @@ mod tests {
     fn spill_auto_hibernates_fd() {
         let mut sink = make_sink();
         let row = vec![b'x'; SPILL_THRESHOLD + 1];
-        sink.write_row(row).unwrap();
+        sink.write_row(&row).unwrap();
 
         let path = sink.temp_file.as_ref().unwrap().0.clone();
         // After spill, FD must already be closed — no hibernate() needed.
@@ -565,12 +556,12 @@ mod tests {
 
         let row1 = b"hello\n".to_vec();
         let len1 = row1.len() as u64;
-        sink.write_row(row1).unwrap();
+        sink.write_row(&row1).unwrap();
         assert_eq!(sink.bytes_buffered, len1);
 
         let row2 = b"world\n".to_vec();
         let len2 = row2.len() as u64;
-        sink.write_row(row2).unwrap();
+        sink.write_row(&row2).unwrap();
         assert_eq!(sink.bytes_buffered, len1 + len2);
     }
 
@@ -579,7 +570,7 @@ mod tests {
         let mut sink = make_sink();
         let large_row = vec![b'x'; SPILL_THRESHOLD + 1];
         let expected = large_row.len() as u64;
-        sink.write_row(large_row).unwrap();
+        sink.write_row(&large_row).unwrap();
         assert!(!sink.is_open(), "FD must be closed immediately after auto-hibernate spill");
         assert!(sink.temp_file.is_some(), "temp file must exist after spill");
         assert_eq!(sink.bytes_buffered, expected, "bytes_buffered must reflect spilled data");
@@ -593,11 +584,11 @@ mod tests {
     #[test]
     fn merge_total_rows_sum_is_correct() {
         let mut s1 = make_sink();
-        s1.write_row(b"row1\n".to_vec()).unwrap();
-        s1.write_row(b"row2\n".to_vec()).unwrap();
+        s1.write_row(b"row1\n").unwrap();
+        s1.write_row(b"row2\n").unwrap();
 
         let mut s2 = make_sink();
-        s2.write_row(b"row3\n".to_vec()).unwrap();
+        s2.write_row(b"row3\n").unwrap();
 
         let total: u64 = [&s1, &s2].iter().map(|s| s.total_flushed + s.row_count).sum();
         assert_eq!(total, 3);
@@ -618,11 +609,11 @@ mod tests {
     #[test]
     fn merge_pending_bytes_preserved_across_sinks() {
         let mut s1 = make_sink();
-        s1.write_row(b"abc\n".to_vec()).unwrap();
+        s1.write_row(b"abc\n").unwrap();
 
         let mut s2 = make_sink();
-        s2.write_row(b"def\n".to_vec()).unwrap();
-        s2.write_row(b"ghi\n".to_vec()).unwrap();
+        s2.write_row(b"def\n").unwrap();
+        s2.write_row(b"ghi\n").unwrap();
 
         assert_eq!(&s1.pending, b"abc\n");
         assert_eq!(&s2.pending, b"def\nghi\n");
@@ -637,10 +628,10 @@ mod tests {
         let mut sink = make_sink();
 
         let row = vec![b'y'; SPILL_THRESHOLD + 1];
-        sink.write_row(row).unwrap();
+        sink.write_row(&row).unwrap();
         assert!(!sink.is_open(), "spill must auto-hibernate — no explicit call needed");
 
-        sink.hibernate().unwrap();
+        sink.hibernate();
         assert!(!sink.is_open(), "hibernate after auto-hibernate must remain false");
     }
 
@@ -662,7 +653,7 @@ mod tests {
     #[test]
     fn force_spill_below_threshold_clears_pending() {
         let mut sink = make_sink();
-        sink.write_row(b"row\n".to_vec()).unwrap();
+        sink.write_row(b"row\n").unwrap();
         assert!(!sink.pending.is_empty(), "pending must hold data before force_spill");
 
         sink.force_spill().unwrap();
@@ -678,7 +669,7 @@ mod tests {
         let mut sink = make_sink();
         let row = b"hello\n".to_vec();
         let expected = row.len() as u64;
-        sink.write_row(row).unwrap();
+        sink.write_row(&row).unwrap();
         sink.force_spill().unwrap();
         assert_eq!(sink.bytes_buffered, expected);
     }
@@ -688,10 +679,10 @@ mod tests {
     #[test]
     fn force_spill_then_hibernate_releases_fd() {
         let mut sink = make_sink();
-        sink.write_row(b"row\n".to_vec()).unwrap();
+        sink.write_row(b"row\n").unwrap();
         sink.force_spill().unwrap();
         assert!(!sink.is_open(), "force_spill must auto-hibernate the FD");
-        sink.hibernate().unwrap();
+        sink.hibernate();
         assert!(!sink.is_open());
         assert!(sink.pending.is_empty());
     }
@@ -705,16 +696,16 @@ mod tests {
     #[test]
     fn force_spill_propagates_io_error_on_deleted_temp_file() {
         let mut sink = make_sink();
-        sink.write_row(b"row\n".to_vec()).unwrap();
+        sink.write_row(b"row\n").unwrap();
         sink.force_spill().unwrap(); // creates temp file, FD open
-        sink.hibernate().unwrap();   // close FD so the next open attempt hits the path
+        sink.hibernate();   // close FD so the next open attempt hits the path
 
         // Delete the temp file externally to simulate an IO failure.
         let path = sink.temp_file.as_ref().unwrap().0.clone();
         std::fs::remove_file(&path).unwrap();
 
         // Write a second row so pending is non-empty again.
-        sink.write_row(b"row2\n".to_vec()).unwrap();
+        sink.write_row(b"row2\n").unwrap();
 
         // force_spill must fail: FD is closed, file is gone → OpenOptions::open → NotFound.
         let result = sink.force_spill();
@@ -752,7 +743,7 @@ mod tests {
     #[test]
     fn temp_dir_none_uses_system_temp() {
         let mut sink = make_sink();
-        sink.write_row(vec![b'x'; SPILL_THRESHOLD + 1]).unwrap();
+        sink.write_row(&vec![b'x'; SPILL_THRESHOLD + 1]).unwrap();
         let path = sink.temp_file.as_ref().unwrap().0.clone();
         assert!(
             path.starts_with(std::env::temp_dir()),
@@ -775,8 +766,8 @@ mod tests {
             is_generated: false,
             is_parent_fk: false,
         });
-        let mut sink = TempFileSink::new(&schema, "public", Some(dir.path())).unwrap();
-        sink.write_row(vec![b'x'; SPILL_THRESHOLD + 1]).unwrap();
+        let mut sink = TempFileSink::new(&schema, "public", Some(dir.path()));
+        sink.write_row(&vec![b'x'; SPILL_THRESHOLD + 1]).unwrap();
         let path = sink.temp_file.as_ref().unwrap().0.clone();
         assert!(
             path.starts_with(dir.path()),
@@ -791,8 +782,8 @@ mod tests {
     #[test]
     fn take_flush_snapshot_resets_sink_and_preserves_data() {
         let mut sink = make_sink();
-        sink.write_row(b"row1\n".to_vec()).unwrap();
-        sink.write_row(b"row2\n".to_vec()).unwrap();
+        sink.write_row(b"row1\n").unwrap();
+        sink.write_row(b"row2\n").unwrap();
         let expected_bytes = b"row1\nrow2\n".len();
 
         let snap = sink.take_flush_snapshot().unwrap();
@@ -810,7 +801,7 @@ mod tests {
         assert_eq!(sink.total_flushed, 2);
 
         // New writes go to a fresh file
-        sink.write_row(b"row3\n".to_vec()).unwrap();
+        sink.write_row(b"row3\n").unwrap();
         assert_eq!(sink.row_count, 1);
         assert_eq!(sink.bytes_buffered, b"row3\n".len() as u64);
         let _ = expected_bytes; // suppress unused warning
@@ -821,12 +812,12 @@ mod tests {
     fn take_flush_snapshot_with_spilled_data_uses_new_file() {
         let mut sink = make_sink();
         // Force a spill
-        sink.write_row(vec![b'x'; SPILL_THRESHOLD + 1]).unwrap();
+        sink.write_row(&vec![b'x'; SPILL_THRESHOLD + 1]).unwrap();
         assert!(sink.temp_file.is_some(), "spill must have created temp file");
         let old_path = sink.temp_file.as_ref().unwrap().0.clone();
 
         // Write one more small row (stays in pending)
-        sink.write_row(b"small\n".to_vec()).unwrap();
+        sink.write_row(b"small\n").unwrap();
 
         let snap = sink.take_flush_snapshot().unwrap();
         assert_eq!(snap.file_path, Some(old_path.clone()), "snapshot gets old file path");
@@ -834,7 +825,7 @@ mod tests {
         assert!(sink.temp_file.is_none(), "sink no longer owns the file");
 
         // New spill creates a different file
-        sink.write_row(vec![b'y'; SPILL_THRESHOLD + 1]).unwrap();
+        sink.write_row(&vec![b'y'; SPILL_THRESHOLD + 1]).unwrap();
         let new_path = sink.temp_file.as_ref().unwrap().0.clone();
         assert_ne!(new_path, old_path, "new writes use a different temp file");
 

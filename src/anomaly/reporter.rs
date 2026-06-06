@@ -36,7 +36,7 @@ pub fn write_report(
             eprintln!("Anomaly summary report written to: {}", path.display());
         }
         None => {
-            print!("{}", content);
+            print!("{content}");
         }
     }
 
@@ -56,8 +56,8 @@ fn write_summary_row(
     wtr: &mut csv::Writer<Vec<u8>>,
     s: &super::collector::AnomalySummary,
 ) -> Result<()> {
-    let example_val = s.examples.first().map(|e| e.actual_value.as_str()).unwrap_or("");
-    let example_type = s.examples.first().map(|e| e.actual_type.as_str()).unwrap_or("");
+    let example_val = s.examples.first().map_or("", |e| e.actual_value.as_str());
+    let example_type = s.examples.first().map_or("", |e| e.actual_type.as_str());
     wtr.write_record([
         &s.table, &s.column, &s.expected_type,
         &s.anomaly_count.to_string(), &s.total_rows.to_string(),

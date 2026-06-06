@@ -1,4 +1,5 @@
 //! Anomaly collection during Pass 2: gathers type coercion failures and dropped keys.
+#![allow(clippy::cast_precision_loss)]
 //!
 //! [`AnomalyCollector`] is the central aggregator; workers communicate with it via
 //! [`AnomalyProxy`] (a channel-based handle). Per-table NDJSON anomaly files are written
@@ -59,7 +60,7 @@ pub struct AnomalyProxy {
 
 impl AnomalyProxy {
     #[must_use]
-    pub fn new(tx: UnboundedSender<AnomalyEvent>) -> Self {
+    pub const fn new(tx: UnboundedSender<AnomalyEvent>) -> Self {
         Self { tx }
     }
 }
@@ -130,7 +131,7 @@ pub struct AnomalySummary {
     pub anomaly_count: u64,
     pub total_rows: u64,
     pub anomaly_rate: f64,
-    /// Up to MAX_EXAMPLES representative anomaly entries.
+    /// Up to `MAX_EXAMPLES` representative anomaly entries.
     pub examples: Vec<AnomalyExample>,
 }
 
@@ -149,13 +150,13 @@ pub struct AnomalySummary {
 ///
 /// Tables with zero anomalies produce no file.
 pub struct AnomalyCollector {
-    /// Per-(table, col) stats: count + capped examples + expected_type.
+    /// Per-(table, col) stats: count + capped examples + `expected_type`.
     stats: HashMap<(String, String), ColAnomalyStat>,
     /// Per-table total row counts (denominator for anomaly rate).
     totals: HashMap<String, u64>,
     /// Fast total anomaly counter (avoids summing stats values each time).
     total_count: u64,
-    /// Lazy-created streaming writers: table_name → writer.
+    /// Lazy-created streaming writers: `table_name` → writer.
     writers: HashMap<String, BufWriter<File>>,
     /// Directory for per-table NDJSON files. None = no file streaming.
     anomaly_dir: Option<PathBuf>,
@@ -174,7 +175,7 @@ impl std::fmt::Debug for AnomalyCollector {
             .field("anomaly_dir", &self.anomaly_dir)
             .field("open_writers", &self.writers.len())
             .field("finished", &self.finished)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -277,7 +278,7 @@ impl AnomalyCollector {
         let dir = self.anomaly_dir.as_ref().expect("called only when anomaly_dir is Some");
         if !self.writers.contains_key(table) {
             let safe_name = sanitize_table_name(table);
-            let path = dir.join(format!("{}_anomalies.ndjson", safe_name));
+            let path = dir.join(format!("{safe_name}_anomalies.ndjson"));
             let file = File::create(&path).map_err(J2sError::Io)?;
             self.writers.insert(table.to_string(), BufWriter::new(file));
             self.written_files.insert(table.to_string(), path);
@@ -303,11 +304,11 @@ impl AnomalyCollector {
 
     /// Total anomaly count across all tables (O(1)).
     #[must_use]
-    pub fn total_anomalies(&self) -> u64 {
+    pub const fn total_anomalies(&self) -> u64 {
         self.total_count
     }
 
-    /// Per-table anomaly totals (sum across all columns). O(n_columns).
+    /// Per-table anomaly totals (sum across all columns). `O(n_columns)`.
     #[must_use]
     pub fn per_table_anomaly_counts(&self) -> HashMap<String, u64> {
         let mut out: HashMap<String, u64> = HashMap::new();
@@ -318,7 +319,7 @@ impl AnomalyCollector {
     }
 
     /// Per-(table, column) summaries including capped examples.
-    /// O(n_columns) — not O(n_anomalies).
+    /// `O(n_columns)` — not `O(n_anomalies)`.
     #[must_use]
     pub fn summaries(&self) -> Vec<AnomalySummary> {
         self.stats
@@ -376,7 +377,7 @@ impl AnomalyCollector {
     /// Paths of NDJSON files produced so far (one per table with anomalies).
     #[allow(dead_code)]
     #[must_use]
-    pub fn written_paths(&self) -> &HashMap<String, PathBuf> {
+    pub const fn written_paths(&self) -> &HashMap<String, PathBuf> {
         &self.written_files
     }
 }

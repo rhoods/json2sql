@@ -17,11 +17,9 @@ pub mod scoring;
 pub mod detection;
 pub mod merge;
 
-pub use scoring::{child_compatibility_score, pairwise_jaccard_min};
-pub(crate) use detection::finalize_cascading;
-pub use merge::{build_keyed_pivot_from_siblings, MergeError, MergeResult};
+pub use detection::finalize_cascading;
+pub use merge::{build_keyed_pivot_from_siblings, MergeError};
+pub use scoring::pairwise_jaccard_min;
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
+#[cfg(test)]
+pub use scoring::child_compatibility_score;

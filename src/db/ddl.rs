@@ -2,7 +2,7 @@
 //!
 //! Pure generation functions (`generate_*`) return owned `String` values with no I/O.
 //! [`add_constraints`] is the async entry point that executes `ALTER TABLE` statements
-//! against PostgreSQL after the COPY phase of Pass 2 completes.
+//! against `PostgreSQL` after the COPY phase of Pass 2 completes.
 //!
 //! [`generate_ddl_preview`] is used by the IHM to show the user what SQL will be executed
 //! before they confirm Pass 2.
@@ -14,6 +14,7 @@ use std::sync::atomic::AtomicUsize;
 use futures_util::future::try_join_all;
 use tokio_postgres::Client;
 
+use crate::db::error::pg_err;
 use crate::error::{J2sError, Result};
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::schema::table_schema::TableSchema;
@@ -22,15 +23,6 @@ fn emit(tx: Option<&ProgressTx>, event: ProgressEvent) {
     if let Some(t) = tx {
         let _ = t.send(event);
     }
-}
-
-fn pg_err(context: &str, e: tokio_postgres::Error) -> J2sError {
-    let detail = if let Some(db) = e.as_db_error() {
-        format!("{} (code: {})", db.message(), db.code().code())
-    } else {
-        e.to_string()
-    };
-    J2sError::DbContext(format!("{}: {}", context, detail))
 }
 
 
@@ -101,8 +93,7 @@ pub fn generate_add_fk_sql(schema: &TableSchema, pg_schema: &str) -> Option<Stri
         .columns
         .iter()
         .find(|c| c.is_parent_fk)
-        .map(|c| c.name.as_str())
-        .unwrap_or("j2s_parent_id");
+        .map_or("j2s_parent_id", |c| c.name.as_str());
     Some(format!(
         "ALTER TABLE {schema_q}.{table_q} \
          ADD CONSTRAINT {constraint_q} \
@@ -118,7 +109,7 @@ pub fn generate_add_fk_sql(schema: &TableSchema, pg_schema: &str) -> Option<Stri
 
 const DDL_BATCH_SIZE: usize = 50;
 
-/// Build a single SQL string that DROPs all schemas in one batch_execute call.
+/// Build a single SQL string that DROPs all schemas in one `batch_execute` call.
 fn build_batch_drop_sql(schemas: &[TableSchema], pg_schema: &str) -> String {
     schemas.iter()
         .map(|s| format!(
@@ -130,7 +121,7 @@ fn build_batch_drop_sql(schemas: &[TableSchema], pg_schema: &str) -> String {
         .join(";\n")
 }
 
-/// Build a single SQL string that CREATEs all schemas in one batch_execute call.
+/// Build a single SQL string that CREATEs all schemas in one `batch_execute` call.
 fn build_batch_create_sql(schemas: &[TableSchema], pg_schema: &str) -> String {
     schemas.iter()
         .map(|s| generate_create_table_no_constraints(s, pg_schema))
@@ -154,14 +145,14 @@ pub async fn create_tables_no_constraints(
     if drop_existing && !schemas.is_empty() {
         let drop_sql = build_batch_drop_sql(schemas, pg_schema);
         client.batch_execute(&drop_sql).await
-            .map_err(|e| pg_err("DROP TABLE batch", e))?;
+            .map_err(|e| pg_err("DROP TABLE batch", &e))?;
     }
 
     let mut done = 0usize;
     for chunk in schemas.chunks(DDL_BATCH_SIZE) {
         let create_sql = build_batch_create_sql(chunk, pg_schema);
         client.batch_execute(&create_sql).await
-            .map_err(|e| pg_err("CREATE TABLE batch", e))?;
+            .map_err(|e| pg_err("CREATE TABLE batch", &e))?;
         done += chunk.len();
         emit(progress_tx, ProgressEvent::DdlProgress { done, total });
     }
@@ -186,7 +177,7 @@ pub enum ConstraintKind {
     ForeignKey,
 }
 
-/// Group schemas by depth level (BTreeMap preserves ascending order → parents before children).
+/// Group schemas by depth level (`BTreeMap` preserves ascending order → parents before children).
 fn group_schemas_by_depth(schemas: &[TableSchema]) -> BTreeMap<usize, Vec<&TableSchema>> {
     let mut map: BTreeMap<usize, Vec<&TableSchema>> = BTreeMap::new();
     for schema in schemas {
@@ -195,7 +186,7 @@ fn group_schemas_by_depth(schemas: &[TableSchema]) -> BTreeMap<usize, Vec<&Table
     map
 }
 
-/// Pre-built work item for one table's constraints: (table_name, pk_sql, fk_sql_opt).
+/// Pre-built work item for one table's constraints: (`table_name`, `pk_sql`, `fk_sql_opt`).
 type ConstraintWork = (String, String, Option<String>);
 
 /// Add PRIMARY KEY + FOREIGN KEY constraints after data has been loaded.
@@ -217,13 +208,13 @@ async fn apply_constraints_chunk(
     let mut warnings: Vec<ConstraintWarning> = Vec::new();
     for (table_name, pk_sql, fk_sql_opt) in &chunk {
         client.execute(pk_sql.as_str(), &[]).await
-            .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {table_name}"), e))?;
-        constraint_progress(&done, total, &ptx);
+            .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {table_name}"), &e))?;
+        constraint_progress(&done, total, ptx.as_ref());
         if let Some(fk_sql) = fk_sql_opt {
             if let Err(e) = client.execute(fk_sql.as_str(), &[]).await {
-                warnings.push(to_fk_warning(e, table_name));
+                warnings.push(to_fk_warning(&e, table_name));
             }
-            constraint_progress(&done, total, &ptx);
+            constraint_progress(&done, total, ptx.as_ref());
         }
     }
     Ok(warnings)
@@ -283,19 +274,18 @@ pub async fn add_constraints(
     Ok(all_warnings)
 }
 
-fn constraint_progress(done: &std::sync::atomic::AtomicUsize, total: usize, ptx: &Option<ProgressTx>) {
+fn constraint_progress(done: &std::sync::atomic::AtomicUsize, total: usize, ptx: Option<&ProgressTx>) {
     let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    if let Some(ref t) = ptx {
+    if let Some(t) = ptx {
         let _ = t.send(ProgressEvent::ConstraintsProgress { done: d, total });
     }
 }
 
-fn to_fk_warning(e: tokio_postgres::Error, table: &str) -> ConstraintWarning {
-    let detail = if let Some(db) = e.as_db_error() {
-        format!("{} (code: {})", db.message(), db.code().code())
-    } else {
-        e.to_string()
-    };
+fn to_fk_warning(e: &tokio_postgres::Error, table: &str) -> ConstraintWarning {
+    let detail = e.as_db_error().map_or_else(
+        || e.to_string(),
+        |db| format!("{} (code: {})", db.message(), db.code().code()),
+    );
     ConstraintWarning { table: table.to_string(), constraint_type: ConstraintKind::ForeignKey, message: detail }
 }
 
@@ -316,8 +306,7 @@ pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
             .columns
             .iter()
             .find(|c| c.is_parent_fk)
-            .map(|c| c.name.as_str())
-            .unwrap_or("j2s_parent_id");
+            .map_or("j2s_parent_id", |c| c.name.as_str());
         col_defs.push(format!(
             "    CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}.{} (j2s_id)",
             quote_ident(&format!("fk_{}_parent", schema.name)),
@@ -335,7 +324,7 @@ pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
     )
 }
 
-/// Quote a PostgreSQL identifier with double quotes, escaping internal quotes.
+/// Quote a `PostgreSQL` identifier with double quotes, escaping internal quotes.
 #[must_use]
 pub fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))

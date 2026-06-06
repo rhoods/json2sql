@@ -41,7 +41,7 @@ pub struct Pass1Config {
     pub stable_threshold: f64,
     pub rare_threshold: f64,
     pub disabled_strategies: HashSet<StrategyName>,
-    /// Used by run_parallel only; ignored by run and run_inspect.
+    /// Used by `run_parallel` only; ignored by run and `run_inspect`.
     pub num_workers: Option<usize>,
 }
 
@@ -50,11 +50,11 @@ pub struct Pass1Result {
     pub schemas: Vec<TableSchema>,
     pub total_rows: u64,
     pub stats: Vec<ColumnStats>,
-    /// Table names that were truncated to fit the 63-byte PostgreSQL limit.
+    /// Table names that were truncated to fit the 63-byte `PostgreSQL` limit.
     pub truncated_names: Vec<TruncatedName>,
     /// Column name collisions resolved by hash suffix (multiple JSON fields → same SQL identifier).
     pub column_collisions: Vec<ColumnCollision>,
-    /// Tables auto-converted to JSONB because they exceeded PostgreSQL's 1600-column limit.
+    /// Tables auto-converted to JSONB because they exceeded `PostgreSQL`'s 1600-column limit.
     pub overflow_warnings: Vec<OverflowWarning>,
 }
 
@@ -63,6 +63,7 @@ pub struct Pass1Result {
 ///
 /// `progress_tx` — optional channel for streaming progress to the IHM.
 /// Pass `None` for CLI / headless mode (terminal progress bar is used instead).
+#[allow(clippy::needless_pass_by_value)] // public API: callers pass owned Option<ProgressTx>
 pub fn run(
     path: &Path,
     config: &Pass1Config,
@@ -86,15 +87,15 @@ pub fn run(
         config.disabled_strategies.clone(),
     );
     let (mut reader, _format) = JsonReader::open(path)?;
-    let total_rows = scan_json_rows(&mut reader, &mut registry, config, progress.as_ref(), &progress_tx, total_bytes)?;
+    let total_rows = scan_json_rows(&mut reader, &mut registry, config, progress.as_ref(), progress_tx.as_ref(), total_bytes)?;
     if let Some(ref bar) = progress { bar.finish(); }
-    eprintln!("Pass 1 complete: {} rows, building schema...", total_rows);
-    build_pass1_result(registry, total_rows, progress_tx)
+    eprintln!("Pass 1 complete: {total_rows} rows, building schema...");
+    Ok(build_pass1_result(registry, total_rows, progress_tx.as_ref()))
 }
 
 fn report_progress(
     progress: Option<&ProgressTracker>,
-    progress_tx: &Option<ProgressTx>,
+    progress_tx: Option<&ProgressTx>,
     total_rows: u64,
     bytes_read: u64,
     total_bytes: u64,
@@ -103,15 +104,15 @@ fn report_progress(
         bar.inc_rows(1);
         bar.set_bytes(bytes_read);
     }
-    if let Some(ref tx) = progress_tx {
+    if let Some(tx) = progress_tx {
         if total_rows.is_multiple_of(PROGRESS_INTERVAL) {
             let _ = tx.send(ProgressEvent::Pass1Progress { rows_scanned: total_rows, bytes_read, total_bytes });
         }
     }
 }
 
-fn flush_final_progress(progress_tx: &Option<ProgressTx>, total_rows: u64, bytes_read: u64, total_bytes: u64) {
-    if let Some(ref tx) = progress_tx {
+fn flush_final_progress(progress_tx: Option<&ProgressTx>, total_rows: u64, bytes_read: u64, total_bytes: u64) {
+    if let Some(tx) = progress_tx {
         if total_rows > 0 && !total_rows.is_multiple_of(PROGRESS_INTERVAL) {
             let _ = tx.send(ProgressEvent::Pass1Progress { rows_scanned: total_rows, bytes_read, total_bytes });
         }
@@ -123,7 +124,7 @@ fn scan_json_rows(
     registry: &mut SchemaRegistry,
     config: &Pass1Config,
     progress: Option<&ProgressTracker>,
-    progress_tx: &Option<ProgressTx>,
+    progress_tx: Option<&ProgressTx>,
     total_bytes: u64,
 ) -> Result<u64> {
     let mut total_rows = 0u64;
@@ -136,8 +137,7 @@ fn scan_json_rows(
             }
             other => {
                 return Err(crate::error::J2sError::InvalidInput(format!(
-                    "Expected JSON object at root level, found: {}",
-                    other
+                    "Expected JSON object at root level, found: {other}"
                 )));
             }
         }
@@ -150,8 +150,8 @@ fn scan_json_rows(
 fn build_pass1_result(
     mut registry: SchemaRegistry,
     total_rows: u64,
-    progress_tx: Option<ProgressTx>,
-) -> Result<Pass1Result> {
+    progress_tx: Option<&ProgressTx>,
+) -> Pass1Result {
     let mut schemas = registry.finalize();
     let overflow_warnings = apply_column_limit_guard(&mut schemas);
     let stats = registry.collect_stats();
@@ -159,11 +159,11 @@ fn build_pass1_result(
     let column_collisions = registry.column_collisions().to_vec();
     let tables_count = schemas.len();
     let columns_count = schemas.iter().map(|s| s.columns.len()).sum::<usize>();
-    eprintln!("Schema: {} tables, {} total columns", tables_count, columns_count);
-    if let Some(ref tx) = progress_tx {
+    eprintln!("Schema: {tables_count} tables, {columns_count} total columns");
+    if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
     }
-    Ok(Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings })
+    Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings }
 }
 
 /// Result of an inspect run (raw schema, no strategies or guards applied).
@@ -181,7 +181,7 @@ pub struct InspectResult {
 /// - Stops after `limit` root objects (no full-file scan required)
 /// - Does NOT apply `apply_column_limit_guard`
 /// - Does NOT apply wide-table strategies, sibling merging, or any overrides
-/// - Disables sibling detection and wide-table heuristics (thresholds set to usize::MAX / 0)
+/// - Disables sibling detection and wide-table heuristics (thresholds set to `usize::MAX` / 0)
 ///
 /// Useful for quickly understanding the structure of a large file before a full import.
 #[allow(clippy::too_many_lines)] // sequential phases: registry config → scan with limit → result assembly
@@ -218,8 +218,7 @@ pub fn run_inspect(
             }
             other => {
                 return Err(crate::error::J2sError::InvalidInput(format!(
-                    "Expected JSON object at root level, found: {}",
-                    other
+                    "Expected JSON object at root level, found: {other}"
                 )));
             }
         }
@@ -240,8 +239,7 @@ pub fn run_inspect(
 pub fn effective_workers(requested: usize) -> (usize, Option<usize>) {
     let requested = requested.max(1);
     let cap = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(usize::MAX); // if detection fails, don't cap
+        .map_or(usize::MAX, std::num::NonZero::get); // if detection fails, don't cap
     if requested > cap {
         (cap, Some(cap))
     } else {
@@ -258,6 +256,7 @@ pub fn effective_workers(requested: usize) -> (usize, Option<usize>) {
 ///
 /// `config.num_workers = None` or `Some(1)` is equivalent to sequential processing with extra
 /// overhead; prefer `run()` for single-threaded use.
+#[allow(clippy::needless_pass_by_value)] // public API: callers pass owned Option<ProgressTx>
 pub fn run_parallel(
     path: &Path,
     config: &Pass1Config,
@@ -288,14 +287,15 @@ pub fn run_parallel(
     if let Some(e) = reader_err { return Err(e); }
     if let Some(e) = worker_err { return Err(e); }
 
-    flush_final_progress(&progress_tx, total_rows, total_bytes, total_bytes);
-    eprintln!("Pass 1 complete (parallel, {} workers): {} rows, building schema...", num_workers, total_rows);
-    build_pass1_result(merged, total_rows, progress_tx)
+    flush_final_progress(progress_tx.as_ref(), total_rows, total_bytes, total_bytes);
+    eprintln!("Pass 1 complete (parallel, {num_workers} workers): {total_rows} rows, building schema...");
+    Ok(build_pass1_result(merged, total_rows, progress_tx.as_ref()))
 }
 
 /// Spawn `num_workers` threads, each consuming JSON object bytes from `rx` and building
 /// an independent `SchemaRegistry`. The original `rx` is dropped at the end of this function;
 /// each worker holds its own clone.
+#[allow(clippy::needless_pass_by_value)] // rx is dropped here to signal workers that reading is done
 fn spawn_worker_threads(
     rx: crossbeam_channel::Receiver<Vec<u8>>,
     config: &Pass1Config,
@@ -321,10 +321,10 @@ fn spawn_worker_threads(
                     match simd_json::from_slice::<serde_json::Value>(&mut bytes) {
                         Ok(serde_json::Value::Object(obj)) => reg.observe_root(&root, &obj),
                         Ok(other) => return Err(crate::error::J2sError::InvalidInput(format!(
-                            "Expected JSON object at root level, found: {}", other
+                            "Expected JSON object at root level, found: {other}"
                         ))),
                         Err(e) => return Err(crate::error::J2sError::InvalidInput(format!(
-                            "JSON parse error in worker: {}", e
+                            "JSON parse error in worker: {e}"
                         ))),
                     }
                 }
@@ -341,6 +341,7 @@ fn spawn_worker_threads(
 /// Returns `(total_rows, reader_err)`. Drops `tx` on return to signal workers that reading
 /// is done. Returns `Err` only for I/O errors opening the file; parse errors are returned
 /// as the `Option<J2sError>`.
+#[allow(clippy::needless_pass_by_value)] // tx is dropped at return to signal workers that reading is done
 fn read_and_dispatch(
     path: &Path,
     tx: crossbeam_channel::Sender<Vec<u8>>,
@@ -348,10 +349,10 @@ fn read_and_dispatch(
     progress_tx: Option<&ProgressTx>,
     total_bytes: u64,
 ) -> Result<(u64, Option<crate::error::J2sError>)> {
+    const PROGRESS_INTERVAL: u64 = 1_000;
     let (mut reader, _format) = JsonReader::open(path)?;
     let mut total_rows = 0u64;
     let mut reader_err: Option<crate::error::J2sError> = None;
-    const PROGRESS_INTERVAL: u64 = 1_000;
 
     while let Some(item) = reader.next_raw() {
         match item {
@@ -387,7 +388,7 @@ fn join_and_merge_workers(
     handles: Vec<std::thread::JoinHandle<crate::error::Result<SchemaRegistry>>>,
     config: &Pass1Config,
 ) -> (SchemaRegistry, Option<crate::error::J2sError>) {
-    let join_results: Vec<_> = handles.into_iter().map(|h| h.join()).collect();
+    let join_results: Vec<_> = handles.into_iter().map(std::thread::JoinHandle::join).collect();
 
     let mut merged = SchemaRegistry::new(
         config.text_threshold, config.array_as_pg_array, config.wide_column_threshold,
@@ -399,9 +400,8 @@ fn join_and_merge_workers(
         match result.map_err(|_| crate::error::J2sError::Schema(
             "Pass 1 worker thread panicked unexpectedly".to_string()
         )) {
-            Err(e)      => worker_errors.push(e.to_string()),
             Ok(Ok(reg)) => { if worker_errors.is_empty() { merged.merge(reg); } }
-            Ok(Err(e))  => worker_errors.push(e.to_string()),
+            Err(e) | Ok(Err(e)) => worker_errors.push(e.to_string()),
         }
     }
     let worker_err = if worker_errors.is_empty() {

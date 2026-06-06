@@ -30,7 +30,7 @@ use super::traversal::{
 /// Mutable context for the recursive insert pass.
 /// Separates `path_map` (immutable, borrowed independently during child lookups)
 /// from the mutable handles so field-level borrows remain valid across recursive calls.
-pub(crate) struct InsertCtx<'a, S, A> {
+pub struct InsertCtx<'a, S, A> {
     pub(crate) sinks: &'a mut HashMap<String, S>,
     pub(crate) anomalies: &'a mut A,
 }
@@ -45,14 +45,13 @@ fn push_data_col<A: AnomalyCollect>(
     row_id: Uuid,
 ) -> Result<()> {
     // For columns inlined via Flatten strategy, look up the value in the nested object.
-    let json_val = if let Some(source_field) = schema.flatten_sources.get(col.name.as_str()) {
-        obj.get(source_field.as_str())
+    let json_val = schema.flatten_sources.get(col.name.as_str()).map_or_else(
+        || obj.get(&col.original_name).unwrap_or(&Value::Null),
+        |source_field| obj.get(source_field.as_str())
             .and_then(|v| v.as_object())
             .and_then(|nested| nested.get(col.original_name.as_str()))
-            .unwrap_or(&Value::Null)
-    } else {
-        obj.get(&col.original_name).unwrap_or(&Value::Null)
-    };
+            .unwrap_or(&Value::Null),
+    );
 
     // JSONB columns accept any JSON value — serialize the raw value directly.
     if matches!(col.pg_type, crate::schema::type_tracker::PgType::Jsonb) {
@@ -87,7 +86,7 @@ fn push_data_col<A: AnomalyCollect>(
     Ok(())
 }
 
-pub(crate) fn insert_object<S: RowSink, A: AnomalyCollect>(
+pub fn insert_object<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
     schema: &TableSchema,
@@ -113,7 +112,7 @@ pub(crate) fn insert_object<S: RowSink, A: AnomalyCollect>(
 
     ctx.anomalies.inc_total(&schema.name);
     if let Some(sink) = ctx.sinks.get_mut(&schema.name) {
-        sink.write_row(builder.finish())?;
+        sink.write_row(&builder.finish())?;
     }
 
     write_autosplit_rows(path_map, ctx, schema, obj, row_id)?;
@@ -170,10 +169,10 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
     }
     ctx.anomalies.inc_total(&schema.name);
     if let Some(sink) = ctx.sinks.get_mut(&schema.name) {
-        sink.write_row(builder.finish())?;
+        sink.write_row(&builder.finish())?;
     }
     for (field, value) in obj {
-        let child_key = format!("{}{}{}", parent_path_key, PATH_SEP, field);
+        let child_key = format!("{parent_path_key}{PATH_SEP}{field}");
         match value {
             Value::Object(nested) => {
                 if let Some(child_schema) = path_map.get(&child_key) {
@@ -191,7 +190,7 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
     Ok(())
 }
 
-/// Dispatch a child Object value to the appropriate insertion function based on its WideStrategy.
+/// Dispatch a child Object value to the appropriate insertion function based on its `WideStrategy`.
 #[allow(clippy::too_many_lines)] // exhaustive dispatch over all WideStrategy variants
 fn insert_child_object<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
@@ -240,7 +239,7 @@ fn insert_child_object<S: RowSink, A: AnomalyCollect>(
     Ok(())
 }
 
-/// Write medium-frequency key-value pairs as EAV rows in the AutoSplit companion wide table.
+/// Write medium-frequency key-value pairs as EAV rows in the `AutoSplit` companion wide table.
 /// Stable keys were already written as schema columns; rare keys are skipped entirely.
 fn push_wide_value<A: AnomalyCollect>(
     wb: &mut RowBuilder,
@@ -248,7 +247,7 @@ fn push_wide_value<A: AnomalyCollect>(
     wide_table_name: &str,
     value: &Value,
     wide_id: Uuid,
-    wide_value_type: &Option<crate::schema::type_tracker::PgType>,
+    wide_value_type: Option<&crate::schema::type_tracker::PgType>,
 ) -> Result<()> {
     match wide_value_type {
         Some(pg_type) => match coerce(value, pg_type) {
@@ -290,10 +289,10 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
             Some(escaped) => wb.push_value(&escaped),
             None => wb.push_null(),
         }
-        push_wide_value(&mut wb, ctx.anomalies, wide_table_name, value, wide_id, &wide_value_type)?;
+        push_wide_value(&mut wb, ctx.anomalies, wide_table_name, value, wide_id, wide_value_type.as_ref())?;
         ctx.anomalies.inc_total(wide_table_name);
         if let Some(sink) = ctx.sinks.get_mut(wide_table_name.as_str()) {
-            sink.write_row(wb.finish())?;
+            sink.write_row(&wb.finish())?;
         }
     }
     Ok(())
@@ -309,7 +308,7 @@ fn recurse_children<S: RowSink, A: AnomalyCollect>(
 ) -> Result<()> {
     let parent_path_key = schema.path.join(&PATH_SEP.to_string());
     for (field, value) in obj {
-        let child_key = format!("{}{}{}", parent_path_key, PATH_SEP, field);
+        let child_key = format!("{parent_path_key}{PATH_SEP}{field}");
         match value {
             Value::Object(nested) => {
                 if let Some(child_schema) = path_map.get(&child_key) {

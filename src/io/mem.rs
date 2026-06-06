@@ -19,7 +19,7 @@ pub fn rss_bytes() -> Option<u64> {
         true,
         ProcessRefreshKind::nothing().with_memory(),
     );
-    sys.process(pid).map(|p| p.memory())
+    sys.process(pid).map(sysinfo::Process::memory)
 }
 
 /// Returns total installed RAM in bytes.
@@ -39,7 +39,7 @@ pub fn total_memory_bytes() -> Option<u64> {
 pub fn ram_pressure_exceeded(threshold_pct: u8) -> bool {
     let Some(rss) = rss_bytes() else { return false };
     let Some(total) = total_memory_bytes() else { return false };
-    rss >= total * threshold_pct as u64 / 100
+    rss >= total * u64::from(threshold_pct) / 100
 }
 
 #[cfg(test)]

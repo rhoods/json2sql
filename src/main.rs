@@ -23,6 +23,7 @@ use error::Result;
 use schema::strategies::parse_disabled_strategies;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // CLI dispatch: each branch handles a distinct subcommand
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -31,12 +32,12 @@ async fn main() -> anyhow::Result<()> {
                 input.file_stem().and_then(|s| s.to_str()).unwrap_or("root").to_string()
             });
             run_inspect(input, &root, text_threshold, limit, sample_output.as_deref(), output.as_deref())
-                .map_err(|e| anyhow::anyhow!("{}", e))
+                .map_err(|e| anyhow::anyhow!("{e}"))
         }
         None => {
             // Validate --disable-strategy flags before any file I/O.
             let disabled_strategies = parse_disabled_strategies(&cli.disable_strategy)
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             let root_table = cli.root_table_name();
             let cfg = pipeline::PipelineConfig {
                 input: cli.input,
@@ -68,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
                 schema_report: cli.schema_report,
                 schema_report_output: cli.schema_report_output,
             };
-            pipeline::run_pipeline(cfg).await.map_err(|e| anyhow::anyhow!("{}", e))
+            pipeline::run_pipeline(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))
         }
     }
 }
@@ -119,7 +120,7 @@ fn write_inspect_outputs(
         let data_cols: Vec<_> = schema.data_columns().collect();
         writeln!(schema_out, "┌─ {} ({} columns)", schema.name, data_cols.len()).map_err(error::J2sError::Io)?;
         if let Some(ref parent) = schema.parent_table {
-            writeln!(schema_out, "│  parent: {}", parent).map_err(error::J2sError::Io)?;
+            writeln!(schema_out, "│  parent: {parent}").map_err(error::J2sError::Io)?;
         }
         for col in &data_cols {
             writeln!(schema_out, "│  {:30} {}", col.name, col.pg_type.as_sql()).map_err(error::J2sError::Io)?;

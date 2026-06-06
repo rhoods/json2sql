@@ -33,9 +33,9 @@ use crate::schema::type_tracker::PgType;
 /// amount = "DOUBLE PRECISION"
 /// ```
 ///
-/// Keys are the PostgreSQL column names (sanitized). Values are SQL type strings.
+/// Keys are the `PostgreSQL` column names (sanitized). Values are SQL type strings.
 /// Special keys: `strategy`, `suffix_columns`.
-/// Définition d'un groupe de fusion (KeyedPivot manuel).
+/// Définition d'un groupe de fusion (`KeyedPivot` manuel).
 #[derive(Debug, Deserialize)]
 pub struct GroupConfig {
     pub strategy: String,
@@ -44,10 +44,10 @@ pub struct GroupConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct SchemaConfig {
-    /// Groupes de fusion : nom_résultant → { strategy, members }
+    /// Groupes de fusion : `nom_résultant` → { strategy, members }
     #[serde(default)]
     pub group: HashMap<String, GroupConfig>,
-    /// Overrides par table : table_name → { colonne_ou_strategy → valeur }
+    /// Overrides par table : `table_name` → { `colonne_ou_strategy` → valeur }
     #[serde(flatten)]
     pub tables: HashMap<String, HashMap<String, toml::Value>>,
 }
@@ -69,7 +69,7 @@ struct DeferredNormalize { table_name: String, id_column: String }
 struct DeferredFlatten  { table_name: String, prefix: String, max_depth: u8 }
 
 /// Apply type overrides from `config` to the finalized schemas.
-/// Matches by table name and column name (both sanitized PostgreSQL identifiers).
+/// Matches by table name and column name (both sanitized `PostgreSQL` identifiers).
 /// Unknown tables or columns are silently ignored but reported via eprintln.
 pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) -> crate::error::Result<()> {
     let mut deferred_normalize: Vec<DeferredNormalize> = Vec::new();
@@ -77,7 +77,7 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) ->
 
     for (table_name, col_overrides) in &config.tables {
         match schemas.iter_mut().find(|s| &s.name == table_name) {
-            None => eprintln!("WARNING: schema-config: table '{}' not found in inferred schema", table_name),
+            None => eprintln!("WARNING: schema-config: table '{table_name}' not found in inferred schema"),
             Some(schema) => {
                 // Strategy must run before suffix_columns so the column layout is correct.
                 // NormalizeDynamicKeys and Flatten are deferred (need full schemas slice).
@@ -113,19 +113,19 @@ fn apply_strategy_override(
     match strategy_str.to_lowercase().as_str() {
         "pivot" => {
             if schema.wide_strategy != WideStrategy::Pivot {
-                eprintln!("  Override strategy: {} → Pivot", table_name);
+                eprintln!("  Override strategy: {table_name} → Pivot");
                 apply_wide_strategy_columns(schema, WideStrategy::Pivot);
             }
         }
         "jsonb" => {
             if schema.wide_strategy != WideStrategy::Jsonb {
-                eprintln!("  Override strategy: {} → Jsonb", table_name);
+                eprintln!("  Override strategy: {table_name} → Jsonb");
                 apply_wide_strategy_columns(schema, WideStrategy::Jsonb);
             }
         }
         "columns" => {
             if schema.wide_strategy != WideStrategy::Columns {
-                eprintln!("  Override strategy: {} → Columns", table_name);
+                eprintln!("  Override strategy: {table_name} → Columns");
                 apply_wide_strategy_columns(schema, WideStrategy::Columns);
             }
         }
@@ -135,13 +135,13 @@ fn apply_strategy_override(
             deferred_normalize.push(DeferredNormalize { table_name: table_name.to_string(), id_column: id_col });
         }
         "flatten" => {
-            let prefix = toml_str(col_overrides, "prefix").unwrap_or_else(|| format!("{}_", table_name));
+            let prefix = toml_str(col_overrides, "prefix").unwrap_or_else(|| format!("{table_name}_"));
             let max_depth = col_overrides.get("max_depth")
-                .and_then(|v| if let toml::Value::Integer(n) = v { Some(*n as u8) } else { None })
+                .and_then(|v| if let toml::Value::Integer(n) = v { u8::try_from(*n).ok() } else { None })
                 .unwrap_or(1);
             deferred_flatten.push(DeferredFlatten { table_name: table_name.to_string(), prefix, max_depth });
         }
-        other => eprintln!("WARNING: schema-config: unknown strategy '{}' for '{}', ignored", other, table_name),
+        other => eprintln!("WARNING: schema-config: unknown strategy '{other}' for '{table_name}', ignored"),
     }
 }
 
@@ -168,7 +168,7 @@ fn apply_suffix_columns_override(
         type_map.insert(col.original_name.clone(), tracker);
     }
     let suffix_schema = build_suffix_schema_from_list(&suffix_list, &type_map);
-    eprintln!("  Override strategy: {} → StructuredPivot (suffixes: {:?})", table_name, suffix_list);
+    eprintln!("  Override strategy: {table_name} → StructuredPivot (suffixes: {suffix_list:?})");
     apply_structured_pivot_columns(schema, suffix_schema);
 }
 
@@ -183,9 +183,9 @@ fn apply_column_type_overrides(
         }
         let toml::Value::String(type_str) = value else { continue };
         match schema.columns.iter_mut().find(|c| &c.name == col_name) {
-            None => eprintln!("WARNING: schema-config: column '{}.{}' not found", table_name, col_name),
+            None => eprintln!("WARNING: schema-config: column '{table_name}.{col_name}' not found"),
             Some(col) => match parse_pg_type(type_str) {
-                None => eprintln!("WARNING: schema-config: unknown type '{}' for '{}.{}', ignored", type_str, table_name, col_name),
+                None => eprintln!("WARNING: schema-config: unknown type '{type_str}' for '{table_name}.{col_name}', ignored"),
                 Some(pg_type) => {
                     eprintln!("  Override: {}.{} {} → {}", table_name, col_name, col.pg_type.as_sql(), pg_type.as_sql());
                     col.pg_type = pg_type;
@@ -202,8 +202,7 @@ pub fn apply_group_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConf
         match group_cfg.strategy.to_lowercase().as_str() {
             "keyed_pivot" => apply_keyed_pivot_merge(schemas, group_name, &group_cfg.members),
             other => eprintln!(
-                "WARNING: group '{}': stratégie '{}' non supportée, ignoré",
-                group_name, other
+                "WARNING: group '{group_name}': stratégie '{other}' non supportée, ignoré"
             ),
         }
     }
@@ -230,8 +229,8 @@ fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> 
     let first = &cloned[0];
     let mut merged =
         TableSchema::new(group_name.to_string(), vec![group_name.to_string()], first.depth);
-    merged.parent_table = first.parent_table.clone();
-    merged.child_kind = first.child_kind.clone();
+    merged.parent_table.clone_from(&first.parent_table);
+    merged.child_kind.clone_from(&first.child_kind);
     merged.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
     if let Some(ref parent) = first.parent_table {
         merged.columns.push(ColumnSchema::parent_fk(parent));
@@ -292,10 +291,10 @@ fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, mem
     );
 }
 
-/// Prime a TypeTracker with a representative observation so `to_pg_type()` returns
+/// Prime a `TypeTracker` with a representative observation so `to_pg_type()` returns
 /// a type consistent with the given `PgType`.  Used when rebuilding type maps from
 /// already-resolved column schemas.
-fn prime_tracker_from_pg_type(
+const fn prime_tracker_from_pg_type(
     tracker: &mut crate::schema::type_tracker::TypeTracker,
     pg_type: &PgType,
 ) {

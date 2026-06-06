@@ -16,14 +16,15 @@ use crate::schema::strategies::StrategyName;
 use crate::schema::table_schema::TableSchema;
 
 /// All parameters for a full json2sql import, resolved from CLI args or built directly.
+#[allow(clippy::struct_excessive_bools)] // CLI flags require individual bools; grouping would obscure semantics
 pub struct PipelineConfig {
     /// Input JSON file. `None` → read from stdin (buffered to a temp file).
     pub input: Option<PathBuf>,
     /// Root table name.
     pub root_table: String,
-    /// PostgreSQL connection URL. Required unless `dry_run` is true.
+    /// `PostgreSQL` connection URL. Required unless `dry_run` is true.
     pub db_url: Option<String>,
-    /// Target PostgreSQL schema (default: `"public"`).
+    /// Target `PostgreSQL` schema (default: `"public"`).
     pub pg_schema: String,
     /// Drop existing tables before import.
     pub drop_existing: bool,
@@ -31,7 +32,7 @@ pub struct PipelineConfig {
     pub dry_run: bool,
     /// Minimum string length (bytes) to use `TEXT` instead of `VARCHAR`.
     pub text_threshold: u32,
-    /// Store scalar arrays as PostgreSQL array columns instead of junction tables.
+    /// Store scalar arrays as `PostgreSQL` array columns instead of junction tables.
     pub array_as_pg_array: bool,
     /// Warn when nesting depth exceeds this value. `None` = disabled.
     pub depth_limit: Option<usize>,
@@ -41,7 +42,7 @@ pub struct PipelineConfig {
     pub sibling_threshold: usize,
     /// Minimum Jaccard similarity for sibling merging.
     pub sibling_jaccard: f64,
-    /// Minimum key frequency to keep a column in the main table (AutoSplit).
+    /// Minimum key frequency to keep a column in the main table (`AutoSplit`).
     pub stable_threshold: f64,
     /// Keys below this frequency are dropped entirely.
     pub rare_threshold: f64,
@@ -49,7 +50,7 @@ pub struct PipelineConfig {
     pub num_workers: usize,
     /// Strategies to disable during Pass 1.
     pub disabled_strategies: HashSet<StrategyName>,
-    /// Number of parallel PostgreSQL connections for Pass 2 COPY.
+    /// Number of parallel `PostgreSQL` connections for Pass 2 COPY.
     pub parallel: usize,
     /// Directory for per-table NDJSON anomaly streaming files.
     pub anomaly_dir: Option<PathBuf>,
@@ -148,7 +149,7 @@ fn finalize_pass2(
     pass2: &crate::pass2::runner::Pass2Result,
     cfg: &PipelineConfig,
 ) -> Result<()> {
-    report_pass2_results(pass2, cfg.anomaly_dir.as_deref())?;
+    report_pass2_results(pass2, cfg.anomaly_dir.as_deref());
 
     let total_anomalies = pass2.anomaly_collector.total_anomalies();
     if total_anomalies > 0 || cfg.anomaly_output.is_some() {
@@ -184,19 +185,16 @@ fn finalize_pass2(
 fn resolve_input(
     input: Option<PathBuf>,
 ) -> Result<(Option<tempfile::NamedTempFile>, PathBuf)> {
-    match input {
-        Some(path) => Ok((None, path)),
-        None => {
-            eprintln!("No input specified, reading from stdin...");
-            let mut temp = tempfile::NamedTempFile::new().map_err(J2sError::Io)?;
-            std::io::copy(&mut std::io::stdin(), &mut temp).map_err(J2sError::Io)?;
-            let path = temp.path().to_path_buf();
-            eprintln!(
-                "Buffered stdin to temp file ({} bytes).",
-                temp.as_file().metadata().map(|m| m.len()).unwrap_or(0)
-            );
-            Ok((Some(temp), path))
-        }
+    if let Some(path) = input { Ok((None, path)) } else {
+        eprintln!("No input specified, reading from stdin...");
+        let mut temp = tempfile::NamedTempFile::new().map_err(J2sError::Io)?;
+        std::io::copy(&mut std::io::stdin(), &mut temp).map_err(J2sError::Io)?;
+        let path = temp.path().to_path_buf();
+        eprintln!(
+            "Buffered stdin to temp file ({} bytes).",
+            temp.as_file().metadata().map_or(0, |m| m.len())
+        );
+        Ok((Some(temp), path))
     }
 }
 
@@ -251,7 +249,7 @@ fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Res
                 cfg.num_workers, cap, cap
             );
         }
-        eprintln!("Using {} parallel workers for schema inference.", workers);
+        eprintln!("Using {workers} parallel workers for schema inference.");
         crate::pass1::runner::run_parallel(
             input_path,
             &Pass1Config { num_workers: Some(workers), ..base_cfg },
@@ -408,8 +406,7 @@ fn print_dry_run_ddl(
                 .columns
                 .iter()
                 .find(|c| c.is_parent_fk)
-                .map(|c| c.name.as_str())
-                .unwrap_or("j2s_parent_id");
+                .map_or("j2s_parent_id", |c| c.name.as_str());
             println!(
                 "ALTER TABLE {schema_q}.{table_q}\n    ADD CONSTRAINT {constraint}\n    FOREIGN KEY ({fk_col_q})\n    REFERENCES {schema_q}.{parent_q} (j2s_id);",
                 schema_q = crate::db::ddl::quote_ident(pg_schema),
@@ -444,7 +441,7 @@ fn aggregate_anomaly_stats(
 fn report_pass2_results(
     pass2: &crate::pass2::runner::Pass2Result,
     anomaly_dir: Option<&Path>,
-) -> Result<()> {
+) {
     eprintln!("\n=== Import Summary ===");
     let mut table_names: Vec<&String> = pass2.rows_per_table.keys().collect();
     table_names.sort();
@@ -463,6 +460,7 @@ fn report_pass2_results(
 
         eprintln!("\nAnomalies by table (top 10):");
         for (table, anom, rows) in table_stats.iter().take(10) {
+            #[allow(clippy::cast_precision_loss)]
             let rate = if *rows > 0 { *anom as f64 / *rows as f64 * 100.0 } else { 0.0 };
             eprintln!("  {table:40} {anom:>8} anomalies / {rows:>10} rows ({rate:.2}%)");
         }
@@ -474,7 +472,6 @@ fn report_pass2_results(
         }
     }
 
-    Ok(())
 }
 
 #[cfg(test)]

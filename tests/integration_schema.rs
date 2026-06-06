@@ -780,10 +780,10 @@ async fn test_merge_copy_single_sink_pending_only() {
     common::with_schema(|client, schema| async move {
         client.execute(&format!("CREATE TABLE \"{schema}\".\"t\" (v TEXT)"), &[]).await.unwrap();
         let ts = single_col_schema("t");
-        let mut sink = TempFileSink::new(&ts, &schema, None).unwrap();
-        sink.write_row(b"hello\n".to_vec()).unwrap();
-        sink.write_row(b"world\n".to_vec()).unwrap();
-        sink.write_row(b"rust\n".to_vec()).unwrap();
+        let mut sink = TempFileSink::new(&ts, &schema, None);
+        sink.write_row(b"hello\n").unwrap();
+        sink.write_row(b"world\n").unwrap();
+        sink.write_row(b"rust\n").unwrap();
 
         let rows = merge_copy_to_db(vec![sink], &client).await.unwrap();
         assert_eq!(rows, 3);
@@ -798,14 +798,14 @@ async fn test_merge_copy_single_sink_with_spill() {
     common::with_schema(|client, schema| async move {
         client.execute(&format!("CREATE TABLE \"{schema}\".\"t\" (v TEXT)"), &[]).await.unwrap();
         let ts = single_col_schema("t");
-        let mut sink = TempFileSink::new(&ts, &schema, None).unwrap();
+        let mut sink = TempFileSink::new(&ts, &schema, None);
 
         // Write one row larger than SPILL_THRESHOLD (256 KiB) to force a disk spill,
         // then a small second row that stays in pending.
         let mut big: Vec<u8> = vec![b'a'; 260 * 1024];
         big.push(b'\n');
-        sink.write_row(big).unwrap();
-        sink.write_row(b"small\n".to_vec()).unwrap();
+        sink.write_row(&big).unwrap();
+        sink.write_row(b"small\n").unwrap();
 
         // After the big write, the sink must have spilled at least once (FD is open).
         assert!(sink.is_open(), "expected a disk spill before merging");
@@ -824,17 +824,17 @@ async fn test_merge_copy_multiple_sinks_same_table() {
         client.execute(&format!("CREATE TABLE \"{schema}\".\"t\" (v TEXT)"), &[]).await.unwrap();
         let ts = single_col_schema("t");
 
-        let mut s1 = TempFileSink::new(&ts, &schema, None).unwrap();
-        s1.write_row(b"a\n".to_vec()).unwrap();
-        s1.write_row(b"b\n".to_vec()).unwrap();
+        let mut s1 = TempFileSink::new(&ts, &schema, None);
+        s1.write_row(b"a\n").unwrap();
+        s1.write_row(b"b\n").unwrap();
 
-        let mut s2 = TempFileSink::new(&ts, &schema, None).unwrap();
-        s2.write_row(b"c\n".to_vec()).unwrap();
+        let mut s2 = TempFileSink::new(&ts, &schema, None);
+        s2.write_row(b"c\n").unwrap();
 
-        let mut s3 = TempFileSink::new(&ts, &schema, None).unwrap();
-        s3.write_row(b"d\n".to_vec()).unwrap();
-        s3.write_row(b"e\n".to_vec()).unwrap();
-        s3.write_row(b"f\n".to_vec()).unwrap();
+        let mut s3 = TempFileSink::new(&ts, &schema, None);
+        s3.write_row(b"d\n").unwrap();
+        s3.write_row(b"e\n").unwrap();
+        s3.write_row(b"f\n").unwrap();
 
         let rows = merge_copy_to_db(vec![s1, s2, s3], &client).await.unwrap();
         assert_eq!(rows, 6);
@@ -849,14 +849,14 @@ async fn test_merge_copy_large_file_streaming() {
     common::with_schema(|client, schema| async move {
         client.execute(&format!("CREATE TABLE \"{schema}\".\"t\" (v TEXT)"), &[]).await.unwrap();
         let ts = single_col_schema("t");
-        let mut sink = TempFileSink::new(&ts, &schema, None).unwrap();
+        let mut sink = TempFileSink::new(&ts, &schema, None);
 
         // Write enough rows to produce a temp file larger than the 4 MiB chunk size.
         // Each row is ~1 KiB; 5000 rows ≈ 5 MiB on disk.
         let row_data: Vec<u8> = std::iter::repeat(b'x').take(1023).chain(std::iter::once(b'\n')).collect();
         let expected_rows: u64 = 5_000;
         for _ in 0..expected_rows {
-            sink.write_row(row_data.clone()).unwrap();
+            sink.write_row(&row_data).unwrap();
         }
         // Force everything to disk so the streaming read path is exercised.
         sink.force_spill().unwrap();
@@ -942,9 +942,9 @@ async fn test_merge_copy_skips_empty_sinks_among_non_empty() {
         client.execute(&format!("CREATE TABLE \"{schema}\".\"t\" (v TEXT)"), &[]).await.unwrap();
         let ts = single_col_schema("t");
 
-        let empty = TempFileSink::new(&ts, &schema, None).unwrap();
-        let mut full = TempFileSink::new(&ts, &schema, None).unwrap();
-        full.write_row(b"x\n".to_vec()).unwrap();
+        let empty = TempFileSink::new(&ts, &schema, None);
+        let mut full = TempFileSink::new(&ts, &schema, None);
+        full.write_row(b"x\n").unwrap();
 
         let rows = merge_copy_to_db(vec![empty, full], &client).await.unwrap();
         assert_eq!(rows, 1);

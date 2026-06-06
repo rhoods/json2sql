@@ -1,30 +1,30 @@
-//! PostgreSQL identifier sanitization and collision resolution.
+//! `PostgreSQL` identifier sanitization and collision resolution.
 //!
 //! [`NamingRegistry`] converts raw JSON field names to valid SQL identifiers (≤ 63 bytes),
 //! resolves duplicates with a short FNV-1a hash suffix, and caps table names at 53 chars
 //! (`PG_TABLE_MAX_IDENT`) so all derived identifiers (`pk_…`, `fk_…_parent`, `j2s_…_id`)
-//! stay within PostgreSQL's 63-byte `NAMEDATALEN` limit.
+//! stay within `PostgreSQL`'s 63-byte `NAMEDATALEN` limit.
 
 use std::collections::HashMap;
 
 use super::PATH_SEP;
 
-/// Maximum PostgreSQL identifier length in bytes.
+/// Maximum `PostgreSQL` identifier length in bytes.
 const PG_MAX_IDENT: usize = 63;
-/// Maximum length for table names, ensuring all derived identifiers fit within PG_MAX_IDENT.
+/// Maximum length for table names, ensuring all derived identifiers fit within `PG_MAX_IDENT`.
 /// The tightest constraint is `fk_{name}_parent` (3 + name + 7 = 10 + name ≤ 63 → name ≤ 53).
-pub(crate) const PG_TABLE_MAX_IDENT: usize = 53;
+pub const PG_TABLE_MAX_IDENT: usize = 53;
 /// Characters reserved for the hash suffix when truncating.
 const HASH_SUFFIX_LEN: usize = 8; // "_" + 7 hex chars
 
-/// A table name that was truncated to fit within the 63-byte PostgreSQL limit.
+/// A table name that was truncated to fit within the 63-byte `PostgreSQL` limit.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TruncatedName {
     /// Dot-joined original path, e.g. "users.orders.items"
     pub original_path: String,
     /// The full unsanitized name before truncation
     pub full_name: String,
-    /// The final PostgreSQL identifier after truncation
+    /// The final `PostgreSQL` identifier after truncation
     pub pg_name: String,
 }
 
@@ -37,7 +37,7 @@ pub struct ColumnCollision {
     pub sanitized_name: String,
     /// Original JSON field names that caused the collision
     pub original_names: Vec<String>,
-    /// Resolved PostgreSQL column names (with hash suffix)
+    /// Resolved `PostgreSQL` column names (with hash suffix)
     pub resolved_names: Vec<String>,
 }
 
@@ -46,12 +46,12 @@ pub struct ColumnCollision {
 /// Usage:
 /// 1. `register()` all original field names
 /// 2. `build(table_name)` to detect collisions
-/// 3. `resolve(original)` to get the final PostgreSQL column name
+/// 3. `resolve(original)` to get the final `PostgreSQL` column name
 #[derive(Debug, Default)]
 pub struct ColumnNameRegistry {
-    /// sanitized_name → original names that map to it
+    /// `sanitized_name` → original names that map to it
     candidates: HashMap<String, Vec<String>>,
-    /// original_name → resolved pg column name
+    /// `original_name` → resolved pg column name
     resolved: HashMap<String, String>,
     /// collision records (for warnings)
     collisions: Vec<ColumnCollision>,
@@ -90,7 +90,7 @@ impl ColumnNameRegistry {
                 let mut resolved_names = Vec::new();
                 for original in originals {
                     let hash = short_hash(original);
-                    let resolved = format!("{}_{}", base, hash);
+                    let resolved = format!("{base}_{hash}");
                     self.resolved.insert(original.clone(), resolved.clone());
                     resolved_names.push(resolved);
                 }
@@ -104,7 +104,7 @@ impl ColumnNameRegistry {
         }
     }
 
-    /// Return the resolved PostgreSQL column name for an original JSON field.
+    /// Return the resolved `PostgreSQL` column name for an original JSON field.
     #[must_use]
     pub fn resolve(&self, original: &str) -> String {
         self.resolved
@@ -120,7 +120,7 @@ impl ColumnNameRegistry {
     }
 }
 
-/// Manages safe PostgreSQL identifier generation.
+/// Manages safe `PostgreSQL` identifier generation.
 /// Ensures uniqueness after truncation by appending a hash suffix.
 #[derive(Debug, Default)]
 pub struct NamingRegistry {
@@ -138,8 +138,8 @@ impl NamingRegistry {
         Self::default()
     }
 
-    /// Convert a hierarchical path (e.g. ["users", "orders", "items"]) to a
-    /// safe PostgreSQL table name (<= 63 bytes, lowercase, no special chars).
+    /// Convert a hierarchical path (e.g. `["users", "orders", "items"]`) to a
+    /// safe `PostgreSQL` table name (<= 63 bytes, lowercase, no special chars).
     #[allow(dead_code)]
     pub fn table_name(&mut self, path: &[String]) -> String {
         let key = path.join(&PATH_SEP.to_string());
@@ -148,12 +148,12 @@ impl NamingRegistry {
         }
         let joined = path.join("_");
         let sanitized = sanitize_identifier(&joined);
-        let result = self.ensure_unique(sanitized, &key);
+        let result = self.ensure_unique(&sanitized, &key);
         self.cache.insert(key, result.clone());
         result
     }
 
-    /// Register and return a safe PostgreSQL table name from a pre-computed PATH_SEP-joined key
+    /// Register and return a safe `PostgreSQL` table name from a pre-computed PATH_SEP-joined key
     /// (e.g. `"users\x00orders\x00items"`). Avoids two `path.join()` allocations compared to
     /// `table_name(&[String])` — use in hot loops where the key is already available.
     pub fn table_name_from_dot_key(&mut self, dot_key: &str) -> String {
@@ -162,7 +162,7 @@ impl NamingRegistry {
         }
         let joined = dot_key.replace(PATH_SEP, "_");
         let sanitized = sanitize_identifier(&joined);
-        let result = self.ensure_unique(sanitized, dot_key);
+        let result = self.ensure_unique(&sanitized, dot_key);
         self.cache.insert(dot_key.to_string(), result.clone());
         result
     }
@@ -189,7 +189,7 @@ impl NamingRegistry {
         })
     }
 
-    /// Convert a JSON field name to a safe PostgreSQL column name.
+    /// Convert a JSON field name to a safe `PostgreSQL` column name.
     #[must_use]
     pub fn column_name(field: &str) -> String {
         let sanitized = sanitize_identifier(field);
@@ -198,14 +198,14 @@ impl NamingRegistry {
         truncate_to_pg_limit(&sanitized, &sanitized)
     }
 
-    fn ensure_unique(&mut self, sanitized: String, original_key: &str) -> String {
-        let truncated = truncate_to_limit(&sanitized, original_key, PG_TABLE_MAX_IDENT);
+    fn ensure_unique(&mut self, sanitized: &str, original_key: &str) -> String {
+        let truncated = truncate_to_limit(sanitized, original_key, PG_TABLE_MAX_IDENT);
 
         // Record truncation if the name was shortened
         if truncated != sanitized {
             self.truncations.push(TruncatedName {
                 original_path: original_key.to_string(),
-                full_name: sanitized.clone(),
+                full_name: sanitized.to_string(),
                 pg_name: truncated.clone(),
             });
         }
@@ -217,10 +217,10 @@ impl NamingRegistry {
             // Name collision (two different paths produce the same sanitized name).
             // Append a numeric counter until we find a free slot.
             let base_len = PG_TABLE_MAX_IDENT.saturating_sub(3); // room for "_NN"
-            let base = if sanitized.len() <= base_len { &sanitized } else { &sanitized[..base_len] };
+            let base = if sanitized.len() <= base_len { sanitized } else { &sanitized[..base_len] };
             let mut counter = 2usize;
             loop {
-                let candidate = format!("{}_{}", base, counter);
+                let candidate = format!("{base}_{counter}");
                 if !self.reverse.contains_key(candidate.as_str()) {
                     self.reverse.insert(candidate.clone(), original_key.to_string());
                     return candidate;
@@ -232,14 +232,14 @@ impl NamingRegistry {
         truncated
     }
 
-    /// Returns all table names that were truncated to fit the 63-byte PostgreSQL limit.
+    /// Returns all table names that were truncated to fit the 63-byte `PostgreSQL` limit.
     #[must_use]
     pub fn truncated_names(&self) -> &[TruncatedName] {
         &self.truncations
     }
 }
 
-/// Sanitize a string to be a valid PostgreSQL identifier:
+/// Sanitize a string to be a valid `PostgreSQL` identifier:
 /// - Lowercase
 /// - Replace non-alphanumeric (except underscore) with underscore
 /// - Collapse consecutive underscores
@@ -267,7 +267,7 @@ fn sanitize_ascii(s: &str) -> String {
             }
         }
     }
-    finalize_sanitized(result)
+    finalize_sanitized(&result)
 }
 
 // Slow path: Unicode input (e.g. Japanese field names like "ja:カルシウム")
@@ -291,7 +291,7 @@ fn sanitize_unicode(s: &str) -> String {
             last_was_underscore = true;
         }
     }
-    finalize_sanitized(result)
+    finalize_sanitized(&result)
 }
 
 /// - Prefix with `c_` if starts with a digit
@@ -300,17 +300,17 @@ pub fn sanitize_identifier(s: &str) -> String {
     if s.is_ascii() { sanitize_ascii(s) } else { sanitize_unicode(s) }
 }
 
-fn finalize_sanitized(result: String) -> String {
+fn finalize_sanitized(result: &str) -> String {
     let result = result.trim_end_matches('_').to_string();
     if result.is_empty() { return "col".to_string(); }
-    if result.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
-        return format!("c_{}", result);
+    if result.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        return format!("c_{result}");
     }
     result
 }
 
 /// Truncate an identifier to `max_len` bytes.
-/// If truncation is needed, replace the last HASH_SUFFIX_LEN bytes with a hash.
+/// If truncation is needed, replace the last `HASH_SUFFIX_LEN` bytes with a hash.
 fn truncate_to_limit(sanitized: &str, original_key: &str, max_len: usize) -> String {
     if sanitized.len() <= max_len {
         return sanitized.to_string();
@@ -318,7 +318,7 @@ fn truncate_to_limit(sanitized: &str, original_key: &str, max_len: usize) -> Str
     let hash = short_hash(original_key);
     let prefix_len = max_len - HASH_SUFFIX_LEN;
     let prefix = &sanitized[..prefix_len];
-    format!("{}_{}", prefix, hash)
+    format!("{prefix}_{hash}")
 }
 
 fn truncate_to_pg_limit(sanitized: &str, original_key: &str) -> String {
@@ -329,10 +329,10 @@ fn truncate_to_pg_limit(sanitized: &str, original_key: &str) -> String {
 /// Implemented inline for stability — output is guaranteed identical across
 /// dependency updates and must not change without a snapshot format version bump.
 fn short_hash(s: &str) -> String {
-    const FNV_OFFSET: u64 = 14695981039346656037;
-    const FNV_PRIME: u64 = 1099511628211;
+    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+    const FNV_PRIME: u64 = 1_099_511_628_211;
     let h = s.bytes().fold(FNV_OFFSET, |acc, b| {
-        (acc ^ b as u64).wrapping_mul(FNV_PRIME)
+        (acc ^ u64::from(b)).wrapping_mul(FNV_PRIME)
     });
     format!("{:07x}", h & 0x0fff_ffff)
 }

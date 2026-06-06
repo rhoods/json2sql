@@ -2,7 +2,7 @@
 //!
 //! Ce module sait *où aller* : il parcourt la hiérarchie JSON et *route* les valeurs
 //! vers les bons sinks selon la structure du schéma (pivot key, structured pivot, jsonb…).
-//! *Dispatcher* un nœud = choisir le handler selon son type JSON ou sa WideStrategy.
+//! *Dispatcher* un nœud = choisir le handler selon son type JSON ou sa `WideStrategy`.
 //! *Router* une ligne = la rediriger vers la table cible correcte.
 //!
 //! Frontière avec `insert.rs` : `traversal.rs` navigue et dispatch depuis un contexte
@@ -45,7 +45,7 @@ fn push_coerced<A: AnomalyCollect>(
 }
 
 /// Insert one row per key-value pair for a Pivot wide table.
-/// Columns: j2s_id, j2s_parent_id, key TEXT, value <type>
+/// Columns: `j2s_id`, `j2s_parent_id`, key TEXT, value <type>
 pub(super) fn insert_pivot_object<S: RowSink>(
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
@@ -70,7 +70,7 @@ pub(super) fn insert_pivot_object<S: RowSink>(
         }
         anomalies.inc_total(&schema.name);
         if let Some(sink) = sinks.get_mut(&schema.name) {
-            sink.write_row(builder.finish())?;
+            sink.write_row(&builder.finish())?;
         }
     }
     Ok(())
@@ -78,7 +78,7 @@ pub(super) fn insert_pivot_object<S: RowSink>(
 
 /// Insert one row containing the entire object serialized as JSONB, then recurse into
 /// any children of this table so they still receive data.
-/// Columns: j2s_id, j2s_parent_id, data JSONB
+/// Columns: `j2s_id`, `j2s_parent_id`, data JSONB
 pub(super) fn insert_jsonb_object<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -98,7 +98,7 @@ pub(super) fn insert_jsonb_object<S: RowSink>(
     }
     anomalies.inc_total(&schema.name);
     if let Some(sink) = sinks.get_mut(&schema.name) {
-        sink.write_row(builder.finish())?;
+        sink.write_row(&builder.finish())?;
     }
     if let Value::Object(obj) = value {
         dispatch_jsonb_children(path_map, sinks, anomalies, schema, obj, child_id)?;
@@ -151,7 +151,7 @@ fn dispatch_jsonb_children<S: RowSink>(
 ) -> Result<()> {
     let parent_path_key = schema.path.join(&PATH_SEP.to_string());
     for (field, child_value) in obj {
-        let child_key = format!("{}{}{}", parent_path_key, PATH_SEP, field);
+        let child_key = format!("{parent_path_key}{PATH_SEP}{field}");
         match child_value {
             Value::Object(_) => {
                 if let Some(child_schema) = path_map.get(&child_key) {
@@ -227,7 +227,7 @@ fn write_structured_pivot_row<S: RowSink>(
         } else { builder.push_null(); }
     }
     anomalies.inc_total(&schema.name);
-    if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(builder.finish())?; }
+    if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&builder.finish())?; }
     Ok(())
 }
 
@@ -265,11 +265,8 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
         return Ok(());
     }
     for (sub_key, child_table_name) in &schema.child_routes {
-        let sub_value = match child_obj.get(sub_key) { Some(v) => v, None => continue };
-        let child_schema = match path_map.values().find(|s| s.name == *child_table_name) {
-            Some(s) => s,
-            None => continue,
-        };
+        let Some(sub_value) = child_obj.get(sub_key) else { continue };
+        let Some(child_schema) = path_map.values().find(|s| s.name == *child_table_name) else { continue };
         match sub_value {
             Value::Object(nested) => {
                 match &child_schema.wide_strategy {
@@ -350,11 +347,11 @@ fn write_keyed_pivot_columns<A: AnomalyCollect>(
     Ok(())
 }
 
-/// Insert one row per sibling key for a KeyedPivot table.
-/// Columns: j2s_id, j2s_parent_id, key TEXT, <union data cols...>
+/// Insert one row per sibling key for a `KeyedPivot` table.
+/// Columns: `j2s_id`, `j2s_parent_id`, key TEXT, <union data cols...>
 ///
 /// When `sibling_schema.array_children` is true, each key maps to an array of objects
-/// instead of a single object. One row is emitted per array element, with j2s_order set.
+/// instead of a single object. One row is emitted per array element, with `j2s_order` set.
 pub(super) fn insert_keyed_pivot_object<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -368,20 +365,20 @@ pub(super) fn insert_keyed_pivot_object<S: RowSink>(
         return insert_keyed_pivot_array_of_objects(path_map, sinks, anomalies, schema, obj, parent_id, sibling_schema);
     }
     for (key, value) in obj {
-        let child_obj = match value { Value::Object(o) => o, _ => continue };
+        let Value::Object(child_obj) = value else { continue };
         let row_id = Uuid::now_v7();
         let mut builder = RowBuilder::new();
         let ctx = KeyedPivotRowInput { key, child_obj, parent_id, row_id, order: None, sibling_schema };
         write_keyed_pivot_columns(&mut builder, anomalies, schema, &ctx)?;
         anomalies.inc_total(&schema.name);
-        if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(builder.finish())?; }
+        if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&builder.finish())?; }
         dispatch_child_routes(path_map, sinks, anomalies, schema, child_obj, row_id)?;
     }
     Ok(())
 }
 
-/// Insert one row per array element per sibling key for an ObjectArray KeyedPivot table.
-/// Columns: j2s_id, j2s_parent_id, j2s_order BIGINT, key TEXT, <union data cols...>
+/// Insert one row per array element per sibling key for an `ObjectArray` `KeyedPivot` table.
+/// Columns: `j2s_id`, `j2s_parent_id`, `j2s_order` BIGINT, key TEXT, <union data cols...>
 pub(super) fn insert_keyed_pivot_array_of_objects<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -392,23 +389,23 @@ pub(super) fn insert_keyed_pivot_array_of_objects<S: RowSink>(
     sibling_schema: &SiblingSchema,
 ) -> Result<()> {
     for (key, value) in obj {
-        let arr = match value { Value::Array(a) => a, _ => continue };
+        let Value::Array(arr) = value else { continue };
         for (order, item) in arr.iter().enumerate() {
-            let item_obj = match item { Value::Object(o) => o, _ => continue };
+            let Value::Object(item_obj) = item else { continue };
             let row_id = Uuid::now_v7();
             let mut builder = RowBuilder::new();
             let ctx = KeyedPivotRowInput { key, child_obj: item_obj, parent_id, row_id, order: Some(order), sibling_schema };
             write_keyed_pivot_columns(&mut builder, anomalies, schema, &ctx)?;
             anomalies.inc_total(&schema.name);
-            if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(builder.finish())?; }
+            if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&builder.finish())?; }
             dispatch_child_routes(path_map, sinks, anomalies, schema, item_obj, row_id)?;
         }
     }
     Ok(())
 }
 
-/// Insert one row per key for a NormalizeDynamicKeys table.
-/// Columns: j2s_id, j2s_parent_id, {id_column} TEXT, <union data cols...>
+/// Insert one row per key for a `NormalizeDynamicKeys` table.
+/// Columns: `j2s_id`, `j2s_parent_id`, {`id_column`} TEXT, <union data cols...>
 pub(super) fn insert_normalize_dynamic_keys<S: RowSink>(
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
@@ -418,7 +415,7 @@ pub(super) fn insert_normalize_dynamic_keys<S: RowSink>(
     id_column: &str,
 ) -> Result<()> {
     for (key, value) in obj {
-        let child_obj = match value { Value::Object(o) => o, _ => continue };
+        let Value::Object(child_obj) = value else { continue };
         let row_id = Uuid::now_v7();
         let mut builder = RowBuilder::new();
         let row_id_str = row_id.to_string();
@@ -443,7 +440,7 @@ pub(super) fn insert_normalize_dynamic_keys<S: RowSink>(
             push_coerced(&mut builder, anomalies, &schema.name, col, &row_id_str, json_val)?;
         }
         anomalies.inc_total(&schema.name);
-        if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(builder.finish())?; }
+        if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&builder.finish())?; }
     }
     Ok(())
 }
@@ -462,7 +459,7 @@ fn emit_routing_row<S: RowSink>(
         else { rb.push_null(); }
     }
     anomalies.inc_total(&schema.name);
-    if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(rb.finish())?; }
+    if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&rb.finish())?; }
     Ok(routing_id)
 }
 
@@ -477,7 +474,7 @@ fn route_independent_child<S: RowSink>(
     child_path_key: &str,
     routing_id: Uuid,
 ) -> Result<bool> {
-    let child_schema = match path_map.get(child_path_key) { Some(s) => s, None => return Ok(false) };
+    let Some(child_schema) = path_map.get(child_path_key) else { return Ok(false) };
     if child_schema.parent_table.as_deref() != Some(schema_name) { return Ok(false); }
     if let Value::Object(nested) = value {
         match &child_schema.wide_strategy {
@@ -494,10 +491,10 @@ fn route_independent_child<S: RowSink>(
     }
 }
 
-/// Dispatch each key in a MultiKeyedPivot object to the matching synthetic pivot table.
+/// Dispatch each key in a `MultiKeyedPivot` object to the matching synthetic pivot table.
 ///
-/// The routing table (`schema`) is a MultiKeyedPivot parent with only generated columns.
-/// One routing row is emitted per call; children FK to it by routing_id.
+/// The routing table (`schema`) is a `MultiKeyedPivot` parent with only generated columns.
+/// One routing row is emitted per call; children FK to it by `routing_id`.
 /// Keys that are all-digits go to the `_num` group; all others go to `_key`.
 pub(super) fn insert_multi_keyed_pivot<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
@@ -512,7 +509,7 @@ pub(super) fn insert_multi_keyed_pivot<S: RowSink>(
     let routing_path = schema.path.join(&PATH_SEP.to_string());
     let mut group_submaps: Vec<serde_json::Map<String, Value>> = vec![serde_json::Map::new(); groups.len()];
     for (key, value) in obj {
-        let child_path_key = format!("{}{}{}", routing_path, PATH_SEP, key);
+        let child_path_key = format!("{routing_path}{PATH_SEP}{key}");
         if route_independent_child(path_map, sinks, anomalies, &schema.name, value, &child_path_key, routing_id)? {
             continue;
         }
@@ -524,7 +521,7 @@ pub(super) fn insert_multi_keyed_pivot<S: RowSink>(
     for (group, submap) in groups.iter().zip(group_submaps.iter()) {
         if submap.is_empty() { continue; }
         let suffix = if group.key_is_numeric { "num" } else { "key" };
-        let pivot_path_key = format!("{}{}{}", routing_path, PATH_SEP, suffix);
+        let pivot_path_key = format!("{routing_path}{PATH_SEP}{suffix}");
         if let Some(pivot_schema) = path_map.get(&pivot_path_key) {
             insert_keyed_pivot_object(path_map, sinks, anomalies, pivot_schema, submap, routing_id, &group.sibling_schema)?;
         }
@@ -532,6 +529,7 @@ pub(super) fn insert_multi_keyed_pivot<S: RowSink>(
     Ok(())
 }
 
+#[allow(clippy::cast_possible_wrap)] // array index never reaches i64::MAX
 pub(super) fn insert_array<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -563,7 +561,7 @@ pub(super) fn insert_array<S: RowSink>(
                 }
                 anomalies.inc_total(&schema.name);
                 if let Some(sink) = sinks.get_mut(&schema.name) {
-                    sink.write_row(builder.finish())?;
+                    sink.write_row(&builder.finish())?;
                 }
             }
             _ => {}

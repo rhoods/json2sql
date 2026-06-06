@@ -13,9 +13,9 @@ use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::stats::ColumnStats;
 use crate::schema::table_schema::{TableSchema, WideStrategy};
 
-/// v2: table names are now capped at 53 chars (PG_TABLE_MAX_IDENT) instead of 63,
+/// v2: table names are now capped at 53 chars (`PG_TABLE_MAX_IDENT`) instead of 63,
 /// ensuring all derived identifiers (pk_, fk_..._parent, j2s_..._id) fit within
-/// PostgreSQL's 63-byte NAMEDATALEN limit. Snapshots from v1 must be regenerated.
+/// `PostgreSQL`'s 63-byte NAMEDATALEN limit. Snapshots from v1 must be regenerated.
 const SCHEMA_FORMAT_VERSION: u32 = 2;
 
 /// Serializable snapshot of a Pass 1 result, optionally including user strategy overrides.
@@ -52,7 +52,7 @@ pub fn save(
         strategy_overrides: std::collections::HashMap::new(),
     };
     let json = serde_json::to_string_pretty(&snapshot)
-        .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {}", e)))?;
+        .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {e}")))?;
     std::fs::write(path, json).map_err(J2sError::Io)?;
     Ok(())
 }
@@ -78,7 +78,7 @@ pub fn save_with_overrides(
         strategy_overrides: strategy_overrides.clone(),
     };
     let json = serde_json::to_string_pretty(&snapshot)
-        .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {}", e)))?;
+        .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {e}")))?;
     std::fs::write(path, json).map_err(J2sError::Io)?;
     Ok(())
 }
@@ -87,7 +87,7 @@ pub fn save_with_overrides(
 pub fn load(path: &Path) -> Result<SchemaSnapshot> {
     let data = std::fs::read(path).map_err(J2sError::Io)?;
     let snapshot: SchemaSnapshot = serde_json::from_slice(&data)
-        .map_err(|e| J2sError::InvalidInput(format!("Schema deserialization failed: {}", e)))?;
+        .map_err(|e| J2sError::InvalidInput(format!("Schema deserialization failed: {e}")))?;
     if snapshot.version != SCHEMA_FORMAT_VERSION {
         if snapshot.version == 1 {
             return Err(J2sError::InvalidInput(

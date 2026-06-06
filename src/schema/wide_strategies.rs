@@ -1,10 +1,11 @@
 //! Génération des colonnes pour les stratégies wide-table.
+#![allow(clippy::cast_precision_loss)]
 //!
 //! **Pivot** : chaque clé JSON distincte devient une colonne (`key_fr`, `key_en`…).
 //! **Structured pivot** : variante où les colonnes sont groupées par suffixe détecté.
 //! **Keyed pivot** : pivot où la clé pivot est une colonne explicite (ex: code langue).
-//! **Flatten / JsonbFlatten** : les colonnes de la table enfant remontent dans le parent.
-//! **NormalizeDynamicKeys** : les clés dynamiques sont normalisées en table EAV.
+//! **Flatten / `JsonbFlatten`** : les colonnes de la table enfant remontent dans le parent.
+//! **`NormalizeDynamicKeys`** : les clés dynamiques sont normalisées en table EAV.
 //!
 //! Frontière avec `finalizer.rs` : ce module génère les colonnes résultantes d'une
 //! stratégie donnée. `finalizer.rs` décide *quelle* stratégie appliquer à chaque table.
@@ -18,11 +19,11 @@ use super::table_schema::{ChildKind, ColumnSchema, KeyShape, SuffixSchema, Table
 use super::type_tracker::{widen_pg_types, PgType};
 
 /// Fraction of keys that must be numeric (or ISO-language codes) to classify a key shape as
-/// KeyShape::Numeric / KeyShape::IsoLang rather than Slug or Mixed.
+/// `KeyShape::Numeric` / `KeyShape::IsoLang` rather than Slug or Mixed.
 const KEY_SHAPE_DOMINANT_RATIO: f64 = 0.8;
 
 /// Determine whether a wide table's values are type-homogeneous (→ Pivot) or not (→ Jsonb).
-pub(crate) fn suggest_wide_strategy(entry: &TableEntry) -> WideStrategy {
+pub fn suggest_wide_strategy(entry: &TableEntry) -> WideStrategy {
     let mut has_string = false;
     let mut has_numeric = false;
     let mut has_boolean = false;
@@ -33,11 +34,10 @@ pub(crate) fn suggest_wide_strategy(entry: &TableEntry) -> WideStrategy {
             continue;
         }
         match tracker.to_pg_type() {
-            PgType::Text | PgType::VarChar(_) => has_string = true,
+            PgType::Text | PgType::VarChar(_) | PgType::Array(_) | PgType::Jsonb => has_string = true,
             PgType::Integer | PgType::BigInt | PgType::DoublePrecision => has_numeric = true,
             PgType::Boolean => has_boolean = true,
             PgType::Uuid | PgType::Date | PgType::Timestamp => has_date_like = true,
-            PgType::Array(_) | PgType::Jsonb => has_string = true,
         }
     }
 
@@ -54,15 +54,12 @@ pub(crate) fn suggest_wide_strategy(entry: &TableEntry) -> WideStrategy {
     }
 }
 
-/// Restructure a schema's data columns to match the given WideStrategy.
+/// Restructure a schema's data columns to match the given `WideStrategy`.
 fn apply_pivot_columns(schema: &mut TableSchema) {
     let value_type = schema
         .data_columns()
         .fold(None::<PgType>, |acc, col| {
-            Some(match acc {
-                None => col.pg_type.clone(),
-                Some(a) => widen_pg_types(a, &col.pg_type),
-            })
+            Some(acc.map_or_else(|| col.pg_type.clone(), |a| widen_pg_types(a, &col.pg_type)))
         })
         .unwrap_or(PgType::Text);
     schema.columns.retain(|c| c.is_generated);
@@ -87,9 +84,19 @@ fn apply_pivot_columns(schema: &mut TableSchema) {
 
 /// Replaces all non-generated columns with either (key, value) for Pivot
 /// or (data JSONB) for Jsonb.
+#[allow(clippy::too_many_lines)] // exhaustive match over all WideStrategy variants
 pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: WideStrategy) {
     match strategy {
-        WideStrategy::Columns => {} // nothing to restructure
+        WideStrategy::Columns
+        | WideStrategy::KeyedPivot(_)
+        | WideStrategy::AutoSplit { .. }
+        | WideStrategy::Ignore
+        | WideStrategy::NormalizeDynamicKeys { .. }
+        | WideStrategy::Flatten { .. }
+        | WideStrategy::JsonbFlatten => {
+            // Applied elsewhere: KeyedPivot via finalize_siblings(), AutoSplit/Ignore inline
+            // in finalize(), NormalizeDynamicKeys/Flatten/JsonbFlatten via dedicated apply_* fns.
+        }
         WideStrategy::Pivot => {
             apply_pivot_columns(schema);
         }
@@ -108,17 +115,6 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: WideStrat
         WideStrategy::StructuredPivot(suffix_schema) => {
             apply_structured_pivot_columns(schema, suffix_schema);
         }
-        WideStrategy::KeyedPivot(_) => {
-            // KeyedPivot is applied by finalize_siblings(), not through this path.
-        }
-        WideStrategy::AutoSplit { .. } | WideStrategy::Ignore => {
-            // AutoSplit is handled inline in finalize(); Ignore is per-key, not per-table.
-            // Neither reaches this function.
-        }
-        WideStrategy::NormalizeDynamicKeys { .. } | WideStrategy::Flatten { .. } | WideStrategy::JsonbFlatten => {
-            // These strategies require the full schemas slice.
-            // Use apply_normalize_dynamic_keys(), apply_flatten(), or apply_jsonb_flatten() instead.
-        }
         WideStrategy::MultiKeyedPivot(_) => {
             // MultiKeyedPivot: parent keeps only its generated columns (no data columns).
             // The synthetic child pivot tables are created by finalize_siblings().
@@ -127,8 +123,8 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: WideStrat
     }
 }
 
-/// Restructure a wide table's columns for StructuredPivot:
-/// (j2s_id, j2s_parent_id, name TEXT, value <type>, <suffix_col>...)
+/// Restructure a wide table's columns for `StructuredPivot`:
+/// (`j2s_id`, `j2s_parent_id`, name TEXT, value <type>, <`suffix_col`>...)
 pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: SuffixSchema) {
     schema.columns.retain(|c| c.is_generated);
     schema.columns.push(ColumnSchema {
@@ -217,10 +213,10 @@ pub fn classify_key_shape(keys: &[&str]) -> KeyShape {
     }
 }
 
-/// Apply NormalizeDynamicKeys strategy to a table: collapse all its direct Object children
+/// Apply `NormalizeDynamicKeys` strategy to a table: collapse all its direct Object children
 /// into a single normalized table with `id_column` TEXT + union of value columns.
 ///
-/// Equivalent to a user-triggered KeyedPivot with a custom ID column name.
+/// Equivalent to a user-triggered `KeyedPivot` with a custom ID column name.
 /// Call `exclude_absorbed_children` after to remove the now-absorbed child tables.
 fn find_object_child_indices(schemas: &[TableSchema], table_name: &str) -> Result<Vec<usize>> {
     let indices: Vec<usize> = schemas.iter().enumerate()
@@ -232,8 +228,7 @@ fn find_object_child_indices(schemas: &[TableSchema], table_name: &str) -> Resul
         .collect();
     if indices.is_empty() {
         return Err(J2sError::Schema(format!(
-            "apply_normalize_dynamic_keys: no Object children found for '{}'; strategy not applied",
-            table_name
+            "apply_normalize_dynamic_keys: no Object children found for '{table_name}'; strategy not applied"
         )));
     }
     Ok(indices)
@@ -246,7 +241,7 @@ pub fn apply_normalize_dynamic_keys(
     id_column: String,
 ) -> Result<()> {
     let target_idx = schemas.iter().position(|s| s.name == table_name)
-        .ok_or_else(|| J2sError::Schema(format!("apply_normalize_dynamic_keys: table '{}' not found", table_name)))?;
+        .ok_or_else(|| J2sError::Schema(format!("apply_normalize_dynamic_keys: table '{table_name}' not found")))?;
     let child_indices = find_object_child_indices(schemas, table_name)?;
     let children: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
     let union_cols = build_union_columns(&children);
@@ -255,7 +250,7 @@ pub fn apply_normalize_dynamic_keys(
         .iter()
         .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
         .collect();
-    let key_shape = classify_key_shape(&keys.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let key_shape = classify_key_shape(&keys.iter().map(std::string::String::as_str).collect::<Vec<_>>());
 
     let target = &mut schemas[target_idx];
     target.columns.retain(|c| c.is_generated);
@@ -354,8 +349,7 @@ pub fn apply_flatten(
         );
     } else {
         return Err(J2sError::Schema(format!(
-            "apply_flatten: parent table '{}' not found for '{}'",
-            parent_name, child_table_name
+            "apply_flatten: parent table '{parent_name}' not found for '{child_table_name}'"
         )));
     }
 
@@ -366,7 +360,7 @@ pub fn apply_flatten(
 
 /// Inline a child table as a single JSONB column on the parent table.
 /// The child table is removed from the schema; the parent gains `{child_table_name} JSONB`.
-/// Used for WideStrategy::JsonbFlatten (IHM override "JSONB inline").
+/// Used for `WideStrategy::JsonbFlatten` (IHM override "JSONB inline").
 #[allow(dead_code)] // pub API consumed by json2sql-ui (separate crate, invisible to binary dead_code lint)
 pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &str) -> Result<()> {
     let (_, parent_name, field_name) = resolve_child_info(schemas, child_table_name, "apply_jsonb_flatten")?;
@@ -393,8 +387,7 @@ pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &st
         }
     } else {
         return Err(J2sError::Schema(format!(
-            "apply_jsonb_flatten: parent table '{}' not found for '{}'",
-            parent_name, child_table_name
+            "apply_jsonb_flatten: parent table '{parent_name}' not found for '{child_table_name}'"
         )));
     }
 

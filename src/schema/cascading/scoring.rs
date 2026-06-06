@@ -1,4 +1,5 @@
 //! Jaccard similarity scoring et clustering glouton pour la détection de siblings.
+#![allow(clippy::cast_precision_loss)]
 //!
 //! Toutes les fonctions de ce module opèrent exclusivement sur `&[TableSchema]`
 //! et des indices — pas d'effets de bord, pas d'état mutable.
@@ -28,8 +29,8 @@ pub fn child_compatibility_score(
 
     for &i in sibling_indices {
         let name = schemas[i].name.as_str();
-        let obj_ch = parent_to_obj.get(name).map(|v| v.as_slice()).unwrap_or(&[]);
-        let arr_ch = parent_to_arr.get(name).map(|v| v.as_slice()).unwrap_or(&[]);
+        let obj_ch: &[usize] = parent_to_obj.get(name).map_or(&[], Vec::as_slice);
+        let arr_ch: &[usize] = parent_to_arr.get(name).map_or(&[], Vec::as_slice);
         for &ci in obj_ch.iter().chain(arr_ch.iter()) {
             if let Some(key) = schemas[ci].path.last() {
                 key_to_children.entry(key.as_str()).or_default().push(ci);
@@ -108,7 +109,7 @@ pub(super) fn siblings_key_prefix(schemas: &[TableSchema], indices: &[usize]) ->
     let keys: Vec<&[u8]> = indices
         .iter()
         .filter_map(|&i| schemas[i].path.last())
-        .map(|s| s.as_bytes())
+        .map(std::string::String::as_bytes)
         .collect();
     if keys.is_empty() {
         return String::new();
@@ -128,13 +129,13 @@ pub(super) fn unique_cluster_suffix(
     desired_suffix: &str,
     schemas: &[TableSchema],
 ) -> String {
-    let taken = |suffix: &str| schemas.iter().any(|s| s.name == format!("{}_{}", parent_name, suffix));
+    let taken = |suffix: &str| schemas.iter().any(|s| s.name == format!("{parent_name}_{suffix}"));
     if !taken(desired_suffix) {
         return desired_suffix.to_string();
     }
     let mut n = 2usize;
     loop {
-        let try_suffix = format!("{}_{}", desired_suffix, n);
+        let try_suffix = format!("{desired_suffix}_{n}");
         if !taken(&try_suffix) {
             return try_suffix;
         }
@@ -142,7 +143,7 @@ pub(super) fn unique_cluster_suffix(
     }
 }
 
-/// Truncate a raw table name to fit PostgreSQL's 63-byte identifier limit.
+/// Truncate a raw table name to fit `PostgreSQL`'s 63-byte identifier limit.
 /// Appends a 7-char FNV-1a hex suffix when truncation is needed, matching the
 /// strategy used by `NamingRegistry` for consistency.
 pub(super) fn pg_truncate_name(raw: &str) -> String {
@@ -151,8 +152,8 @@ pub(super) fn pg_truncate_name(raw: &str) -> String {
         return raw.to_string();
     }
     // FNV-1a 64-bit hash → 7 hex chars (same algorithm as naming::short_hash)
-    let h = raw.bytes().fold(14695981039346656037u64, |acc, b| {
-        (acc ^ b as u64).wrapping_mul(1099511628211)
+    let h = raw.bytes().fold(14_695_981_039_346_656_037_u64, |acc, b| {
+        (acc ^ u64::from(b)).wrapping_mul(1_099_511_628_211)
     });
     let hash = format!("{:07x}", h & 0x0fff_ffff);
     format!("{}_{}", &raw[..MAX - 8], hash)
@@ -187,7 +188,7 @@ fn noise_filtered_col_sets<'a>(
                 .collect()
         })
         .collect();
-    if filtered.iter().all(|s| s.is_empty()) {
+    if filtered.iter().all(std::collections::HashSet::is_empty) {
         indices
             .iter()
             .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
@@ -219,9 +220,9 @@ fn build_jaccard_col_sets<'a>(
 ///    containers whose data lives in their own children), the Jaccard is 1.0 by convention
 ///    (union = 0 for all pairs). This covers the common pangenomegraph/genome-key pattern.
 ///
-/// 2. **Large-group fast path** — when N > PAIRWISE_LIMIT, compare each sibling against
+/// 2. **Large-group fast path** — when N > `PAIRWISE_LIMIT`, compare each sibling against
 ///    sibling[0] instead of all N*(N-1)/2 pairs. Semantically equivalent for the homogeneous
-///    schemas typical of KeyedPivot detection (language codes, numeric IDs, genome keys).
+///    schemas typical of `KeyedPivot` detection (language codes, numeric IDs, genome keys).
 ///    Outliers are still detected: any sibling with 0 column overlap with sibling[0] returns 0.
 fn min_jaccard_from_col_sets(col_sets: &[std::collections::HashSet<&str>]) -> f64 {
     const PAIRWISE_LIMIT: usize = 200;

@@ -51,7 +51,7 @@ fn type_histogram(tracker: &TypeTracker) -> Vec<(String, u64)> {
     let mut hist: Vec<(String, u64)> = tracker
         .iter_types()
         .filter(|(t, _)| !matches!(t, InferredType::Object | InferredType::Array))
-        .map(|(t, n)| (format!("{:?}", t), n))
+        .map(|(t, n)| (format!("{t:?}"), n))
         .collect();
     hist.sort_by_key(|b| std::cmp::Reverse(b.1));
     hist

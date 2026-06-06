@@ -25,14 +25,14 @@ impl ProgressTracker {
             .expect("bytes progress bar template is valid")
             .progress_chars("=>-"),
         );
-        bytes_bar.set_prefix(format!("{} bytes", pass_label));
+        bytes_bar.set_prefix(format!("{pass_label} bytes"));
 
         let rows_bar = multi.add(ProgressBar::new_spinner());
         rows_bar.set_style(
             ProgressStyle::with_template("{prefix:.bold} {spinner} {human_pos} rows ({per_sec})")
                 .expect("rows spinner template is valid"),
         );
-        rows_bar.set_prefix(format!("{} rows ", pass_label));
+        rows_bar.set_prefix(format!("{pass_label} rows "));
 
         Self {
             multi,

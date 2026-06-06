@@ -13,13 +13,14 @@ use serde_json::Value;
 
 use crate::error::{J2sError, Result};
 
-/// Map a simd-json parse error to J2sError.
+/// Map a simd-json parse error to `J2sError`.
+#[allow(clippy::needless_pass_by_value)] // map_err(simd_err) requires fn(Error) -> J2sError signature
 fn simd_err(e: simd_json::Error) -> J2sError {
-    J2sError::InvalidInput(format!("JSON parse error: {}", e))
+    J2sError::InvalidInput(format!("JSON parse error: {e}"))
 }
 
 /// Detected format of the input file.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonFormat {
     /// Top-level JSON array: `[{...}, {...}, ...]`
     Array,
@@ -76,7 +77,7 @@ impl JsonLinesReader {
     }
 
     #[must_use]
-    pub fn bytes_read(&self) -> u64 {
+    pub const fn bytes_read(&self) -> u64 {
         self.bytes_read
     }
 }
@@ -92,7 +93,7 @@ impl JsonLinesReader {
                 Ok(n) => {
                     self.bytes_read += n as u64;
                     let start = self.line_buf.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(self.line_buf.len());
-                    let end = self.line_buf.iter().rposition(|b| !b.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(0);
+                    let end = self.line_buf.iter().rposition(|b| !b.is_ascii_whitespace()).map_or(0, |i| i + 1);
                     if start >= end { continue; }
                     return Some(Ok((start, end)));
                 }
@@ -151,7 +152,7 @@ impl JsonArrayReader {
     }
 
     #[must_use]
-    pub fn bytes_read(&self) -> u64 {
+    pub const fn bytes_read(&self) -> u64 {
         self.bytes_read
     }
 
@@ -176,7 +177,7 @@ impl JsonArrayReader {
             match self.read_byte()? {
                 Err(e) => return Some(Err(J2sError::Io(e))),
                 Ok(b) => match b {
-                    b' ' | b'\t' | b'\n' | b'\r' | b',' => continue,
+                    b' ' | b'\t' | b'\n' | b'\r' | b',' => {}
                     b']' => return None, // end of array
                     other => return Some(Ok(other)),
                 },
@@ -304,7 +305,7 @@ impl JsonArrayReader {
                 match self.read_byte()? {
                     Err(e) => return Some(Err(J2sError::Io(e))),
                     Ok(b'[') => { self.opened = true; break; }
-                    Ok(b) if b.is_ascii_whitespace() => continue,
+                    Ok(b) if b.is_ascii_whitespace() => {}
                     Ok(b) => return Some(Err(J2sError::InvalidInput(format!("Expected '[', found '{}'", b as char)))),
                 }
             }
@@ -340,7 +341,7 @@ impl Iterator for JsonArrayReader {
                         self.opened = true;
                         break;
                     }
-                    Ok(b) if b.is_ascii_whitespace() => continue,
+                    Ok(b) if b.is_ascii_whitespace() => {}
                     Ok(b) => {
                         return Some(Err(J2sError::InvalidInput(format!(
                             "Expected '[', found '{}'",
@@ -381,25 +382,25 @@ impl JsonReader {
     /// Used by `run_parallel` to distribute parsing work to worker threads.
     pub fn next_raw(&mut self) -> Option<Result<Vec<u8>>> {
         match self {
-            JsonReader::Lines(r) => r.next_raw(),
-            JsonReader::Array(r) => r.next_raw(),
+            Self::Lines(r) => r.next_raw(),
+            Self::Array(r) => r.next_raw(),
         }
     }
 
     pub fn open(path: &Path) -> Result<(Self, JsonFormat)> {
         let format = detect_format(path)?;
         let reader = match format {
-            JsonFormat::Lines => JsonReader::Lines(JsonLinesReader::open(path)?),
-            JsonFormat::Array => JsonReader::Array(JsonArrayReader::open(path)?),
+            JsonFormat::Lines => Self::Lines(JsonLinesReader::open(path)?),
+            JsonFormat::Array => Self::Array(JsonArrayReader::open(path)?),
         };
         Ok((reader, format))
     }
 
     #[must_use]
-    pub fn bytes_read(&self) -> u64 {
+    pub const fn bytes_read(&self) -> u64 {
         match self {
-            JsonReader::Lines(r) => r.bytes_read(),
-            JsonReader::Array(r) => r.bytes_read(),
+            Self::Lines(r) => r.bytes_read(),
+            Self::Array(r) => r.bytes_read(),
         }
     }
 }
@@ -409,8 +410,8 @@ impl Iterator for JsonReader {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            JsonReader::Lines(r) => r.next(),
-            JsonReader::Array(r) => r.next(),
+            Self::Lines(r) => r.next(),
+            Self::Array(r) => r.next(),
         }
     }
 }

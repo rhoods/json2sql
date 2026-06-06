@@ -15,19 +15,19 @@ pub enum StrategyName {
 
 impl StrategyName {
     #[allow(dead_code)] // used in tests + available as public API
-    pub const OPTIONAL: &'static [StrategyName] = &[
-        StrategyName::Sibling,
-        StrategyName::Pivot,
-        StrategyName::StructuredPivot,
+    pub const OPTIONAL: &'static [Self] = &[
+        Self::Sibling,
+        Self::Pivot,
+        Self::StructuredPivot,
     ];
 
     #[allow(dead_code)] // used by json2sql-ui::config for TOML serialization
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            StrategyName::Sibling => "sibling",
-            StrategyName::Pivot => "pivot",
-            StrategyName::StructuredPivot => "structured_pivot",
+            Self::Sibling => "sibling",
+            Self::Pivot => "pivot",
+            Self::StructuredPivot => "structured_pivot",
         }
     }
 }
@@ -37,9 +37,9 @@ impl TryFrom<&str> for StrategyName {
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         match s {
-            "sibling" => Ok(StrategyName::Sibling),
-            "pivot" => Ok(StrategyName::Pivot),
-            "structured_pivot" => Ok(StrategyName::StructuredPivot),
+            "sibling" => Ok(Self::Sibling),
+            "pivot" => Ok(Self::Pivot),
+            "structured_pivot" => Ok(Self::StructuredPivot),
             "split" => Err(StrategyError::Mandatory(s.to_string())),
             _ => Err(StrategyError::Unknown(s.to_string())),
         }

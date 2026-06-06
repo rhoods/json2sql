@@ -2,7 +2,7 @@
 //!
 //! [`ColumnStats`] records null counts and a histogram of observed JSON types for each
 //! data column. Mixed-type columns (`is_mixed() == true`) are candidates for anomalies
-//! in Pass 2 when values can't be coerced to the inferred PostgreSQL type.
+//! in Pass 2 when values can't be coerced to the inferred `PostgreSQL` type.
 
 use crate::schema::type_tracker::PgType;
 
@@ -14,7 +14,7 @@ pub struct ColumnStats {
     pub pg_type: PgType,
     pub total_count: u64,
     pub null_count: u64,
-    /// Histogram of observed JSON types: [(type_label, count), ...]
+    /// Histogram of observed JSON types: [(`type_label`, count), ...]
     /// Empty for generated j2s_ columns.
     pub type_histogram: Vec<(String, u64)>,
 }
@@ -22,13 +22,13 @@ pub struct ColumnStats {
 impl ColumnStats {
     /// True if more than one JSON type was observed (potential anomalies).
     #[must_use]
-    pub fn is_mixed(&self) -> bool {
+    pub const fn is_mixed(&self) -> bool {
         self.type_histogram.len() > 1
     }
 
     /// Non-null count.
     #[must_use]
-    pub fn non_null_count(&self) -> u64 {
+    pub const fn non_null_count(&self) -> u64 {
         self.total_count.saturating_sub(self.null_count)
     }
 }
@@ -38,7 +38,7 @@ fn write_column_line(col: &ColumnStats, writer: &mut dyn std::io::Write) -> std:
         let histogram: Vec<String> = col
             .type_histogram
             .iter()
-            .map(|(t, n)| format!("{} {}", n, t))
+            .map(|(t, n)| format!("{n} {t}"))
             .collect();
         writeln!(
             writer,
@@ -61,7 +61,7 @@ pub fn write_text_report(
     writer: &mut dyn std::io::Write,
 ) -> std::io::Result<()> {
     writeln!(writer, "=== Pass 1 Schema Statistics ===")?;
-    writeln!(writer, "Total root rows: {}", total_rows)?;
+    writeln!(writer, "Total root rows: {total_rows}")?;
     let mut current_table = "";
     for col in stats {
         if col.table_name != current_table {

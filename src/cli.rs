@@ -45,6 +45,7 @@ pub enum Commands {
     about = "Convert large nested JSON files to PostgreSQL databases",
     version
 )]
+#[allow(clippy::struct_excessive_bools)] // CLI flags are individual booleans by convention
 pub struct Cli {
     /// Subcommand (omit for default import mode)
     #[command(subcommand)]
@@ -54,11 +55,11 @@ pub struct Cli {
     #[arg(short, long, value_name = "FILE")]
     pub input: Option<PathBuf>,
 
-    /// PostgreSQL connection string (e.g. postgres://user:pass@localhost/dbname)
+    /// `PostgreSQL` connection string (e.g. <postgres://user:pass@localhost/dbname>)
     #[arg(short, long, value_name = "DSN", env = "DATABASE_URL")]
     pub db_url: Option<String>,
 
-    /// Target PostgreSQL schema (default: public)
+    /// Target `PostgreSQL` schema (default: public)
     #[arg(long, default_value = "public")]
     pub schema: String,
 
@@ -91,7 +92,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 256)]
     pub text_threshold: u32,
 
-    /// Flush a table's buffer to PostgreSQL every N rows during Pass 2, keeping
+    /// Flush a table's buffer to `PostgreSQL` every N rows during Pass 2, keeping
     /// temp-file disk usage bounded. Use 0 to disable (buffer everything first).
     /// (default: 100000)
     #[arg(long, default_value_t = 100_000)]
@@ -105,7 +106,7 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
 
-    /// Store scalar arrays as PostgreSQL array columns (TEXT[], INTEGER[]…) instead of junction tables
+    /// Store scalar arrays as `PostgreSQL` array columns (TEXT[], INTEGER[]…) instead of junction tables
     #[arg(long, default_value_t = false)]
     pub array_as_pg_array: bool,
 
@@ -133,7 +134,7 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub schema_input: Option<PathBuf>,
 
-    /// Number of parallel PostgreSQL connections for COPY (default: 1, sequential)
+    /// Number of parallel `PostgreSQL` connections for COPY (default: 1, sequential)
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub parallel: usize,
 
@@ -141,13 +142,13 @@ pub struct Cli {
     #[arg(long, value_name = "DIR")]
     pub temp_dir: Option<PathBuf>,
 
-    /// Tables with more data columns than this threshold are automatically assigned a WideStrategy
+    /// Tables with more data columns than this threshold are automatically assigned a `WideStrategy`
     /// (Pivot or Jsonb). Override per table via --schema-config with `strategy = "pivot"|"jsonb"`.
     /// Set to 0 to disable automatic wide-table detection.
     #[arg(long, default_value_t = 100, value_name = "N")]
     pub wide_column_threshold: usize,
 
-    /// Minimum number of sibling child tables required to trigger automatic KeyedPivot merging.
+    /// Minimum number of sibling child tables required to trigger automatic `KeyedPivot` merging.
     /// Sibling tables share the same parent and have similar column schemas (see --sibling-jaccard).
     /// Set to 0 to disable automatic sibling detection.
     #[arg(long, default_value_t = 2, value_name = "N")]
@@ -159,12 +160,12 @@ pub struct Cli {
     pub sibling_jaccard: f64,
 
     /// Fraction of rows a key must appear in to be kept as a stable column in the main table
-    /// (AutoSplit strategy). Keys below this threshold but above --rare-threshold go to
+    /// (`AutoSplit` strategy). Keys below this threshold but above --rare-threshold go to
     /// the companion `{table}_wide` EAV table.
     #[arg(long, default_value_t = 0.10, value_name = "F")]
     pub stable_threshold: f64,
 
-    /// Fraction of rows below which a key is dropped entirely (AutoSplit + Ignore strategy).
+    /// Fraction of rows below which a key is dropped entirely (`AutoSplit` + Ignore strategy).
     /// Keys appearing in fewer rows than this fraction are excluded from all schemas and data.
     #[arg(long, default_value_t = 0.001, value_name = "F")]
     pub rare_threshold: f64,
@@ -175,7 +176,7 @@ pub struct Cli {
     pub workers: usize,
 
     /// Disable an optional inference strategy. Repeatable.
-    /// Valid values: sibling, pivot, structured_pivot.
+    /// Valid values: sibling, pivot, `structured_pivot`.
     /// Mandatory strategies (split) cannot be disabled — exits non-zero with explicit error.
     #[arg(long = "disable-strategy", value_name = "STRATEGY")]
     pub disable_strategy: Vec<String>,

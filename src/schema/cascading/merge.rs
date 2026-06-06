@@ -26,7 +26,7 @@ pub enum MergeError {
 #[allow(dead_code)] // used by json2sql-ui::state::apply_sibling_merge
 #[derive(Debug)]
 pub struct MergeResult {
-    /// Parent table that receives the new WideStrategy.
+    /// Parent table that receives the new `WideStrategy`.
     pub parent_name: String,
     /// `KeyedPivot` or `MultiKeyedPivot` to store in `strategy_overrides[parent_name]`.
     pub strategy: WideStrategy,
@@ -70,10 +70,10 @@ pub fn build_keyed_pivot_from_siblings(
     let parent_name = validate_merge_inputs(schemas, indices)?;
 
     let names: Vec<&str> = indices.iter().map(|&i| schemas[i].name.as_str()).collect();
-    let absorbed_names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+    let absorbed_names: Vec<String> = names.iter().map(std::string::ToString::to_string).collect();
 
     let keys = extract_key_suffixes(&names);
-    let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+    let key_refs: Vec<&str> = keys.iter().map(std::string::String::as_str).collect();
 
     let is_numeric: Vec<bool> = keys.iter().map(|k| k.chars().all(|c| c.is_ascii_digit())).collect();
     let has_numeric = is_numeric.iter().any(|&b| b);
@@ -111,7 +111,7 @@ fn build_mixed_keyed_pivot_strategy(
     }
     WideStrategy::MultiKeyedPivot(vec![
         SiblingGroup {
-            pivot_table: pg_truncate_name(&format!("{}_{}_num", parent_name, key_col_name)),
+            pivot_table: pg_truncate_name(&format!("{parent_name}_{key_col_name}_num")),
             key_is_numeric: true,
             sibling_schema: SiblingSchema {
                 key_col_name: key_col_name.to_string(),
@@ -122,7 +122,7 @@ fn build_mixed_keyed_pivot_strategy(
             absorbed_names: numeric_names,
         },
         SiblingGroup {
-            pivot_table: pg_truncate_name(&format!("{}_{}_txt", parent_name, key_col_name)),
+            pivot_table: pg_truncate_name(&format!("{parent_name}_{key_col_name}_txt")),
             key_is_numeric: false,
             sibling_schema: SiblingSchema {
                 key_col_name: key_col_name.to_string(),
@@ -142,7 +142,7 @@ fn extract_key_suffixes(names: &[&str]) -> Vec<String> {
     let prefix_len = (0..min_len)
         .take_while(|&i| bytes.iter().all(|b| b[i] == bytes[0][i]))
         .count();
-    let skip = if matches!(names[0].as_bytes().get(prefix_len), Some(&b'_') | Some(&b'-')) {
+    let skip = if matches!(names[0].as_bytes().get(prefix_len), Some(&b'_' | &b'-')) {
         prefix_len + 1
     } else {
         prefix_len
