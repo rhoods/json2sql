@@ -141,12 +141,13 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             let collisions = s.schema.column_collisions.clone();
                             let stats = s.schema.pass1_stats.clone();
                             let overrides = s.schema.strategy_overrides.clone();
+                            let overflow_warnings = s.schema.overflow_warnings.clone();
                             drop(s);
                             let mut fb = save_feedback;
                             spawn(async move {
                                 if let PickResult::Selected(path) = pick_save_file("schema.json").await {
                                     let result = json2sql::schema::persistence::save_with_overrides(
-                                        &schemas, total_rows, &truncated, &collisions, &stats, &overrides, &path,
+                                        &schemas, total_rows, &truncated, &collisions, &stats, &overflow_warnings, &overrides, &path,
                                     );
                                     match result {
                                         Ok(()) => fb.set(Some(Ok(

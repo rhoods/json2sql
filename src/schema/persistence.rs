@@ -9,6 +9,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{J2sError, Result};
+use crate::schema::finalizer::OverflowWarning;
 use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::stats::ColumnStats;
 use crate::schema::table_schema::{TableSchema, WideStrategy};
@@ -31,6 +32,10 @@ pub struct SchemaSnapshot {
     /// versions (or by the CLI) — deserialized as an empty map via `serde(default)`.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub strategy_overrides: std::collections::HashMap<String, WideStrategy>,
+    /// Tables converted to JSONB due to column overflow. Absent in pre-fix snapshots
+    /// — deserialized as empty vec via `serde(default)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overflow_warnings: Vec<OverflowWarning>,
 }
 
 /// Save a Pass 1 result to a JSON file.
@@ -40,6 +45,7 @@ pub fn save(
     truncated_names: &[TruncatedName],
     column_collisions: &[ColumnCollision],
     stats: &[ColumnStats],
+    overflow_warnings: &[OverflowWarning],
     path: &Path,
 ) -> Result<()> {
     let snapshot = SchemaSnapshot {
@@ -50,6 +56,7 @@ pub fn save(
         column_collisions: column_collisions.to_vec(),
         stats: stats.to_vec(),
         strategy_overrides: std::collections::HashMap::new(),
+        overflow_warnings: overflow_warnings.to_vec(),
     };
     let json = serde_json::to_string_pretty(&snapshot)
         .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {e}")))?;
@@ -65,6 +72,7 @@ pub fn save_with_overrides(
     truncated_names: &[TruncatedName],
     column_collisions: &[ColumnCollision],
     stats: &[ColumnStats],
+    overflow_warnings: &[OverflowWarning],
     strategy_overrides: &std::collections::HashMap<String, crate::schema::table_schema::WideStrategy>,
     path: &Path,
 ) -> Result<()> {
@@ -76,6 +84,7 @@ pub fn save_with_overrides(
         column_collisions: column_collisions.to_vec(),
         stats: stats.to_vec(),
         strategy_overrides: strategy_overrides.clone(),
+        overflow_warnings: overflow_warnings.to_vec(),
     };
     let json = serde_json::to_string_pretty(&snapshot)
         .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {e}")))?;
@@ -119,6 +128,7 @@ mod tests {
             column_collisions: vec![],
             stats: vec![],
             strategy_overrides: HashMap::new(),
+            overflow_warnings: vec![],
         }
     }
 
@@ -128,7 +138,7 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("my_table".to_string(), WideStrategy::Jsonb);
 
-        save_with_overrides(&[], 0, &[], &[], &[], &overrides, tmp.path()).unwrap();
+        save_with_overrides(&[], 0, &[], &[], &[], &[], &overrides, tmp.path()).unwrap();
         let loaded = load(tmp.path()).unwrap();
 
         assert!(matches!(
@@ -154,7 +164,7 @@ mod tests {
     #[test]
     fn v2_snapshot_round_trips() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        save(&[], 42, &[], &[], &[], tmp.path()).unwrap();
+        save(&[], 42, &[], &[], &[], &[], tmp.path()).unwrap();
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(loaded.version, SCHEMA_FORMAT_VERSION);
         assert_eq!(loaded.total_rows, 42);
@@ -164,5 +174,31 @@ mod tests {
     fn strategy_overrides_default_empty_on_new_snapshot() {
         let s = empty_snapshot();
         assert!(s.strategy_overrides.is_empty());
+    }
+
+    #[test]
+    fn overflow_warnings_round_trip() {
+        use crate::schema::finalizer::OverflowWarning;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let warnings = vec![
+            OverflowWarning { table_name: "wide_table".to_string(), original_column_count: 1700 },
+            OverflowWarning { table_name: "another_wide".to_string(), original_column_count: 1800 },
+        ];
+        save(&[], 0, &[], &[], &[], &warnings, tmp.path()).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(loaded.overflow_warnings.len(), 2);
+        assert_eq!(loaded.overflow_warnings[0].table_name, "wide_table");
+        assert_eq!(loaded.overflow_warnings[0].original_column_count, 1700);
+        assert_eq!(loaded.overflow_warnings[1].table_name, "another_wide");
+    }
+
+    #[test]
+    fn overflow_warnings_default_empty_on_old_snapshot() {
+        // Snapshots written before this fix have no overflow_warnings field → default to empty.
+        let json = r#"{"version":2,"total_rows":0,"schemas":[],"truncated_names":[],"column_collisions":[],"stats":[]}"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert!(loaded.overflow_warnings.is_empty(), "old snapshots must deserialize with empty overflow_warnings");
     }
 }

@@ -120,6 +120,8 @@ fn build_mixed_keyed_pivot_strategy(
                 data_col_name: "j2s_data".to_string(),
             },
             absorbed_names: numeric_names,
+            path_segment: format!("{key_col_name}_num"),
+            absorbed_path_segments: numeric_keys.iter().map(ToString::to_string).collect(),
         },
         SiblingGroup {
             pivot_table: pg_truncate_name(&format!("{parent_name}_{key_col_name}_txt")),
@@ -131,6 +133,8 @@ fn build_mixed_keyed_pivot_strategy(
                 data_col_name: "j2s_data".to_string(),
             },
             absorbed_names: non_numeric_names,
+            path_segment: format!("{key_col_name}_txt"),
+            absorbed_path_segments: non_numeric_keys.iter().map(ToString::to_string).collect(),
         },
     ])
 }

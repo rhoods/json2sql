@@ -98,6 +98,17 @@ pub struct SiblingGroup {
     /// Names of the original child tables absorbed into this group.
     /// Used by `exclude_absorbed_children` to remove them from the schema.
     pub absorbed_names: Vec<String>,
+    /// Path segment used for this group in the schema path and `path_map` lookup
+    /// (e.g. `"num"`, `"key"`, `"cluster_0"`). Empty in old snapshots — Pass 2 falls
+    /// back to the `key_is_numeric` heuristic when this is empty.
+    #[serde(default)]
+    pub path_segment: String,
+    /// Path last-segments of the child schemas absorbed into this cluster
+    /// (i.e. the JSON keys seen in Pass 1). Used at Pass 2 to route runtime keys
+    /// to the correct cluster when multiple non-numeric groups exist.
+    /// Empty in old snapshots — falls back to `key_is_numeric` heuristic.
+    #[serde(default)]
+    pub absorbed_path_segments: Vec<String>,
 }
 
 /// Strategy for handling "wide" tables — tables with many dynamic keys.

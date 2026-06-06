@@ -427,7 +427,7 @@ const SUFFIX_MIN_COVERAGE: f64 = 0.3;
 /// Fraction of keys that must be numeric (or ISO-language codes) to classify a key shape as
 /// `KeyShape::Numeric` / `KeyShape::IsoLang` rather than Slug or Mixed.
 /// Recorded when a table is auto-converted to JSONB by `apply_column_limit_guard`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OverflowWarning {
     pub table_name: String,
     pub original_column_count: usize,

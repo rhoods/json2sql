@@ -16,6 +16,8 @@ struct SubgroupData {
     key_shape: KeyShape,
     union_cols: Vec<ColumnSchema>,
     absorbed_names: Vec<String>,
+    path_segment: String,
+    absorbed_path_segments: Vec<String>,
 }
 
 enum CollapseKind {
@@ -567,7 +569,7 @@ fn build_multi_group_entry(
     for col in &g.union_cols { cols.push(col.clone()); }
     cols.push(ColumnSchema { name: "j2s_data".to_string(), original_name: "j2s_data".to_string(), pg_type: PgType::Jsonb, not_null: false, is_generated: true, is_parent_fk: false });
     let mut path = parent.path.to_vec();
-    path.push(if g.key_is_numeric { "num" } else { "key" }.to_string());
+    path.push(g.path_segment.clone());
     let sibling_schema = SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: parent.array_children, data_col_name: "j2s_data".to_string() };
     let pivot_name = g.pivot_table_name.clone();
     let absorbed_idx: Vec<usize> = g.absorbed_names.iter().filter_map(|n| name_to_idx.get(n.as_str()).copied()).collect();
@@ -602,6 +604,8 @@ fn apply_multi_collapse(
         key_is_numeric: g.key_is_numeric,
         sibling_schema: SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: collapse.array_children, data_col_name: "j2s_data".to_string() },
         absorbed_names: g.absorbed_names.clone(),
+        path_segment: g.path_segment.clone(),
+        absorbed_path_segments: g.absorbed_path_segments.clone(),
     }).collect();
     schemas[collapse.parent_idx].wide_strategy = WideStrategy::MultiKeyedPivot(sibling_groups);
     let parent_ctx = ParentCtx {
@@ -679,6 +683,8 @@ fn make_subgroup(
         key_shape: shape,
         union_cols,
         absorbed_names: absorbed,
+        path_segment: suffix.to_string(),
+        absorbed_path_segments: sub_keys,
     }
 }
 
@@ -772,10 +778,15 @@ fn run_sibling_wave(
 
 /// Process one `CoSiblingGroup` from a cascade wave.
 /// Returns new `CoSiblingGroup`s for the next wave (grandchildren level).
+///
+/// Co-siblings share the same `json_key` and therefore MUST be routed to a single table at
+/// Pass 2. Merging is unconditional: a low Jaccard score produces a wider table with nullable
+/// columns, which is correct. The previous Jaccard gate caused `child_routes.insert` to
+/// overwrite for each sibling, leaving only the last sibling routable.
 fn process_co_sibling_group(
     schemas: &mut Vec<TableSchema>,
     _threshold: usize,
-    min_jaccard: f64,
+    _min_jaccard: f64,
     group: &CoSiblingGroup,
 ) -> Vec<CoSiblingGroup> {
     if group.sibling_indices.len() < 2 {
@@ -784,17 +795,9 @@ fn process_co_sibling_group(
     }
 
     let (obj_map, arr_map) = build_parent_child_maps(schemas);
-    let jaccard = pairwise_jaccard_min(schemas, &group.sibling_indices);
-    let compat = child_compatibility_score(schemas, &group.sibling_indices, &obj_map, &arr_map);
-
     let Some(parent_idx) = schemas.iter().position(|s| s.name == group.synthetic_parent_name) else { return Vec::new() };
 
-    if jaccard >= min_jaccard && compat >= min_jaccard {
-        merge_co_sibling_group(schemas, group, parent_idx, &obj_map, &arr_map)
-    } else {
-        reparent_siblings_individually(schemas, group, parent_idx);
-        Vec::new()
-    }
+    merge_co_sibling_group(schemas, group, parent_idx, &obj_map, &arr_map)
 }
 
 /// Re-parent a sole co-sibling to its synthetic pivot and register it in `child_routes`.
@@ -883,19 +886,6 @@ fn merge_co_sibling_group(
     cascade_grandchildren_to_next_wave(schemas, group, &t_name, obj_map, arr_map)
 }
 
-/// Re-parent each sibling individually to the synthetic parent (Jaccard too low to merge).
-fn reparent_siblings_individually(
-    schemas: &mut [TableSchema],
-    group: &CoSiblingGroup,
-    parent_idx: usize,
-) {
-    for &i in &group.sibling_indices {
-        let child_name = schemas[i].name.clone();
-        let child_key = schemas[i].path.last().cloned().unwrap_or_else(|| group.json_key.clone());
-        schemas[i].parent_table = Some(group.synthetic_parent_name.clone());
-        schemas[parent_idx].child_routes.insert(child_key, child_name);
-    }
-}
 
 /// Post-pass: merge `Columns` children of `KeyedPivot` parents into a synthetic sub-pivot.
 ///
@@ -1436,5 +1426,130 @@ mod tests {
         let arr_map = std::collections::HashMap::new();
         let result = filter_routing_tables(&schemas, &non_numeric_idx, &obj_map, &arr_map, 2);
         assert!(result.contains(&1), "pure table with few children is not a routing table");
+    }
+
+    // --- Finding 2: path collision dans path_map pour clusters non-numériques multiples ---
+
+    #[test]
+    fn test_two_non_numeric_clusters_have_distinct_path_segments() {
+        // 6 non-numeric siblings split into 2 incompatible clusters (Jaccard=0 between groups,
+        // Jaccard=1.0 within each group). try_cluster_fallback must produce SubgroupData with
+        // distinct path_segment values so path_map can store both without collision.
+        let mut parent = make_parent("p");
+        parent.wide_strategy = WideStrategy::Columns;
+        let schemas = vec![
+            parent,
+            make_child_with_key("p_a1", "p", "a1", &["col"]),
+            make_child_with_key("p_a2", "p", "a2", &["col"]),
+            make_child_with_key("p_a3", "p", "a3", &["col"]),
+            make_child_with_key("p_b1", "p", "b1", &["size"]),
+            make_child_with_key("p_b2", "p", "b2", &["size"]),
+            make_child_with_key("p_b3", "p", "b3", &["size"]),
+        ];
+        let ctx = make_ctx(&schemas, 0, vec![1, 2, 3, 4, 5, 6], 3, 0.5);
+        let regular = vec![1, 2, 3, 4, 5, 6];
+        let result = try_cluster_fallback(&schemas, &ctx, &regular);
+        let Some(Collapse { kind: CollapseKind::Multi { groups }, .. }) = result else {
+            panic!("expected Multi collapse with 2 non-numeric groups");
+        };
+        assert_eq!(groups.len(), 2, "expected exactly 2 clusters");
+        assert_ne!(
+            groups[0].path_segment, groups[1].path_segment,
+            "path_segments must be distinct; got {:?} and {:?}",
+            groups[0].path_segment, groups[1].path_segment,
+        );
+    }
+
+    #[test]
+    fn test_apply_multi_collapse_pivot_schemas_have_distinct_paths() {
+        // After apply_multi_collapse, each group's TableSchema.path.last() must be distinct
+        // so that path_map (keyed on path.join(SEP)) stores both pivots without collision.
+        let parent = make_parent("p");
+        let mut schemas = vec![
+            parent,
+            make_child_with_key("p_a1", "p", "a1", &["col"]),
+            make_child_with_key("p_a2", "p", "a2", &["col"]),
+            make_child_with_key("p_a3", "p", "a3", &["col"]),
+            make_child_with_key("p_b1", "p", "b1", &["size"]),
+            make_child_with_key("p_b2", "p", "b2", &["size"]),
+            make_child_with_key("p_b3", "p", "b3", &["size"]),
+        ];
+        let g0 = make_subgroup(&schemas, "p", &[1, 2, 3], false, "cluster_0");
+        let g1 = make_subgroup(&schemas, "p", &[4, 5, 6], false, "cluster_1");
+        let collapse = Collapse {
+            parent_idx: 0,
+            array_children: false,
+            log_msg: String::new(),
+            kind: CollapseKind::Multi { groups: vec![g0, g1] },
+            absorbed_indices: vec![1, 2, 3, 4, 5, 6],
+        };
+        let name_to_idx: std::collections::HashMap<String, usize> =
+            schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+        let empty = std::collections::HashMap::new();
+        let (pivot_schemas, _) = apply_multi_collapse(&mut schemas, &collapse, &name_to_idx, &empty, &empty);
+        assert_eq!(pivot_schemas.len(), 2, "expected 2 pivot schemas");
+        let last_segs: Vec<Option<&String>> = pivot_schemas.iter().map(|s| s.path.last()).collect();
+        assert_ne!(
+            last_segs[0], last_segs[1],
+            "pivot schemas must have distinct path last-segments; got {:?}",
+            last_segs,
+        );
+    }
+
+    #[test]
+    fn test_make_subgroup_stores_path_segment_and_absorbed_path_segments() {
+        let schemas = vec![
+            make_child_with_key("p_front", "p", "front", &["url"]),
+            make_child_with_key("p_back",  "p", "back",  &["url"]),
+            make_child_with_key("p_top",   "p", "top",   &["url"]),
+        ];
+        let g = make_subgroup(&schemas, "p", &[0, 1, 2], false, "cluster_0");
+        assert_eq!(g.path_segment, "cluster_0");
+        let mut segs = g.absorbed_path_segments.clone();
+        segs.sort();
+        assert_eq!(segs, vec!["back", "front", "top"]);
+    }
+
+    // --- Finding 3: child_routes.insert écrasé pour co-siblings avec le même json_key ---
+
+    #[test]
+    fn test_process_co_sibling_low_jaccard_still_merges_and_routes() {
+        // Co-siblings share the same json_key → they MUST produce a single routable table
+        // even when their schemas are disjoint (Jaccard=0). The routing table must have a
+        // child_routes entry for "desc" pointing to an existing schema.
+        use crate::schema::table_schema::{KeyShape, SiblingSchema};
+        let synthetic = {
+            let mut t = make_parent("pivot");
+            t.wide_strategy = WideStrategy::KeyedPivot(SiblingSchema {
+                key_col_name: "key".to_string(),
+                key_shape: KeyShape::Slug,
+                array_children: false,
+                data_col_name: "j2s_data".to_string(),
+            });
+            t
+        };
+        let mut schemas = vec![
+            synthetic,
+            make_child_with_key("pivot_desc_v1", "pivot", "desc", &["color"]),
+            make_child_with_key("pivot_desc_v2", "pivot", "desc", &["length"]),
+        ];
+        let group = CoSiblingGroup {
+            synthetic_parent_name: "pivot".to_string(),
+            json_key: "desc".to_string(),
+            sibling_indices: vec![1, 2],
+            array_children: false,
+        };
+        // min_jaccard=0.9 → Jaccard(color vs length)=0.0 < 0.9 (previously would reparent individually)
+        process_co_sibling_group(&mut schemas, 2, 0.9, &group);
+        let pivot_idx = schemas.iter().position(|s| s.name == "pivot").unwrap();
+        assert!(
+            schemas[pivot_idx].child_routes.contains_key("desc"),
+            "pivot must have a child_routes entry for 'desc' after merge"
+        );
+        let target_name = schemas[pivot_idx].child_routes["desc"].clone();
+        assert!(
+            schemas.iter().any(|s| s.name == target_name),
+            "target table '{}' must exist in schemas", target_name
+        );
     }
 }

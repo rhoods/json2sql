@@ -4,7 +4,7 @@ mod common;
 // does not use it but sharing the import avoids per-test redundancy.
 use json2sql::{db, pass1, pass2};
 use json2sql::db::copy_sink::{merge_copy_to_db, TempFileSink};
-use json2sql::schema::table_schema::{ColumnSchema, TableSchema};
+use json2sql::schema::table_schema::{ColumnSchema, TableSchema, WideStrategy};
 use json2sql::schema::type_tracker::PgType;
 use std::io::Write;
 
@@ -1185,5 +1185,53 @@ async fn test_no_duplicate_pk_on_num_key_collision_structure() {
             result.err().map(|e| e.to_string()));
         assert!(result.unwrap().constraint_warnings.is_empty(),
             "unexpected constraint warnings on num_key_collision fixture");
+    }).await;
+}
+
+/// Regression test for findings 1+2: MultiKeyedPivot with two non-numeric clusters must
+/// populate BOTH pivot tables, not just the last one (path collision bug).
+///
+/// The fixture has 6 child keys split into 2 incompatible clusters (Jaccard=0 between them):
+///   cluster A: a1, a2, a3 (column "color")
+///   cluster B: b1, b2, b3 (column "size")
+/// 3 JSON documents → each cluster should have 9 rows (3 keys × 3 docs).
+#[tokio::test]
+async fn test_multi_cluster_non_numeric_both_pivots_populated() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("multi_cluster_pivot.jsonl");
+        let mut cfg = common::pass1_config("root");
+        cfg.sibling_threshold = 3;
+        cfg.sibling_jaccard = 0.5;
+        let p1 = pass1::runner::run(&path, &cfg, None).unwrap();
+
+        // Find the MultiKeyedPivot parent and extract both pivot table names.
+        let pivot_tables: Vec<String> = p1.schemas.iter()
+            .filter_map(|s| {
+                if let WideStrategy::MultiKeyedPivot(groups) = &s.wide_strategy {
+                    Some(groups.iter().map(|g| g.pivot_table.clone()).collect::<Vec<_>>())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+
+        assert_eq!(pivot_tables.len(), 2,
+            "expected exactly 2 pivot tables from MultiKeyedPivot; got {:?}", pivot_tables);
+
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path, &p1.schemas, &client, &url, &common::pass2_config("root", &schema), None,
+        ).await.unwrap();
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+
+        for pivot_name in &pivot_tables {
+            let count = common::row_count(&client, &schema, pivot_name).await;
+            assert_eq!(count, 9,
+                "pivot table '{}' must have 9 rows (3 keys × 3 docs); got {}",
+                pivot_name, count);
+        }
     }).await;
 }

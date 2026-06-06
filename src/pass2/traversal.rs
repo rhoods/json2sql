@@ -495,7 +495,9 @@ fn route_independent_child<S: RowSink>(
 ///
 /// The routing table (`schema`) is a `MultiKeyedPivot` parent with only generated columns.
 /// One routing row is emitted per call; children FK to it by `routing_id`.
-/// Keys that are all-digits go to the `_num` group; all others go to `_key`.
+/// Keys that are all-digits go to the `_num` group; all others are routed by
+/// `absorbed_path_segments` lookup (exact match against keys seen in Pass 1), falling
+/// back to the `key_is_numeric` heuristic for backward compat with old snapshots.
 pub(super) fn insert_multi_keyed_pivot<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -513,20 +515,36 @@ pub(super) fn insert_multi_keyed_pivot<S: RowSink>(
         if route_independent_child(path_map, sinks, anomalies, &schema.name, value, &child_path_key, routing_id)? {
             continue;
         }
-        let key_is_numeric = key.chars().all(|c| c.is_ascii_digit());
-        if let Some(idx) = groups.iter().position(|g| g.key_is_numeric == key_is_numeric) {
+        if let Some(idx) = find_group_for_key(groups, key) {
             group_submaps[idx].insert(key.clone(), value.clone());
         }
     }
     for (group, submap) in groups.iter().zip(group_submaps.iter()) {
         if submap.is_empty() { continue; }
-        let suffix = if group.key_is_numeric { "num" } else { "key" };
-        let pivot_path_key = format!("{routing_path}{PATH_SEP}{suffix}");
+        let path_seg = if group.path_segment.is_empty() {
+            if group.key_is_numeric { "num" } else { "key" }
+        } else {
+            &group.path_segment
+        };
+        let pivot_path_key = format!("{routing_path}{PATH_SEP}{path_seg}");
         if let Some(pivot_schema) = path_map.get(&pivot_path_key) {
             insert_keyed_pivot_object(path_map, sinks, anomalies, pivot_schema, submap, routing_id, &group.sibling_schema)?;
         }
     }
     Ok(())
+}
+
+/// Route a runtime JSON key to the matching `SiblingGroup` index.
+///
+/// Tries exact match in `absorbed_path_segments` first (populated by Pass 1 for all
+/// schemas produced since the fix). Falls back to the `key_is_numeric` heuristic so
+/// that old snapshots (empty `absorbed_path_segments`) continue to work correctly.
+fn find_group_for_key(groups: &[SiblingGroup], key: &str) -> Option<usize> {
+    if let Some(idx) = groups.iter().position(|g| g.absorbed_path_segments.iter().any(|s| s == key)) {
+        return Some(idx);
+    }
+    let key_is_numeric = key.chars().all(|c| c.is_ascii_digit());
+    groups.iter().position(|g| g.key_is_numeric == key_is_numeric)
 }
 
 #[allow(clippy::cast_possible_wrap)] // array index never reaches i64::MAX

@@ -223,7 +223,7 @@ fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
         stats: snap.stats,
         truncated_names: snap.truncated_names,
         column_collisions: snap.column_collisions,
-        overflow_warnings: Vec::new(),
+        overflow_warnings: snap.overflow_warnings,
     })
 }
 
@@ -364,6 +364,7 @@ fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()>
         &pass1.truncated_names,
         &pass1.column_collisions,
         &pass1.stats,
+        &pass1.overflow_warnings,
         out_path,
     )?;
     eprintln!("Schema snapshot saved to '{}'.", out_path.display());

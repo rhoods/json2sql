@@ -170,8 +170,16 @@ fn coerce_bigint(value: &Value) -> CoerceResult {
             }
             if let Some(f) = n.as_f64() {
                 if f.fract() == 0.0 {
-                    #[allow(clippy::cast_possible_truncation)] // as_i64() tried first; huge floats are anomalies
-                    return CoerceResult::Ok(CopyEscaped::from_safe_ascii((f as i64).to_string()));
+                    // i64::MIN as f64 = -2^63 (exact). i64::MAX as f64 rounds up to 2^63,
+                    // so `f < i64::MAX as f64` correctly excludes 2^63 and above.
+                    if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
+                        #[allow(clippy::cast_possible_truncation)]
+                        return CoerceResult::Ok(CopyEscaped::from_safe_ascii((f as i64).to_string()));
+                    }
+                    return CoerceResult::Anomaly {
+                        actual_value: value.to_string(),
+                        actual_type: "integer_overflow",
+                    };
                 }
             }
             CoerceResult::Anomaly {
@@ -395,5 +403,32 @@ mod tests {
     fn test_null_always_null() {
         assert!(matches!(coerce(&Value::Null, &PgType::Integer), CoerceResult::Null));
         assert!(matches!(coerce(&Value::Null, &PgType::Text), CoerceResult::Null));
+    }
+
+    #[test]
+    fn test_coerce_bigint_overflow_is_anomaly() {
+        // 10^20 > i64::MAX — must produce Anomaly, not silent saturating cast to i64::MAX.
+        let huge_pos = serde_json::from_str::<Value>("100000000000000000000").unwrap();
+        assert!(
+            matches!(coerce(&huge_pos, &PgType::BigInt), CoerceResult::Anomaly { .. }),
+            "positive integer overflow must be an anomaly"
+        );
+
+        // Negative overflow (< i64::MIN)
+        let huge_neg = serde_json::from_str::<Value>("-100000000000000000000").unwrap();
+        assert!(
+            matches!(coerce(&huge_neg, &PgType::BigInt), CoerceResult::Anomaly { .. }),
+            "negative integer overflow must be an anomaly"
+        );
+
+        // i64::MAX must still coerce OK
+        assert!(matches!(coerce(&json!(i64::MAX), &PgType::BigInt), CoerceResult::Ok(_)));
+
+        // 1e18 is a whole-number float within i64 range — must still coerce OK
+        let ok_float = serde_json::from_str::<Value>("1e18").unwrap();
+        assert!(
+            matches!(coerce(&ok_float, &PgType::BigInt), CoerceResult::Ok(_)),
+            "whole-number float within i64 range must coerce OK"
+        );
     }
 }
