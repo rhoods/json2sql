@@ -5,6 +5,12 @@ disallowed-methods = [
     "std::result::Result::unwrap",
 ]
 
+[target.'cfg(test)'.rustflags]
+rustflags = [
+    "-A", "clippy::disallowed_methods",
+    "-A", "clippy::doc_markdown"         
+]
+
 cognitive-complexity-threshold = 25  # 3 violations at 25: cascading(57), runner(42), insert_object(41)
 too-many-lines-threshold = 30
 too-many-arguments-threshold = 7     # 4 violations marked #[allow] pending T5 struct refactor

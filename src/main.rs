@@ -7,6 +7,8 @@
 #![deny(clippy::all)]
 #![deny(clippy::pedantic)]
 #![deny(clippy::nursery)]
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod anomaly;
 mod cli;
 mod db;
