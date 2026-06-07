@@ -142,7 +142,7 @@ pub struct Cli {
     #[arg(long, value_name = "DIR")]
     pub temp_dir: Option<PathBuf>,
 
-    /// Tables with more data columns than this threshold are automatically assigned a `WideStrategy`
+    /// Tables with more data columns than this threshold are automatically assigned a `InferredStrategy`
     /// (Pivot or Jsonb). Override per table via --schema-config with `strategy = "pivot"|"jsonb"`.
     /// Set to 0 to disable automatic wide-table detection.
     #[arg(long, default_value_t = 100, value_name = "N")]

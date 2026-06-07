@@ -4,7 +4,7 @@ mod common;
 // does not use it but sharing the import avoids per-test redundancy.
 use json2sql::{db, pass1, pass2};
 use json2sql::db::copy_sink::{merge_copy_to_db, TempFileSink};
-use json2sql::schema::table_schema::{ColumnSchema, TableSchema, WideStrategy};
+use json2sql::schema::table_schema::{ColumnSchema, TableSchema, InferredStrategy};
 use json2sql::schema::type_tracker::PgType;
 use std::io::Write;
 
@@ -152,7 +152,7 @@ fn test_schema_inference_no_db() {
 // Les 12 enfants originaux sont exclus du schéma.
 #[test]
 fn test_keyed_pivot_mixed_key_shapes() {
-    use json2sql::schema::table_schema::WideStrategy;
+    use json2sql::schema::table_schema::InferredStrategy;
 
     let path = common::fixture("keyed_pivot_mixed_shape.jsonl");
     let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
@@ -168,13 +168,13 @@ fn test_keyed_pivot_mixed_key_shapes() {
 
     let images = p1.schemas.iter().find(|s| s.name == "products_images").unwrap();
     assert!(
-        matches!(images.wide_strategy, WideStrategy::MultiKeyedPivot(_)),
+        matches!(images.inferred_strategy, InferredStrategy::MultiKeyedPivot(_)),
         "products_images doit avoir MultiKeyedPivot"
     );
 
     // Table pivot numérique : key_id + imgid + uploader
     let num_pivot = p1.schemas.iter().find(|s| s.name == "products_images_num").unwrap();
-    assert!(matches!(num_pivot.wide_strategy, WideStrategy::KeyedPivot(_)));
+    assert!(matches!(num_pivot.inferred_strategy, InferredStrategy::KeyedPivot(_)));
     let num_cols: Vec<&str> = num_pivot.data_columns().map(|c| c.name.as_str()).collect();
     assert!(num_cols.contains(&"imgid"),    "pivot numérique : imgid manquant");
     assert!(num_cols.contains(&"uploader"), "pivot numérique : uploader manquant");
@@ -182,7 +182,7 @@ fn test_keyed_pivot_mixed_key_shapes() {
 
     // Table pivot textuelle : key + imgid + rev
     let key_pivot = p1.schemas.iter().find(|s| s.name == "products_images_key").unwrap();
-    assert!(matches!(key_pivot.wide_strategy, WideStrategy::KeyedPivot(_)));
+    assert!(matches!(key_pivot.inferred_strategy, InferredStrategy::KeyedPivot(_)));
     let key_cols: Vec<&str> = key_pivot.data_columns().map(|c| c.name.as_str()).collect();
     assert!(key_cols.contains(&"imgid"),     "pivot textuel : imgid manquant");
     assert!(key_cols.contains(&"rev"),       "pivot textuel : rev manquant");
@@ -203,7 +203,7 @@ fn test_keyed_pivot_mixed_key_shapes() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_sibling_significant_container_not_diluting_jaccard() {
-    use json2sql::schema::table_schema::WideStrategy;
+    use json2sql::schema::table_schema::InferredStrategy;
 
     let path = common::fixture("sibling_significant_container.jsonl");
     let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
@@ -221,14 +221,14 @@ fn test_sibling_significant_container_not_diluting_jaccard() {
 
     // T1: images parent — all text children → synthetic pivot → MultiKeyedPivot with one group.
     let images = p1.schemas.iter().find(|s| s.name == "root_images").unwrap();
-    assert!(matches!(images.wide_strategy, WideStrategy::MultiKeyedPivot(_)),
-        "root_images doit avoir MultiKeyedPivot; actual: {:?}", images.wide_strategy);
+    assert!(matches!(images.inferred_strategy, InferredStrategy::MultiKeyedPivot(_)),
+        "root_images doit avoir MultiKeyedPivot; actual: {:?}", images.inferred_strategy);
 
     // Pure container detection: images_uploaded is itself a pure container → classic KeyedPivot.
     // Its numeric children (100..108) are collapsed into it directly.
     let uploaded = p1.schemas.iter().find(|s| s.name == "root_images_uploaded").unwrap();
-    assert!(matches!(uploaded.wide_strategy, WideStrategy::KeyedPivot(_)),
-        "root_images_uploaded doit avoir KeyedPivot (pure container); actual: {:?}", uploaded.wide_strategy);
+    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::KeyedPivot(_)),
+        "root_images_uploaded doit avoir KeyedPivot (pure container); actual: {:?}", uploaded.inferred_strategy);
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
     assert!(cols.contains(&"uploaded_t"), "KeyedPivot uploaded : uploaded_t manquant; cols: {:?}", cols);
     assert!(cols.contains(&"uploader"),   "KeyedPivot uploaded : uploader manquant; cols: {:?}", cols);
@@ -251,7 +251,7 @@ fn test_sibling_significant_container_not_diluting_jaccard() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_sibling_noisy_schema_jaccard_filter() {
-    use json2sql::schema::table_schema::WideStrategy;
+    use json2sql::schema::table_schema::InferredStrategy;
 
     let path = common::fixture("sibling_noisy_schema.jsonl");
     let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
@@ -264,8 +264,8 @@ fn test_sibling_noisy_schema_jaccard_filter() {
     assert!(uploaded.is_some(),
         "root_images_uploaded doit exister; schemas: {:?}", names);
     let uploaded = uploaded.unwrap();
-    assert!(matches!(uploaded.wide_strategy, WideStrategy::KeyedPivot(_)),
-        "root_images_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.wide_strategy);
+    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::KeyedPivot(_)),
+        "root_images_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.inferred_strategy);
 
     // Les colonnes stables (uploaded_t, uploader) doivent être présentes.
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
@@ -291,7 +291,7 @@ fn test_sibling_noisy_schema_jaccard_filter() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_sibling_all_pure_container_collapse() {
-    use json2sql::schema::table_schema::WideStrategy;
+    use json2sql::schema::table_schema::InferredStrategy;
 
     let path = common::fixture("sibling_all_pure_containers.jsonl");
     let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
@@ -302,8 +302,8 @@ fn test_sibling_all_pure_container_collapse() {
     let uploaded = p1.schemas.iter().find(|s| s.name == "root_uploaded");
     assert!(uploaded.is_some(),
         "root_uploaded doit exister; schemas: {:?}", names);
-    assert!(matches!(uploaded.unwrap().wide_strategy, WideStrategy::KeyedPivot(_)),
-        "root_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.unwrap().wide_strategy);
+    assert!(matches!(uploaded.unwrap().inferred_strategy, InferredStrategy::KeyedPivot(_)),
+        "root_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.unwrap().inferred_strategy);
 
     // Les tables sibling individuelles (1, 2, 3) doivent être absorbées.
     for n in &["root_uploaded_1", "root_uploaded_2", "root_uploaded_3"] {
@@ -347,7 +347,7 @@ fn test_sibling_all_pure_container_collapse() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
-    use json2sql::schema::table_schema::WideStrategy;
+    use json2sql::schema::table_schema::InferredStrategy;
 
     let path = common::fixture("cascade_wave1_child_route_survives.jsonl");
     let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
@@ -358,8 +358,8 @@ fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
     let front = p1.schemas.iter().find(|s| s.name == "root_front");
     assert!(front.is_some(), "root_front doit exister; schemas: {:?}", names);
     assert!(
-        matches!(front.unwrap().wide_strategy, WideStrategy::KeyedPivot(_)),
-        "root_front doit avoir KeyedPivot; actual: {:?}", front.unwrap().wide_strategy
+        matches!(front.unwrap().inferred_strategy, InferredStrategy::KeyedPivot(_)),
+        "root_front doit avoir KeyedPivot; actual: {:?}", front.unwrap().inferred_strategy
     );
 
     // root_front_sizes doit survivre (target de child_routes, wave 1).
@@ -405,7 +405,7 @@ fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_sibling_pure_diluter_absorbed() {
-    use json2sql::schema::table_schema::WideStrategy;
+    use json2sql::schema::table_schema::InferredStrategy;
 
     let path = common::fixture("sibling_pure_diluter.jsonl");
     let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
@@ -417,8 +417,8 @@ fn test_sibling_pure_diluter_absorbed() {
     assert!(uploaded.is_some(),
         "root_uploaded doit exister; schemas: {:?}", names);
     let uploaded = uploaded.unwrap();
-    assert!(matches!(uploaded.wide_strategy, WideStrategy::KeyedPivot(_)),
-        "root_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.wide_strategy);
+    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::KeyedPivot(_)),
+        "root_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.inferred_strategy);
 
     // Les colonnes data-bearing (x, y) doivent être présentes.
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
@@ -442,7 +442,7 @@ fn test_sibling_pure_diluter_absorbed() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_sibling_mixed_unified_fallback() {
-    use json2sql::schema::table_schema::WideStrategy;
+    use json2sql::schema::table_schema::InferredStrategy;
 
     let path = common::fixture("sibling_mixed_unified_fallback.jsonl");
     let p1 = pass1::runner::run(&path, &common::pass1_config("root"), None).unwrap();
@@ -454,8 +454,8 @@ fn test_sibling_mixed_unified_fallback() {
     assert!(sizes.is_some(),
         "root_sizes doit exister; schemas: {:?}", names);
     let sizes = sizes.unwrap();
-    assert!(matches!(sizes.wide_strategy, WideStrategy::KeyedPivot(_)),
-        "root_sizes doit avoir KeyedPivot (fallback unifié); actual: {:?}", sizes.wide_strategy);
+    assert!(matches!(sizes.inferred_strategy, InferredStrategy::KeyedPivot(_)),
+        "root_sizes doit avoir KeyedPivot (fallback unifié); actual: {:?}", sizes.inferred_strategy);
 
     // Les colonnes w et h doivent être présentes.
     let cols: Vec<&str> = sizes.data_columns().map(|c| c.name.as_str()).collect();
@@ -625,9 +625,9 @@ async fn test_column_limit_guard_jsonb_non_root_with_children() {
         // Force Jsonb sur "root_middle" (non-racine — a un parent_table = "root").
         {
             use json2sql::schema::wide_strategies::apply_wide_strategy_columns;
-            use json2sql::schema::table_schema::WideStrategy;
+            use json2sql::schema::table_schema::InferredStrategy;
             if let Some(mid) = p1.schemas.iter_mut().find(|s| s.name == "root_middle") {
-                apply_wide_strategy_columns(mid, WideStrategy::Jsonb);
+                apply_wide_strategy_columns(mid, InferredStrategy::Jsonb);
             }
         }
 
@@ -1207,7 +1207,7 @@ async fn test_multi_cluster_non_numeric_both_pivots_populated() {
         // Find the MultiKeyedPivot parent and extract both pivot table names.
         let pivot_tables: Vec<String> = p1.schemas.iter()
             .filter_map(|s| {
-                if let WideStrategy::MultiKeyedPivot(groups) = &s.wide_strategy {
+                if let InferredStrategy::MultiKeyedPivot(groups) = &s.inferred_strategy {
                     Some(groups.iter().map(|g| g.pivot_table.clone()).collect::<Vec<_>>())
                 } else {
                     None

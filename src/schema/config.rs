@@ -15,7 +15,7 @@ use crate::schema::wide_strategies::{
     apply_wide_strategy_columns, build_union_columns,
 };
 use crate::schema::suffix_detector::build_suffix_schema_from_list;
-use crate::schema::table_schema::{ColumnSchema, KeyShape, SiblingSchema, TableSchema, WideStrategy};
+use crate::schema::table_schema::{ColumnSchema, KeyShape, SiblingSchema, TableSchema, InferredStrategy, UserOverride};
 use crate::schema::type_tracker::PgType;
 
 /// TOML config file for manual type overrides.
@@ -112,21 +112,21 @@ fn apply_strategy_override(
     let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") else { return };
     match strategy_str.to_lowercase().as_str() {
         "pivot" => {
-            if schema.wide_strategy != WideStrategy::Pivot {
+            if schema.inferred_strategy != InferredStrategy::Pivot {
                 eprintln!("  Override strategy: {table_name} → Pivot");
-                apply_wide_strategy_columns(schema, WideStrategy::Pivot);
+                apply_wide_strategy_columns(schema, InferredStrategy::Pivot);
             }
         }
         "jsonb" => {
-            if schema.wide_strategy != WideStrategy::Jsonb {
+            if schema.inferred_strategy != InferredStrategy::Jsonb {
                 eprintln!("  Override strategy: {table_name} → Jsonb");
-                apply_wide_strategy_columns(schema, WideStrategy::Jsonb);
+                apply_wide_strategy_columns(schema, InferredStrategy::Jsonb);
             }
         }
         "columns" => {
-            if schema.wide_strategy != WideStrategy::Columns {
+            if schema.inferred_strategy != InferredStrategy::Columns {
                 eprintln!("  Override strategy: {table_name} → Columns");
-                apply_wide_strategy_columns(schema, WideStrategy::Columns);
+                apply_wide_strategy_columns(schema, InferredStrategy::Columns);
             }
         }
         "structured_pivot" => {} // handled via suffix_columns below
@@ -249,7 +249,7 @@ fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> 
     for col in build_union_columns(&refs) {
         merged.columns.push(col);
     }
-    merged.wide_strategy = WideStrategy::KeyedPivot(SiblingSchema {
+    merged.inferred_strategy = InferredStrategy::KeyedPivot(SiblingSchema {
         key_col_name: "key_id".to_string(),
         key_shape: KeyShape::Mixed,
         array_children: false,
@@ -289,6 +289,45 @@ fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, mem
         group_name,
         indices.len()
     );
+}
+
+/// Apply IHM strategy overrides (`Pivot | Jsonb | Skip`) to a mutable schema slice.
+///
+/// Called by the CLI after loading a snapshot that includes `strategy_overrides`.
+/// `Skip` removes the table — and if it had `AutoSplit`, also removes the companion
+/// `_wide` table. `Pivot` and `Jsonb` mutate `inferred_strategy` in place.
+pub fn apply_user_overrides(
+    schemas: &mut Vec<TableSchema>,
+    overrides: &HashMap<String, UserOverride>,
+) {
+    // Collect companion _wide table names for AutoSplit tables being skipped.
+    let wide_to_remove: Vec<String> = overrides.iter()
+        .filter_map(|(name, ov)| {
+            if !matches!(ov, UserOverride::Skip) { return None; }
+            schemas.iter().find(|s| &s.name == name).and_then(|s| {
+                if let InferredStrategy::AutoSplit { wide_table_name, .. } = &s.inferred_strategy {
+                    Some(wide_table_name.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    for (table_name, ov) in overrides {
+        if let Some(s) = schemas.iter_mut().find(|s| &s.name == table_name) {
+            match ov {
+                UserOverride::Pivot => apply_wide_strategy_columns(s, InferredStrategy::Pivot),
+                UserOverride::Jsonb => apply_wide_strategy_columns(s, InferredStrategy::Jsonb),
+                UserOverride::Skip  => {}
+            }
+        }
+    }
+
+    schemas.retain(|s| {
+        !matches!(overrides.get(&s.name), Some(UserOverride::Skip))
+            && !wide_to_remove.contains(&s.name)
+    });
 }
 
 /// Prime a `TypeTracker` with a representative observation so `to_pg_type()` returns
@@ -403,5 +442,65 @@ mod tests {
 
         let col = schemas[0].columns.iter().find(|c| c.name == "age").unwrap();
         assert_eq!(col.pg_type, PgType::Integer);
+    }
+
+    fn simple_table(name: &str) -> TableSchema {
+        TableSchema::new(name.to_string(), vec![name.to_string()], 0)
+    }
+
+    #[test]
+    fn apply_user_overrides_skip_removes_table() {
+        let mut schemas = vec![simple_table("a"), simple_table("b")];
+        let mut overrides = HashMap::new();
+        overrides.insert("a".to_string(), UserOverride::Skip);
+        apply_user_overrides(&mut schemas, &overrides);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0].name, "b");
+    }
+
+    #[test]
+    fn apply_user_overrides_skip_removes_autosplit_companion() {
+        let mut t = simple_table("products");
+        t.inferred_strategy = InferredStrategy::AutoSplit {
+            stable_threshold: 0.8,
+            rare_threshold: 0.01,
+            medium_keys: Default::default(),
+            wide_table_name: "products_wide".to_string(),
+        };
+        let mut schemas = vec![t, simple_table("products_wide"), simple_table("orders")];
+        let mut overrides = HashMap::new();
+        overrides.insert("products".to_string(), UserOverride::Skip);
+        apply_user_overrides(&mut schemas, &overrides);
+        assert!(!schemas.iter().any(|s| s.name == "products"),       "main table removed");
+        assert!(!schemas.iter().any(|s| s.name == "products_wide"),  "companion _wide removed");
+        assert!(schemas.iter().any(|s| s.name == "orders"),          "unrelated table kept");
+    }
+
+    #[test]
+    fn apply_user_overrides_pivot_sets_strategy() {
+        let mut schemas = vec![simple_table("tags")];
+        let mut overrides = HashMap::new();
+        overrides.insert("tags".to_string(), UserOverride::Pivot);
+        apply_user_overrides(&mut schemas, &overrides);
+        assert_eq!(schemas.len(), 1);
+        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::Pivot));
+    }
+
+    #[test]
+    fn apply_user_overrides_jsonb_sets_strategy() {
+        let mut schemas = vec![simple_table("blob")];
+        let mut overrides = HashMap::new();
+        overrides.insert("blob".to_string(), UserOverride::Jsonb);
+        apply_user_overrides(&mut schemas, &overrides);
+        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::Jsonb));
+    }
+
+    #[test]
+    fn apply_user_overrides_no_override_unchanged() {
+        let mut schemas = vec![simple_table("unchanged")];
+        let overrides: HashMap<String, UserOverride> = HashMap::new();
+        apply_user_overrides(&mut schemas, &overrides);
+        assert_eq!(schemas.len(), 1);
+        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::Columns));
     }
 }

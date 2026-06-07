@@ -12,7 +12,7 @@ use crate::error::{J2sError, Result};
 use crate::schema::finalizer::OverflowWarning;
 use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::stats::ColumnStats;
-use crate::schema::table_schema::{TableSchema, WideStrategy};
+use crate::schema::table_schema::{TableSchema, UserOverride};
 
 /// v2: table names are now capped at 53 chars (`PG_TABLE_MAX_IDENT`) instead of 63,
 /// ensuring all derived identifiers (pk_, fk_..._parent, j2s_..._id) fit within
@@ -31,7 +31,7 @@ pub struct SchemaSnapshot {
     /// User strategy overrides applied via the IHM. Absent in snapshots saved by older
     /// versions (or by the CLI) — deserialized as an empty map via `serde(default)`.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub strategy_overrides: std::collections::HashMap<String, WideStrategy>,
+    pub strategy_overrides: std::collections::HashMap<String, UserOverride>,
     /// Tables converted to JSONB due to column overflow. Absent in pre-fix snapshots
     /// — deserialized as empty vec via `serde(default)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -73,7 +73,7 @@ pub fn save_with_overrides(
     column_collisions: &[ColumnCollision],
     stats: &[ColumnStats],
     overflow_warnings: &[OverflowWarning],
-    strategy_overrides: &std::collections::HashMap<String, crate::schema::table_schema::WideStrategy>,
+    strategy_overrides: &std::collections::HashMap<String, UserOverride>,
     path: &Path,
 ) -> Result<()> {
     let snapshot = SchemaSnapshot {
@@ -116,7 +116,6 @@ pub fn load(path: &Path) -> Result<SchemaSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::table_schema::WideStrategy;
     use std::collections::HashMap;
 
     fn empty_snapshot() -> SchemaSnapshot {
@@ -134,17 +133,33 @@ mod tests {
 
     #[test]
     fn strategy_overrides_round_trips() {
+        use crate::schema::table_schema::UserOverride;
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mut overrides = HashMap::new();
-        overrides.insert("my_table".to_string(), WideStrategy::Jsonb);
+        let mut overrides: HashMap<String, UserOverride> = HashMap::new();
+        overrides.insert("my_table".to_string(), UserOverride::Jsonb);
 
         save_with_overrides(&[], 0, &[], &[], &[], &[], &overrides, tmp.path()).unwrap();
         let loaded = load(tmp.path()).unwrap();
 
         assert!(matches!(
             loaded.strategy_overrides.get("my_table"),
-            Some(WideStrategy::Jsonb)
+            Some(UserOverride::Jsonb)
         ));
+    }
+
+    #[test]
+    fn strategy_overrides_ignore_alias_deserializes_as_skip() {
+        // Old snapshots persist "Ignore" — must deserialize as UserOverride::Skip.
+        use crate::schema::table_schema::UserOverride;
+        let json = r#"{"version":2,"total_rows":0,"schemas":[],"truncated_names":[],
+            "column_collisions":[],"stats":[],"strategy_overrides":{"products":"Ignore"}}"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert!(
+            matches!(loaded.strategy_overrides.get("products"), Some(UserOverride::Skip)),
+            "\"Ignore\" must deserialize as UserOverride::Skip"
+        );
     }
 
     #[test]

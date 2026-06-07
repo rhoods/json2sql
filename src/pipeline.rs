@@ -212,13 +212,13 @@ fn load_or_infer_schema(cfg: &PipelineConfig, input_path: &Path) -> Result<Pass1
 fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
     eprintln!("Loading schema snapshot from '{}'...", schema_path.display());
     let snap = crate::schema::persistence::load(schema_path)?;
-    eprintln!(
-        "Snapshot loaded: {} tables, {} rows originally scanned.",
-        snap.schemas.len(),
-        snap.total_rows
-    );
+    let mut schemas = snap.schemas;
+    if !snap.strategy_overrides.is_empty() {
+        crate::schema::config::apply_user_overrides(&mut schemas, &snap.strategy_overrides);
+    }
+    eprintln!("Snapshot loaded: {} tables, {} rows originally scanned.", schemas.len(), snap.total_rows);
     Ok(Pass1Result {
-        schemas: snap.schemas,
+        schemas,
         total_rows: snap.total_rows,
         stats: snap.stats,
         truncated_names: snap.truncated_names,

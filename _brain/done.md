@@ -8,6 +8,30 @@ Description courte de ce qui a été fait.
 
 Ajouter toujours EN HAUT du fichier. -->
 
+## 2026-06-07 — Refactoring finalisation de schéma : InferredStrategy + UserOverride (T1–T10)
+
+Sprint complet — 10 tâches, 271 tests passent, zéro warning.
+
+**T1** — `WideStrategy` renommé `InferredStrategy` ; `UserOverride { Pivot, Jsonb, Skip }` ajouté avec `#[serde(alias = "Ignore")]` sur `Skip`.
+
+**T2** — `finalizer.rs` restructuré : `apply_per_table_strategies` + `apply_cross_table_strategies` ; `Ignore` conservé comme marqueur interne de sœurs absorbées.
+
+**T3** — `apply_column_limit_guard` intégré dans `SchemaFinalizer::run()` via champ `apply_pg_guard: bool`.
+
+**T4** — `exclude_absorbed_children` déplacé **après** `apply_column_limit_guard` (invariant : guard voit les stratégies finales avant exclusion).
+
+**T5** — Deux phases nommées dans `finalizer.rs` (per-table / cross-table).
+
+**T6 + T8** — `strategy_overrides: HashMap<String, UserOverride>` partout (persistence, state, UI) ; IHM réduite à `Pivot | Jsonb | Skip` ; bouton "merge as siblings" retiré.
+
+**T7** — `apply_user_overrides()` dans `config.rs` : `Skip` retire la table + le companion `_wide` si `AutoSplit`.
+
+**T9** — `restore_from_snapshot` applique les overrides ; `SchemaRegistry::finalize_with_pg_guard()` encapsule le guard ; appel direct retiré de `runner.rs`.
+
+**T10** — Tous les tests adaptés (271 passent) ; `build_effective_schemas` (UI) délègue à `apply_user_overrides` pour éviter la divergence sur AutoSplit + Skip (fix post-review).
+
+**Règle runtime** : UI pas testée manuellement (Dioxus desktop) — vérification runtime toujours à faire avant release.
+
 ## 2026-05-30 — IHM : temp dir picker + double barre progression (T1–T2)
 
 Deux features UI suite au pass2-refactor (séparation streaming/COPY) :

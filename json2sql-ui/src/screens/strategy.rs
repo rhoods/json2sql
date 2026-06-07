@@ -9,9 +9,9 @@
 use dioxus::prelude::*;
 
 use dioxus::prelude::Modifiers;
-use json2sql::schema::table_schema::WideStrategy;
+use json2sql::schema::table_schema::{InferredStrategy, UserOverride};
 
-use crate::screens::{build_table_rows, pick_save_file, strategy_badge, strategy_label, PickResult, TableRowsCtx};
+use crate::screens::{build_table_rows, pick_save_file, strategy_badge, strategy_label, user_override_badge, PickResult, TableRowsCtx};
 use crate::state::{compute_jaccard_display, select_children_visible};
 use crate::screens::table_list::TableListPanel;
 use crate::state::{AppScreen, AppState};
@@ -27,12 +27,9 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let mut right_collapsed: Signal<bool>            = use_signal(|| false);
     let mut filter_text:     Signal<String>          = use_signal(String::new);
     let mut warn_only:       Signal<bool>            = use_signal(|| false);
-    let mut normalize_col:   Signal<String>          = use_signal(|| "id".to_string());
     let save_feedback:   Signal<Option<Result<String, String>>> = use_signal(|| None);
     let mut banner_dismissed: Signal<bool>           = use_signal(|| false);
     let mut anchor_idx:      Signal<usize>           = use_signal(|| 0);
-    let mut merge_key_col:   Signal<String>          = use_signal(|| "key".to_string());
-    let mut merge_error:     Signal<Option<String>>  = use_signal(|| None);
 
     // ── Derived snapshot ──────────────────────────────────────────────────
     let schemas           = state.read().schema.schemas.clone();
@@ -58,9 +55,8 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
     let idx = state.read().schema.last_selected_idx.min(schemas.len().saturating_sub(1));
     let selected_table = &schemas[idx];
-    let current_strategy = overrides_snap
-        .get(&selected_table.name).cloned()
-        .unwrap_or_else(|| selected_table.wide_strategy.clone());
+    let inferred_strategy = &selected_table.inferred_strategy;
+    let current_override: Option<&UserOverride> = overrides_snap.get(&selected_table.name);
 
     let is_multi = selected_indices.len() > 1;
     let selection_count = selected_indices.len();
@@ -70,7 +66,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
         let idx_vec: Vec<usize> = selected_indices.iter().copied().collect();
         compute_jaccard_display(&schemas, &idx_vec)
     } else {
-        crate::state::JaccardDisplay { score: 1.0, common: 0, union_count: 0, same_parent: false, parent_name: None }
+        crate::state::JaccardDisplay { score: 1.0, common: 0, union_count: 0 }
     };
     let jaccard_score_pct   = format!("{:.0}%", jaccard.score * 100.0);
     let jaccard_ratio_txt   = if jaccard.union_count == 0 {
@@ -353,9 +349,11 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                 for &i in selected_indices.iter() {
                                                     if let Some(t) = schemas.get(i) {
                                                         {
-                                                            let eff = overrides_snap.get(&t.name).cloned()
-                                                                .unwrap_or_else(|| t.wide_strategy.clone());
-                                                            let (bc, bl) = strategy_badge(&eff);
+                                                            let (bc, bl) = if let Some(ov) = overrides_snap.get(&t.name) {
+                                                                user_override_badge(ov)
+                                                            } else {
+                                                                strategy_badge(&t.inferred_strategy)
+                                                            };
                                                             let is_indented = t.depth > 0;
                                                             rsx! {
                                                                 tr { key: "{t.name}",
@@ -430,7 +428,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                     div { class: "row mt-md fs-xs fg-3",
                                         span {
                                             b { class: "fg-2", "Strategy:" }
-                                            " {strategy_label(&current_strategy)}"
+                                            " {strategy_label(inferred_strategy)}"
                                         }
                                         if let Some(ref parent) = selected_table.parent_table {
                                             span { "·" }
@@ -524,58 +522,6 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                 "{jaccard_ratio_txt}"
                                             }
                                         }
-                                        if jaccard.same_parent {
-                                            div { style: "margin-top:12px;padding:10px 12px;background:var(--bg-2);border:1px solid var(--bd);border-radius:var(--r-md);",
-                                                h4 { style: "font-size:var(--fs-xs);color:var(--fg-2);margin:0 0 8px;font-weight:600;",
-                                                    "⇢ Merge as siblings"
-                                                }
-                                                p { style: "font-size:var(--fs-xs);color:var(--fg-4);margin:0 0 8px;line-height:1.5;",
-                                                    "Collapse these tables under their shared parent "
-                                                    span { style: "font-family:'JetBrains Mono',monospace;color:var(--fg-2);",
-                                                        "{jaccard.parent_name.as_deref().unwrap_or(\"\")}"
-                                                    }
-                                                    "."
-                                                }
-                                                if jaccard.score < 0.5 {
-                                                    p { style: "font-size:var(--fs-xs);color:var(--warning);margin:0 0 8px;",
-                                                        "⚠ Low similarity — the tables may have incompatible schemas."
-                                                    }
-                                                }
-                                                div { class: "field",
-                                                    label { style: "font-size:var(--fs-xs);color:var(--fg-3);margin-bottom:3px;display:block;",
-                                                        "Key column name"
-                                                    }
-                                                    input {
-                                                        class: "input sm",
-                                                        r#type: "text",
-                                                        placeholder: "key",
-                                                        value: "{merge_key_col.read()}",
-                                                        oninput: move |e| { *merge_key_col.write() = e.value(); },
-                                                    }
-                                                }
-                                                if let Some(ref err) = *merge_error.read() {
-                                                    p { style: "font-size:var(--fs-xs);color:var(--danger);margin:6px 0 0;", "{err}" }
-                                                }
-                                                div { style: "margin-top:8px;",
-                                                    button {
-                                                        class: "btn primary sm",
-                                                        onclick: move |_| {
-                                                            let col = merge_key_col.read().trim().to_string();
-                                                            let key = if col.is_empty() { "key".to_string() } else { col };
-                                                            match state.write().schema.apply_sibling_merge(&key) {
-                                                                Ok(()) => { merge_error.set(None); }
-                                                                Err(e)  => { merge_error.set(Some(e.to_string())); }
-                                                            }
-                                                        },
-                                                        "Merge siblings"
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            p { style: "margin-top:8px;font-size:var(--fs-xs);color:var(--fg-4);",
-                                                "⚠ Tables have different parents — merge not available."
-                                            }
-                                        }
                                     }
 
                                     // ── Bulk strategy ─────────────────────
@@ -616,7 +562,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                             .collect()
                                                     };
                                                     let mut s = state.write();
-                                                    for n in names { s.schema.strategy_overrides.insert(n, WideStrategy::Jsonb); }
+                                                    for n in names { s.schema.strategy_overrides.insert(n, UserOverride::Jsonb); }
                                                 },
                                                 span { class: "radio" }
                                                 span { class: "nm",
@@ -624,26 +570,6 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                     span { class: "dsc", "payload in dedicated child table" }
                                                 }
                                                 span { class: "badge jsonb", "jsonb" }
-                                            }
-                                            // JSONB inline
-                                            button {
-                                                class: "strat-btn",
-                                                onclick: move |_| {
-                                                    let names: Vec<String> = {
-                                                        let s = state.read();
-                                                        s.schema.selected_table_indices.iter()
-                                                            .filter_map(|&i| s.schema.schemas.get(i).map(|t| t.name.clone()))
-                                                            .collect()
-                                                    };
-                                                    let mut s = state.write();
-                                                    for n in names { s.schema.strategy_overrides.insert(n, WideStrategy::JsonbFlatten); }
-                                                },
-                                                span { class: "radio" }
-                                                span { class: "nm",
-                                                    "JSONB — inline column"
-                                                    span { class: "dsc", "store as JSONB in parent" }
-                                                }
-                                                span { class: "badge jsonbi", "jsonb·inline" }
                                             }
                                             // Pivot
                                             button {
@@ -656,7 +582,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                             .collect()
                                                     };
                                                     let mut s = state.write();
-                                                    for n in names { s.schema.strategy_overrides.insert(n, WideStrategy::Pivot); }
+                                                    for n in names { s.schema.strategy_overrides.insert(n, UserOverride::Pivot); }
                                                 },
                                                 span { class: "radio" }
                                                 span { class: "nm",
@@ -676,7 +602,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                             .collect()
                                                     };
                                                     let mut s = state.write();
-                                                    for n in names { s.schema.strategy_overrides.insert(n, WideStrategy::Ignore); }
+                                                    for n in names { s.schema.strategy_overrides.insert(n, UserOverride::Skip); }
                                                 },
                                                 span { class: "radio" }
                                                 span { class: "nm",
@@ -690,9 +616,9 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                 } else {
                                     // ── Single-table strategy ─────────────
                                     div { class: "strat-list",
-                                        // Default
+                                        // Default (= no user override — keep auto-detected)
                                         button {
-                                            class: if matches!(current_strategy, WideStrategy::Columns) { "strat-btn on" } else { "strat-btn" },
+                                            class: if current_override.is_none() { "strat-btn on" } else { "strat-btn" },
                                             onclick: move |_| {
                                                 let name = state.read().schema.schemas[idx].name.clone();
                                                 state.write().schema.strategy_overrides.remove(&name);
@@ -700,16 +626,16 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                             span { class: "radio" }
                                             span { class: "nm",
                                                 "Default"
-                                                span { class: "dsc", "column per JSON key — best for ≤100 keys" }
+                                                span { class: "dsc", "use auto-detected strategy" }
                                             }
                                             span { class: "badge default", "default" }
                                         }
                                         // JSONB separate
                                         button {
-                                            class: if matches!(current_strategy, WideStrategy::Jsonb) { "strat-btn on" } else { "strat-btn" },
+                                            class: if matches!(current_override, Some(UserOverride::Jsonb)) { "strat-btn on" } else { "strat-btn" },
                                             onclick: move |_| {
                                                 let name = state.read().schema.schemas[idx].name.clone();
-                                                state.write().schema.strategy_overrides.insert(name, WideStrategy::Jsonb);
+                                                state.write().schema.strategy_overrides.insert(name, UserOverride::Jsonb);
                                             },
                                             span { class: "radio" }
                                             span { class: "nm",
@@ -718,44 +644,12 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                             }
                                             span { class: "badge jsonb", "jsonb" }
                                         }
-                                        // JSONB inline
-                                        button {
-                                            class: if matches!(current_strategy, WideStrategy::JsonbFlatten) { "strat-btn on" } else { "strat-btn" },
-                                            onclick: move |_| {
-                                                let name = state.read().schema.schemas[idx].name.clone();
-                                                state.write().schema.strategy_overrides.insert(name, WideStrategy::JsonbFlatten);
-                                            },
-                                            span { class: "radio" }
-                                            span { class: "nm",
-                                                "JSONB — inline column"
-                                                span { class: "dsc", "store as JSONB in parent table" }
-                                            }
-                                            span { class: "badge jsonbi", "jsonb·inline" }
-                                        }
-                                        // Normalize
-                                        button {
-                                            class: if matches!(current_strategy, WideStrategy::NormalizeDynamicKeys { .. }) { "strat-btn on" } else { "strat-btn" },
-                                            onclick: move |_| {
-                                                let col = normalize_col.read().trim().to_string();
-                                                let id_col = if col.is_empty() { "id".to_string() } else { col };
-                                                let name = state.read().schema.schemas[idx].name.clone();
-                                                state.write().schema.strategy_overrides.insert(
-                                                    name, WideStrategy::NormalizeDynamicKeys { id_column: id_col },
-                                                );
-                                            },
-                                            span { class: "radio" }
-                                            span { class: "nm",
-                                                "Normalize dynamic keys"
-                                                span { class: "dsc", "one row per key in child table" }
-                                            }
-                                            span { class: "badge normalize", "normalize" }
-                                        }
                                         // Pivot
                                         button {
-                                            class: if matches!(current_strategy, WideStrategy::Pivot) { "strat-btn on" } else { "strat-btn" },
+                                            class: if matches!(current_override, Some(UserOverride::Pivot)) { "strat-btn on" } else { "strat-btn" },
                                             onclick: move |_| {
                                                 let name = state.read().schema.schemas[idx].name.clone();
-                                                state.write().schema.strategy_overrides.insert(name, WideStrategy::Pivot);
+                                                state.write().schema.strategy_overrides.insert(name, UserOverride::Pivot);
                                             },
                                             span { class: "radio" }
                                             span { class: "nm",
@@ -766,10 +660,10 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                         }
                                         // Skip
                                         button {
-                                            class: if matches!(current_strategy, WideStrategy::Ignore) { "strat-btn on" } else { "strat-btn" },
+                                            class: if matches!(current_override, Some(UserOverride::Skip)) { "strat-btn on" } else { "strat-btn" },
                                             onclick: move |_| {
                                                 let name = state.read().schema.schemas[idx].name.clone();
-                                                state.write().schema.strategy_overrides.insert(name, WideStrategy::Ignore);
+                                                state.write().schema.strategy_overrides.insert(name, UserOverride::Skip);
                                             },
                                             span { class: "radio" }
                                             span { class: "nm",
@@ -780,43 +674,9 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                         }
                                     }
 
-                                    // Normalize config box (shown when active)
-                                    if matches!(current_strategy, WideStrategy::NormalizeDynamicKeys { .. }) {
-                                        div { style: "margin-top:14px;padding:14px;background:var(--acc-bg);border:1px solid var(--acc-bd);border-radius:var(--r-md);",
-                                            h4 { style: "color:var(--acc);margin:0 0 6px;font-size:var(--fs-sm);", "⚡ Normalize dynamic keys" }
-                                            p { style: "font-size:var(--fs-xs);color:var(--fg-3);margin:0 0 10px;line-height:1.5;",
-                                                "Each JSON key becomes a row in a child table."
-                                            }
-                                            div { class: "field",
-                                                label { "Key column name" }
-                                                input {
-                                                    class: "input",
-                                                    r#type: "text",
-                                                    placeholder: "id_column (e.g. image_id)",
-                                                    value: "{normalize_col.read()}",
-                                                    oninput: move |e| { *normalize_col.write() = e.value(); },
-                                                }
-                                            }
-                                            div { class: "row mt-md", style: "justify-content:flex-end;",
-                                                button {
-                                                    class: "btn primary sm",
-                                                    onclick: move |_| {
-                                                        let col = normalize_col.read().trim().to_string();
-                                                        let id_col = if col.is_empty() { "id".to_string() } else { col };
-                                                        let name = state.read().schema.schemas[idx].name.clone();
-                                                        state.write().schema.strategy_overrides.insert(
-                                                            name, WideStrategy::NormalizeDynamicKeys { id_column: id_col },
-                                                        );
-                                                    },
-                                                    "Apply Normalize"
-                                                }
-                                            }
-                                        }
-                                    }
-
                                     // Auto-detected notice
-                                    if matches!(current_strategy,
-                                        WideStrategy::StructuredPivot(_) | WideStrategy::KeyedPivot(_) | WideStrategy::AutoSplit { .. }
+                                    if current_override.is_none() && matches!(inferred_strategy,
+                                        InferredStrategy::StructuredPivot(_) | InferredStrategy::KeyedPivot(_) | InferredStrategy::AutoSplit { .. }
                                     ) {
                                         p { style: "font-size:var(--fs-xs);color:var(--fg-4);margin-top:12px;font-style:italic;line-height:1.5;",
                                             "Auto-detected strategy — configurable via CLI only. Override above if needed."

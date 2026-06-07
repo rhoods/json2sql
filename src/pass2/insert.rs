@@ -2,7 +2,7 @@
 //!
 //! Ce module sait *quoi* écrire : une ligne root, une ligne wide (pivot, autosplit…),
 //! un objet enfant. Il sélectionne la stratégie via `insert_child_object` qui aiguille
-//! (*dispatch*) selon le `WideStrategy` de la table cible.
+//! (*dispatch*) selon le `InferredStrategy` de la table cible.
 //!
 //! Frontière avec `traversal.rs` : `insert.rs` gère l'écriture d'une ligne complète
 //! dans un contexte `InsertCtx`. `traversal.rs` gère la navigation dans les sous-arbres
@@ -20,7 +20,7 @@ use crate::error::Result;
 use crate::pass2::coercer::{coerce, CoerceResult};
 use crate::pass2::sink::RowSink;
 use crate::schema::PATH_SEP;
-use crate::schema::table_schema::{TableSchema, WideStrategy};
+use crate::schema::table_schema::{TableSchema, InferredStrategy};
 
 use super::traversal::{
     insert_array, insert_jsonb_object, insert_keyed_pivot_object, insert_multi_keyed_pivot,
@@ -97,7 +97,7 @@ pub fn insert_object<S: RowSink, A: AnomalyCollect>(
 ) -> Result<()> {
     // Special case: root table with Jsonb strategy — write the full object as a JSONB blob,
     // then still recurse into child tables so they receive their data.
-    if matches!(schema.wide_strategy, WideStrategy::Jsonb) && parent_id.is_none() {
+    if matches!(schema.inferred_strategy, InferredStrategy::Jsonb) && parent_id.is_none() {
         return write_root_jsonb(path_map, ctx, schema, obj, row_id);
     }
 
@@ -190,8 +190,8 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
     Ok(())
 }
 
-/// Dispatch a child Object value to the appropriate insertion function based on its `WideStrategy`.
-#[allow(clippy::too_many_lines)] // exhaustive dispatch over all WideStrategy variants
+/// Dispatch a child Object value to the appropriate insertion function based on its `InferredStrategy`.
+#[allow(clippy::too_many_lines)] // exhaustive dispatch over all InferredStrategy variants
 fn insert_child_object<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
@@ -200,38 +200,38 @@ fn insert_child_object<S: RowSink, A: AnomalyCollect>(
     value: &Value,
     parent_id: Uuid,
 ) -> Result<()> {
-    match &child_schema.wide_strategy {
-        WideStrategy::Pivot => {
+    match &child_schema.inferred_strategy {
+        InferredStrategy::Pivot => {
             insert_pivot_object(ctx.sinks, ctx.anomalies, child_schema, nested, parent_id)?;
         }
-        WideStrategy::Jsonb => {
+        InferredStrategy::Jsonb => {
             insert_jsonb_object(path_map, ctx.sinks, ctx.anomalies, child_schema, value, parent_id)?;
         }
-        WideStrategy::StructuredPivot(suffix_schema) => {
+        InferredStrategy::StructuredPivot(suffix_schema) => {
             insert_structured_pivot_object(
                 ctx.sinks, ctx.anomalies, child_schema, nested, parent_id, suffix_schema,
             )?;
         }
-        WideStrategy::KeyedPivot(sibling_schema) => {
+        InferredStrategy::KeyedPivot(sibling_schema) => {
             insert_keyed_pivot_object(
                 path_map, ctx.sinks, ctx.anomalies, child_schema, nested, parent_id, sibling_schema,
             )?;
         }
-        WideStrategy::MultiKeyedPivot(groups) => {
+        InferredStrategy::MultiKeyedPivot(groups) => {
             insert_multi_keyed_pivot(
                 path_map, ctx.sinks, ctx.anomalies, child_schema, nested, parent_id, groups,
             )?;
         }
-        WideStrategy::NormalizeDynamicKeys { id_column } => {
+        InferredStrategy::NormalizeDynamicKeys { id_column } => {
             insert_normalize_dynamic_keys(
                 ctx.sinks, ctx.anomalies, child_schema, nested, parent_id, id_column,
             )?;
         }
-        WideStrategy::Columns
-        | WideStrategy::AutoSplit { .. }
-        | WideStrategy::Ignore
-        | WideStrategy::Flatten { .. }
-        | WideStrategy::JsonbFlatten => {
+        InferredStrategy::Columns
+        | InferredStrategy::AutoSplit { .. }
+        | InferredStrategy::Ignore
+        | InferredStrategy::Flatten { .. }
+        | InferredStrategy::JsonbFlatten => {
             let child_id = Uuid::now_v7();
             insert_object(path_map, ctx, child_schema, nested, child_id, Some(parent_id), None)?;
         }
@@ -270,7 +270,7 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     obj: &serde_json::Map<String, Value>,
     row_id: Uuid,
 ) -> Result<()> {
-    let WideStrategy::AutoSplit { medium_keys, wide_table_name, .. } = &schema.wide_strategy else {
+    let InferredStrategy::AutoSplit { medium_keys, wide_table_name, .. } = &schema.inferred_strategy else {
         return Ok(());
     };
     let wide_value_type = path_map

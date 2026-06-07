@@ -2,7 +2,7 @@
 //!
 //! Ce module sait *où aller* : il parcourt la hiérarchie JSON et *route* les valeurs
 //! vers les bons sinks selon la structure du schéma (pivot key, structured pivot, jsonb…).
-//! *Dispatcher* un nœud = choisir le handler selon son type JSON ou sa `WideStrategy`.
+//! *Dispatcher* un nœud = choisir le handler selon son type JSON ou sa `InferredStrategy`.
 //! *Router* une ligne = la rediriger vers la table cible correcte.
 //!
 //! Frontière avec `insert.rs` : `traversal.rs` navigue et dispatch depuis un contexte
@@ -21,7 +21,7 @@ use crate::error::Result;
 use crate::pass2::coercer::{coerce, CoerceResult};
 use crate::pass2::sink::RowSink;
 use crate::schema::PATH_SEP;
-use crate::schema::table_schema::{ChildKind, ColumnSchema, SiblingGroup, SiblingSchema, SuffixSchema, TableSchema, WideStrategy};
+use crate::schema::table_schema::{ChildKind, ColumnSchema, SiblingGroup, SiblingSchema, SuffixSchema, TableSchema, InferredStrategy};
 
 use super::insert::{insert_object, InsertCtx};
 
@@ -115,23 +115,23 @@ fn dispatch_child_object<S: RowSink>(
     child_id: Uuid,
 ) -> Result<()> {
     let Value::Object(nested) = child_value else { return Ok(()); };
-    match &child_schema.wide_strategy {
-        WideStrategy::Pivot => insert_pivot_object(sinks, anomalies, child_schema, nested, child_id)?,
-        WideStrategy::Jsonb => insert_jsonb_object(path_map, sinks, anomalies, child_schema, child_value, child_id)?,
-        WideStrategy::StructuredPivot(suffix_schema) => {
+    match &child_schema.inferred_strategy {
+        InferredStrategy::Pivot => insert_pivot_object(sinks, anomalies, child_schema, nested, child_id)?,
+        InferredStrategy::Jsonb => insert_jsonb_object(path_map, sinks, anomalies, child_schema, child_value, child_id)?,
+        InferredStrategy::StructuredPivot(suffix_schema) => {
             insert_structured_pivot_object(sinks, anomalies, child_schema, nested, child_id, suffix_schema)?;
         }
-        WideStrategy::KeyedPivot(sibling_schema) => {
+        InferredStrategy::KeyedPivot(sibling_schema) => {
             insert_keyed_pivot_object(path_map, sinks, anomalies, child_schema, nested, child_id, sibling_schema)?;
         }
-        WideStrategy::MultiKeyedPivot(groups) => {
+        InferredStrategy::MultiKeyedPivot(groups) => {
             insert_multi_keyed_pivot(path_map, sinks, anomalies, child_schema, nested, child_id, groups)?;
         }
-        WideStrategy::NormalizeDynamicKeys { id_column } => {
+        InferredStrategy::NormalizeDynamicKeys { id_column } => {
             insert_normalize_dynamic_keys(sinks, anomalies, child_schema, nested, child_id, id_column)?;
         }
-        WideStrategy::Columns | WideStrategy::AutoSplit { .. } | WideStrategy::Ignore
-        | WideStrategy::Flatten { .. } | WideStrategy::JsonbFlatten => {
+        InferredStrategy::Columns | InferredStrategy::AutoSplit { .. } | InferredStrategy::Ignore
+        | InferredStrategy::Flatten { .. } | InferredStrategy::JsonbFlatten => {
             insert_object(
                 path_map, &mut InsertCtx { sinks, anomalies },
                 child_schema, nested, Uuid::now_v7(), Some(child_id), None,
@@ -269,12 +269,12 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
         let Some(child_schema) = path_map.values().find(|s| s.name == *child_table_name) else { continue };
         match sub_value {
             Value::Object(nested) => {
-                match &child_schema.wide_strategy {
-                    WideStrategy::KeyedPivot(ss) => {
+                match &child_schema.inferred_strategy {
+                    InferredStrategy::KeyedPivot(ss) => {
                         let ss = ss.clone();
                         insert_keyed_pivot_object(path_map, sinks, anomalies, child_schema, nested, row_id, &ss)?;
                     }
-                    WideStrategy::MultiKeyedPivot(groups) => {
+                    InferredStrategy::MultiKeyedPivot(groups) => {
                         let groups = groups.clone();
                         insert_multi_keyed_pivot(path_map, sinks, anomalies, child_schema, nested, row_id, &groups)?;
                     }
@@ -477,9 +477,9 @@ fn route_independent_child<S: RowSink>(
     let Some(child_schema) = path_map.get(child_path_key) else { return Ok(false) };
     if child_schema.parent_table.as_deref() != Some(schema_name) { return Ok(false); }
     if let Value::Object(nested) = value {
-        match &child_schema.wide_strategy {
-            WideStrategy::KeyedPivot(ss) => insert_keyed_pivot_object(path_map, sinks, anomalies, child_schema, nested, routing_id, ss)?,
-            WideStrategy::MultiKeyedPivot(cg) => insert_multi_keyed_pivot(path_map, sinks, anomalies, child_schema, nested, routing_id, cg)?,
+        match &child_schema.inferred_strategy {
+            InferredStrategy::KeyedPivot(ss) => insert_keyed_pivot_object(path_map, sinks, anomalies, child_schema, nested, routing_id, ss)?,
+            InferredStrategy::MultiKeyedPivot(cg) => insert_multi_keyed_pivot(path_map, sinks, anomalies, child_schema, nested, routing_id, cg)?,
             _ => {
                 let child_id = Uuid::now_v7();
                 insert_object(path_map, &mut InsertCtx { sinks, anomalies }, child_schema, nested, child_id, Some(routing_id), None)?;

@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 use crate::error::{J2sError, Result};
 use super::finalizer::exclude_absorbed_children;
 use super::observer::TableEntry;
-use super::table_schema::{ChildKind, ColumnSchema, KeyShape, SuffixSchema, TableSchema, WideStrategy};
+use super::table_schema::{ChildKind, ColumnSchema, KeyShape, SuffixSchema, TableSchema, InferredStrategy};
 use super::type_tracker::{widen_pg_types, PgType};
 
 /// Fraction of keys that must be numeric (or ISO-language codes) to classify a key shape as
@@ -23,7 +23,7 @@ use super::type_tracker::{widen_pg_types, PgType};
 const KEY_SHAPE_DOMINANT_RATIO: f64 = 0.8;
 
 /// Determine whether a wide table's values are type-homogeneous (→ Pivot) or not (→ Jsonb).
-pub fn suggest_wide_strategy(entry: &TableEntry) -> WideStrategy {
+pub fn suggest_wide_strategy(entry: &TableEntry) -> InferredStrategy {
     let mut has_string = false;
     let mut has_numeric = false;
     let mut has_boolean = false;
@@ -48,13 +48,13 @@ pub fn suggest_wide_strategy(entry: &TableEntry) -> WideStrategy {
 
     // Only one type category across all value columns → safe to pivot
     if type_categories <= 1 {
-        WideStrategy::Pivot
+        InferredStrategy::Pivot
     } else {
-        WideStrategy::Jsonb
+        InferredStrategy::Jsonb
     }
 }
 
-/// Restructure a schema's data columns to match the given `WideStrategy`.
+/// Restructure a schema's data columns to match the given `InferredStrategy`.
 fn apply_pivot_columns(schema: &mut TableSchema) {
     let value_type = schema
         .data_columns()
@@ -79,28 +79,28 @@ fn apply_pivot_columns(schema: &mut TableSchema) {
         is_generated: false,
         is_parent_fk: false,
     });
-    schema.wide_strategy = WideStrategy::Pivot;
+    schema.inferred_strategy = InferredStrategy::Pivot;
 }
 
 /// Replaces all non-generated columns with either (key, value) for Pivot
 /// or (data JSONB) for Jsonb.
-#[allow(clippy::too_many_lines)] // exhaustive match over all WideStrategy variants
-pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: WideStrategy) {
+#[allow(clippy::too_many_lines)] // exhaustive match over all InferredStrategy variants
+pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: InferredStrategy) {
     match strategy {
-        WideStrategy::Columns
-        | WideStrategy::KeyedPivot(_)
-        | WideStrategy::AutoSplit { .. }
-        | WideStrategy::Ignore
-        | WideStrategy::NormalizeDynamicKeys { .. }
-        | WideStrategy::Flatten { .. }
-        | WideStrategy::JsonbFlatten => {
+        InferredStrategy::Columns
+        | InferredStrategy::KeyedPivot(_)
+        | InferredStrategy::AutoSplit { .. }
+        | InferredStrategy::Ignore
+        | InferredStrategy::NormalizeDynamicKeys { .. }
+        | InferredStrategy::Flatten { .. }
+        | InferredStrategy::JsonbFlatten => {
             // Applied elsewhere: KeyedPivot via finalize_siblings(), AutoSplit/Ignore inline
             // in finalize(), NormalizeDynamicKeys/Flatten/JsonbFlatten via dedicated apply_* fns.
         }
-        WideStrategy::Pivot => {
+        InferredStrategy::Pivot => {
             apply_pivot_columns(schema);
         }
-        WideStrategy::Jsonb => {
+        InferredStrategy::Jsonb => {
             schema.columns.retain(|c| c.is_generated);
             schema.columns.push(ColumnSchema {
                 name: "data".to_string(),
@@ -110,12 +110,12 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: WideStrat
                 is_generated: false,
                 is_parent_fk: false,
             });
-            schema.wide_strategy = WideStrategy::Jsonb;
+            schema.inferred_strategy = InferredStrategy::Jsonb;
         }
-        WideStrategy::StructuredPivot(suffix_schema) => {
+        InferredStrategy::StructuredPivot(suffix_schema) => {
             apply_structured_pivot_columns(schema, suffix_schema);
         }
-        WideStrategy::MultiKeyedPivot(_) => {
+        InferredStrategy::MultiKeyedPivot(_) => {
             // MultiKeyedPivot: parent keeps only its generated columns (no data columns).
             // The synthetic child pivot tables are created by finalize_siblings().
             schema.columns.retain(|c| c.is_generated);
@@ -154,7 +154,7 @@ pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: S
             is_parent_fk: false,
         });
     }
-    schema.wide_strategy = WideStrategy::StructuredPivot(suffix_schema);
+    schema.inferred_strategy = InferredStrategy::StructuredPivot(suffix_schema);
 }
 
 #[must_use]
@@ -261,7 +261,7 @@ pub fn apply_normalize_dynamic_keys(
         "  NormalizeDynamicKeys: {} ({} child tables → 1, id_col: {} [{}])",
         table_name, child_indices.len(), id_column, key_shape,
     );
-    schemas[target_idx].wide_strategy = WideStrategy::NormalizeDynamicKeys { id_column };
+    schemas[target_idx].inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column };
     exclude_absorbed_children(schemas);
     Ok(())
 }
@@ -313,7 +313,7 @@ pub fn apply_flatten(
 
     // Mark child as Flatten so absorbs_children() returns true for its descendants
     if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
-        child.wide_strategy = WideStrategy::Flatten { prefix: prefix.to_string(), max_depth };
+        child.inferred_strategy = InferredStrategy::Flatten { prefix: prefix.to_string(), max_depth };
     }
 
     // Remove descendants of the child (e.g. nutrients.sub_items)
@@ -342,20 +342,20 @@ pub fn apply_flatten(
     }
 
     // Remove the flattened child table from the schema
-    schemas.retain(|s| !matches!(s.wide_strategy, WideStrategy::Flatten { .. }));
+    schemas.retain(|s| !matches!(s.inferred_strategy, InferredStrategy::Flatten { .. }));
     Ok(())
 }
 
 /// Inline a child table as a single JSONB column on the parent table.
 /// The child table is removed from the schema; the parent gains `{child_table_name} JSONB`.
-/// Used for `WideStrategy::JsonbFlatten` (IHM override "JSONB inline").
+/// Used for `InferredStrategy::JsonbFlatten` (IHM override "JSONB inline").
 #[allow(dead_code)] // pub API consumed by json2sql-ui (separate crate, invisible to binary dead_code lint)
 pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &str) -> Result<()> {
     let (_, parent_name, field_name) = resolve_child_info(schemas, child_table_name, "apply_jsonb_flatten")?;
 
     // Mark child as JsonbFlatten so absorbs_children() returns true for its descendants
     if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
-        child.wide_strategy = WideStrategy::JsonbFlatten;
+        child.inferred_strategy = InferredStrategy::JsonbFlatten;
     }
 
     // Remove any nested children of the child table
@@ -380,7 +380,7 @@ pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &st
     }
 
     // Remove the child table and its absorbed descendants
-    schemas.retain(|s| !matches!(s.wide_strategy, WideStrategy::JsonbFlatten));
+    schemas.retain(|s| !matches!(s.inferred_strategy, InferredStrategy::JsonbFlatten));
     Ok(())
 }
 

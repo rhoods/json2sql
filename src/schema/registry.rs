@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 use serde_json::Value;
 
-use super::finalizer::SchemaFinalizer;
+use super::finalizer::{OverflowWarning, SchemaFinalizer};
 use super::naming::{ColumnCollision, NamingRegistry, TruncatedName};
 use super::observer::SchemaObserver;
 use super::inspector;
@@ -64,7 +64,19 @@ impl SchemaRegistry {
 
     /// Convert all accumulated observations into finalized `TableSchema` objects,
     /// sorted topologically (parents before children).
+    /// The PG column-limit guard is NOT applied — use `finalize_with_pg_guard` for Pass 1 runs.
     pub fn finalize(&mut self) -> Vec<crate::schema::table_schema::TableSchema> {
+        let (schemas, _overflow) = self.finalize_inner(false);
+        schemas
+    }
+
+    /// Like `finalize`, but also applies the PG 1600-column guard and returns overflow warnings.
+    /// Used by `runner::build_pass1_result` so the guard runs inside the finalizer, not outside.
+    pub fn finalize_with_pg_guard(&mut self) -> (Vec<crate::schema::table_schema::TableSchema>, Vec<OverflowWarning>) {
+        self.finalize_inner(true)
+    }
+
+    fn finalize_inner(&mut self, apply_pg_guard: bool) -> (Vec<crate::schema::table_schema::TableSchema>, Vec<OverflowWarning>) {
         let finalizer = SchemaFinalizer::new(
             self.wide_column_threshold,
             self.sibling_threshold,
@@ -72,14 +84,15 @@ impl SchemaRegistry {
             self.stable_threshold,
             self.rare_threshold,
             self.disabled_strategies.clone(),
+            apply_pg_guard,
         );
-        let (schemas, collisions) = finalizer.run(
+        let (schemas, collisions, overflow) = finalizer.run(
             &self.observer.tables,
             self.observer.text_threshold,
             &mut self.naming,
         );
         self.column_collisions = collisions;
-        schemas
+        (schemas, overflow)
     }
 
     /// Collect type distribution statistics for every data column (excluding j2s_ generated columns).
@@ -115,9 +128,9 @@ impl SchemaRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::cascading::{child_compatibility_score, pairwise_jaccard_min};
+    use crate::schema::cascading::scoring::{child_compatibility_score, pairwise_jaccard_min};
     use crate::schema::finalizer::*;
-    use crate::schema::table_schema::{ChildKind, ColumnSchema, TableSchema, WideStrategy};
+    use crate::schema::table_schema::{ChildKind, ColumnSchema, TableSchema, InferredStrategy};
     use crate::schema::type_tracker::PgType;
     use crate::schema::wide_strategies::{apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys};
     use serde_json::json;
@@ -189,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_wide_object_pivot_homogeneous() {
-        // 3 numeric keys → threshold=2 → should get WideStrategy::Pivot
+        // 3 numeric keys → threshold=2 → should get InferredStrategy::Pivot
         let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({
             "id": 1,
@@ -206,7 +219,7 @@ mod tests {
         let nutrients = schemas.iter().find(|s| s.name == "ingredient_nutrients");
         assert!(nutrients.is_some(), "nutrients table should exist");
         let n = nutrients.unwrap();
-        assert_eq!(n.wide_strategy, WideStrategy::Pivot);
+        assert_eq!(n.inferred_strategy, InferredStrategy::Pivot);
         // Should have j2s_id, j2s_parent_id, key, value
         assert!(n.find_by_original("key").is_some());
         assert!(n.find_by_original("value").is_some());
@@ -215,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_wide_object_jsonb_heterogeneous() {
-        // Mixed types (string + numeric) → should get WideStrategy::Jsonb
+        // Mixed types (string + numeric) → should get InferredStrategy::Jsonb
         let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
         let obj = json!({
             "id": 1,
@@ -231,7 +244,7 @@ mod tests {
         let meta = schemas.iter().find(|s| s.name == "item_meta");
         assert!(meta.is_some(), "meta table should exist");
         let m = meta.unwrap();
-        assert_eq!(m.wide_strategy, WideStrategy::Jsonb);
+        assert_eq!(m.inferred_strategy, InferredStrategy::Jsonb);
         // Should have j2s_id, j2s_parent_id, data
         assert!(m.find_by_original("data").is_some());
         assert_eq!(m.data_columns().count(), 1);
@@ -305,8 +318,8 @@ mod tests {
         assert!(genomes_schema.is_some(), "root_genomes table must exist");
         assert!(
             matches!(
-                genomes_schema.unwrap().wide_strategy,
-                WideStrategy::KeyedPivot(_)
+                genomes_schema.unwrap().inferred_strategy,
+                InferredStrategy::KeyedPivot(_)
             ),
             "root_genomes must be KeyedPivot"
         );
@@ -331,8 +344,8 @@ mod tests {
         let translations = schemas.iter().find(|s| s.name == "root_translations");
         assert!(
             matches!(
-                translations.unwrap().wide_strategy,
-                WideStrategy::KeyedPivot(_)
+                translations.unwrap().inferred_strategy,
+                InferredStrategy::KeyedPivot(_)
             ),
             "500 identical siblings must collapse into KeyedPivot"
         );
@@ -362,8 +375,8 @@ mod tests {
         );
         assert!(
             !matches!(
-                items_schema.unwrap().wide_strategy,
-                WideStrategy::KeyedPivot(_)
+                items_schema.unwrap().inferred_strategy,
+                InferredStrategy::KeyedPivot(_)
             ),
             "group with outlier (0 column overlap) must not collapse into KeyedPivot"
         );
@@ -431,7 +444,7 @@ mod tests {
         let translations = schemas.iter().find(|s| s.name == "root_translations").unwrap();
 
         assert!(
-            matches!(translations.wide_strategy, WideStrategy::KeyedPivot(_)),
+            matches!(translations.inferred_strategy, InferredStrategy::KeyedPivot(_)),
             "expected KeyedPivot strategy"
         );
 
@@ -685,7 +698,7 @@ mod tests {
         assert_eq!(data.len(), 1);
         assert_eq!(data[0].name, "data");
         assert!(matches!(data[0].pg_type, PgType::Jsonb));
-        assert!(matches!(schemas[0].wide_strategy, WideStrategy::Jsonb));
+        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::Jsonb));
     }
 
     #[test]
@@ -748,7 +761,74 @@ mod tests {
         assert_eq!(schemas[0].data_columns().count(), 10);
         // Child converted
         assert_eq!(schemas[1].data_columns().count(), 1);
-        assert!(matches!(schemas[1].wide_strategy, WideStrategy::Jsonb));
+        assert!(matches!(schemas[1].inferred_strategy, InferredStrategy::Jsonb));
+    }
+
+    // -----------------------------------------------------------------------
+    // SchemaFinalizer::run — apply_pg_guard flag
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_run_with_guard_enabled_returns_overflow_warnings() {
+        use indexmap::IndexMap;
+        use crate::schema::naming::NamingRegistry;
+        use crate::schema::strategies::StrategyName;
+        use std::collections::HashSet;
+
+        let finalizer = SchemaFinalizer::new(256, 3, 0.5, 0.10, 0.001, HashSet::<StrategyName>::new(), true);
+        let mut naming = NamingRegistry::default();
+        let (schemas, _collisions, warnings) = finalizer.run(&IndexMap::new(), 256, &mut naming);
+        // Empty input: no schemas, no warnings.
+        assert!(schemas.is_empty());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_run_with_guard_disabled_returns_no_warnings_for_wide_table() {
+        use indexmap::IndexMap;
+        use crate::schema::naming::NamingRegistry;
+        use crate::schema::strategies::StrategyName;
+        use std::collections::HashSet;
+
+        // Guard disabled: run() must not produce OverflowWarnings even for wide tables.
+        // (The actual wide-table conversion is tested via apply_column_limit_guard directly.)
+        let finalizer = SchemaFinalizer::new(256, 3, 0.5, 0.10, 0.001, HashSet::<StrategyName>::new(), false);
+        let mut naming = NamingRegistry::default();
+        let (_schemas, _collisions, warnings) = finalizer.run(&IndexMap::new(), 256, &mut naming);
+        assert!(warnings.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // T4 — exclude_absorbed_children must run AFTER apply_column_limit_guard
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_guard_before_exclude_autosplit_overflow_removes_child() {
+        // AutoSplit does not absorb children (they are separate companion tables).
+        // But if the guard converts AutoSplit → Jsonb (column overflow), Jsonb DOES absorb
+        // children. exclude_absorbed_children must run after the guard to see this.
+        let mut parent = make_wide_schema("products", None, 1601);
+        parent.inferred_strategy = InferredStrategy::AutoSplit {
+            stable_threshold: 0.5,
+            rare_threshold: 0.01,
+            medium_keys: std::collections::HashSet::new(),
+            wide_table_name: "products_wide".to_string(),
+        };
+        parent.parent_table = None;
+
+        let mut child = make_wide_schema("products_items", Some("products"), 5);
+        child.parent_table = Some("products".to_string());
+
+        let mut schemas = vec![parent, child];
+
+        // Correct order: guard first, then exclude.
+        apply_column_limit_guard(&mut schemas);
+        assert!(
+            matches!(schemas[0].inferred_strategy, InferredStrategy::Jsonb),
+            "parent must be converted to Jsonb by the guard"
+        );
+        exclude_absorbed_children(&mut schemas);
+        assert_eq!(schemas.len(), 1, "child must be removed after parent becomes Jsonb");
     }
 
     // -----------------------------------------------------------------------
@@ -937,9 +1017,9 @@ mod tests {
         let schemas = reg.finalize();
         let nutriscore = schemas.iter().find(|s| s.name == "products_nutriscore").unwrap();
         assert!(
-            matches!(nutriscore.wide_strategy, WideStrategy::KeyedPivot(_)),
+            matches!(nutriscore.inferred_strategy, InferredStrategy::KeyedPivot(_)),
             "2 identical siblings with threshold=2 must become KeyedPivot, got: {:?}",
-            nutriscore.wide_strategy
+            nutriscore.inferred_strategy
         );
     }
 
@@ -955,7 +1035,7 @@ mod tests {
         let schemas = reg.finalize();
         let nutriscore = schemas.iter().find(|s| s.name == "products_nutriscore").unwrap();
         assert!(
-            !matches!(nutriscore.wide_strategy, WideStrategy::KeyedPivot(_)),
+            !matches!(nutriscore.inferred_strategy, InferredStrategy::KeyedPivot(_)),
             "2 siblings with threshold=3 must NOT become KeyedPivot"
         );
     }
@@ -979,11 +1059,11 @@ mod tests {
         let schemas = reg.finalize();
         let dict = schemas.iter().find(|s| s.name == "root_dict").unwrap();
         assert!(
-            matches!(dict.wide_strategy, WideStrategy::MultiKeyedPivot(_)),
+            matches!(dict.inferred_strategy, InferredStrategy::MultiKeyedPivot(_)),
             "heterogeneous non-numeric group with 2 homogeneous clusters must produce MultiKeyedPivot, got: {:?}",
-            dict.wide_strategy
+            dict.inferred_strategy
         );
-        if let WideStrategy::MultiKeyedPivot(groups) = &dict.wide_strategy {
+        if let InferredStrategy::MultiKeyedPivot(groups) = &dict.inferred_strategy {
             assert_eq!(groups.len(), 2, "must produce exactly 2 pivot groups (front + ingr)");
         }
     }
@@ -1006,11 +1086,11 @@ mod tests {
         let schemas = reg.finalize();
         let images = schemas.iter().find(|s| s.name == "root_images").unwrap();
         assert!(
-            matches!(images.wide_strategy, WideStrategy::MultiKeyedPivot(_)),
+            matches!(images.inferred_strategy, InferredStrategy::MultiKeyedPivot(_)),
             "mixed group with clusterable non-numeric siblings must produce MultiKeyedPivot, got: {:?}",
-            images.wide_strategy
+            images.inferred_strategy
         );
-        if let WideStrategy::MultiKeyedPivot(groups) = &images.wide_strategy {
+        if let InferredStrategy::MultiKeyedPivot(groups) = &images.inferred_strategy {
             // numeric group + 2 non-numeric clusters = 3 total
             assert_eq!(groups.len(), 3, "must produce 3 groups (num + front + ingr), got {}", groups.len());
         }
@@ -1046,15 +1126,15 @@ mod tests {
 
         let selected = schemas.iter().find(|s| s.name == "root_selected").unwrap();
         assert!(
-            matches!(selected.wide_strategy, WideStrategy::KeyedPivot(_)),
+            matches!(selected.inferred_strategy, InferredStrategy::KeyedPivot(_)),
             "root_selected must remain KeyedPivot (type key), got: {:?}",
-            selected.wide_strategy
+            selected.inferred_strategy
         );
 
         // Post-pass must create a KeyedPivot sub-table directly under root_selected.
         let sub_pivot = schemas.iter().find(|s| {
             s.parent_table.as_deref() == Some("root_selected")
-                && matches!(s.wide_strategy, WideStrategy::KeyedPivot(_))
+                && matches!(s.inferred_strategy, InferredStrategy::KeyedPivot(_))
         });
         assert!(
             sub_pivot.is_some(),
@@ -1068,7 +1148,7 @@ mod tests {
             .iter()
             .filter(|s| {
                 s.parent_table.as_deref() == Some("root_selected")
-                    && matches!(s.wide_strategy, WideStrategy::Columns)
+                    && matches!(s.inferred_strategy, InferredStrategy::Columns)
             })
             .count();
         assert_eq!(
@@ -1094,7 +1174,7 @@ mod tests {
 
         let sub_pivot = schemas.iter().find(|s| {
             s.parent_table.as_deref() == Some("root_selected")
-                && matches!(s.wide_strategy, WideStrategy::KeyedPivot(_))
+                && matches!(s.inferred_strategy, InferredStrategy::KeyedPivot(_))
         });
         assert!(
             sub_pivot.is_none(),
@@ -1118,9 +1198,9 @@ mod tests {
         let schemas = reg.finalize();
         let markers = schemas.iter().find(|s| s.name == "product_markers").unwrap();
         assert!(
-            matches!(markers.wide_strategy, WideStrategy::KeyedPivot(_)),
+            matches!(markers.inferred_strategy, InferredStrategy::KeyedPivot(_)),
             "3 ScalarArray siblings with threshold=2 must become KeyedPivot, got: {:?}",
-            markers.wide_strategy
+            markers.inferred_strategy
         );
         assert!(
             !schemas.iter().any(|s| matches!(s.name.as_str(), "product_markers_2" | "product_markers_3" | "product_markers_4")),
@@ -1141,9 +1221,9 @@ mod tests {
         let schemas = reg.finalize();
         let markers = schemas.iter().find(|s| s.name == "product_markers").unwrap();
         assert!(
-            !matches!(markers.wide_strategy, WideStrategy::KeyedPivot(_)),
+            !matches!(markers.inferred_strategy, InferredStrategy::KeyedPivot(_)),
             "single ScalarArray child must NOT become KeyedPivot, got: {:?}",
-            markers.wide_strategy
+            markers.inferred_strategy
         );
     }
 
@@ -1161,7 +1241,7 @@ mod tests {
         reg_normal.observe_root("root", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
         let langs_normal = schemas_normal.iter().find(|s| s.name == "root_langs").unwrap();
-        assert!(matches!(langs_normal.wide_strategy, WideStrategy::KeyedPivot(_)),
+        assert!(matches!(langs_normal.inferred_strategy, InferredStrategy::KeyedPivot(_)),
             "sibling enabled → KeyedPivot expected");
 
         let mut reg_disabled = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001,
@@ -1169,7 +1249,7 @@ mod tests {
         reg_disabled.observe_root("root", make_root(&obj));
         let schemas_disabled = reg_disabled.finalize();
         let langs_disabled = schemas_disabled.iter().find(|s| s.name == "root_langs").unwrap();
-        assert!(!matches!(langs_disabled.wide_strategy, WideStrategy::KeyedPivot(_)),
+        assert!(!matches!(langs_disabled.inferred_strategy, InferredStrategy::KeyedPivot(_)),
             "sibling disabled → no KeyedPivot");
     }
 
@@ -1181,7 +1261,7 @@ mod tests {
         reg_normal.observe_root("item", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
         let nutrients_normal = schemas_normal.iter().find(|s| s.name == "item_nutrients").unwrap();
-        assert_eq!(nutrients_normal.wide_strategy, WideStrategy::Pivot,
+        assert_eq!(nutrients_normal.inferred_strategy, InferredStrategy::Pivot,
             "pivot enabled → Pivot expected");
 
         let mut reg_disabled = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001,
@@ -1189,7 +1269,7 @@ mod tests {
         reg_disabled.observe_root("item", make_root(&obj));
         let schemas_disabled = reg_disabled.finalize();
         let nutrients_disabled = schemas_disabled.iter().find(|s| s.name == "item_nutrients").unwrap();
-        assert_eq!(nutrients_disabled.wide_strategy, WideStrategy::Jsonb,
+        assert_eq!(nutrients_disabled.inferred_strategy, InferredStrategy::Jsonb,
             "pivot disabled → Jsonb for homogeneous wide table");
     }
 
@@ -1227,7 +1307,7 @@ mod tests {
         reg.observe_root("item", make_root(&obj));
         let schemas = reg.finalize();
         let nutrients = schemas.iter().find(|s| s.name == "item_nutrients").unwrap();
-        assert_eq!(nutrients.wide_strategy, WideStrategy::Pivot,
+        assert_eq!(nutrients.inferred_strategy, InferredStrategy::Pivot,
             "empty disabled set → default Pivot behavior unchanged");
     }
 
@@ -1246,8 +1326,8 @@ mod tests {
         reg_normal.observe_root("products", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
         let nutrients_normal = schemas_normal.iter().find(|s| s.name == "products_nutrients").unwrap();
-        assert!(matches!(nutrients_normal.wide_strategy, WideStrategy::StructuredPivot(_)),
-            "structured_pivot enabled → StructuredPivot expected, got: {:?}", nutrients_normal.wide_strategy);
+        assert!(matches!(nutrients_normal.inferred_strategy, InferredStrategy::StructuredPivot(_)),
+            "structured_pivot enabled → StructuredPivot expected, got: {:?}", nutrients_normal.inferred_strategy);
 
         // With structured_pivot disabled: fall through to Pivot or Jsonb
         let mut reg_disabled = SchemaRegistry::new(256, false, 3, usize::MAX, 0.5, 0.10, 0.001,
@@ -1255,8 +1335,8 @@ mod tests {
         reg_disabled.observe_root("products", make_root(&obj));
         let schemas_disabled = reg_disabled.finalize();
         let nutrients_disabled = schemas_disabled.iter().find(|s| s.name == "products_nutrients").unwrap();
-        assert!(!matches!(nutrients_disabled.wide_strategy, WideStrategy::StructuredPivot(_)),
-            "structured_pivot disabled → no StructuredPivot, got: {:?}", nutrients_disabled.wide_strategy);
+        assert!(!matches!(nutrients_disabled.inferred_strategy, InferredStrategy::StructuredPivot(_)),
+            "structured_pivot disabled → no StructuredPivot, got: {:?}", nutrients_disabled.inferred_strategy);
     }
 }
 

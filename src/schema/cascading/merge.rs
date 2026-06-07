@@ -1,9 +1,9 @@
 //! API publique pour la fusion manuelle de siblings depuis l'IHM.
 //!
-//! Expose `build_keyed_pivot_from_siblings` : construit un `WideStrategy::KeyedPivot`
+//! Expose `build_keyed_pivot_from_siblings` : construit un `InferredStrategy::KeyedPivot`
 //! ou `MultiKeyedPivot` à partir d'une sélection utilisateur de tables sœurs.
 
-use super::super::table_schema::{SiblingGroup, SiblingSchema, TableSchema, WideStrategy};
+use super::super::table_schema::{SiblingGroup, SiblingSchema, TableSchema, InferredStrategy};
 use super::super::wide_strategies::classify_key_shape;
 use super::scoring::pg_truncate_name;
 
@@ -26,12 +26,12 @@ pub enum MergeError {
 #[allow(dead_code)] // used by json2sql-ui::state::apply_sibling_merge
 #[derive(Debug)]
 pub struct MergeResult {
-    /// Parent table that receives the new `WideStrategy`.
+    /// Parent table that receives the new `InferredStrategy`.
     pub parent_name: String,
     /// `KeyedPivot` or `MultiKeyedPivot` to store in `strategy_overrides[parent_name]`.
-    pub strategy: WideStrategy,
+    pub strategy: InferredStrategy,
     /// Sibling tables that are absorbed — caller should set
-    /// `strategy_overrides[name] = WideStrategy::Ignore` for each.
+    /// `strategy_overrides[name] = InferredStrategy::Ignore` for each.
     pub absorbed_names: Vec<String>,
 }
 
@@ -82,7 +82,7 @@ pub fn build_keyed_pivot_from_siblings(
     let strategy = if has_numeric && has_non_numeric {
         build_mixed_keyed_pivot_strategy(&parent_name, key_col_name, &names, &key_refs, &is_numeric)
     } else {
-        WideStrategy::KeyedPivot(SiblingSchema {
+        InferredStrategy::KeyedPivot(SiblingSchema {
             key_col_name: key_col_name.to_string(),
             key_shape: classify_key_shape(&key_refs),
             array_children: false,
@@ -100,7 +100,7 @@ fn build_mixed_keyed_pivot_strategy(
     names: &[&str],
     key_refs: &[&str],
     is_numeric: &[bool],
-) -> WideStrategy {
+) -> InferredStrategy {
     let mut numeric_names: Vec<String> = Vec::new();
     let mut non_numeric_names: Vec<String> = Vec::new();
     let mut numeric_keys: Vec<&str> = Vec::new();
@@ -109,7 +109,7 @@ fn build_mixed_keyed_pivot_strategy(
         if num { numeric_names.push(names[i].to_string()); numeric_keys.push(key_refs[i]); }
         else { non_numeric_names.push(names[i].to_string()); non_numeric_keys.push(key_refs[i]); }
     }
-    WideStrategy::MultiKeyedPivot(vec![
+    InferredStrategy::MultiKeyedPivot(vec![
         SiblingGroup {
             pivot_table: pg_truncate_name(&format!("{parent_name}_{key_col_name}_num")),
             key_is_numeric: true,
@@ -158,7 +158,7 @@ fn extract_key_suffixes(names: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::super::table_schema::{ColumnSchema, KeyShape, TableSchema, WideStrategy};
+    use super::super::super::table_schema::{ColumnSchema, KeyShape, TableSchema, InferredStrategy};
     use super::super::super::type_tracker::PgType;
 
     fn make_parent(name: &str) -> TableSchema {
@@ -194,7 +194,7 @@ mod tests {
         ];
         let r = build_keyed_pivot_from_siblings(&schemas, &[1, 2], "img_key").unwrap();
         assert_eq!(r.parent_name, "products_images");
-        assert!(matches!(r.strategy, WideStrategy::KeyedPivot(_)));
+        assert!(matches!(r.strategy, InferredStrategy::KeyedPivot(_)));
         let mut absorbed = r.absorbed_names.clone();
         absorbed.sort();
         assert_eq!(absorbed, vec!["products_images_back", "products_images_front"]);
@@ -210,7 +210,7 @@ mod tests {
         ];
         let r = build_keyed_pivot_from_siblings(&schemas, &[1, 2, 3], "key").unwrap();
         assert_eq!(r.parent_name, "p");
-        if let WideStrategy::KeyedPivot(ss) = &r.strategy {
+        if let InferredStrategy::KeyedPivot(ss) = &r.strategy {
             assert_eq!(ss.key_shape, KeyShape::Numeric);
             assert_eq!(ss.key_col_name, "key");
         } else {
@@ -228,7 +228,7 @@ mod tests {
         ];
         let r = build_keyed_pivot_from_siblings(&schemas, &[1, 2, 3], "key").unwrap();
         assert_eq!(r.parent_name, "img");
-        if let WideStrategy::MultiKeyedPivot(groups) = &r.strategy {
+        if let InferredStrategy::MultiKeyedPivot(groups) = &r.strategy {
             assert_eq!(groups.len(), 2);
             let num = groups.iter().find(|g| g.key_is_numeric).unwrap();
             let mut num_absorbed = num.absorbed_names.clone();

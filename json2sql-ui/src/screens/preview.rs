@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 
 use json2sql::db::ddl::generate_ddl_preview;
 
-use crate::screens::{build_effective_schemas, build_table_rows, strategy_badge, TableRowsCtx};
+use crate::screens::{build_effective_schemas, build_table_rows, strategy_badge, user_override_badge, TableRowsCtx};
 use crate::screens::table_list::TableListPanel;
 use crate::state::{AppScreen, AppState};
 
@@ -50,15 +50,19 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
             if col.is_generated { (d, g + 1) } else { (d + 1, g) }
         });
 
-    // Strategy diff — tables whose override changed the strategy type.
+    // Strategy diff — tables whose user override differs from the inferred strategy.
+    use json2sql::schema::table_schema::{InferredStrategy, UserOverride};
     let diffs: Vec<DiffEntry> = schemas_orig.iter()
         .filter_map(|orig| {
             let ov = strategy_overrides.get(&orig.name)?;
-            if std::mem::discriminant(ov) == std::mem::discriminant(&orig.wide_strategy) {
-                return None;
-            }
-            let (_from_cls, from_lbl) = strategy_badge(&orig.wide_strategy);
-            let (to_cls,    to_lbl)   = strategy_badge(ov);
+            let matches_inferred = match ov {
+                UserOverride::Pivot => matches!(orig.inferred_strategy, InferredStrategy::Pivot),
+                UserOverride::Jsonb => matches!(orig.inferred_strategy, InferredStrategy::Jsonb),
+                UserOverride::Skip  => matches!(orig.inferred_strategy, InferredStrategy::Ignore),
+            };
+            if matches_inferred { return None; }
+            let (_from_cls, from_lbl) = strategy_badge(&orig.inferred_strategy);
+            let (to_cls,    to_lbl)   = user_override_badge(ov);
             Some(DiffEntry {
                 table_name: orig.name.clone(),
                 from_lbl,
@@ -68,7 +72,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
         })
         .collect();
 
-    let (sel_cls, sel_lbl) = strategy_badge(&selected.wide_strategy);
+    let (sel_cls, sel_lbl) = strategy_badge(&selected.inferred_strategy);
     let selected_name = selected.name.clone();
     let parent_table  = selected.parent_table.clone();
 

@@ -4,25 +4,26 @@
 //! and [`ColumnSchema`] (one column with inferred `PostgreSQL` type). Both are serialized to the
 //! inspect JSON written between Pass 1 and Pass 2.
 //!
-//! ## `WideStrategy`
+//! ## `InferredStrategy` and `UserOverride`
 //!
-//! Each [`TableSchema`] carries a [`WideStrategy`] that determines how Pass 2 materializes
-//! the table in `PostgreSQL`. The strategy is inferred by `finalize()` at the end of Pass 1
-//! and can be overridden by the user through the IHM before running Pass 2.
+//! Each [`TableSchema`] carries an [`InferredStrategy`] that determines how Pass 2 materializes
+//! the table in `PostgreSQL`. The strategy is inferred by `finalize()` at the end of Pass 1.
+//! The user can override it through the IHM via [`UserOverride`] before running Pass 2.
 //!
-//! | Strategy | When used | Output shape |
-//! |---|---|---|
-//! | `Columns` | default | one column per JSON key |
-//! | `Pivot` | homogeneous values, dynamic keys | `(key TEXT, value T)` EAV |
-//! | `Jsonb` | heterogeneous / irregular structure | single `JSONB` column |
-//! | `StructuredPivot` | keys share prefix + typed suffixes | one row per prefix group |
-//! | `KeyedPivot` | N sibling tables, same schema | merged table with key column |
-//! | `MultiKeyedPivot` | siblings with mixed key shapes | two synthetic pivot tables |
-//! | `AutoSplit` | root table with bi-modal key frequency | main table + `_wide` companion |
-//! | `Ignore` | key appears in < `rare_threshold` of rows | excluded from schema |
-//! | `NormalizeDynamicKeys` | arbitrary JSON keys → row IDs (IHM) | key becomes a column |
-//! | `Flatten` | inline child fields into parent (IHM) | child table removed |
-//! | `JsonbFlatten` | store child as JSONB on parent (IHM) | child table removed |
+//! | Strategy | Kind | When used | Output shape |
+//! |---|---|---|---|
+//! | `Columns` | inferred | default | one column per JSON key |
+//! | `Pivot` | inferred / user | homogeneous values, dynamic keys | `(key TEXT, value T)` EAV |
+//! | `Jsonb` | inferred / user | heterogeneous / irregular structure | single `JSONB` column |
+//! | `StructuredPivot` | inferred | keys share prefix + typed suffixes | one row per prefix group |
+//! | `KeyedPivot` | inferred | N sibling tables, same schema | merged table with key column |
+//! | `MultiKeyedPivot` | inferred | siblings with mixed key shapes | two synthetic pivot tables |
+//! | `AutoSplit` | inferred | root table with bi-modal key frequency | main table + `_wide` companion |
+//! | `Ignore` | inferred | key appears in < `rare_threshold` of rows | excluded from schema |
+//! | `Skip` | user | user wants table removed | table excluded from DDL and Pass 2 |
+//! | `NormalizeDynamicKeys` | TOML-only | arbitrary JSON keys → row IDs | key becomes a column |
+//! | `Flatten` | TOML-only | inline child fields into parent | child table removed |
+//! | `JsonbFlatten` | TOML-only | store child as JSONB on parent | child table removed |
 //!
 //! See each variant's doc comment for a concrete JSON → SQL example.
 
@@ -111,12 +112,15 @@ pub struct SiblingGroup {
     pub absorbed_path_segments: Vec<String>,
 }
 
-/// Strategy for handling "wide" tables — tables with many dynamic keys.
+/// System-inferred strategy for handling "wide" tables — tables with many dynamic keys.
+///
+/// Set by `finalize()` at the end of Pass 1. Not directly editable by the user; the user
+/// chooses a [`UserOverride`] instead, which is applied before Pass 2 via `apply_user_overrides`.
 ///
 /// See the [module-level table](self) for a quick comparison and each variant's
 /// doc comment for a concrete JSON → SQL example.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-pub enum WideStrategy {
+pub enum InferredStrategy {
     /// Default: one SQL column per JSON key.
     ///
     /// Trigger: fewer than `wide_column_threshold` distinct keys observed across all rows.
@@ -242,6 +246,25 @@ pub enum WideStrategy {
     JsonbFlatten,
 }
 
+/// User-facing override for a table's materialization strategy.
+///
+/// Applied by `apply_user_overrides` between Pass 1 and Pass 2.
+/// Only three choices are exposed to the user in the IHM — the full inferred strategy set
+/// is not directly editable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum UserOverride {
+    /// Force EAV pivot layout — equivalent to [`InferredStrategy::Pivot`].
+    Pivot,
+    /// Force JSONB storage — equivalent to [`InferredStrategy::Jsonb`].
+    Jsonb,
+    /// Remove the table from the schema and skip it in Pass 2.
+    ///
+    /// `#[serde(alias = "Ignore")]` provides backward-compat for snapshots saved before this
+    /// variant was renamed.
+    #[serde(alias = "Ignore")]
+    Skip,
+}
+
 /// A column in a finalized table schema.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ColumnSchema {
@@ -322,8 +345,9 @@ pub struct TableSchema {
     pub child_kind: Option<ChildKind>,
     /// Depth in the hierarchy (root = 0)
     pub depth: usize,
-    /// How wide-table keys are stored (auto-detected or user-overridden).
-    pub wide_strategy: WideStrategy,
+    /// How wide-table keys are materialized — set by `finalize()`, optionally mutated by `apply_user_overrides`.
+    #[serde(alias = "wide_strategy")]
+    pub inferred_strategy: InferredStrategy,
     /// Maps prefixed column name → source JSON field for columns inlined via Flatten strategy.
     /// e.g. `nutrients_calories` → `nutrients` means: look up `obj["nutrients"]["calories"]`.
     /// Empty for tables that have no flattened children.
@@ -349,7 +373,7 @@ impl TableSchema {
             parent_table: None,
             child_kind: None,
             depth,
-            wide_strategy: WideStrategy::default(),
+            inferred_strategy: InferredStrategy::default(),
             flatten_sources: HashMap::new(),
             child_routes: HashMap::new(),
         }
@@ -401,7 +425,7 @@ impl TableSchema {
     }
 }
 
-impl WideStrategy {
+impl InferredStrategy {
     /// Returns true if this strategy changes the default column-per-key layout.
     #[allow(dead_code)]
     #[must_use]
@@ -413,7 +437,7 @@ impl WideStrategy {
     ///
     /// Only `MultiKeyedPivot` carries an explicit absorbed-names list (one per `SiblingGroup`).
     /// For `KeyedPivot`, the absorbed sibling tables are tracked separately in the schema list
-    /// (each sibling receives `WideStrategy::Ignore` during finalization) — returns empty here.
+    /// (each sibling receives `InferredStrategy::Ignore` during finalization) — returns empty here.
     #[must_use]
     pub fn absorbed_names(&self) -> Vec<&str> {
         match self {
@@ -516,5 +540,28 @@ mod tests {
         let json = r#"{"name":"root","path":["root"],"columns":[],"depth":0,"wide_strategy":"Columns","flatten_sources":{}}"#;
         let s: TableSchema = serde_json::from_str(json).unwrap();
         assert!(s.child_routes.is_empty());
+    }
+
+    #[test]
+    fn user_override_skip_deserializes_from_ignore() {
+        let v: UserOverride = serde_json::from_str(r#""Ignore""#).unwrap();
+        assert_eq!(v, UserOverride::Skip);
+    }
+
+    #[test]
+    fn user_override_round_trip() {
+        for v in [UserOverride::Pivot, UserOverride::Jsonb, UserOverride::Skip] {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: UserOverride = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, v);
+        }
+    }
+
+    #[test]
+    fn table_schema_inferred_strategy_old_json_alias() {
+        // Old snapshots serialise the field as "wide_strategy" — must still load.
+        let json = r#"{"name":"root","path":["root"],"columns":[],"depth":0,"wide_strategy":"Columns","flatten_sources":{}}"#;
+        let s: TableSchema = serde_json::from_str(json).unwrap();
+        assert_eq!(s.inferred_strategy, InferredStrategy::Columns);
     }
 }

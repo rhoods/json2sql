@@ -9,7 +9,7 @@ pub mod table_list;
 
 use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
-use json2sql::schema::table_schema::{TableSchema, WideStrategy};
+use json2sql::schema::table_schema::{TableSchema, InferredStrategy, UserOverride};
 
 // ---------------------------------------------------------------------------
 // Shared hook: elapsed timer
@@ -72,7 +72,7 @@ pub struct TableRowViewModel {
 /// Input context for [`build_table_rows`]. Groups the per-call parameters so the
 /// function signature stays within the `too_many_arguments` threshold.
 pub struct TableRowsCtx<'a> {
-    pub overrides:        &'a HashMap<String, WideStrategy>,
+    pub overrides:        &'a HashMap<String, UserOverride>,
     pub overflow_names:   &'a HashSet<String>,
     pub selected_indices: &'a HashSet<usize>,
     pub absorbed_names:   &'a HashSet<String>,
@@ -92,20 +92,19 @@ struct RowFlags {
 impl RowFlags {
     fn compute(table: &TableSchema, ctx: &TableRowsCtx<'_>) -> Self {
         let user_overrode = ctx.overrides.contains_key(&table.name);
-        let effective = ctx.overrides.get(&table.name).cloned()
-            .unwrap_or_else(|| table.wide_strategy.clone());
         let is_absorbed = ctx.absorbed_names.contains(&table.name);
         let is_overflow = !user_overrode
-            && matches!(effective, WideStrategy::Jsonb)
+            && matches!(table.inferred_strategy, InferredStrategy::Jsonb)
             && ctx.overflow_names.contains(&table.name);
         let is_routing = !user_overrode
-            && matches!(effective, WideStrategy::MultiKeyedPivot(_))
+            && matches!(table.inferred_strategy, InferredStrategy::MultiKeyedPivot(_))
             && table.columns.iter().all(|c| c.is_generated);
         let has_warn = is_overflow || is_routing;
         let (badge_cls, badge_lbl) = if is_absorbed { ("muted", "merged") }
             else if is_routing { ("muted", "ROUTE") }
             else if is_overflow { ("warn", "JSONB ⚠") }
-            else { strategy_badge(&effective) };
+            else if let Some(ov) = ctx.overrides.get(&table.name) { user_override_badge(ov) }
+            else { strategy_badge(&table.inferred_strategy) };
         Self { is_routing, is_absorbed, has_warn, badge_cls, badge_lbl }
     }
 }
@@ -262,19 +261,19 @@ pub async fn pick_save_file(default_name: &str) -> PickResult {
     option_to_pick_result(handle.map(|h| h.path().to_path_buf()))
 }
 
-pub const fn strategy_label(s: &WideStrategy) -> &'static str {
+pub const fn strategy_label(s: &InferredStrategy) -> &'static str {
     match s {
-        WideStrategy::Columns                     => "DEFAULT",
-        WideStrategy::Pivot                       => "PIVOT",
-        WideStrategy::Jsonb                       => "JSONB SÉP.",
-        WideStrategy::JsonbFlatten                => "JSONB INLINE",
-        WideStrategy::StructuredPivot(_)          => "STRUCT PIVOT",
-        WideStrategy::KeyedPivot(_)               => "KEYED PIVOT",
-        WideStrategy::MultiKeyedPivot(_)          => "MULTI PIVOT",
-        WideStrategy::AutoSplit { .. }            => "AUTO SPLIT",
-        WideStrategy::Ignore                      => "SKIP",
-        WideStrategy::NormalizeDynamicKeys { .. } => "NORMALIZE",
-        WideStrategy::Flatten { .. }              => "FLATTEN",
+        InferredStrategy::Columns                     => "DEFAULT",
+        InferredStrategy::Pivot                       => "PIVOT",
+        InferredStrategy::Jsonb                       => "JSONB SÉP.",
+        InferredStrategy::JsonbFlatten                => "JSONB INLINE",
+        InferredStrategy::StructuredPivot(_)          => "STRUCT PIVOT",
+        InferredStrategy::KeyedPivot(_)               => "KEYED PIVOT",
+        InferredStrategy::MultiKeyedPivot(_)          => "MULTI PIVOT",
+        InferredStrategy::AutoSplit { .. }            => "AUTO SPLIT",
+        InferredStrategy::Ignore                      => "SKIP",
+        InferredStrategy::NormalizeDynamicKeys { .. } => "NORMALIZE",
+        InferredStrategy::Flatten { .. }              => "FLATTEN",
     }
 }
 
@@ -297,29 +296,31 @@ pub fn compute_last_child(order: &[usize], schemas: &[TableSchema]) -> Vec<bool>
 }
 
 /// Returns (`css_badge_class_suffix`, `short_label`) for the new design-system `.badge` classes.
-pub const fn strategy_badge(s: &WideStrategy) -> (&'static str, &'static str) {
+pub const fn strategy_badge(s: &InferredStrategy) -> (&'static str, &'static str) {
     match s {
-        WideStrategy::Columns                     => ("default",   "default"),
-        WideStrategy::Jsonb                       => ("jsonb",     "jsonb"),
-        WideStrategy::JsonbFlatten                => ("jsonbi",    "flatten"),
-        WideStrategy::Pivot                       => ("pivot",     "pivot"),
-        WideStrategy::NormalizeDynamicKeys { .. } => ("normalize", "normalize"),
-        WideStrategy::Ignore                      => ("skip",      "skip"),
-        WideStrategy::Flatten { .. }              => ("flatten",   "flatten"),
-        WideStrategy::StructuredPivot(_)          => ("pivot",     "struct pivot"),
-        WideStrategy::KeyedPivot(_)               => ("pivot",     "keyed pivot"),
-        WideStrategy::MultiKeyedPivot(_)          => ("pivot",     "multi pivot"),
-        WideStrategy::AutoSplit { .. }            => ("normalize", "auto split"),
+        InferredStrategy::Columns                     => ("default",   "default"),
+        InferredStrategy::Jsonb                       => ("jsonb",     "jsonb"),
+        InferredStrategy::JsonbFlatten                => ("jsonbi",    "flatten"),
+        InferredStrategy::Pivot                       => ("pivot",     "pivot"),
+        InferredStrategy::NormalizeDynamicKeys { .. } => ("normalize", "normalize"),
+        InferredStrategy::Ignore                      => ("skip",      "skip"),
+        InferredStrategy::Flatten { .. }              => ("flatten",   "flatten"),
+        InferredStrategy::StructuredPivot(_)          => ("pivot",     "struct pivot"),
+        InferredStrategy::KeyedPivot(_)               => ("pivot",     "keyed pivot"),
+        InferredStrategy::MultiKeyedPivot(_)          => ("pivot",     "multi pivot"),
+        InferredStrategy::AutoSplit { .. }            => ("normalize", "auto split"),
+    }
+}
+
+pub const fn user_override_badge(o: &UserOverride) -> (&'static str, &'static str) {
+    match o {
+        UserOverride::Pivot => ("pivot", "pivot"),
+        UserOverride::Jsonb => ("jsonb", "jsonb"),
+        UserOverride::Skip  => ("skip",  "skip"),
     }
 }
 
 
-/// Apply all user strategy overrides to a copy of `schemas`.
-///
-/// The original slice is never mutated — returns a fresh Vec ready for DDL
-/// generation and pass2 import.  Three passes are needed because some strategies
-/// (`NormalizeDynamicKeys`, `JsonbFlatten`) require the full schema slice and remove
-/// child tables, so they must run after the single-table pass.
 /// Compute a progress percentage from `done` units out of `total`.
 /// Returns 0 if total is 0, clamps to 100 if done >= total.
 pub fn progress_pct(done: u64, total: u64) -> u32 {
@@ -366,149 +367,22 @@ pub fn ProgressBar(pct: u32, done: bool, label: String, phase: String) -> Elemen
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// Apply user strategy overrides (`Pivot | Jsonb | Skip`) to a copy of `schemas`.
+///
+/// Delegates to `json2sql::schema::config::apply_user_overrides` so both the GUI
+/// and CLI paths produce identical output for the same overrides. `Skip` removes the
+/// table and — for `AutoSplit` tables — also removes the companion `_wide` table.
+/// The original slice is never mutated.
 pub fn build_effective_schemas(
     schemas: &[TableSchema],
-    strategy_overrides: &HashMap<String, WideStrategy>,
+    strategy_overrides: &HashMap<String, UserOverride>,
 ) -> Vec<TableSchema> {
-    use json2sql::schema::wide_strategies::{
-        apply_jsonb_flatten, apply_normalize_dynamic_keys, apply_wide_strategy_columns,
-    };
-
     let mut result = schemas.to_vec();
-
-    // Pass 1: single-table overrides (column layout change only).
-    for (table_name, strategy) in strategy_overrides {
-        if let Some(s) = result.iter_mut().find(|s| &s.name == table_name) {
-            match strategy {
-                WideStrategy::NormalizeDynamicKeys { .. } | WideStrategy::JsonbFlatten => {}
-                other => apply_wide_strategy_columns(s, other.clone()),
-            }
-        }
-    }
-
-    // Pass 2: NormalizeDynamicKeys (removes child tables — needs full slice).
-    let normalize_targets: Vec<(String, String)> = strategy_overrides
-        .iter()
-        .filter_map(|(name, strategy)| {
-            if let WideStrategy::NormalizeDynamicKeys { id_column } = strategy {
-                Some((name.clone(), id_column.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-    for (table_name, id_column) in normalize_targets {
-        if let Err(e) = apply_normalize_dynamic_keys(&mut result, &table_name, id_column) {
-            eprintln!("WARNING: {e}");
-        }
-    }
-
-    // Pass 3: JsonbFlatten (removes child table — needs full slice).
-    let jsonb_flatten_targets: Vec<String> = strategy_overrides
-        .iter()
-        .filter_map(|(name, strategy)| {
-            if matches!(strategy, WideStrategy::JsonbFlatten) {
-                Some(name.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-    for table_name in jsonb_flatten_targets {
-        if let Err(e) = apply_jsonb_flatten(&mut result, &table_name) {
-            eprintln!("WARNING: {e}");
-        }
-    }
-
-    // Pass 4: MultiKeyedPivot — create child pivot TableSchemas for each SiblingGroup.
-    // The automatic detection path (apply_multi_collapse) creates these schemas; the IHM
-    // path only stores the WideStrategy override and marks absorbed siblings as Ignore.
-    // Without this pass, Pass 2 cannot find the pivot tables in path_map → all data lost.
-    // Absorbed siblings are still in `result` here (removed by the retain below), so we
-    // can compute union columns from them.
-    {
-        use json2sql::schema::table_schema::{ChildKind, ColumnSchema, SiblingSchema, WideStrategy as WS};
-        use json2sql::schema::type_tracker::PgType;
-        use json2sql::schema::wide_strategies::build_union_columns;
-
-        let multi_targets: Vec<(String, Vec<json2sql::schema::table_schema::SiblingGroup>)> =
-            strategy_overrides.iter().filter_map(|(name, strategy)| {
-                if let WS::MultiKeyedPivot(groups) = strategy {
-                    Some((name.clone(), groups.clone()))
-                } else {
-                    None
-                }
-            }).collect();
-
-        let mut new_schemas: Vec<TableSchema> = Vec::new();
-        for (parent_name, groups) in multi_targets {
-            let Some(parent_idx) = result.iter().position(|s| s.name == parent_name) else { continue };
-            let parent_depth = result[parent_idx].depth;
-            let parent_path  = result[parent_idx].path.clone();
-
-            for group in &groups {
-                // Skip if pivot schema already exists (idempotent).
-                if result.iter().chain(new_schemas.iter()).any(|s| s.name == group.pivot_table) {
-                    continue;
-                }
-                let absorbed: Vec<&TableSchema> = group.absorbed_names.iter()
-                    .filter_map(|n| result.iter().find(|s| s.name.as_str() == n.as_str()))
-                    .collect();
-                let union_cols = build_union_columns(&absorbed);
-
-                let fk_col = format!("j2s_{parent_name}_id");
-                let mut cols = vec![
-                    ColumnSchema::generated("j2s_id", PgType::Uuid),
-                    ColumnSchema { name: fk_col.clone(), original_name: fk_col, pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: true },
-                ];
-                if group.sibling_schema.array_children {
-                    cols.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
-                }
-                cols.push(ColumnSchema { name: group.sibling_schema.key_col_name.clone(), original_name: group.sibling_schema.key_col_name.clone(), pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false });
-                cols.extend(union_cols);
-                cols.push(ColumnSchema { name: "j2s_data".to_string(), original_name: "j2s_data".to_string(), pg_type: PgType::Jsonb, not_null: false, is_generated: true, is_parent_fk: false });
-
-                let mut pivot_path = parent_path.clone();
-                let seg = if group.path_segment.is_empty() {
-                    if group.key_is_numeric { "num".to_string() } else { "key".to_string() }
-                } else {
-                    group.path_segment.clone()
-                };
-                pivot_path.push(seg);
-
-                let child_kind = if group.sibling_schema.array_children { ChildKind::ObjectArray } else { ChildKind::Object };
-                new_schemas.push(TableSchema {
-                    name: group.pivot_table.clone(),
-                    path: pivot_path,
-                    parent_table: Some(parent_name.clone()),
-                    depth: parent_depth + 1,
-                    columns: cols,
-                    child_kind: Some(child_kind),
-                    wide_strategy: WS::KeyedPivot(SiblingSchema {
-                        key_col_name: group.sibling_schema.key_col_name.clone(),
-                        key_shape: group.sibling_schema.key_shape.clone(),
-                        array_children: group.sibling_schema.array_children,
-                        data_col_name: group.sibling_schema.data_col_name.clone(),
-                    }),
-                    flatten_sources: std::collections::HashMap::new(),
-                    child_routes: std::collections::HashMap::new(),
-                });
-            }
-        }
-        result.extend(new_schemas);
-    }
-
-    // Remove tables explicitly skipped by the user.
-    result.retain(|s| !matches!(strategy_overrides.get(&s.name), Some(WideStrategy::Ignore)));
-
+    json2sql::schema::config::apply_user_overrides(&mut result, strategy_overrides);
     // Defensive dedup: stale snapshots saved before the finalizer fix may contain
     // duplicate table names, which would cause add_constraints() to fail with 42P16.
-    {
-        let mut seen = std::collections::HashSet::new();
-        result.retain(|s| seen.insert(s.name.clone()));
-    }
-
+    let mut seen = std::collections::HashSet::new();
+    result.retain(|s| seen.insert(s.name.clone()));
     result
 }
 
@@ -678,7 +552,7 @@ mod tests {
     fn ignore_removes_table() {
         let schemas = vec![make_table("a", None), make_table("b", None)];
         let mut overrides = HashMap::new();
-        overrides.insert("a".to_string(), WideStrategy::Ignore);
+        overrides.insert("a".to_string(), UserOverride::Skip);
         let result = build_effective_schemas(&schemas, &overrides);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "b");
@@ -709,9 +583,9 @@ mod tests {
         });
         let schemas = vec![t];
         let mut overrides = HashMap::new();
-        overrides.insert("wide".to_string(), WideStrategy::Jsonb);
+        overrides.insert("wide".to_string(), UserOverride::Jsonb);
         let result = build_effective_schemas(&schemas, &overrides);
-        assert!(matches!(result[0].wide_strategy, WideStrategy::Jsonb));
+        assert!(matches!(result[0].inferred_strategy, InferredStrategy::Jsonb));
     }
 
     #[test]
@@ -719,7 +593,7 @@ mod tests {
         let schemas = vec![make_table("a", None), make_table("b", None)];
         let original_len = schemas.len();
         let mut overrides = HashMap::new();
-        overrides.insert("a".to_string(), WideStrategy::Ignore);
+        overrides.insert("a".to_string(), UserOverride::Skip);
         let _ = build_effective_schemas(&schemas, &overrides);
         assert_eq!(schemas.len(), original_len, "original slice must not be mutated");
     }
@@ -740,84 +614,31 @@ mod tests {
         assert!(result.iter().any(|s| s.name == "b"));
     }
 
+
     #[test]
-    fn multikeyedpivot_override_creates_child_pivot_schemas() {
-        // JSON en entrée (merge manuel IHM) :
-        //   { "1": {"url":"…"}, "front": {"url":"…"} }
-        //
-        // Avec le bug — apply_wide_strategy_columns strip le parent mais ne crée aucun pivot :
-        //   CREATE TABLE img ();  -- colonnes générées seulement
-        //   -- img_key_num et img_key_txt n'existent pas → Pass 2 perd toutes les données
-        //
-        // Après fix :
-        //   CREATE TABLE img ();  -- routing table (colonnes générées seulement)
-        //   CREATE TABLE img_key_num (j2s_id uuid, j2s_img_id uuid, key text, url text, j2s_data jsonb);
-        //   CREATE TABLE img_key_txt (j2s_id uuid, j2s_img_id uuid, key text, url text, j2s_data jsonb);
-        use json2sql::schema::table_schema::{ChildKind, ColumnSchema, KeyShape, SiblingGroup, SiblingSchema};
-        use json2sql::schema::type_tracker::PgType;
-
-        let col_url = || ColumnSchema {
-            name: "url".to_string(), original_name: "url".to_string(),
-            pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+    fn skip_autosplit_removes_companion_wide_table() {
+        // AutoSplit produces two tables: the main (e.g. "events") and a companion
+        // "events_wide". Applying Skip on the main must remove BOTH so the GUI
+        // Preview shows the same schema as the CLI snapshot-restore path.
+        let mut main = make_table("events", None);
+        main.inferred_strategy = InferredStrategy::AutoSplit {
+            stable_threshold: 0.8,
+            rare_threshold: 0.1,
+            medium_keys: std::collections::HashSet::new(),
+            wide_table_name: "events_wide".to_string(),
         };
-        let gen_col = |n: &str| ColumnSchema {
-            name: n.to_string(), original_name: n.to_string(),
-            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false,
-        };
+        let companion = make_table("events_wide", None);
+        let other = make_table("users", None);
 
-        let parent = make_table("img", None);
-        let mut img_1 = make_table("img_1", Some("img"));
-        img_1.columns = vec![gen_col("j2s_id"), gen_col("j2s_parent_id"), col_url()];
-        let mut img_front = make_table("img_front", Some("img"));
-        img_front.columns = vec![gen_col("j2s_id"), gen_col("j2s_parent_id"), col_url()];
-
-        let schemas = vec![parent, img_1, img_front];
-
-        let sibling_num = SiblingSchema {
-            key_col_name: "key".to_string(), key_shape: KeyShape::Numeric,
-            array_children: false, data_col_name: "j2s_data".to_string(),
-        };
-        let sibling_txt = SiblingSchema {
-            key_col_name: "key".to_string(), key_shape: KeyShape::Slug,
-            array_children: false, data_col_name: "j2s_data".to_string(),
-        };
+        let schemas = vec![main, companion, other];
         let mut overrides = HashMap::new();
-        overrides.insert("img".to_string(), WideStrategy::MultiKeyedPivot(vec![
-            SiblingGroup {
-                pivot_table: "img_key_num".to_string(), key_is_numeric: true,
-                sibling_schema: sibling_num, absorbed_names: vec!["img_1".to_string()],
-                path_segment: "key_num".to_string(),
-                absorbed_path_segments: vec!["1".to_string()],
-            },
-            SiblingGroup {
-                pivot_table: "img_key_txt".to_string(), key_is_numeric: false,
-                sibling_schema: sibling_txt, absorbed_names: vec!["img_front".to_string()],
-                path_segment: "key_txt".to_string(),
-                absorbed_path_segments: vec!["front".to_string()],
-            },
-        ]));
-        overrides.insert("img_1".to_string(), WideStrategy::Ignore);
-        overrides.insert("img_front".to_string(), WideStrategy::Ignore);
-
+        overrides.insert("events".to_string(), UserOverride::Skip);
         let result = build_effective_schemas(&schemas, &overrides);
 
-        assert!(!result.iter().any(|s| s.name == "img_1"),    "absorbed sibling must be removed");
-        assert!(!result.iter().any(|s| s.name == "img_front"), "absorbed sibling must be removed");
-
-        assert!(result.iter().any(|s| s.name == "img_key_num"),
-            "pivot schema img_key_num must be created; got: {:?}", result.iter().map(|s| &s.name).collect::<Vec<_>>());
-        assert!(result.iter().any(|s| s.name == "img_key_txt"),
-            "pivot schema img_key_txt must be created; got: {:?}", result.iter().map(|s| &s.name).collect::<Vec<_>>());
-
-        let num_pivot = result.iter().find(|s| s.name == "img_key_num").unwrap();
-        assert!(matches!(num_pivot.wide_strategy, WideStrategy::KeyedPivot(_)),
-            "img_key_num must have WideStrategy::KeyedPivot");
-        assert_eq!(num_pivot.parent_table.as_deref(), Some("img"));
-
-        let txt_pivot = result.iter().find(|s| s.name == "img_key_txt").unwrap();
-        assert!(matches!(txt_pivot.wide_strategy, WideStrategy::KeyedPivot(_)),
-            "img_key_txt must have WideStrategy::KeyedPivot");
-        assert_eq!(txt_pivot.parent_table.as_deref(), Some("img"));
+        let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.contains(&"events"),      "main table must be removed");
+        assert!(!names.contains(&"events_wide"), "companion _wide table must be removed");
+        assert!(names.contains(&"users"),        "unrelated table must survive");
     }
 
     // --- build_table_rows helpers ---
@@ -832,7 +653,7 @@ mod tests {
         use json2sql::schema::table_schema::{ColumnSchema, KeyShape, SiblingGroup, SiblingSchema};
         use json2sql::schema::type_tracker::PgType;
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
-        t.wide_strategy = WideStrategy::MultiKeyedPivot(vec![SiblingGroup {
+        t.inferred_strategy = InferredStrategy::MultiKeyedPivot(vec![SiblingGroup {
             pivot_table: format!("{name}_pivot"),
             key_is_numeric: false,
             sibling_schema: SiblingSchema {
@@ -854,7 +675,7 @@ mod tests {
 
     fn make_overflow_table(name: &str) -> TableSchema {
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
-        t.wide_strategy = WideStrategy::Jsonb;
+        t.inferred_strategy = InferredStrategy::Jsonb;
         t
     }
 
@@ -872,7 +693,8 @@ mod tests {
     }
 
     fn empty_rows(schemas: &[TableSchema]) -> Vec<TableRowViewModel> {
-        let (ov, ov_n, sel, abs, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
+        let (ov, ov_n, sel, abs, an): (HashMap<String, UserOverride>, _, _, _, _) =
+            (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
         build_table_rows(schemas, &TableRowsCtx {
             overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
             absorbed_names: &abs, filter: "", show_warn_only: false, anomaly_counts: &an,
@@ -911,7 +733,7 @@ mod tests {
         let schemas = vec![make_overflow_table("big")];
         let overflow = HashSet::from(["big".to_string()]);
         let mut overrides = HashMap::new();
-        overrides.insert("big".to_string(), WideStrategy::Jsonb);
+        overrides.insert("big".to_string(), UserOverride::Jsonb);
         let (sel, abs, an) = (HashSet::new(), HashSet::new(), HashMap::new());
         let rows = build_table_rows(&schemas, &TableRowsCtx {
             overrides: &overrides, overflow_names: &overflow, selected_indices: &sel,

@@ -2,11 +2,11 @@ mod common;
 
 use json2sql::{db, pass1, pass2};
 use json2sql::schema::wide_strategies::{apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys, apply_structured_pivot_columns, apply_wide_strategy_columns};
-use json2sql::schema::table_schema::{SiblingSchema, SuffixColumn, SuffixSchema, WideStrategy};
+use json2sql::schema::table_schema::{SiblingSchema, SuffixColumn, SuffixSchema, InferredStrategy};
 use json2sql::schema::type_tracker::PgType;
 
 // ---------------------------------------------------------------------------
-// WideStrategy::Pivot (EAV) sur une table enfant.
+// InferredStrategy::Pivot (EAV) sur une table enfant.
 // Fixture : 3 produits avec un objet enfant `nutrients` à clés dynamiques
 // homogènes (entiers). Après apply_wide_strategy_columns(Pivot) :
 //   - products_nutrients a exactement 2 colonnes de données : key TEXT, value <int>
@@ -29,7 +29,7 @@ async fn test_pivot_strategy() {
         apply_wide_strategy_columns(
             schemas.iter_mut().find(|s| s.name == "products_nutrients")
                 .expect("products_nutrients not found"),
-            WideStrategy::Pivot,
+            InferredStrategy::Pivot,
         );
 
         let nutrients_schema = schemas.iter().find(|s| s.name == "products_nutrients").unwrap();
@@ -94,7 +94,7 @@ async fn test_pivot_strategy() {
 }
 
 // ---------------------------------------------------------------------------
-// WideStrategy::Jsonb sur une table enfant.
+// InferredStrategy::Jsonb sur une table enfant.
 // Fixture : 3 produits avec un objet enfant `attrs` à clés dynamiques.
 // Après apply_wide_strategy_columns(Jsonb), products_attrs a une seule
 // colonne `data JSONB` contenant l'objet entier.
@@ -113,7 +113,7 @@ async fn test_jsonb_strategy() {
         apply_wide_strategy_columns(
             schemas.iter_mut().find(|s| s.name == "products_attrs")
                 .expect("products_attrs not found — naming regression in pass1?"),
-            WideStrategy::Jsonb,
+            InferredStrategy::Jsonb,
         );
 
         let attrs_schema = schemas.iter().find(|s| s.name == "products_attrs").unwrap();
@@ -183,7 +183,7 @@ async fn test_jsonb_strategy() {
 }
 
 // ---------------------------------------------------------------------------
-// WideStrategy Flatten : colonnes enfant inlinées dans le parent.
+// InferredStrategy Flatten : colonnes enfant inlinées dans le parent.
 // Fixture : 3 produits avec un objet enfant `dims` (width, height, depth).
 // Après apply_flatten("products_dims", "dims_", 1) :
 //   - products_dims est supprimé des schémas
@@ -311,7 +311,7 @@ async fn test_null_patterns() {
 }
 
 // ---------------------------------------------------------------------------
-// WideStrategy::StructuredPivot sur une table enfant.
+// InferredStrategy::StructuredPivot sur une table enfant.
 // Fixture : 3 produits avec `nutrients` contenant des clés à suffixes communs
 // (_100g, _serving). Après apply_structured_pivot_columns :
 //   - products_nutrients a : name TEXT, value INT, per_100g INT, per_serving INT
@@ -351,7 +351,7 @@ async fn test_structured_pivot_strategy() {
         assert!(data_cols.iter().any(|c| c.name == "value"),      "colonne 'value' absente");
         assert!(data_cols.iter().any(|c| c.name == "per_100g"),   "colonne 'per_100g' absente");
         assert!(data_cols.iter().any(|c| c.name == "per_serving"),"colonne 'per_serving' absente");
-        assert!(matches!(nutrients_schema.wide_strategy, WideStrategy::StructuredPivot(_)));
+        assert!(matches!(nutrients_schema.inferred_strategy, InferredStrategy::StructuredPivot(_)));
 
         let fk_col_name = nutrients_schema.columns.iter()
             .find(|c| c.is_parent_fk)
@@ -413,7 +413,7 @@ async fn test_structured_pivot_strategy() {
 }
 
 // ---------------------------------------------------------------------------
-// WideStrategy::AutoSplit sur la table racine.
+// InferredStrategy::AutoSplit sur la table racine.
 // Fixture : 5 produits, chacun avec un objet enfant `details` (déclencheur
 // de is_root && has_object_children).
 // Colonnes scalaires :
@@ -450,7 +450,7 @@ async fn test_auto_split_strategy() {
 
         let products_schema = p1.schemas.iter().find(|s| s.name == "products").unwrap();
         assert!(
-            matches!(products_schema.wide_strategy, WideStrategy::AutoSplit { .. }),
+            matches!(products_schema.inferred_strategy, InferredStrategy::AutoSplit { .. }),
             "products doit avoir la stratégie AutoSplit"
         );
 
@@ -515,7 +515,7 @@ async fn test_auto_split_strategy() {
 }
 
 // ---------------------------------------------------------------------------
-// WideStrategy::KeyedPivot sur une table intermédiaire pure container.
+// InferredStrategy::KeyedPivot sur une table intermédiaire pure container.
 // Fixture : 2 produits, chacun avec un objet `translations` contenant
 // exactement 3 clés ISO (fr, en, de) — chaque clé est un objet {label, desc}.
 // `translations` est un pure container (0 colonnes scalaires).
@@ -548,7 +548,7 @@ async fn test_keyed_pivot_strategy() {
         let translations_schema = p1.schemas.iter()
             .find(|s| s.name == "products_translations").unwrap();
         assert!(
-            matches!(translations_schema.wide_strategy, WideStrategy::KeyedPivot(_)),
+            matches!(translations_schema.inferred_strategy, InferredStrategy::KeyedPivot(_)),
             "products_translations doit avoir la stratégie KeyedPivot"
         );
 
@@ -652,7 +652,7 @@ async fn test_keyed_pivot_pure_container() {
 
         let genomes_schema = p1.schemas.iter().find(|s| s.name == "graph_genomes").unwrap();
         assert!(
-            matches!(genomes_schema.wide_strategy, WideStrategy::KeyedPivot(_)),
+            matches!(genomes_schema.inferred_strategy, InferredStrategy::KeyedPivot(_)),
             "graph_genomes doit avoir KeyedPivot"
         );
 
@@ -693,7 +693,7 @@ async fn test_keyed_pivot_pure_container() {
 }
 
 // ---------------------------------------------------------------------------
-// WideStrategy::NormalizeDynamicKeys sur une table intermédiaire.
+// InferredStrategy::NormalizeDynamicKeys sur une table intermédiaire.
 // Fixture : 3 produits avec un objet `images` à clés dynamiques (image IDs).
 // Chaque clé mappe vers un objet {url, width}.
 //
@@ -742,7 +742,7 @@ async fn test_normalize_dynamic_keys_strategy() {
 
         let images_schema = schemas.iter().find(|s| s.name == "products_images").unwrap();
         assert!(
-            matches!(images_schema.wide_strategy, WideStrategy::NormalizeDynamicKeys { .. }),
+            matches!(images_schema.inferred_strategy, InferredStrategy::NormalizeDynamicKeys { .. }),
             "products_images doit avoir la stratégie NormalizeDynamicKeys"
         );
 
@@ -790,7 +790,7 @@ async fn test_normalize_dynamic_keys_strategy() {
 }
 
 // ---------------------------------------------------------------------------
-// WideStrategy::JsonbFlatten : données enfant inlinées en JSONB dans le parent.
+// InferredStrategy::JsonbFlatten : données enfant inlinées en JSONB dans le parent.
 // Fixture : 3 produits avec un objet enfant `dims` (width, height, depth).
 // Après apply_jsonb_flatten("products_dims") :
 //   - products_dims est supprimé des schémas
@@ -857,7 +857,7 @@ async fn test_jsonb_flatten_strategy() {
 }
 
 // ---------------------------------------------------------------------------
-// WideStrategy::KeyedPivot sur des siblings ObjectArray.
+// InferredStrategy::KeyedPivot sur des siblings ObjectArray.
 // Fixture : 2 enregistrements "graph", chacun avec un objet `genomes`
 // contenant 3 clés génome (gcf_001/002/003) qui valent chacune un tableau
 // d'objets {length, source, target}. gcf_001 a 2 éléments pour id=1.
@@ -892,8 +892,8 @@ async fn test_keyed_pivot_array_strategy() {
         let genomes_schema = p1.schemas.iter().find(|s| s.name == "graph_genomes").unwrap();
 
         // La stratégie doit être KeyedPivot avec array_children=true
-        match &genomes_schema.wide_strategy {
-            WideStrategy::KeyedPivot(SiblingSchema { array_children: true, .. }) => {}
+        match &genomes_schema.inferred_strategy {
+            InferredStrategy::KeyedPivot(SiblingSchema { array_children: true, .. }) => {}
             other => panic!("expected KeyedPivot(array_children=true), got {:?}", other),
         }
 
@@ -985,12 +985,12 @@ async fn test_keyed_pivot_array_strategy() {
 fn test_disable_sibling_no_keyed_pivot_integration() {
     use std::collections::HashSet;
     use json2sql::schema::strategies::StrategyName;
-    use json2sql::schema::table_schema::WideStrategy;
+    use json2sql::schema::table_schema::InferredStrategy;
 
     let path = common::fixture("keyed_pivot.jsonl");
     // Avec sibling activé : KeyedPivot attendu
     let p1_normal = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
-    assert!(p1_normal.schemas.iter().any(|s| matches!(s.wide_strategy, WideStrategy::KeyedPivot(_))),
+    assert!(p1_normal.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::KeyedPivot(_))),
         "sibling enabled → KeyedPivot attendu dans le schema normal");
 
     // Avec sibling désactivé : aucun KeyedPivot
@@ -999,12 +999,12 @@ fn test_disable_sibling_no_keyed_pivot_integration() {
         ..common::pass1_config("products")
     };
     let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
-    assert!(!p1_disabled.schemas.iter().any(|s| matches!(s.wide_strategy, WideStrategy::KeyedPivot(_))),
+    assert!(!p1_disabled.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::KeyedPivot(_))),
         "sibling disabled → aucun KeyedPivot dans le schema");
 }
 
 // ---------------------------------------------------------------------------
-// WideStrategy::Jsonb sur la table RACINE (parent_id.is_none()).
+// InferredStrategy::Jsonb sur la table RACINE (parent_id.is_none()).
 // Chemin spécial dans insert_object : l'objet entier est écrit en JSONB blob,
 // puis la récursion peuple quand même les tables enfant.
 // Fixture : 3 produits avec un objet enfant `attrs`.
@@ -1022,7 +1022,7 @@ async fn test_jsonb_strategy_root_table() {
         // Apply Jsonb to the root table — each root object becomes a JSONB blob.
         apply_wide_strategy_columns(
             schemas.iter_mut().find(|s| s.name == "products").expect("products not found"),
-            WideStrategy::Jsonb,
+            InferredStrategy::Jsonb,
         );
 
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
@@ -1058,13 +1058,13 @@ async fn test_jsonb_strategy_root_table() {
     }).await;
 }
 
-// disable pivot → WideStrategy::Jsonb au lieu de Pivot pour les tables homogènes.
+// disable pivot → InferredStrategy::Jsonb au lieu de Pivot pour les tables homogènes.
 // wide_column_threshold=3 : nutrients a 4 colonnes homogènes (int) → Pivot automatique.
 #[test]
 fn test_disable_pivot_gives_jsonb_integration() {
     use std::collections::HashSet;
     use json2sql::schema::strategies::StrategyName;
-    use json2sql::schema::table_schema::WideStrategy;
+    use json2sql::schema::table_schema::InferredStrategy;
 
     let path = common::fixture("pivot_eav.jsonl");
     // Config avec wide_column_threshold=3 pour déclencher la détection wide sur nutrients
@@ -1075,8 +1075,8 @@ fn test_disable_pivot_gives_jsonb_integration() {
 
     // Avec pivot activé : Pivot attendu sur products_nutrients
     let p1_normal = pass1::runner::run(&path, &base_config, None).unwrap();
-    assert!(p1_normal.schemas.iter().any(|s| s.wide_strategy == WideStrategy::Pivot),
-        "pivot enabled → WideStrategy::Pivot attendu sur products_nutrients");
+    assert!(p1_normal.schemas.iter().any(|s| s.inferred_strategy == InferredStrategy::Pivot),
+        "pivot enabled → InferredStrategy::Pivot attendu sur products_nutrients");
 
     // Avec pivot désactivé : Jsonb à la place
     let config_disabled = pass1::runner::Pass1Config {
@@ -1085,10 +1085,10 @@ fn test_disable_pivot_gives_jsonb_integration() {
         ..common::pass1_config("products")
     };
     let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
-    assert!(!p1_disabled.schemas.iter().any(|s| s.wide_strategy == WideStrategy::Pivot),
-        "pivot disabled → aucun WideStrategy::Pivot, Jsonb attendu");
-    assert!(p1_disabled.schemas.iter().any(|s| s.wide_strategy == WideStrategy::Jsonb),
-        "pivot disabled → WideStrategy::Jsonb attendu");
+    assert!(!p1_disabled.schemas.iter().any(|s| s.inferred_strategy == InferredStrategy::Pivot),
+        "pivot disabled → aucun InferredStrategy::Pivot, Jsonb attendu");
+    assert!(p1_disabled.schemas.iter().any(|s| s.inferred_strategy == InferredStrategy::Jsonb),
+        "pivot disabled → InferredStrategy::Jsonb attendu");
 }
 
 // disable structured_pivot → suffix detection skippée → fallback suggest_wide_strategy.
@@ -1099,7 +1099,7 @@ fn test_disable_pivot_gives_jsonb_integration() {
 fn test_disable_structured_pivot_gives_pivot_integration() {
     use std::collections::HashSet;
     use json2sql::schema::strategies::StrategyName;
-    use json2sql::schema::table_schema::WideStrategy;
+    use json2sql::schema::table_schema::InferredStrategy;
 
     let path = common::fixture("structured_pivot.jsonl");
     let base_config = pass1::runner::Pass1Config {
@@ -1110,8 +1110,8 @@ fn test_disable_structured_pivot_gives_pivot_integration() {
     // structured_pivot activé : StructuredPivot attendu sur products_nutrients
     let p1_normal = pass1::runner::run(&path, &base_config, None).unwrap();
     assert!(
-        p1_normal.schemas.iter().any(|s| matches!(s.wide_strategy, WideStrategy::StructuredPivot(_))),
-        "structured_pivot enabled → WideStrategy::StructuredPivot attendu sur products_nutrients"
+        p1_normal.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::StructuredPivot(_))),
+        "structured_pivot enabled → InferredStrategy::StructuredPivot attendu sur products_nutrients"
     );
 
     // structured_pivot désactivé : aucun StructuredPivot, Pivot à la place (all-numeric)
@@ -1122,11 +1122,11 @@ fn test_disable_structured_pivot_gives_pivot_integration() {
     };
     let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
     assert!(
-        !p1_disabled.schemas.iter().any(|s| matches!(s.wide_strategy, WideStrategy::StructuredPivot(_))),
-        "structured_pivot disabled → aucun WideStrategy::StructuredPivot"
+        !p1_disabled.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::StructuredPivot(_))),
+        "structured_pivot disabled → aucun InferredStrategy::StructuredPivot"
     );
     assert!(
-        p1_disabled.schemas.iter().any(|s| s.wide_strategy == WideStrategy::Pivot),
-        "structured_pivot disabled → WideStrategy::Pivot attendu (fallback all-numeric)"
+        p1_disabled.schemas.iter().any(|s| s.inferred_strategy == InferredStrategy::Pivot),
+        "structured_pivot disabled → InferredStrategy::Pivot attendu (fallback all-numeric)"
     );
 }

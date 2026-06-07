@@ -18,8 +18,6 @@ pub mod detection;
 pub mod merge;
 
 pub use detection::finalize_cascading;
-pub use merge::{build_keyed_pivot_from_siblings, MergeError};
-pub use scoring::pairwise_jaccard_min;
 
 #[cfg(test)]
 pub use scoring::child_compatibility_score;

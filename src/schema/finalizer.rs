@@ -17,7 +17,7 @@ use super::naming::{ColumnCollision, ColumnNameRegistry, NamingRegistry};
 use super::observer::TableEntry;
 use super::strategies::StrategyName;
 use super::suffix_detector::detect_suffix_schema;
-use super::table_schema::{ChildKind, ColumnSchema, TableSchema, WideStrategy};
+use super::table_schema::{ChildKind, ColumnSchema, TableSchema, InferredStrategy};
 use super::type_tracker::{widen_pg_types, PgType};
 use super::cascading::finalize_cascading;
 use super::wide_strategies::{apply_structured_pivot_columns, apply_wide_strategy_columns, suggest_wide_strategy};
@@ -33,30 +33,35 @@ pub struct SchemaFinalizer {
     pub(crate) stable_threshold: f64,
     pub(crate) rare_threshold: f64,
     pub(crate) disabled_strategies: HashSet<StrategyName>,
+    /// When `true`, `run()` applies the PG column-limit guard and returns `OverflowWarning`s.
+    /// Set to `false` for inspect mode (no guard, raw schema).
+    pub(crate) apply_pg_guard: bool,
 }
 
 impl SchemaFinalizer {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         wide_column_threshold: usize,
         sibling_threshold: usize,
         sibling_jaccard: f64,
         stable_threshold: f64,
         rare_threshold: f64,
         disabled_strategies: HashSet<StrategyName>,
+        apply_pg_guard: bool,
     ) -> Self {
-        Self { wide_column_threshold, sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold, disabled_strategies }
+        Self { wide_column_threshold, sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold, disabled_strategies, apply_pg_guard }
     }
 
     /// Convert all accumulated observations into finalized `TableSchema` objects,
     /// sorted topologically (parents before children).
-    /// Returns `(schemas, column_collisions)`.
+    /// Returns `(schemas, column_collisions, overflow_warnings)`.
+    /// `overflow_warnings` is non-empty only when `apply_pg_guard` is `true`.
     pub(crate) fn run(
         &self,
         tables: &IndexMap<String, TableEntry>,
         text_threshold: u32,
         naming: &mut NamingRegistry,
-    ) -> (Vec<TableSchema>, Vec<ColumnCollision>) {
+    ) -> (Vec<TableSchema>, Vec<ColumnCollision>, Vec<OverflowWarning>) {
         // Pre-register all table names so that table_name_lookup() (read-only) works in parallel.
         let dot_keys: Vec<String> = tables.keys().cloned().collect();
         for key in &dot_keys {
@@ -72,39 +77,82 @@ impl SchemaFinalizer {
 
         let config = build_finalizer_config(self, text_threshold);
 
-        // Build schemas in parallel — each entry is independent after pre-registration.
-        let entries: Vec<&TableEntry> = tables.values().collect();
-        let results: Vec<(TableSchema, Option<TableSchema>, Vec<ColumnCollision>)> = entries
-            .par_iter()
-            .map(|entry| build_entry_schema(entry, naming, &tables_with_object_children, &config))
-            .collect();
+        // Phase 1 — per-table: schema construction and wide-table strategy selection.
+        // Each table is processed independently and in parallel. All InferredStrategy values
+        // are set here. Phase 2 must not be started until Phase 1 is fully complete.
+        let (mut schemas, all_collisions) =
+            apply_per_table_strategies(tables, naming, &config, &tables_with_object_children);
 
-        let (mut schemas, all_collisions) = collect_build_results(results);
+        // Phase 2 — cross-table: strategies that require the full schema set.
+        // Invariant: must run after Phase 1 (all per-table strategies are final going in).
+        let overflow_warnings = apply_cross_table_strategies(
+            &mut schemas,
+            self.sibling_threshold,
+            self.sibling_jaccard,
+            self.disabled_strategies.contains(&StrategyName::Sibling),
+            self.apply_pg_guard,
+        );
 
-        {
-            let mut seen = std::collections::HashSet::new();
-            schemas.retain(|s| seen.insert(s.name.clone()));
-        }
-
-        if !self.disabled_strategies.contains(&StrategyName::Sibling) {
-            finalize_cascading(&mut schemas, self.sibling_threshold, self.sibling_jaccard);
-        }
-        exclude_absorbed_children(&mut schemas);
-        // Post-cascade dedup: cascading can produce synthetic table names (co-sibling path,
-        // _num/_txt split) that collide with already-registered names. Without this dedup,
-        // add_constraints() would attempt to add PRIMARY KEY twice → PostgreSQL 42P16.
-        // Keeps the first (pre-cascade, more stable) occurrence.
-        {
-            let mut seen = std::collections::HashSet::new();
-            schemas.retain(|s| seen.insert(s.name.clone()));
-        }
-        // Re-sort after cascade: finalize_cascading appends synthetic tables at the end of the
-        // Vec without inserting them at their correct depth position. A second sort restores
-        // topological (depth-then-name) order so the UI tree and pass2 flush order are correct.
-        schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
-
-        (schemas, all_collisions)
+        (schemas, all_collisions, overflow_warnings)
     }
+}
+
+/// Phase 1: build one `TableSchema` per `TableEntry` and select per-table wide strategies.
+/// Each table is processed independently (parallel). Returns schemas with initial dedup applied.
+fn apply_per_table_strategies(
+    tables: &IndexMap<String, TableEntry>,
+    naming: &NamingRegistry,
+    config: &FinalizerConfig,
+    tables_with_object_children: &std::collections::HashSet<String>,
+) -> (Vec<TableSchema>, Vec<ColumnCollision>) {
+    let entries: Vec<&TableEntry> = tables.values().collect();
+    let results: Vec<(TableSchema, Option<TableSchema>, Vec<ColumnCollision>)> = entries
+        .par_iter()
+        .map(|entry| build_entry_schema(entry, naming, tables_with_object_children, config))
+        .collect();
+    let (mut schemas, all_collisions) = collect_build_results(results);
+    {
+        let mut seen = std::collections::HashSet::new();
+        schemas.retain(|s| seen.insert(s.name.clone()));
+    }
+    (schemas, all_collisions)
+}
+
+/// Phase 2: apply cross-table strategies that require the full schema set.
+/// Returns overflow warnings produced by the PG column-limit guard (empty if guard disabled).
+///
+/// Invariant: must be called after [`apply_per_table_strategies`] is fully complete.
+/// The PG guard can mutate strategies (e.g. `AutoSplit` → `Jsonb`), so
+/// `exclude_absorbed_children` runs last to reflect the final strategy state.
+fn apply_cross_table_strategies(
+    schemas: &mut Vec<TableSchema>,
+    sibling_threshold: usize,
+    sibling_jaccard: f64,
+    disable_sibling: bool,
+    apply_pg_guard: bool,
+) -> Vec<OverflowWarning> {
+    if !disable_sibling {
+        finalize_cascading(schemas, sibling_threshold, sibling_jaccard);
+    }
+    // Post-cascade dedup: cascading can produce synthetic table names (co-sibling path,
+    // _num/_txt split) that collide with already-registered names. Without this dedup,
+    // add_constraints() would attempt to add PRIMARY KEY twice → PostgreSQL 42P16.
+    // Keeps the first (pre-cascade, more stable) occurrence.
+    {
+        let mut seen = std::collections::HashSet::new();
+        schemas.retain(|s| seen.insert(s.name.clone()));
+    }
+    // Re-sort after cascade: finalize_cascading appends synthetic tables at the end of the
+    // Vec without inserting them at their correct depth position. A second sort restores
+    // topological (depth-then-name) order so the UI tree and pass2 flush order are correct.
+    schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
+    let overflow_warnings = if apply_pg_guard {
+        apply_column_limit_guard(schemas)
+    } else {
+        Vec::new()
+    };
+    exclude_absorbed_children(schemas);
+    overflow_warnings
 }
 
 fn collect_build_results(
@@ -316,7 +364,7 @@ fn apply_non_autosplit_strategy(
         );
         apply_structured_pivot_columns(schema, suffix_schema);
     } else {
-        let strategy = if config.disable_pivot { WideStrategy::Jsonb } else { suggest_wide_strategy(entry) };
+        let strategy = if config.disable_pivot { InferredStrategy::Jsonb } else { suggest_wide_strategy(entry) };
         eprintln!(
             "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: {:?}",
             schema.name, data_col_count, ratio_stable * 100.0, strategy
@@ -404,8 +452,8 @@ fn build_wide_pivot_schema(
         name: "value".to_string(), original_name: "value".to_string(),
         pg_type: value_type, not_null: false, is_generated: false, is_parent_fk: false,
     });
-    wide_schema.wide_strategy = WideStrategy::Pivot;
-    schema.wide_strategy = WideStrategy::AutoSplit {
+    wide_schema.inferred_strategy = InferredStrategy::Pivot;
+    schema.inferred_strategy = InferredStrategy::AutoSplit {
         stable_threshold: config.stable_threshold,
         rare_threshold: config.rare_threshold,
         medium_keys,
@@ -433,14 +481,14 @@ pub struct OverflowWarning {
     pub original_column_count: usize,
 }
 
-/// Convert any table with more than [`PG_MAX_COLUMNS`] data columns to `WideStrategy::Jsonb`.
+/// Convert any table with more than [`PG_MAX_COLUMNS`] data columns to `InferredStrategy::Jsonb`.
 ///
 /// Only the table's own columns are affected; child tables are preserved in the schema
 /// and continue to function normally with their parent FK intact.
 ///
 /// Must be called after `finalize()` (schemas in topological order). Each table is
 /// evaluated independently — a child can be converted without its parent being converted.
-pub fn apply_column_limit_guard(schemas: &mut [TableSchema]) -> Vec<OverflowWarning> {
+pub(crate) fn apply_column_limit_guard(schemas: &mut [TableSchema]) -> Vec<OverflowWarning> {
     let mut warnings = Vec::new();
     for schema in schemas.iter_mut() {
         let count = schema.data_columns().count();
@@ -452,7 +500,7 @@ pub fn apply_column_limit_guard(schemas: &mut [TableSchema]) -> Vec<OverflowWarn
                 table_name: schema.name.clone(),
                 original_column_count: count,
             });
-            apply_wide_strategy_columns(schema, WideStrategy::Jsonb);
+            apply_wide_strategy_columns(schema, InferredStrategy::Jsonb);
         }
     }
     warnings
@@ -485,9 +533,9 @@ fn collect_surviving_route_targets<'a>(
 
 pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
     let absorbers: std::collections::HashSet<&str> = schemas
-        .iter().filter(|s| s.wide_strategy.absorbs_children()).map(|s| s.name.as_str()).collect();
+        .iter().filter(|s| s.inferred_strategy.absorbs_children()).map(|s| s.name.as_str()).collect();
     let partial_absorbed: std::collections::HashSet<&str> = schemas
-        .iter().flat_map(|s| s.wide_strategy.absorbed_names()).collect();
+        .iter().flat_map(|s| s.inferred_strategy.absorbed_names()).collect();
     if absorbers.is_empty() && partial_absorbed.is_empty() { return; }
     let route_targets = collect_surviving_route_targets(schemas, &absorbers, &partial_absorbed);
     // Pass 2: final exclusion, protecting only valid route targets.

@@ -76,7 +76,7 @@ pub enum PgType {
     Text,
     /// `PostgreSQL` array of a scalar type, e.g. TEXT[], INTEGER[]
     Array(Box<Self>),
-    /// `PostgreSQL` JSONB — used by `WideStrategy::Jsonb` tables
+    /// `PostgreSQL` JSONB — used by `InferredStrategy::Jsonb` tables
     Jsonb,
 }
 

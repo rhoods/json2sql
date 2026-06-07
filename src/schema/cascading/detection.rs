@@ -4,7 +4,7 @@
 //! `finalize_cascading` (point d'entrée crate), et toutes les fonctions auxiliaires du BFS.
 
 use super::super::wide_strategies::{build_union_columns, classify_key_shape};
-use super::super::table_schema::{ChildKind, ColumnSchema, KeyShape, SiblingSchema, TableSchema, WideStrategy};
+use super::super::table_schema::{ChildKind, ColumnSchema, KeyShape, SiblingSchema, TableSchema, InferredStrategy};
 use super::super::type_tracker::PgType;
 use super::scoring::{child_compatibility_score, greedy_schema_clusters, pairwise_jaccard_min, pg_truncate_name, siblings_key_prefix, unique_cluster_suffix};
 
@@ -316,7 +316,7 @@ fn try_cluster_fallback(
     regular: &[usize],
 ) -> Option<Collapse> {
     let has_sig = regular.len() < ctx.child_indices.len();
-    let is_autosplit = matches!(schemas[ctx.parent_idx].wide_strategy, WideStrategy::AutoSplit { .. });
+    let is_autosplit = matches!(schemas[ctx.parent_idx].inferred_strategy, InferredStrategy::AutoSplit { .. });
     if (ctx.parent_has_data || has_sig) && !is_autosplit {
         return None;
     }
@@ -635,7 +635,7 @@ fn apply_single_collapse(
     parent.columns.push(ColumnSchema { name: key_col_name.clone(), original_name: key_col_name.clone(), pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false });
     for col in union_cols { parent.columns.push(col.clone()); }
     parent.columns.push(ColumnSchema { name: data_col_name.clone(), original_name: data_col_name.clone(), pg_type: PgType::Jsonb, not_null: false, is_generated: true, is_parent_fk: false });
-    parent.wide_strategy = WideStrategy::KeyedPivot(sibling_schema);
+    parent.inferred_strategy = InferredStrategy::KeyedPivot(sibling_schema);
     let synthetic_parent_name = schemas[collapse.parent_idx].name.clone();
     collect_children_by_key(schemas, &collapse.absorbed_indices, obj_map, arr_map)
         .into_iter()
@@ -698,7 +698,7 @@ fn build_multi_group_entry(
         depth: parent.depth + 1,
         columns: cols,
         child_kind: Some(ChildKind::Object),
-        wide_strategy: WideStrategy::KeyedPivot(sibling_schema),
+        inferred_strategy: InferredStrategy::KeyedPivot(sibling_schema),
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
     };
@@ -721,7 +721,7 @@ fn apply_multi_collapse(
         path_segment: g.path_segment.clone(),
         absorbed_path_segments: g.absorbed_path_segments.clone(),
     }).collect();
-    schemas[collapse.parent_idx].wide_strategy = WideStrategy::MultiKeyedPivot(sibling_groups);
+    schemas[collapse.parent_idx].inferred_strategy = InferredStrategy::MultiKeyedPivot(sibling_groups);
     let parent_ctx = ParentCtx {
         name: &schemas[collapse.parent_idx].name.clone(),
         path: &schemas[collapse.parent_idx].path.clone(),
@@ -814,9 +814,9 @@ fn build_sibling_ctx(
     min_jaccard: f64,
 ) -> Option<(SiblingDetectCtx, bool)> {
     let effective: Vec<usize> =
-        if matches!(schemas[parent_idx].wide_strategy, WideStrategy::AutoSplit { .. }) {
+        if matches!(schemas[parent_idx].inferred_strategy, InferredStrategy::AutoSplit { .. }) {
             let filtered: Vec<usize> = child_indices.iter().copied()
-                .filter(|&i| !matches!(schemas[i].wide_strategy, WideStrategy::Pivot))
+                .filter(|&i| !matches!(schemas[i].inferred_strategy, InferredStrategy::Pivot))
                 .collect();
             if filtered.len() < threshold { return None; }
             filtered
@@ -844,7 +844,7 @@ fn build_sibling_ctx(
 }
 
 fn should_skip_parent(schemas: &[TableSchema], parent_idx: usize) -> bool {
-    !matches!(schemas[parent_idx].wide_strategy, WideStrategy::Columns | WideStrategy::AutoSplit { .. })
+    !matches!(schemas[parent_idx].inferred_strategy, InferredStrategy::Columns | InferredStrategy::AutoSplit { .. })
 }
 
 fn collect_sibling_collapses(
@@ -946,7 +946,7 @@ fn build_co_sibling_schema(
         depth: parent_depth + 1,
         columns: cols,
         child_kind: Some(if group.array_children { ChildKind::ObjectArray } else { ChildKind::Object }),
-        wide_strategy: WideStrategy::Columns,
+        inferred_strategy: InferredStrategy::Columns,
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
     };
@@ -1010,7 +1010,7 @@ fn merge_co_sibling_group(
 /// `KeyedPivot` parent — for example, the lang-code T tables produced by cascade wave 1
 /// (one per shared language across image types).  These tables are similar to each other
 /// (same schema) but the main `run_sibling_wave` skips them because their parent is no
-/// longer `WideStrategy::Columns`.
+/// longer `InferredStrategy::Columns`.
 ///
 /// This function detects groups of ≥ `threshold` such orphans with Jaccard ≥ `min_jaccard`,
 /// creates a `{parent}_key` sub-pivot, re-parents the orphans under it, and updates the
@@ -1051,7 +1051,7 @@ fn build_sub_pivot_schema(
         depth: parent_depth + 1,
         columns: cols,
         child_kind: Some(ChildKind::Object),
-        wide_strategy: WideStrategy::KeyedPivot(sibling_schema),
+        inferred_strategy: InferredStrategy::KeyedPivot(sibling_schema),
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
     }
@@ -1145,7 +1145,7 @@ fn collect_keyed_pivot_work_items(
         .iter()
         .enumerate()
         .filter_map(|(parent_idx, s)| {
-            if !matches!(s.wide_strategy, WideStrategy::KeyedPivot(_)) {
+            if !matches!(s.inferred_strategy, InferredStrategy::KeyedPivot(_)) {
                 return None;
             }
             let routed: std::collections::HashSet<&str> =
@@ -1155,7 +1155,7 @@ fn collect_keyed_pivot_work_items(
                 .into_iter()
                 .flatten()
                 .copied()
-                .filter(|&i| matches!(schemas[i].wide_strategy, WideStrategy::Columns))
+                .filter(|&i| matches!(schemas[i].inferred_strategy, InferredStrategy::Columns))
                 .filter(|&i| routed.contains(schemas[i].name.as_str()))
                 .collect();
             if children.len() < threshold { return None; }
@@ -1225,7 +1225,7 @@ fn reparent_and_update_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::super::table_schema::{ChildKind, ColumnSchema, KeyShape, SiblingSchema, TableSchema, WideStrategy};
+    use super::super::super::table_schema::{ChildKind, ColumnSchema, KeyShape, SiblingSchema, TableSchema, InferredStrategy};
     use super::super::super::type_tracker::PgType;
     use super::super::scoring;
 
@@ -1285,7 +1285,7 @@ mod tests {
     #[test]
     fn test_detect_homogeneous_classic_keyed_pivot() {
         let mut parent = make_parent("p");
-        parent.wide_strategy = WideStrategy::Columns;
+        parent.inferred_strategy = InferredStrategy::Columns;
         let schemas = vec![
             parent,
             make_child_with_key("p_fr", "p", "fr", &["label"]),
@@ -1306,7 +1306,7 @@ mod tests {
     #[test]
     fn test_detect_homogeneous_below_threshold_returns_none() {
         let mut parent = make_parent("p");
-        parent.wide_strategy = WideStrategy::Columns;
+        parent.inferred_strategy = InferredStrategy::Columns;
         let schemas = vec![
             parent,
             make_child_with_key("p_fr", "p", "fr", &["label"]),
@@ -1320,7 +1320,7 @@ mod tests {
     #[test]
     fn test_detect_mixed_both_groups_qualify() {
         let mut parent = make_parent("p");
-        parent.wide_strategy = WideStrategy::Columns;
+        parent.inferred_strategy = InferredStrategy::Columns;
         let schemas = vec![
             parent,
             make_child_with_key("p_1",  "p", "1",  &["val"]),
@@ -1346,7 +1346,7 @@ mod tests {
     #[test]
     fn test_detect_mixed_both_below_threshold_returns_none() {
         let mut parent = make_parent("p");
-        parent.wide_strategy = WideStrategy::Columns;
+        parent.inferred_strategy = InferredStrategy::Columns;
         let schemas = vec![
             parent,
             make_child_with_key("p_1",  "p", "1",  &["v"]),
@@ -1472,7 +1472,7 @@ mod tests {
         assert_eq!(schema.name, "p_pivot");
         assert_eq!(schema.parent_table.as_deref(), Some("p"));
         assert_eq!(schema.depth, 2);
-        assert!(matches!(schema.wide_strategy, WideStrategy::KeyedPivot(_)));
+        assert!(matches!(schema.inferred_strategy, InferredStrategy::KeyedPivot(_)));
     }
 
     #[test]
@@ -1553,7 +1553,7 @@ mod tests {
         // Jaccard=1.0 within each group). try_cluster_fallback must produce SubgroupData with
         // distinct path_segment values so path_map can store both without collision.
         let mut parent = make_parent("p");
-        parent.wide_strategy = WideStrategy::Columns;
+        parent.inferred_strategy = InferredStrategy::Columns;
         let schemas = vec![
             parent,
             make_child_with_key("p_a1", "p", "a1", &["col"]),
@@ -1847,7 +1847,7 @@ mod tests {
         use crate::schema::table_schema::{KeyShape, SiblingSchema};
         let synthetic = {
             let mut t = make_parent("pivot");
-            t.wide_strategy = WideStrategy::KeyedPivot(SiblingSchema {
+            t.inferred_strategy = InferredStrategy::KeyedPivot(SiblingSchema {
                 key_col_name: "key".to_string(),
                 key_shape: KeyShape::Slug,
                 array_children: false,
@@ -1895,7 +1895,7 @@ mod tests {
         use crate::schema::table_schema::{KeyShape, SiblingSchema};
         let make_pivot = |name: &str| {
             let mut t = make_parent(name);
-            t.wide_strategy = WideStrategy::KeyedPivot(SiblingSchema {
+            t.inferred_strategy = InferredStrategy::KeyedPivot(SiblingSchema {
                 key_col_name: "key".to_string(),
                 key_shape: KeyShape::Slug,
                 array_children: false,

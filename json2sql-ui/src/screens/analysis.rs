@@ -339,7 +339,7 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                             } else {
                                 for table in schemas.iter() {
                                     {
-                                        let (badge_cls, badge_lbl) = strategy_badge(&table.wide_strategy);
+                                        let (badge_cls, badge_lbl) = strategy_badge(&table.inferred_strategy);
                                         let is_wide = table.columns.len() > PASS1_WIDE_COLUMN_THRESHOLD;
                                         let col_count = table.columns.len();
                                         let col_style = if is_wide {

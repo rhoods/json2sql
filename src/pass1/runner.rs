@@ -5,7 +5,7 @@
 //! - [`run_inspect`] — like `run` but also collects per-column value statistics.
 //! - [`run_parallel`] — multi-worker variant; merges per-worker registries at the end.
 //!
-//! Wide-table strategies ([`crate::schema::table_schema::WideStrategy`]) are selected
+//! Wide-table strategies ([`crate::schema::table_schema::InferredStrategy`]) are selected
 //! during `finalize()` at the end of the pass — not row-by-row.
 //! The resulting [`Pass1Result::schemas`] are sorted topologically (parents before children)
 //! and are ready to be serialized or handed directly to Pass 2.
@@ -22,7 +22,7 @@ use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonReader};
 use crate::schema::naming::{ColumnCollision, TruncatedName};
-use crate::schema::finalizer::{apply_column_limit_guard, OverflowWarning};
+use crate::schema::finalizer::OverflowWarning;
 use crate::schema::registry::SchemaRegistry;
 use crate::schema::stats::ColumnStats;
 use crate::schema::strategies::StrategyName;
@@ -152,8 +152,7 @@ fn build_pass1_result(
     total_rows: u64,
     progress_tx: Option<&ProgressTx>,
 ) -> Pass1Result {
-    let mut schemas = registry.finalize();
-    let overflow_warnings = apply_column_limit_guard(&mut schemas);
+    let (schemas, overflow_warnings) = registry.finalize_with_pg_guard();
     let stats = registry.collect_stats();
     let truncated_names = registry.truncated_names().to_vec();
     let column_collisions = registry.column_collisions().to_vec();
@@ -468,9 +467,9 @@ mod tests {
     fn test_inspect_no_column_limit_guard() {
         let path = fixture("users.jsonl");
         let result = run_inspect(&path, &inspect_config("users"), 10).unwrap();
-        use crate::schema::table_schema::WideStrategy;
+        use crate::schema::table_schema::InferredStrategy;
         assert!(
-            result.schemas.iter().all(|s| !matches!(s.wide_strategy, WideStrategy::Jsonb)),
+            result.schemas.iter().all(|s| !matches!(s.inferred_strategy, InferredStrategy::Jsonb)),
             "column limit guard must not be applied in inspect mode"
         );
     }
