@@ -35,7 +35,7 @@ use crate::schema::type_tracker::PgType;
 ///
 /// Keys are the `PostgreSQL` column names (sanitized). Values are SQL type strings.
 /// Special keys: `strategy`, `suffix_columns`.
-/// Définition d'un groupe de fusion (`KeyedPivot` manuel).
+/// Définition d'un groupe de fusion (`SiblingCollapse` manuel).
 #[derive(Debug, Deserialize)]
 pub struct GroupConfig {
     pub strategy: String,
@@ -249,7 +249,7 @@ fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> 
     for col in build_union_columns(&refs) {
         merged.columns.push(col);
     }
-    merged.inferred_strategy = InferredStrategy::KeyedPivot(SiblingSchema {
+    merged.inferred_strategy = InferredStrategy::SiblingCollapse(SiblingSchema {
         key_col_name: "key_id".to_string(),
         key_shape: KeyShape::Mixed,
         array_children: false,
@@ -285,7 +285,7 @@ fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, mem
     schemas.insert(insert_pos, merged);
 
     eprintln!(
-        "  Groupe '{}' : {} tables → 1 (KeyedPivot)",
+        "  Groupe '{}' : {} tables → 1 (SiblingCollapse)",
         group_name,
         indices.len()
     );

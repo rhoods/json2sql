@@ -676,7 +676,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
                                     // Auto-detected notice
                                     if current_override.is_none() && matches!(inferred_strategy,
-                                        InferredStrategy::StructuredPivot(_) | InferredStrategy::KeyedPivot(_) | InferredStrategy::AutoSplit { .. }
+                                        InferredStrategy::StructuredPivot(_) | InferredStrategy::SiblingCollapse(_) | InferredStrategy::AutoSplit { .. }
                                     ) {
                                         p { style: "font-size:var(--fs-xs);color:var(--fg-4);margin-top:12px;font-style:italic;line-height:1.5;",
                                             "Auto-detected strategy — configurable via CLI only. Override above if needed."

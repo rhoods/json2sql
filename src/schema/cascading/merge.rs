@@ -1,14 +1,14 @@
 //! API publique pour la fusion manuelle de siblings depuis l'IHM.
 //!
-//! Expose `build_keyed_pivot_from_siblings` : construit un `InferredStrategy::KeyedPivot`
-//! ou `MultiKeyedPivot` à partir d'une sélection utilisateur de tables sœurs.
+//! Expose `build_sibling_collapse_from_siblings` : construit un `InferredStrategy::SiblingCollapse`
+//! ou `SiblingCollapseMulti` à partir d'une sélection utilisateur de tables sœurs.
 
 use super::super::table_schema::{SiblingGroup, SiblingSchema, TableSchema, InferredStrategy};
 use super::super::wide_strategies::classify_key_shape;
 use super::scoring::pg_truncate_name;
 
 
-/// Error returned by [`build_keyed_pivot_from_siblings`].
+/// Error returned by [`build_sibling_collapse_from_siblings`].
 #[allow(dead_code)] // used by json2sql-ui::state::apply_sibling_merge
 #[derive(Debug, thiserror::Error)]
 pub enum MergeError {
@@ -28,7 +28,7 @@ pub enum MergeError {
 pub struct MergeResult {
     /// Parent table that receives the new `InferredStrategy`.
     pub parent_name: String,
-    /// `KeyedPivot` or `MultiKeyedPivot` to store in `strategy_overrides[parent_name]`.
+    /// `SiblingCollapse` or `SiblingCollapseMulti` to store in `strategy_overrides[parent_name]`.
     pub strategy: InferredStrategy,
     /// Sibling tables that are absorbed — caller should set
     /// `strategy_overrides[name] = InferredStrategy::Ignore` for each.
@@ -58,11 +58,11 @@ fn validate_merge_inputs(schemas: &[TableSchema], indices: &[usize]) -> Result<S
     Ok(parent_name.to_string())
 }
 
-/// Build a `KeyedPivot` or `MultiKeyedPivot` strategy from a manual user selection of
+/// Build a `SiblingCollapse` or `SiblingCollapseMulti` strategy from a manual user selection of
 /// sibling tables. Infers key shape from table name suffixes; auto-detects whether to
-/// produce a single-group (`KeyedPivot`) or two-group (`MultiKeyedPivot`) strategy.
+/// produce a single-group (`SiblingCollapse`) or two-group (`SiblingCollapseMulti`) strategy.
 #[allow(dead_code)] // used by json2sql-ui::state::apply_sibling_merge
-pub fn build_keyed_pivot_from_siblings(
+pub fn build_sibling_collapse_from_siblings(
     schemas: &[TableSchema],
     indices: &[usize],
     key_col_name: &str,
@@ -82,7 +82,7 @@ pub fn build_keyed_pivot_from_siblings(
     let strategy = if has_numeric && has_non_numeric {
         build_mixed_keyed_pivot_strategy(&parent_name, key_col_name, &names, &key_refs, &is_numeric)
     } else {
-        InferredStrategy::KeyedPivot(SiblingSchema {
+        InferredStrategy::SiblingCollapse(SiblingSchema {
             key_col_name: key_col_name.to_string(),
             key_shape: classify_key_shape(&key_refs),
             array_children: false,
@@ -93,7 +93,7 @@ pub fn build_keyed_pivot_from_siblings(
     Ok(MergeResult { parent_name, strategy, absorbed_names })
 }
 
-#[allow(clippy::too_many_lines)] // symmetric two-group struct construction for MultiKeyedPivot
+#[allow(clippy::too_many_lines)] // symmetric two-group struct construction for SiblingCollapseMulti
 fn build_mixed_keyed_pivot_strategy(
     parent_name: &str,
     key_col_name: &str,
@@ -109,7 +109,7 @@ fn build_mixed_keyed_pivot_strategy(
         if num { numeric_names.push(names[i].to_string()); numeric_keys.push(key_refs[i]); }
         else { non_numeric_names.push(names[i].to_string()); non_numeric_keys.push(key_refs[i]); }
     }
-    InferredStrategy::MultiKeyedPivot(vec![
+    InferredStrategy::SiblingCollapseMulti(vec![
         SiblingGroup {
             pivot_table: pg_truncate_name(&format!("{parent_name}_{key_col_name}_num")),
             key_is_numeric: true,
@@ -192,9 +192,9 @@ mod tests {
             make_sibling("products_images_front", "products_images", &["url", "width"]),
             make_sibling("products_images_back",  "products_images", &["url", "width"]),
         ];
-        let r = build_keyed_pivot_from_siblings(&schemas, &[1, 2], "img_key").unwrap();
+        let r = build_sibling_collapse_from_siblings(&schemas, &[1, 2], "img_key").unwrap();
         assert_eq!(r.parent_name, "products_images");
-        assert!(matches!(r.strategy, InferredStrategy::KeyedPivot(_)));
+        assert!(matches!(r.strategy, InferredStrategy::SiblingCollapse(_)));
         let mut absorbed = r.absorbed_names.clone();
         absorbed.sort();
         assert_eq!(absorbed, vec!["products_images_back", "products_images_front"]);
@@ -208,13 +208,13 @@ mod tests {
             make_sibling("p_2", "p", &["val"]),
             make_sibling("p_3", "p", &["val"]),
         ];
-        let r = build_keyed_pivot_from_siblings(&schemas, &[1, 2, 3], "key").unwrap();
+        let r = build_sibling_collapse_from_siblings(&schemas, &[1, 2, 3], "key").unwrap();
         assert_eq!(r.parent_name, "p");
-        if let InferredStrategy::KeyedPivot(ss) = &r.strategy {
+        if let InferredStrategy::SiblingCollapse(ss) = &r.strategy {
             assert_eq!(ss.key_shape, KeyShape::Numeric);
             assert_eq!(ss.key_col_name, "key");
         } else {
-            panic!("expected KeyedPivot, got {:?}", r.strategy);
+            panic!("expected SiblingCollapse, got {:?}", r.strategy);
         }
     }
 
@@ -226,9 +226,9 @@ mod tests {
             make_sibling("img_2",     "img", &["url"]),
             make_sibling("img_front", "img", &["url"]),
         ];
-        let r = build_keyed_pivot_from_siblings(&schemas, &[1, 2, 3], "key").unwrap();
+        let r = build_sibling_collapse_from_siblings(&schemas, &[1, 2, 3], "key").unwrap();
         assert_eq!(r.parent_name, "img");
-        if let InferredStrategy::MultiKeyedPivot(groups) = &r.strategy {
+        if let InferredStrategy::SiblingCollapseMulti(groups) = &r.strategy {
             assert_eq!(groups.len(), 2);
             let num = groups.iter().find(|g| g.key_is_numeric).unwrap();
             let mut num_absorbed = num.absorbed_names.clone();
@@ -237,7 +237,7 @@ mod tests {
             let txt = groups.iter().find(|g| !g.key_is_numeric).unwrap();
             assert_eq!(txt.absorbed_names, vec!["img_front"]);
         } else {
-            panic!("expected MultiKeyedPivot, got {:?}", r.strategy);
+            panic!("expected SiblingCollapseMulti, got {:?}", r.strategy);
         }
     }
 
@@ -247,7 +247,7 @@ mod tests {
             make_parent("p"),
             make_sibling("p_1", "p", &["val"]),
         ];
-        let err = build_keyed_pivot_from_siblings(&schemas, &[1], "key").unwrap_err();
+        let err = build_sibling_collapse_from_siblings(&schemas, &[1], "key").unwrap_err();
         assert!(matches!(err, MergeError::TooFewTables(_)));
     }
 
@@ -257,7 +257,7 @@ mod tests {
             make_sibling("a_1", "a", &["val"]),
             make_sibling("b_1", "b", &["val"]),
         ];
-        let err = build_keyed_pivot_from_siblings(&schemas, &[0, 1], "key").unwrap_err();
+        let err = build_sibling_collapse_from_siblings(&schemas, &[0, 1], "key").unwrap_err();
         assert!(matches!(err, MergeError::DifferentParents));
     }
 
@@ -266,7 +266,7 @@ mod tests {
         let t1 = TableSchema::new("a".to_string(), vec!["a".to_string()], 0);
         let t2 = TableSchema::new("b".to_string(), vec!["b".to_string()], 0);
         let schemas = vec![t1, t2];
-        let err = build_keyed_pivot_from_siblings(&schemas, &[0, 1], "key").unwrap_err();
+        let err = build_sibling_collapse_from_siblings(&schemas, &[0, 1], "key").unwrap_err();
         assert!(matches!(err, MergeError::NoParent(_)));
     }
 
@@ -280,7 +280,7 @@ mod tests {
         });
         let sibling = make_sibling("p_s", "p", &["val"]);
         let schemas = vec![routing, sibling];
-        let err = build_keyed_pivot_from_siblings(&schemas, &[0, 1], "key").unwrap_err();
+        let err = build_sibling_collapse_from_siblings(&schemas, &[0, 1], "key").unwrap_err();
         assert!(matches!(err, MergeError::RoutingTable(_)));
     }
 
@@ -292,7 +292,7 @@ mod tests {
             make_sibling("x_b", "x", &["v"]),
             make_sibling("x_c", "x", &["v"]),
         ];
-        let r = build_keyed_pivot_from_siblings(&schemas, &[1, 2, 3], "key").unwrap();
+        let r = build_sibling_collapse_from_siblings(&schemas, &[1, 2, 3], "key").unwrap();
         let mut absorbed = r.absorbed_names.clone();
         absorbed.sort();
         assert_eq!(absorbed, vec!["x_a", "x_b", "x_c"]);

@@ -222,7 +222,7 @@ fn build_jaccard_col_sets<'a>(
 ///
 /// 2. **Large-group fast path** — when N > `PAIRWISE_LIMIT`, compare each sibling against
 ///    sibling[0] instead of all N*(N-1)/2 pairs. Semantically equivalent for the homogeneous
-///    schemas typical of `KeyedPivot` detection (language codes, numeric IDs, genome keys).
+///    schemas typical of `SiblingCollapse` detection (language codes, numeric IDs, genome keys).
 ///    Outliers are still detected: any sibling with 0 column overlap with sibling[0] returns 0.
 fn min_jaccard_from_col_sets(col_sets: &[std::collections::HashSet<&str>]) -> f64 {
     const PAIRWISE_LIMIT: usize = 200;

@@ -16,8 +16,8 @@
 //! | `Pivot` | inferred / user | homogeneous values, dynamic keys | `(key TEXT, value T)` EAV |
 //! | `Jsonb` | inferred / user | heterogeneous / irregular structure | single `JSONB` column |
 //! | `StructuredPivot` | inferred | keys share prefix + typed suffixes | one row per prefix group |
-//! | `KeyedPivot` | inferred | N sibling tables, same schema | merged table with key column |
-//! | `MultiKeyedPivot` | inferred | siblings with mixed key shapes | two synthetic pivot tables |
+//! | `SiblingCollapse` | inferred | N sibling tables, same schema | merged table with key column |
+//! | `SiblingCollapseMulti` | inferred | siblings with mixed key shapes | two synthetic pivot tables |
 //! | `AutoSplit` | inferred | root table with bi-modal key frequency | main table + `_wide` companion |
 //! | `Ignore` | inferred | key appears in < `rare_threshold` of rows | excluded from schema |
 //! | `Skip` | user | user wants table removed | table excluded from DDL and Pass 2 |
@@ -69,7 +69,7 @@ fn default_data_col_name() -> String {
     "j2s_data".to_string()
 }
 
-/// Metadata for a `KeyedPivot` table (sibling tables collapsed into one).
+/// Metadata for a `SiblingCollapse` table (sibling tables collapsed into one).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SiblingSchema {
     /// Name of the column that holds the original sibling key (e.g. "`key_id`", "`lang_code`", "key")
@@ -86,7 +86,7 @@ pub struct SiblingSchema {
     pub data_col_name: String,
 }
 
-/// One key-shape subgroup within a `MultiKeyedPivot` parent.
+/// One key-shape subgroup within a `SiblingCollapseMulti` parent.
 /// Each group produces its own synthetic pivot table in the schema.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SiblingGroup {
@@ -224,7 +224,7 @@ pub enum InferredStrategy {
     /// } }
     /// ```
     /// Pass 1 creates 3 sibling tables: `images_front`, `images_back`, `images_top`.
-    /// KeyedPivot merges them — columns are the **union** of all siblings, missing fields → NULL:
+    /// SiblingCollapse merges them — columns are the **union** of all siblings, missing fields → NULL:
     ///
     /// ```text
     /// CREATE TABLE images (
@@ -236,13 +236,13 @@ pub enum InferredStrategy {
     /// );
     /// -- 3 rows: ("front","a.jpg",100,50), ("back","b.jpg",80,40), ("top","c.jpg",90,NULL)
     /// ```
-    KeyedPivot(SiblingSchema),
+    SiblingCollapse(SiblingSchema),
 
-    /// Multi-group sibling collapse: like `KeyedPivot` but the sibling keys mix integers and slugs,
+    /// Multi-group sibling collapse: like `SiblingCollapse` but the sibling keys mix integers and slugs,
     /// so two synthetic tables are produced — one per key shape. The parent becomes a routing table
     /// (no rows, only `j2s_id`).
     ///
-    /// Trigger: same Jaccard conditions as `KeyedPivot`, but `classify_key_shape` detects both
+    /// Trigger: same Jaccard conditions as `SiblingCollapse`, but `classify_key_shape` detects both
     /// numeric keys ("1","2") and slug keys ("front","back") in the same sibling group.
     ///
     /// JSON input — same parent key, mixed numeric + text child keys:
@@ -253,7 +253,7 @@ pub enum InferredStrategy {
     ///     "front": {"url":"c.jpg","size":950 }
     /// } }
     /// ```
-    /// Pass 1 creates 3 siblings. MultiKeyedPivot splits them into 2 synthetic tables:
+    /// Pass 1 creates 3 siblings. SiblingCollapseMulti splits them into 2 synthetic tables:
     ///
     /// ```text
     /// -- Parent: routing only, no data rows
@@ -277,7 +277,7 @@ pub enum InferredStrategy {
     /// );
     /// -- 1 row: ("front","c.jpg",950)
     /// ```
-    MultiKeyedPivot(Vec<SiblingGroup>),
+    SiblingCollapseMulti(Vec<SiblingGroup>),
 
     /// Root table split: bi-modal key frequency → main table (stable columns) + `{name}_wide`
     /// EAV companion (medium-frequency keys). Rare keys are dropped entirely.
@@ -326,7 +326,7 @@ pub enum InferredStrategy {
     ///
     /// Applied during `finalize()` before column building. No table or column is produced.
     /// The dropped key is recorded in the anomaly report so the user knows data was omitted.
-    /// Also used internally to mark sibling tables absorbed by `KeyedPivot`/`MultiKeyedPivot`.
+    /// Also used internally to mark sibling tables absorbed by `SiblingCollapse`/`SiblingCollapseMulti`.
     ///
     /// No DDL produced — the table or key is silently omitted from the schema.
     Ignore,
@@ -334,7 +334,7 @@ pub enum InferredStrategy {
     /// Normalize dynamic keys: each JSON key in the object becomes a row, with the key stored
     /// as a typed ID column. Child object fields become regular columns (union across all keys).
     ///
-    /// Applied manually via the IHM (not auto-inferred). Similar to `KeyedPivot` but triggered
+    /// Applied manually via the IHM (not auto-inferred). Similar to `SiblingCollapse` but triggered
     /// by the user, not by sibling detection.
     ///
     /// JSON input — arbitrary numeric IDs as keys, each with the same nested fields:
@@ -594,13 +594,13 @@ impl InferredStrategy {
 
     /// Returns the names of child tables explicitly absorbed by this strategy.
     ///
-    /// Only `MultiKeyedPivot` carries an explicit absorbed-names list (one per `SiblingGroup`).
-    /// For `KeyedPivot`, the absorbed sibling tables are tracked separately in the schema list
+    /// Only `SiblingCollapseMulti` carries an explicit absorbed-names list (one per `SiblingGroup`).
+    /// For `SiblingCollapse`, the absorbed sibling tables are tracked separately in the schema list
     /// (each sibling receives `InferredStrategy::Ignore` during finalization) — returns empty here.
     #[must_use]
     pub fn absorbed_names(&self) -> Vec<&str> {
         match self {
-            Self::MultiKeyedPivot(groups) => groups
+            Self::SiblingCollapseMulti(groups) => groups
                 .iter()
                 .flat_map(|g| g.absorbed_names.iter().map(std::string::String::as_str))
                 .collect(),
@@ -619,12 +619,12 @@ impl InferredStrategy {
             Self::Pivot
                 | Self::Jsonb
                 | Self::StructuredPivot(_)
-                | Self::KeyedPivot(_)
+                | Self::SiblingCollapse(_)
                 | Self::NormalizeDynamicKeys { .. }
                 | Self::Flatten { .. }
                 | Self::JsonbFlatten
         )
-        // MultiKeyedPivot: absorption handled via SiblingGroup.absorbed_names,
+        // SiblingCollapseMulti: absorption handled via SiblingGroup.absorbed_names,
         // not through this flag — the parent itself absorbs nothing directly.
     }
 }

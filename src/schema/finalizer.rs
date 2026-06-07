@@ -506,7 +506,7 @@ pub(crate) fn apply_column_limit_guard(schemas: &mut [TableSchema]) -> Vec<Overf
     warnings
 }
 
-/// (Pivot, Jsonb, `StructuredPivot`, `KeyedPivot`). `AutoSplit` does NOT absorb children.
+/// (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`). `AutoSplit` does NOT absorb children.
 ///
 /// The schemas must be topologically sorted (parents before children) for the single-pass
 /// transitive exclusion to work correctly. Safe to call multiple times (idempotent).

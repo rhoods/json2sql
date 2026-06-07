@@ -38,7 +38,7 @@ pub struct PipelineConfig {
     pub depth_limit: Option<usize>,
     /// Wide-table column threshold for automatic `Pivot`/`Jsonb` strategy assignment.
     pub wide_column_threshold: usize,
-    /// Minimum sibling count required for automatic `KeyedPivot` merging.
+    /// Minimum sibling count required for automatic `SiblingCollapse` merging.
     pub sibling_threshold: usize,
     /// Minimum Jaccard similarity for sibling merging.
     pub sibling_jaccard: f64,

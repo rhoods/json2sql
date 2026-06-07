@@ -23,7 +23,7 @@ use crate::schema::PATH_SEP;
 use crate::schema::table_schema::{TableSchema, InferredStrategy};
 
 use super::traversal::{
-    insert_array, insert_jsonb_object, insert_keyed_pivot_object, insert_multi_keyed_pivot,
+    insert_array, insert_jsonb_object, insert_sibling_collapse_object, insert_sibling_collapse_multi,
     insert_normalize_dynamic_keys, insert_pivot_object, insert_structured_pivot_object,
 };
 
@@ -212,13 +212,13 @@ fn insert_child_object<S: RowSink, A: AnomalyCollect>(
                 ctx.sinks, ctx.anomalies, child_schema, nested, parent_id, suffix_schema,
             )?;
         }
-        InferredStrategy::KeyedPivot(sibling_schema) => {
-            insert_keyed_pivot_object(
+        InferredStrategy::SiblingCollapse(sibling_schema) => {
+            insert_sibling_collapse_object(
                 path_map, ctx.sinks, ctx.anomalies, child_schema, nested, parent_id, sibling_schema,
             )?;
         }
-        InferredStrategy::MultiKeyedPivot(groups) => {
-            insert_multi_keyed_pivot(
+        InferredStrategy::SiblingCollapseMulti(groups) => {
+            insert_sibling_collapse_multi(
                 path_map, ctx.sinks, ctx.anomalies, child_schema, nested, parent_id, groups,
             )?;
         }

@@ -88,13 +88,13 @@ fn apply_pivot_columns(schema: &mut TableSchema) {
 pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: InferredStrategy) {
     match strategy {
         InferredStrategy::Columns
-        | InferredStrategy::KeyedPivot(_)
+        | InferredStrategy::SiblingCollapse(_)
         | InferredStrategy::AutoSplit { .. }
         | InferredStrategy::Ignore
         | InferredStrategy::NormalizeDynamicKeys { .. }
         | InferredStrategy::Flatten { .. }
         | InferredStrategy::JsonbFlatten => {
-            // Applied elsewhere: KeyedPivot via finalize_siblings(), AutoSplit/Ignore inline
+            // Applied elsewhere: SiblingCollapse via finalize_siblings(), AutoSplit/Ignore inline
             // in finalize(), NormalizeDynamicKeys/Flatten/JsonbFlatten via dedicated apply_* fns.
         }
         InferredStrategy::Pivot => {
@@ -115,8 +115,8 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: InferredS
         InferredStrategy::StructuredPivot(suffix_schema) => {
             apply_structured_pivot_columns(schema, suffix_schema);
         }
-        InferredStrategy::MultiKeyedPivot(_) => {
-            // MultiKeyedPivot: parent keeps only its generated columns (no data columns).
+        InferredStrategy::SiblingCollapseMulti(_) => {
+            // SiblingCollapseMulti: parent keeps only its generated columns (no data columns).
             // The synthetic child pivot tables are created by finalize_siblings().
             schema.columns.retain(|c| c.is_generated);
         }
@@ -216,7 +216,7 @@ pub fn classify_key_shape(keys: &[&str]) -> KeyShape {
 /// Apply `NormalizeDynamicKeys` strategy to a table: collapse all its direct Object children
 /// into a single normalized table with `id_column` TEXT + union of value columns.
 ///
-/// Equivalent to a user-triggered `KeyedPivot` with a custom ID column name.
+/// Equivalent to a user-triggered `SiblingCollapse` with a custom ID column name.
 /// Call `exclude_absorbed_children` after to remove the now-absorbed child tables.
 fn find_object_child_indices(schemas: &[TableSchema], table_name: &str) -> Result<Vec<usize>> {
     let indices: Vec<usize> = schemas.iter().enumerate()

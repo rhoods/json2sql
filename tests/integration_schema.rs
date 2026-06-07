@@ -146,7 +146,7 @@ fn test_schema_inference_no_db() {
 // Fixture : 2 produits avec un objet `images` qui a 3 clés numériques (schema
 // {imgid, uploader}) et 3 clés textuelles (schema {imgid, rev}).
 //
-// Résultat attendu : MultiKeyedPivot — deux tables pivots distinctes.
+// Résultat attendu : SiblingCollapseMulti — deux tables pivots distinctes.
 //   products_images_num  ← absorbe les clés numériques (imgid, uploader)
 //   products_images_key  ← absorbe les clés textuelles (imgid, rev)
 // Les 12 enfants originaux sont exclus du schéma.
@@ -159,7 +159,7 @@ fn test_keyed_pivot_mixed_key_shapes() {
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
-    // products + products_images (parent MultiKeyedPivot) + 2 tables pivots synthétiques.
+    // products + products_images (parent SiblingCollapseMulti) + 2 tables pivots synthétiques.
     assert_eq!(p1.schemas.len(), 4, "attendu 4 schemas, obtenu: {:?}", names);
     assert!(names.contains(&"products"),              "products manquant");
     assert!(names.contains(&"products_images"),       "products_images (parent) manquant");
@@ -168,13 +168,13 @@ fn test_keyed_pivot_mixed_key_shapes() {
 
     let images = p1.schemas.iter().find(|s| s.name == "products_images").unwrap();
     assert!(
-        matches!(images.inferred_strategy, InferredStrategy::MultiKeyedPivot(_)),
-        "products_images doit avoir MultiKeyedPivot"
+        matches!(images.inferred_strategy, InferredStrategy::SiblingCollapseMulti(_)),
+        "products_images doit avoir SiblingCollapseMulti"
     );
 
     // Table pivot numérique : key_id + imgid + uploader
     let num_pivot = p1.schemas.iter().find(|s| s.name == "products_images_num").unwrap();
-    assert!(matches!(num_pivot.inferred_strategy, InferredStrategy::KeyedPivot(_)));
+    assert!(matches!(num_pivot.inferred_strategy, InferredStrategy::SiblingCollapse(_)));
     let num_cols: Vec<&str> = num_pivot.data_columns().map(|c| c.name.as_str()).collect();
     assert!(num_cols.contains(&"imgid"),    "pivot numérique : imgid manquant");
     assert!(num_cols.contains(&"uploader"), "pivot numérique : uploader manquant");
@@ -182,7 +182,7 @@ fn test_keyed_pivot_mixed_key_shapes() {
 
     // Table pivot textuelle : key + imgid + rev
     let key_pivot = p1.schemas.iter().find(|s| s.name == "products_images_key").unwrap();
-    assert!(matches!(key_pivot.inferred_strategy, InferredStrategy::KeyedPivot(_)));
+    assert!(matches!(key_pivot.inferred_strategy, InferredStrategy::SiblingCollapse(_)));
     let key_cols: Vec<&str> = key_pivot.data_columns().map(|c| c.name.as_str()).collect();
     assert!(key_cols.contains(&"imgid"),     "pivot textuel : imgid manquant");
     assert!(key_cols.contains(&"rev"),       "pivot textuel : rev manquant");
@@ -196,10 +196,10 @@ fn test_keyed_pivot_mixed_key_shapes() {
 // Fixture: images has 3 numeric-keyed tables (front_*, ingredients_*, nutrition_*)
 // AND an "uploaded" sub-object that is itself a pure container with 3 numeric children.
 // Expected:
-//   - images → MultiKeyedPivot (text group = front/ingredients/nutrition, NOT uploaded)
-//   - images_key → KeyedPivot for text children
+//   - images → SiblingCollapseMulti (text group = front/ingredients/nutrition, NOT uploaded)
+//   - images_key → SiblingCollapse for text children
 //   - images_uploaded → remains as independent table (significant container)
-//   - images_uploaded_num → KeyedPivot for the numeric uploaded children
+//   - images_uploaded_num → SiblingCollapse for the numeric uploaded children
 // ---------------------------------------------------------------------------
 #[test]
 fn test_sibling_significant_container_not_diluting_jaccard() {
@@ -219,19 +219,19 @@ fn test_sibling_significant_container_not_diluting_jaccard() {
     assert!(names.contains(&"root_images_key"),
         "root_images_key (pivot textuel) doit exister; schemas: {:?}", names);
 
-    // T1: images parent — all text children → synthetic pivot → MultiKeyedPivot with one group.
+    // T1: images parent — all text children → synthetic pivot → SiblingCollapseMulti with one group.
     let images = p1.schemas.iter().find(|s| s.name == "root_images").unwrap();
-    assert!(matches!(images.inferred_strategy, InferredStrategy::MultiKeyedPivot(_)),
-        "root_images doit avoir MultiKeyedPivot; actual: {:?}", images.inferred_strategy);
+    assert!(matches!(images.inferred_strategy, InferredStrategy::SiblingCollapseMulti(_)),
+        "root_images doit avoir SiblingCollapseMulti; actual: {:?}", images.inferred_strategy);
 
-    // Pure container detection: images_uploaded is itself a pure container → classic KeyedPivot.
+    // Pure container detection: images_uploaded is itself a pure container → classic SiblingCollapse.
     // Its numeric children (100..108) are collapsed into it directly.
     let uploaded = p1.schemas.iter().find(|s| s.name == "root_images_uploaded").unwrap();
-    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-        "root_images_uploaded doit avoir KeyedPivot (pure container); actual: {:?}", uploaded.inferred_strategy);
+    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+        "root_images_uploaded doit avoir SiblingCollapse (pure container); actual: {:?}", uploaded.inferred_strategy);
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(cols.contains(&"uploaded_t"), "KeyedPivot uploaded : uploaded_t manquant; cols: {:?}", cols);
-    assert!(cols.contains(&"uploader"),   "KeyedPivot uploaded : uploader manquant; cols: {:?}", cols);
+    assert!(cols.contains(&"uploaded_t"), "SiblingCollapse uploaded : uploaded_t manquant; cols: {:?}", cols);
+    assert!(cols.contains(&"uploader"),   "SiblingCollapse uploaded : uploader manquant; cols: {:?}", cols);
 
     // The individual numeric children must have been absorbed (excluded from schema).
     assert!(!names.iter().any(|n| n.starts_with("root_images_uploaded_1")),
@@ -247,7 +247,7 @@ fn test_sibling_significant_container_not_diluting_jaccard() {
 //             (imgid, rev, angle, geometry, x1, x2, y1, y2, white_magic, normalize).
 //
 // Sans filtre : Jaccard(uploaded.1, uploaded.4) = 2/12 ≈ 0.17 < 0.5 → pas de collapse.
-// Avec filtre : colonnes rares exclues → Jaccard = 1.0 → images_uploaded = KeyedPivot.
+// Avec filtre : colonnes rares exclues → Jaccard = 1.0 → images_uploaded = SiblingCollapse.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_sibling_noisy_schema_jaccard_filter() {
@@ -264,8 +264,8 @@ fn test_sibling_noisy_schema_jaccard_filter() {
     assert!(uploaded.is_some(),
         "root_images_uploaded doit exister; schemas: {:?}", names);
     let uploaded = uploaded.unwrap();
-    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-        "root_images_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.inferred_strategy);
+    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+        "root_images_uploaded doit avoir SiblingCollapse; actual: {:?}", uploaded.inferred_strategy);
 
     // Les colonnes stables (uploaded_t, uploader) doivent être présentes.
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
@@ -286,7 +286,7 @@ fn test_sibling_noisy_schema_jaccard_filter() {
 // le filtre significant-container les élimine tous → regular vide → pas de collapse.
 //
 // Avec fix all-pure + fix child_routes : wave 0 fusionne uploaded.{1,2,3} en
-// KeyedPivot, waves 1-2 créent les tables fusionnées pour les co-siblings et
+// SiblingCollapse, waves 1-2 créent les tables fusionnées pour les co-siblings et
 // celles-ci survivent à exclude_absorbed_children via child_routes.
 // ---------------------------------------------------------------------------
 #[test]
@@ -298,12 +298,12 @@ fn test_sibling_all_pure_container_collapse() {
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
-    // root_uploaded doit exister et avoir KeyedPivot.
+    // root_uploaded doit exister et avoir SiblingCollapse.
     let uploaded = p1.schemas.iter().find(|s| s.name == "root_uploaded");
     assert!(uploaded.is_some(),
         "root_uploaded doit exister; schemas: {:?}", names);
-    assert!(matches!(uploaded.unwrap().inferred_strategy, InferredStrategy::KeyedPivot(_)),
-        "root_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.unwrap().inferred_strategy);
+    assert!(matches!(uploaded.unwrap().inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+        "root_uploaded doit avoir SiblingCollapse; actual: {:?}", uploaded.unwrap().inferred_strategy);
 
     // Les tables sibling individuelles (1, 2, 3) doivent être absorbées.
     for n in &["root_uploaded_1", "root_uploaded_2", "root_uploaded_3"] {
@@ -337,11 +337,11 @@ fn test_sibling_all_pure_container_collapse() {
 // ---------------------------------------------------------------------------
 // Régression : les tables créées par cascade wave 1+ (co-sibling merge) ne
 // doivent pas être exclues par exclude_absorbed_children même quand leur
-// parent synthétique a KeyedPivot (absorbs_children = true).
+// parent synthétique a SiblingCollapse (absorbs_children = true).
 // Les tables enregistrées dans child_routes doivent être protégées.
 //
 // Structure : root.front.{en,fr,de}.sizes = {w, h}
-//   Wave 0 : front.{en,fr,de} → root_front (KeyedPivot)
+//   Wave 0 : front.{en,fr,de} → root_front (SiblingCollapse)
 //   Wave 1 : front.*.sizes → root_front_sizes (T, via child_routes)
 //   Bug    : T était exclu car root_front.absorbs_children() = true
 // ---------------------------------------------------------------------------
@@ -354,12 +354,12 @@ fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
-    // root_front doit avoir KeyedPivot (wave 0 a fusionné en, fr, de).
+    // root_front doit avoir SiblingCollapse (wave 0 a fusionné en, fr, de).
     let front = p1.schemas.iter().find(|s| s.name == "root_front");
     assert!(front.is_some(), "root_front doit exister; schemas: {:?}", names);
     assert!(
-        matches!(front.unwrap().inferred_strategy, InferredStrategy::KeyedPivot(_)),
-        "root_front doit avoir KeyedPivot; actual: {:?}", front.unwrap().inferred_strategy
+        matches!(front.unwrap().inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+        "root_front doit avoir SiblingCollapse; actual: {:?}", front.unwrap().inferred_strategy
     );
 
     // root_front_sizes doit survivre (target de child_routes, wave 1).
@@ -412,13 +412,13 @@ fn test_sibling_pure_diluter_absorbed() {
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
-    // root_uploaded doit avoir KeyedPivot.
+    // root_uploaded doit avoir SiblingCollapse.
     let uploaded = p1.schemas.iter().find(|s| s.name == "root_uploaded");
     assert!(uploaded.is_some(),
         "root_uploaded doit exister; schemas: {:?}", names);
     let uploaded = uploaded.unwrap();
-    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-        "root_uploaded doit avoir KeyedPivot; actual: {:?}", uploaded.inferred_strategy);
+    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+        "root_uploaded doit avoir SiblingCollapse; actual: {:?}", uploaded.inferred_strategy);
 
     // Les colonnes data-bearing (x, y) doivent être présentes.
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
@@ -434,11 +434,11 @@ fn test_sibling_pure_diluter_absorbed() {
 // ---------------------------------------------------------------------------
 // T3: is_mixed fallback unifié — quand ni le sous-groupe numérique (< threshold)
 // ni le sous-groupe texte (< threshold) n'est suffisant, mais que le groupe
-// combiné l'est, collapser en un seul KeyedPivot avec key TEXT.
+// combiné l'est, collapser en un seul SiblingCollapse avec key TEXT.
 //
 // Fixture : sizes.{100, 400} (numériques, 2 < threshold=3) + sizes.{full}
 // (texte, 1 < threshold). Séparément : ni num_ok ni non_ok. Combiné : 3
-// tables, toutes avec {w, h} → Jaccard = 1.0 → KeyedPivot unifié.
+// tables, toutes avec {w, h} → Jaccard = 1.0 → SiblingCollapse unifié.
 // ---------------------------------------------------------------------------
 #[test]
 fn test_sibling_mixed_unified_fallback() {
@@ -449,13 +449,13 @@ fn test_sibling_mixed_unified_fallback() {
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
-    // root_sizes doit exister et avoir KeyedPivot (pas MultiKeyedPivot).
+    // root_sizes doit exister et avoir SiblingCollapse (pas SiblingCollapseMulti).
     let sizes = p1.schemas.iter().find(|s| s.name == "root_sizes");
     assert!(sizes.is_some(),
         "root_sizes doit exister; schemas: {:?}", names);
     let sizes = sizes.unwrap();
-    assert!(matches!(sizes.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-        "root_sizes doit avoir KeyedPivot (fallback unifié); actual: {:?}", sizes.inferred_strategy);
+    assert!(matches!(sizes.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+        "root_sizes doit avoir SiblingCollapse (fallback unifié); actual: {:?}", sizes.inferred_strategy);
 
     // Les colonnes w et h doivent être présentes.
     let cols: Vec<&str> = sizes.data_columns().map(|c| c.name.as_str()).collect();
@@ -1188,7 +1188,7 @@ async fn test_no_duplicate_pk_on_num_key_collision_structure() {
     }).await;
 }
 
-/// Regression test for findings 1+2: MultiKeyedPivot with two non-numeric clusters must
+/// Regression test for findings 1+2: SiblingCollapseMulti with two non-numeric clusters must
 /// populate BOTH pivot tables, not just the last one (path collision bug).
 ///
 /// The fixture has 6 child keys split into 2 incompatible clusters (Jaccard=0 between them):
@@ -1204,10 +1204,10 @@ async fn test_multi_cluster_non_numeric_both_pivots_populated() {
         cfg.sibling_jaccard = 0.5;
         let p1 = pass1::runner::run(&path, &cfg, None).unwrap();
 
-        // Find the MultiKeyedPivot parent and extract both pivot table names.
+        // Find the SiblingCollapseMulti parent and extract both pivot table names.
         let pivot_tables: Vec<String> = p1.schemas.iter()
             .filter_map(|s| {
-                if let InferredStrategy::MultiKeyedPivot(groups) = &s.inferred_strategy {
+                if let InferredStrategy::SiblingCollapseMulti(groups) = &s.inferred_strategy {
                     Some(groups.iter().map(|g| g.pivot_table.clone()).collect::<Vec<_>>())
                 } else {
                     None
@@ -1217,7 +1217,7 @@ async fn test_multi_cluster_non_numeric_both_pivots_populated() {
             .collect();
 
         assert_eq!(pivot_tables.len(), 2,
-            "expected exactly 2 pivot tables from MultiKeyedPivot; got {:?}", pivot_tables);
+            "expected exactly 2 pivot tables from SiblingCollapseMulti; got {:?}", pivot_tables);
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
             .await.unwrap();

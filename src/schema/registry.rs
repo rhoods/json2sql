@@ -313,19 +313,19 @@ mod tests {
             elapsed.as_millis()
         );
 
-        // The genomes table must have become a KeyedPivot
+        // The genomes table must have become a SiblingCollapse
         let genomes_schema = schemas.iter().find(|s| s.name == "root_genomes");
         assert!(genomes_schema.is_some(), "root_genomes table must exist");
         assert!(
             matches!(
                 genomes_schema.unwrap().inferred_strategy,
-                InferredStrategy::KeyedPivot(_)
+                InferredStrategy::SiblingCollapse(_)
             ),
-            "root_genomes must be KeyedPivot"
+            "root_genomes must be SiblingCollapse"
         );
     }
 
-    /// 500 homogeneous siblings (identical schemas) → all similar → collapsed into KeyedPivot.
+    /// 500 homogeneous siblings (identical schemas) → all similar → collapsed into SiblingCollapse.
     #[test]
     fn test_jaccard_large_homogeneous_collapses() {
         let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001, HashSet::new());
@@ -345,9 +345,9 @@ mod tests {
         assert!(
             matches!(
                 translations.unwrap().inferred_strategy,
-                InferredStrategy::KeyedPivot(_)
+                InferredStrategy::SiblingCollapse(_)
             ),
-            "500 identical siblings must collapse into KeyedPivot"
+            "500 identical siblings must collapse into SiblingCollapse"
         );
     }
 
@@ -376,9 +376,9 @@ mod tests {
         assert!(
             !matches!(
                 items_schema.unwrap().inferred_strategy,
-                InferredStrategy::KeyedPivot(_)
+                InferredStrategy::SiblingCollapse(_)
             ),
-            "group with outlier (0 column overlap) must not collapse into KeyedPivot"
+            "group with outlier (0 column overlap) must not collapse into SiblingCollapse"
         );
     }
 
@@ -444,8 +444,8 @@ mod tests {
         let translations = schemas.iter().find(|s| s.name == "root_translations").unwrap();
 
         assert!(
-            matches!(translations.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-            "expected KeyedPivot strategy"
+            matches!(translations.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            "expected SiblingCollapse strategy"
         );
 
         let data_col_names: Vec<&str> =
@@ -1005,7 +1005,7 @@ mod tests {
         assert_eq!(fwd, rev, "schema names must be identical regardless of observation order");
     }
 
-    /// With threshold=2, a pair of 2 identical siblings must be auto-merged into a KeyedPivot.
+    /// With threshold=2, a pair of 2 identical siblings must be auto-merged into a SiblingCollapse.
     #[test]
     fn test_sibling_threshold_two_detects_pair() {
         let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
@@ -1017,8 +1017,8 @@ mod tests {
         let schemas = reg.finalize();
         let nutriscore = schemas.iter().find(|s| s.name == "products_nutriscore").unwrap();
         assert!(
-            matches!(nutriscore.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-            "2 identical siblings with threshold=2 must become KeyedPivot, got: {:?}",
+            matches!(nutriscore.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            "2 identical siblings with threshold=2 must become SiblingCollapse, got: {:?}",
             nutriscore.inferred_strategy
         );
     }
@@ -1035,12 +1035,12 @@ mod tests {
         let schemas = reg.finalize();
         let nutriscore = schemas.iter().find(|s| s.name == "products_nutriscore").unwrap();
         assert!(
-            !matches!(nutriscore.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-            "2 siblings with threshold=3 must NOT become KeyedPivot"
+            !matches!(nutriscore.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            "2 siblings with threshold=3 must NOT become SiblingCollapse"
         );
     }
 
-    /// Non-mixed group with 2 disjoint sub-schemas → greedy clustering produces MultiKeyedPivot.
+    /// Non-mixed group with 2 disjoint sub-schemas → greedy clustering produces SiblingCollapseMulti.
     /// Without clustering this would fall through (global pairwise Jaccard = 0).
     #[test]
     fn test_schema_clustering_non_mixed_two_groups() {
@@ -1059,11 +1059,11 @@ mod tests {
         let schemas = reg.finalize();
         let dict = schemas.iter().find(|s| s.name == "root_dict").unwrap();
         assert!(
-            matches!(dict.inferred_strategy, InferredStrategy::MultiKeyedPivot(_)),
-            "heterogeneous non-numeric group with 2 homogeneous clusters must produce MultiKeyedPivot, got: {:?}",
+            matches!(dict.inferred_strategy, InferredStrategy::SiblingCollapseMulti(_)),
+            "heterogeneous non-numeric group with 2 homogeneous clusters must produce SiblingCollapseMulti, got: {:?}",
             dict.inferred_strategy
         );
-        if let InferredStrategy::MultiKeyedPivot(groups) = &dict.inferred_strategy {
+        if let InferredStrategy::SiblingCollapseMulti(groups) = &dict.inferred_strategy {
             assert_eq!(groups.len(), 2, "must produce exactly 2 pivot groups (front + ingr)");
         }
     }
@@ -1086,24 +1086,24 @@ mod tests {
         let schemas = reg.finalize();
         let images = schemas.iter().find(|s| s.name == "root_images").unwrap();
         assert!(
-            matches!(images.inferred_strategy, InferredStrategy::MultiKeyedPivot(_)),
-            "mixed group with clusterable non-numeric siblings must produce MultiKeyedPivot, got: {:?}",
+            matches!(images.inferred_strategy, InferredStrategy::SiblingCollapseMulti(_)),
+            "mixed group with clusterable non-numeric siblings must produce SiblingCollapseMulti, got: {:?}",
             images.inferred_strategy
         );
-        if let InferredStrategy::MultiKeyedPivot(groups) = &images.inferred_strategy {
+        if let InferredStrategy::SiblingCollapseMulti(groups) = &images.inferred_strategy {
             // numeric group + 2 non-numeric clusters = 3 total
             assert_eq!(groups.len(), 3, "must produce 3 groups (num + front + ingr), got {}", groups.len());
         }
     }
 
-    /// Post-pass: after the BFS cascade, Columns children of a KeyedPivot parent that
+    /// Post-pass: after the BFS cascade, Columns children of a SiblingCollapse parent that
     /// are numerous enough and sufficiently similar must be fused into a sub-pivot.
     ///
     /// Structure: `selected.{type}.{lang} = {imgid, rev}`
-    /// Wave 0: selected absorbs {front, nutrition} → KeyedPivot (key = image type).
+    /// Wave 0: selected absorbs {front, nutrition} → SiblingCollapse (key = image type).
     /// Cascade wave 1: creates one T table per shared lang code
     ///   (root_selected_fr, root_selected_en, root_selected_de).
-    /// Post-pass: those 3 Columns children of the KeyedPivot → merged into root_selected_key.
+    /// Post-pass: those 3 Columns children of the SiblingCollapse → merged into root_selected_key.
     #[test]
     fn test_keyed_pivot_orphan_children_merged_by_post_pass() {
         let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
@@ -1126,19 +1126,19 @@ mod tests {
 
         let selected = schemas.iter().find(|s| s.name == "root_selected").unwrap();
         assert!(
-            matches!(selected.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-            "root_selected must remain KeyedPivot (type key), got: {:?}",
+            matches!(selected.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            "root_selected must remain SiblingCollapse (type key), got: {:?}",
             selected.inferred_strategy
         );
 
-        // Post-pass must create a KeyedPivot sub-table directly under root_selected.
+        // Post-pass must create a SiblingCollapse sub-table directly under root_selected.
         let sub_pivot = schemas.iter().find(|s| {
             s.parent_table.as_deref() == Some("root_selected")
-                && matches!(s.inferred_strategy, InferredStrategy::KeyedPivot(_))
+                && matches!(s.inferred_strategy, InferredStrategy::SiblingCollapse(_))
         });
         assert!(
             sub_pivot.is_some(),
-            "post-pass must create a KeyedPivot child of root_selected for the 3 lang T tables;\n\
+            "post-pass must create a SiblingCollapse child of root_selected for the 3 lang T tables;\n\
              schemas: {:?}",
             schemas.iter().map(|s| (&s.name, &s.parent_table)).collect::<Vec<_>>()
         );
@@ -1153,7 +1153,7 @@ mod tests {
             .count();
         assert_eq!(
             columns_orphans, 0,
-            "all Columns children of the KeyedPivot must be absorbed by the sub-pivot"
+            "all Columns children of the SiblingCollapse must be absorbed by the sub-pivot"
         );
     }
 
@@ -1174,7 +1174,7 @@ mod tests {
 
         let sub_pivot = schemas.iter().find(|s| {
             s.parent_table.as_deref() == Some("root_selected")
-                && matches!(s.inferred_strategy, InferredStrategy::KeyedPivot(_))
+                && matches!(s.inferred_strategy, InferredStrategy::SiblingCollapse(_))
         });
         assert!(
             sub_pivot.is_none(),
@@ -1182,8 +1182,8 @@ mod tests {
         );
     }
 
-    /// ScalarArray siblings (≥ threshold) with identical value schemas must be merged into KeyedPivot.
-    /// Concrete case: nova_groups_markers {"2": [...], "3": [...], "4": [...]} → parent becomes KeyedPivot.
+    /// ScalarArray siblings (≥ threshold) with identical value schemas must be merged into SiblingCollapse.
+    /// Concrete case: nova_groups_markers {"2": [...], "3": [...], "4": [...]} → parent becomes SiblingCollapse.
     #[test]
     fn test_scalar_array_siblings_merged_keyed_pivot() {
         let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
@@ -1198,8 +1198,8 @@ mod tests {
         let schemas = reg.finalize();
         let markers = schemas.iter().find(|s| s.name == "product_markers").unwrap();
         assert!(
-            matches!(markers.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-            "3 ScalarArray siblings with threshold=2 must become KeyedPivot, got: {:?}",
+            matches!(markers.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            "3 ScalarArray siblings with threshold=2 must become SiblingCollapse, got: {:?}",
             markers.inferred_strategy
         );
         assert!(
@@ -1221,8 +1221,8 @@ mod tests {
         let schemas = reg.finalize();
         let markers = schemas.iter().find(|s| s.name == "product_markers").unwrap();
         assert!(
-            !matches!(markers.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-            "single ScalarArray child must NOT become KeyedPivot, got: {:?}",
+            !matches!(markers.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            "single ScalarArray child must NOT become SiblingCollapse, got: {:?}",
             markers.inferred_strategy
         );
     }
@@ -1241,16 +1241,16 @@ mod tests {
         reg_normal.observe_root("root", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
         let langs_normal = schemas_normal.iter().find(|s| s.name == "root_langs").unwrap();
-        assert!(matches!(langs_normal.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-            "sibling enabled → KeyedPivot expected");
+        assert!(matches!(langs_normal.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            "sibling enabled → SiblingCollapse expected");
 
         let mut reg_disabled = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001,
             HashSet::from([StrategyName::Sibling]));
         reg_disabled.observe_root("root", make_root(&obj));
         let schemas_disabled = reg_disabled.finalize();
         let langs_disabled = schemas_disabled.iter().find(|s| s.name == "root_langs").unwrap();
-        assert!(!matches!(langs_disabled.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-            "sibling disabled → no KeyedPivot");
+        assert!(!matches!(langs_disabled.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            "sibling disabled → no SiblingCollapse");
     }
 
     #[test]

@@ -121,11 +121,11 @@ fn dispatch_child_object<S: RowSink>(
         InferredStrategy::StructuredPivot(suffix_schema) => {
             insert_structured_pivot_object(sinks, anomalies, child_schema, nested, child_id, suffix_schema)?;
         }
-        InferredStrategy::KeyedPivot(sibling_schema) => {
-            insert_keyed_pivot_object(path_map, sinks, anomalies, child_schema, nested, child_id, sibling_schema)?;
+        InferredStrategy::SiblingCollapse(sibling_schema) => {
+            insert_sibling_collapse_object(path_map, sinks, anomalies, child_schema, nested, child_id, sibling_schema)?;
         }
-        InferredStrategy::MultiKeyedPivot(groups) => {
-            insert_multi_keyed_pivot(path_map, sinks, anomalies, child_schema, nested, child_id, groups)?;
+        InferredStrategy::SiblingCollapseMulti(groups) => {
+            insert_sibling_collapse_multi(path_map, sinks, anomalies, child_schema, nested, child_id, groups)?;
         }
         InferredStrategy::NormalizeDynamicKeys { id_column } => {
             insert_normalize_dynamic_keys(sinks, anomalies, child_schema, nested, child_id, id_column)?;
@@ -270,13 +270,13 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
         match sub_value {
             Value::Object(nested) => {
                 match &child_schema.inferred_strategy {
-                    InferredStrategy::KeyedPivot(ss) => {
+                    InferredStrategy::SiblingCollapse(ss) => {
                         let ss = ss.clone();
-                        insert_keyed_pivot_object(path_map, sinks, anomalies, child_schema, nested, row_id, &ss)?;
+                        insert_sibling_collapse_object(path_map, sinks, anomalies, child_schema, nested, row_id, &ss)?;
                     }
-                    InferredStrategy::MultiKeyedPivot(groups) => {
+                    InferredStrategy::SiblingCollapseMulti(groups) => {
                         let groups = groups.clone();
-                        insert_multi_keyed_pivot(path_map, sinks, anomalies, child_schema, nested, row_id, &groups)?;
+                        insert_sibling_collapse_multi(path_map, sinks, anomalies, child_schema, nested, row_id, &groups)?;
                     }
                     _ => {
                         let child_id = Uuid::now_v7();
@@ -291,7 +291,7 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
     Ok(())
 }
 
-struct KeyedPivotRowInput<'a> {
+struct SiblingCollapseRowInput<'a> {
     key: &'a str,
     child_obj: &'a serde_json::Map<String, Value>,
     parent_id: Uuid,
@@ -306,7 +306,7 @@ fn write_keyed_pivot_columns<A: AnomalyCollect>(
     builder: &mut RowBuilder,
     anomalies: &mut A,
     schema: &TableSchema,
-    ctx: &KeyedPivotRowInput<'_>,
+    ctx: &SiblingCollapseRowInput<'_>,
 ) -> Result<()> {
     let row_id_str = ctx.row_id.to_string();
     for col in &schema.columns {
@@ -347,12 +347,12 @@ fn write_keyed_pivot_columns<A: AnomalyCollect>(
     Ok(())
 }
 
-/// Insert one row per sibling key for a `KeyedPivot` table.
+/// Insert one row per sibling key for a `SiblingCollapse` table.
 /// Columns: `j2s_id`, `j2s_parent_id`, key TEXT, <union data cols...>
 ///
 /// When `sibling_schema.array_children` is true, each key maps to an array of objects
 /// instead of a single object. One row is emitted per array element, with `j2s_order` set.
-pub(super) fn insert_keyed_pivot_object<S: RowSink>(
+pub(super) fn insert_sibling_collapse_object<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
@@ -362,13 +362,13 @@ pub(super) fn insert_keyed_pivot_object<S: RowSink>(
     sibling_schema: &SiblingSchema,
 ) -> Result<()> {
     if sibling_schema.array_children {
-        return insert_keyed_pivot_array_of_objects(path_map, sinks, anomalies, schema, obj, parent_id, sibling_schema);
+        return insert_sibling_collapse_array_of_objects(path_map, sinks, anomalies, schema, obj, parent_id, sibling_schema);
     }
     for (key, value) in obj {
         let Value::Object(child_obj) = value else { continue };
         let row_id = Uuid::now_v7();
         let mut builder = RowBuilder::new();
-        let ctx = KeyedPivotRowInput { key, child_obj, parent_id, row_id, order: None, sibling_schema };
+        let ctx = SiblingCollapseRowInput { key, child_obj, parent_id, row_id, order: None, sibling_schema };
         write_keyed_pivot_columns(&mut builder, anomalies, schema, &ctx)?;
         anomalies.inc_total(&schema.name);
         if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&builder.finish())?; }
@@ -377,9 +377,9 @@ pub(super) fn insert_keyed_pivot_object<S: RowSink>(
     Ok(())
 }
 
-/// Insert one row per array element per sibling key for an `ObjectArray` `KeyedPivot` table.
+/// Insert one row per array element per sibling key for an `ObjectArray` `SiblingCollapse` table.
 /// Columns: `j2s_id`, `j2s_parent_id`, `j2s_order` BIGINT, key TEXT, <union data cols...>
-pub(super) fn insert_keyed_pivot_array_of_objects<S: RowSink>(
+pub(super) fn insert_sibling_collapse_array_of_objects<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
@@ -394,7 +394,7 @@ pub(super) fn insert_keyed_pivot_array_of_objects<S: RowSink>(
             let Value::Object(item_obj) = item else { continue };
             let row_id = Uuid::now_v7();
             let mut builder = RowBuilder::new();
-            let ctx = KeyedPivotRowInput { key, child_obj: item_obj, parent_id, row_id, order: Some(order), sibling_schema };
+            let ctx = SiblingCollapseRowInput { key, child_obj: item_obj, parent_id, row_id, order: Some(order), sibling_schema };
             write_keyed_pivot_columns(&mut builder, anomalies, schema, &ctx)?;
             anomalies.inc_total(&schema.name);
             if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&builder.finish())?; }
@@ -478,8 +478,8 @@ fn route_independent_child<S: RowSink>(
     if child_schema.parent_table.as_deref() != Some(schema_name) { return Ok(false); }
     if let Value::Object(nested) = value {
         match &child_schema.inferred_strategy {
-            InferredStrategy::KeyedPivot(ss) => insert_keyed_pivot_object(path_map, sinks, anomalies, child_schema, nested, routing_id, ss)?,
-            InferredStrategy::MultiKeyedPivot(cg) => insert_multi_keyed_pivot(path_map, sinks, anomalies, child_schema, nested, routing_id, cg)?,
+            InferredStrategy::SiblingCollapse(ss) => insert_sibling_collapse_object(path_map, sinks, anomalies, child_schema, nested, routing_id, ss)?,
+            InferredStrategy::SiblingCollapseMulti(cg) => insert_sibling_collapse_multi(path_map, sinks, anomalies, child_schema, nested, routing_id, cg)?,
             _ => {
                 let child_id = Uuid::now_v7();
                 insert_object(path_map, &mut InsertCtx { sinks, anomalies }, child_schema, nested, child_id, Some(routing_id), None)?;
@@ -491,14 +491,14 @@ fn route_independent_child<S: RowSink>(
     }
 }
 
-/// Dispatch each key in a `MultiKeyedPivot` object to the matching synthetic pivot table.
+/// Dispatch each key in a `SiblingCollapseMulti` object to the matching synthetic pivot table.
 ///
-/// The routing table (`schema`) is a `MultiKeyedPivot` parent with only generated columns.
+/// The routing table (`schema`) is a `SiblingCollapseMulti` parent with only generated columns.
 /// One routing row is emitted per call; children FK to it by `routing_id`.
 /// Keys that are all-digits go to the `_num` group; all others are routed by
 /// `absorbed_path_segments` lookup (exact match against keys seen in Pass 1), falling
 /// back to the `key_is_numeric` heuristic for backward compat with old snapshots.
-pub(super) fn insert_multi_keyed_pivot<S: RowSink>(
+pub(super) fn insert_sibling_collapse_multi<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
@@ -528,7 +528,7 @@ pub(super) fn insert_multi_keyed_pivot<S: RowSink>(
         };
         let pivot_path_key = format!("{routing_path}{PATH_SEP}{path_seg}");
         if let Some(pivot_schema) = path_map.get(&pivot_path_key) {
-            insert_keyed_pivot_object(path_map, sinks, anomalies, pivot_schema, submap, routing_id, &group.sibling_schema)?;
+            insert_sibling_collapse_object(path_map, sinks, anomalies, pivot_schema, submap, routing_id, &group.sibling_schema)?;
         }
     }
     Ok(())

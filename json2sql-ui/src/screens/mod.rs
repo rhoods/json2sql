@@ -97,7 +97,7 @@ impl RowFlags {
             && matches!(table.inferred_strategy, InferredStrategy::Jsonb)
             && ctx.overflow_names.contains(&table.name);
         let is_routing = !user_overrode
-            && matches!(table.inferred_strategy, InferredStrategy::MultiKeyedPivot(_))
+            && matches!(table.inferred_strategy, InferredStrategy::SiblingCollapseMulti(_))
             && table.columns.iter().all(|c| c.is_generated);
         let has_warn = is_overflow || is_routing;
         let (badge_cls, badge_lbl) = if is_absorbed { ("muted", "merged") }
@@ -268,8 +268,8 @@ pub const fn strategy_label(s: &InferredStrategy) -> &'static str {
         InferredStrategy::Jsonb                       => "JSONB SÉP.",
         InferredStrategy::JsonbFlatten                => "JSONB INLINE",
         InferredStrategy::StructuredPivot(_)          => "STRUCT PIVOT",
-        InferredStrategy::KeyedPivot(_)               => "KEYED PIVOT",
-        InferredStrategy::MultiKeyedPivot(_)          => "MULTI PIVOT",
+        InferredStrategy::SiblingCollapse(_)               => "SIBLING COLLAPSE",
+        InferredStrategy::SiblingCollapseMulti(_)          => "SIBLING COLLAPSE MULTI",
         InferredStrategy::AutoSplit { .. }            => "AUTO SPLIT",
         InferredStrategy::Ignore                      => "SKIP",
         InferredStrategy::NormalizeDynamicKeys { .. } => "NORMALIZE",
@@ -306,8 +306,8 @@ pub const fn strategy_badge(s: &InferredStrategy) -> (&'static str, &'static str
         InferredStrategy::Ignore                      => ("skip",      "skip"),
         InferredStrategy::Flatten { .. }              => ("flatten",   "flatten"),
         InferredStrategy::StructuredPivot(_)          => ("pivot",     "struct pivot"),
-        InferredStrategy::KeyedPivot(_)               => ("pivot",     "keyed pivot"),
-        InferredStrategy::MultiKeyedPivot(_)          => ("pivot",     "multi pivot"),
+        InferredStrategy::SiblingCollapse(_)               => ("pivot",     "sibling collapse"),
+        InferredStrategy::SiblingCollapseMulti(_)          => ("pivot",     "sibling collapse multi"),
         InferredStrategy::AutoSplit { .. }            => ("normalize", "auto split"),
     }
 }
@@ -653,7 +653,7 @@ mod tests {
         use json2sql::schema::table_schema::{ColumnSchema, KeyShape, SiblingGroup, SiblingSchema};
         use json2sql::schema::type_tracker::PgType;
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
-        t.inferred_strategy = InferredStrategy::MultiKeyedPivot(vec![SiblingGroup {
+        t.inferred_strategy = InferredStrategy::SiblingCollapseMulti(vec![SiblingGroup {
             pivot_table: format!("{name}_pivot"),
             key_is_numeric: false,
             sibling_schema: SiblingSchema {

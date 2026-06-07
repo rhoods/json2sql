@@ -515,7 +515,7 @@ async fn test_auto_split_strategy() {
 }
 
 // ---------------------------------------------------------------------------
-// InferredStrategy::KeyedPivot sur une table intermédiaire pure container.
+// InferredStrategy::SiblingCollapse sur une table intermédiaire pure container.
 // Fixture : 2 produits, chacun avec un objet `translations` contenant
 // exactement 3 clés ISO (fr, en, de) — chaque clé est un objet {label, desc}.
 // `translations` est un pure container (0 colonnes scalaires).
@@ -527,7 +527,7 @@ async fn test_auto_split_strategy() {
 //
 // Assertions :
 //   - 2 schemas (products + products_translations)
-//   - products_translations a KeyedPivot, lang_code TEXT, label TEXT, desc TEXT
+//   - products_translations a SiblingCollapse, lang_code TEXT, label TEXT, desc TEXT
 //   - 2 lignes dans products, 6 dans products_translations
 //   - Widget/fr → label="Bonjour", desc="Rouge"
 //   - Gadget/de → desc="Blau"
@@ -536,7 +536,7 @@ async fn test_auto_split_strategy() {
 async fn test_keyed_pivot_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("keyed_pivot.jsonl");
-        // sibling_threshold=3 : au moins 3 siblings pour déclencher KeyedPivot
+        // sibling_threshold=3 : au moins 3 siblings pour déclencher SiblingCollapse
         // sibling_jaccard=0.5 : Jaccard min acceptable
         let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
 
@@ -548,8 +548,8 @@ async fn test_keyed_pivot_strategy() {
         let translations_schema = p1.schemas.iter()
             .find(|s| s.name == "products_translations").unwrap();
         assert!(
-            matches!(translations_schema.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-            "products_translations doit avoir la stratégie KeyedPivot"
+            matches!(translations_schema.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            "products_translations doit avoir la stratégie SiblingCollapse"
         );
 
         let data_cols: Vec<_> = translations_schema.data_columns().collect();
@@ -623,7 +623,7 @@ async fn test_keyed_pivot_strategy() {
 }
 
 // ---------------------------------------------------------------------------
-// KeyedPivot pure container — siblings dont les enfants sont eux-mêmes des
+// SiblingCollapse pure container — siblings dont les enfants sont eux-mêmes des
 // objets (pas de scalaires directs). L'union est vide mais data JSONB capture
 // la sous-structure complète.
 //
@@ -633,7 +633,7 @@ async fn test_keyed_pivot_strategy() {
 //
 // Assertions Pass 1 :
 //   - 2 schemas (graph + graph_genomes), gcf_* et NC_* absorbés
-//   - graph_genomes a KeyedPivot, union_cols vide, colonne data JSONB présente
+//   - graph_genomes a SiblingCollapse, union_cols vide, colonne data JSONB présente
 //
 // Assertions Pass 2 :
 //   - 6 lignes dans graph_genomes (2 records × 3 génomes)
@@ -652,8 +652,8 @@ async fn test_keyed_pivot_pure_container() {
 
         let genomes_schema = p1.schemas.iter().find(|s| s.name == "graph_genomes").unwrap();
         assert!(
-            matches!(genomes_schema.inferred_strategy, InferredStrategy::KeyedPivot(_)),
-            "graph_genomes doit avoir KeyedPivot"
+            matches!(genomes_schema.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            "graph_genomes doit avoir SiblingCollapse"
         );
 
         // Union vide (pure containers) mais j2s_data JSONB présente
@@ -697,10 +697,10 @@ async fn test_keyed_pivot_pure_container() {
 // Fixture : 3 produits avec un objet `images` à clés dynamiques (image IDs).
 // Chaque clé mappe vers un objet {url, width}.
 //
-// Différence avec KeyedPivot : appliqué manuellement (pas auto-détecté),
+// Différence avec SiblingCollapse : appliqué manuellement (pas auto-détecté),
 // le nom de la colonne ID est libre ("image_id").
 //
-// sibling_threshold=10 → empêche l'auto-détection KeyedPivot (5 < 10)
+// sibling_threshold=10 → empêche l'auto-détection SiblingCollapse (5 < 10)
 // apply_normalize_dynamic_keys → products_images : image_id TEXT, url TEXT, width INT
 // Les 5 tables images enfants sont absorbées et supprimées.
 //
@@ -715,7 +715,7 @@ async fn test_keyed_pivot_pure_container() {
 async fn test_normalize_dynamic_keys_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("normalize_dynamic_keys.jsonl");
-        // sibling_threshold=10 : 5 tables images < 10 → pas d'auto-détection KeyedPivot
+        // sibling_threshold=10 : 5 tables images < 10 → pas d'auto-détection SiblingCollapse
         let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
             root_table: "products".to_string(),
             text_threshold: 256,
@@ -857,7 +857,7 @@ async fn test_jsonb_flatten_strategy() {
 }
 
 // ---------------------------------------------------------------------------
-// InferredStrategy::KeyedPivot sur des siblings ObjectArray.
+// InferredStrategy::SiblingCollapse sur des siblings ObjectArray.
 // Fixture : 2 enregistrements "graph", chacun avec un objet `genomes`
 // contenant 3 clés génome (gcf_001/002/003) qui valent chacune un tableau
 // d'objets {length, source, target}. gcf_001 a 2 éléments pour id=1.
@@ -869,7 +869,7 @@ async fn test_jsonb_flatten_strategy() {
 //
 // Assertions Pass 1 :
 //   - 2 schemas (graph + graph_genomes), tables gcf_* absorbées
-//   - graph_genomes a KeyedPivot avec array_children=true
+//   - graph_genomes a SiblingCollapse avec array_children=true
 //   - graph_genomes a j2s_order parmi les colonnes générées
 //
 // Assertions Pass 2 :
@@ -891,10 +891,10 @@ async fn test_keyed_pivot_array_strategy() {
 
         let genomes_schema = p1.schemas.iter().find(|s| s.name == "graph_genomes").unwrap();
 
-        // La stratégie doit être KeyedPivot avec array_children=true
+        // La stratégie doit être SiblingCollapse avec array_children=true
         match &genomes_schema.inferred_strategy {
-            InferredStrategy::KeyedPivot(SiblingSchema { array_children: true, .. }) => {}
-            other => panic!("expected KeyedPivot(array_children=true), got {:?}", other),
+            InferredStrategy::SiblingCollapse(SiblingSchema { array_children: true, .. }) => {}
+            other => panic!("expected SiblingCollapse(array_children=true), got {:?}", other),
         }
 
         // j2s_order doit être présent parmi les colonnes générées
@@ -980,7 +980,7 @@ async fn test_keyed_pivot_array_strategy() {
 // Tests end-to-end disabled_strategies dans Pass1Config
 // ---------------------------------------------------------------------------
 
-// disable sibling → aucune table KeyedPivot dans le résultat
+// disable sibling → aucune table SiblingCollapse dans le résultat
 #[test]
 fn test_disable_sibling_no_keyed_pivot_integration() {
     use std::collections::HashSet;
@@ -988,19 +988,19 @@ fn test_disable_sibling_no_keyed_pivot_integration() {
     use json2sql::schema::table_schema::InferredStrategy;
 
     let path = common::fixture("keyed_pivot.jsonl");
-    // Avec sibling activé : KeyedPivot attendu
+    // Avec sibling activé : SiblingCollapse attendu
     let p1_normal = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
-    assert!(p1_normal.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::KeyedPivot(_))),
-        "sibling enabled → KeyedPivot attendu dans le schema normal");
+    assert!(p1_normal.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::SiblingCollapse(_))),
+        "sibling enabled → SiblingCollapse attendu dans le schema normal");
 
-    // Avec sibling désactivé : aucun KeyedPivot
+    // Avec sibling désactivé : aucun SiblingCollapse
     let config_disabled = pass1::runner::Pass1Config {
         disabled_strategies: HashSet::from([StrategyName::Sibling]),
         ..common::pass1_config("products")
     };
     let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
-    assert!(!p1_disabled.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::KeyedPivot(_))),
-        "sibling disabled → aucun KeyedPivot dans le schema");
+    assert!(!p1_disabled.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::SiblingCollapse(_))),
+        "sibling disabled → aucun SiblingCollapse dans le schema");
 }
 
 // ---------------------------------------------------------------------------

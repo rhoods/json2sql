@@ -90,7 +90,7 @@ pub fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usize, min_
     // ── Wave 0 bis: sibling detection on T tables created by the BFS cascade ──
     // Tables produced by process_co_sibling_group (e.g. cluster_0_sizes_100/200/400/full)
     // share a Columns parent but did not exist during wave 0. This pass fuses them.
-    // Parents already converted to KeyedPivot/MultiKeyedPivot are skipped automatically.
+    // Parents already converted to SiblingCollapse/SiblingCollapseMulti are skipped automatically.
     let co_siblings_bis = run_sibling_wave(schemas, threshold, min_jaccard);
     let mut pending_bis: Vec<CoSiblingGroup> = co_siblings_bis;
     while !pending_bis.is_empty() {
@@ -105,8 +105,8 @@ pub fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usize, min_
         pending_bis = next_pending;
     }
 
-    // ── Post-pass: merge Columns orphans under KeyedPivot parents ───────────
-    // After the BFS cascade, some Columns tables survive as children of a KeyedPivot
+    // ── Post-pass: merge Columns orphans under SiblingCollapse parents ───────────
+    // After the BFS cascade, some Columns tables survive as children of a SiblingCollapse
     // parent (e.g. lang-code T tables produced by cascade wave 1 that themselves
     // are numerous and similar).  A second sibling-detection pass fuses them into
     // a synthetic sub-pivot and cascades their own children.
@@ -269,7 +269,7 @@ fn try_unified_fallback(
     Some(Collapse {
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
-        log_msg: format!("  Unified-fallback KeyedPivot {}: {} ({} tables → 1, Jaccard {:.2})", kind_label, ctx.parent_name, ctx.child_indices.len(), unified_jaccard),
+        log_msg: format!("  Unified-fallback SiblingCollapse {}: {} ({} tables → 1, Jaccard {:.2})", kind_label, ctx.parent_name, ctx.child_indices.len(), unified_jaccard),
         kind: CollapseKind::Single { key_col_name: "key".to_string(), key_shape, union_cols, data_col_name: "j2s_data".to_string() },
         absorbed_indices: ctx.child_indices.clone(),
     })
@@ -339,7 +339,7 @@ fn try_cluster_fallback(
     Some(Collapse {
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
-        log_msg: format!("  Schema-cluster MultiKeyedPivot: {} ({} tables → {} clusters)", ctx.parent_name, regular.len(), groups.len()),
+        log_msg: format!("  Schema-cluster SiblingCollapseMulti: {} ({} tables → {} clusters)", ctx.parent_name, regular.len(), groups.len()),
         kind: CollapseKind::Multi { groups },
         absorbed_indices: all_absorbed,
     })
@@ -399,7 +399,7 @@ fn detect_mixed_collapse(
     Some(assemble_mixed_collapse(schemas, ctx, num_ok, non_ok, &non_num_regular, &non_num_clusters))
 }
 
-/// Assemble a `MultiKeyedPivot` collapse from pre-classified numeric/non-numeric groups.
+/// Assemble a `SiblingCollapseMulti` collapse from pre-classified numeric/non-numeric groups.
 /// Each group gets a unique suffix via `pick_unique_suffix` to avoid name collisions.
 ///
 /// **Scenario 1 — numeric + two incompatible non-numeric clusters:**
@@ -458,7 +458,7 @@ fn assemble_mixed_collapse(
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
         log_msg: format!(
-            "  MultiKeyedPivot {} tables detected: {} ({} tables → {} pivot tables)",
+            "  SiblingCollapseMulti {} tables detected: {} ({} tables → {} pivot tables)",
             kind_label, ctx.parent_name, ctx.child_indices.len(), groups.len(),
         ),
         kind: CollapseKind::Multi { groups },
@@ -509,7 +509,7 @@ fn effective_jaccard_for_regular(
 /// Child-compatibility gate bypass threshold: skip the gate when Jaccard similarity is very high.
 const HIGH_JACCARD: f64 = 0.9;
 
-/// Build a synthetic `MultiKeyedPivot` when the parent carries its own data or has
+/// Build a synthetic `SiblingCollapseMulti` when the parent carries its own data or has
 /// significant containers — the parent cannot be repurposed as a pivot table itself.
 /// Returns `None` when the parent has data and the keys are non-numeric.
 ///
@@ -573,7 +573,7 @@ fn detect_homogeneous_collapse(
     Some(build_classic_keyed_pivot_collapse(schemas, ctx, regular))
 }
 
-/// Build a classic `KeyedPivot` collapse: the pure-container parent absorbs all `regular`
+/// Build a classic `SiblingCollapse` collapse: the pure-container parent absorbs all `regular`
 /// siblings into a single keyed pivot table.
 #[allow(clippy::too_many_lines)] // inline Collapse construction with log assembly
 fn build_classic_keyed_pivot_collapse(
@@ -600,7 +600,7 @@ fn build_classic_keyed_pivot_collapse(
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
         log_msg: format!(
-            "  Sibling {} tables detected: {} ({} tables → 1)\n  Keys: \"{}{}\n  Jaccard min: {:.2} → strategy: KeyedPivot (col: {} {})",
+            "  Sibling {} tables detected: {} ({} tables → 1)\n  Keys: \"{}{}\n  Jaccard min: {:.2} → strategy: SiblingCollapse (col: {} {})",
             kind_label, ctx.parent_name, regular.len(), key_examples, more,
             ctx.min_jaccard, key_col_name, key_shape,
         ),
@@ -635,7 +635,7 @@ fn apply_single_collapse(
     parent.columns.push(ColumnSchema { name: key_col_name.clone(), original_name: key_col_name.clone(), pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false });
     for col in union_cols { parent.columns.push(col.clone()); }
     parent.columns.push(ColumnSchema { name: data_col_name.clone(), original_name: data_col_name.clone(), pg_type: PgType::Jsonb, not_null: false, is_generated: true, is_parent_fk: false });
-    parent.inferred_strategy = InferredStrategy::KeyedPivot(sibling_schema);
+    parent.inferred_strategy = InferredStrategy::SiblingCollapse(sibling_schema);
     let synthetic_parent_name = schemas[collapse.parent_idx].name.clone();
     collect_children_by_key(schemas, &collapse.absorbed_indices, obj_map, arr_map)
         .into_iter()
@@ -698,7 +698,7 @@ fn build_multi_group_entry(
         depth: parent.depth + 1,
         columns: cols,
         child_kind: Some(ChildKind::Object),
-        inferred_strategy: InferredStrategy::KeyedPivot(sibling_schema),
+        inferred_strategy: InferredStrategy::SiblingCollapse(sibling_schema),
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
     };
@@ -721,7 +721,7 @@ fn apply_multi_collapse(
         path_segment: g.path_segment.clone(),
         absorbed_path_segments: g.absorbed_path_segments.clone(),
     }).collect();
-    schemas[collapse.parent_idx].inferred_strategy = InferredStrategy::MultiKeyedPivot(sibling_groups);
+    schemas[collapse.parent_idx].inferred_strategy = InferredStrategy::SiblingCollapseMulti(sibling_groups);
     let parent_ctx = ParentCtx {
         name: &schemas[collapse.parent_idx].name.clone(),
         path: &schemas[collapse.parent_idx].path.clone(),
@@ -1004,10 +1004,10 @@ fn merge_co_sibling_group(
 }
 
 
-/// Post-pass: merge `Columns` children of `KeyedPivot` parents into a synthetic sub-pivot.
+/// Post-pass: merge `Columns` children of `SiblingCollapse` parents into a synthetic sub-pivot.
 ///
 /// After the main BFS cascade, some `Columns` tables survive as direct children of a
-/// `KeyedPivot` parent — for example, the lang-code T tables produced by cascade wave 1
+/// `SiblingCollapse` parent — for example, the lang-code T tables produced by cascade wave 1
 /// (one per shared language across image types).  These tables are similar to each other
 /// (same schema) but the main `run_sibling_wave` skips them because their parent is no
 /// longer `InferredStrategy::Columns`.
@@ -1051,7 +1051,7 @@ fn build_sub_pivot_schema(
         depth: parent_depth + 1,
         columns: cols,
         child_kind: Some(ChildKind::Object),
-        inferred_strategy: InferredStrategy::KeyedPivot(sibling_schema),
+        inferred_strategy: InferredStrategy::SiblingCollapse(sibling_schema),
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
     }
@@ -1078,7 +1078,7 @@ fn process_keyed_pivot_work_item(
     let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
     let co_sibs = collect_pivot_co_siblings(schemas, child_indices, &sub_pivot_name, obj_map, arr_map);
     reparent_and_update_routes(schemas, parent_idx, child_indices, &sub_pivot_name);
-    eprintln!("  KeyedPivot post-pass: {} ({} orphan tables → sub-pivot {})", parent_name, child_indices.len(), sub_pivot_name);
+    eprintln!("  SiblingCollapse post-pass: {} ({} orphan tables → sub-pivot {})", parent_name, child_indices.len(), sub_pivot_name);
     Some((build_sub_pivot_schema(sub_pivot_name, parent_name, sub_path, parent_depth, cols, sibling_schema), co_sibs))
 }
 
@@ -1132,7 +1132,7 @@ fn collect_pivot_co_siblings(
     result
 }
 
-/// Collect (`parent_idx`, `sorted_child_indices`) for `KeyedPivot` parents with enough Columns children.
+/// Collect (`parent_idx`, `sorted_child_indices`) for `SiblingCollapse` parents with enough Columns children.
 ///
 /// Only children registered in `child_routes` are considered — this excludes original absorbed
 /// siblings (still in `schemas` at this point) from diluting the Jaccard score.
@@ -1145,7 +1145,7 @@ fn collect_keyed_pivot_work_items(
         .iter()
         .enumerate()
         .filter_map(|(parent_idx, s)| {
-            if !matches!(s.inferred_strategy, InferredStrategy::KeyedPivot(_)) {
+            if !matches!(s.inferred_strategy, InferredStrategy::SiblingCollapse(_)) {
                 return None;
             }
             let routed: std::collections::HashSet<&str> =
@@ -1165,7 +1165,7 @@ fn collect_keyed_pivot_work_items(
         .collect()
 }
 
-/// Build the column list for a sub-pivot `KeyedPivot` table.
+/// Build the column list for a sub-pivot `SiblingCollapse` table.
 fn build_sub_pivot_columns(
     fk_col: &str,
     key_col_name: &str,
@@ -1472,7 +1472,7 @@ mod tests {
         assert_eq!(schema.name, "p_pivot");
         assert_eq!(schema.parent_table.as_deref(), Some("p"));
         assert_eq!(schema.depth, 2);
-        assert!(matches!(schema.inferred_strategy, InferredStrategy::KeyedPivot(_)));
+        assert!(matches!(schema.inferred_strategy, InferredStrategy::SiblingCollapse(_)));
     }
 
     #[test]
@@ -1847,7 +1847,7 @@ mod tests {
         use crate::schema::table_schema::{KeyShape, SiblingSchema};
         let synthetic = {
             let mut t = make_parent("pivot");
-            t.inferred_strategy = InferredStrategy::KeyedPivot(SiblingSchema {
+            t.inferred_strategy = InferredStrategy::SiblingCollapse(SiblingSchema {
                 key_col_name: "key".to_string(),
                 key_shape: KeyShape::Slug,
                 array_children: false,
@@ -1895,7 +1895,7 @@ mod tests {
         use crate::schema::table_schema::{KeyShape, SiblingSchema};
         let make_pivot = |name: &str| {
             let mut t = make_parent(name);
-            t.inferred_strategy = InferredStrategy::KeyedPivot(SiblingSchema {
+            t.inferred_strategy = InferredStrategy::SiblingCollapse(SiblingSchema {
                 key_col_name: "key".to_string(),
                 key_shape: KeyShape::Slug,
                 array_children: false,

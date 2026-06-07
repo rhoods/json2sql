@@ -148,7 +148,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 100, value_name = "N")]
     pub wide_column_threshold: usize,
 
-    /// Minimum number of sibling child tables required to trigger automatic `KeyedPivot` merging.
+    /// Minimum number of sibling child tables required to trigger automatic `SiblingCollapse` merging.
     /// Sibling tables share the same parent and have similar column schemas (see --sibling-jaccard).
     /// Set to 0 to disable automatic sibling detection.
     #[arg(long, default_value_t = 2, value_name = "N")]
