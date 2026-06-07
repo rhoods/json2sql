@@ -125,73 +125,194 @@ pub enum InferredStrategy {
     ///
     /// Trigger: fewer than `wide_column_threshold` distinct keys observed across all rows.
     ///
-    /// JSON: `{ "name": "Alice", "age": 30 }` in table `users`
-    /// → `users(name TEXT, age INTEGER)` — one row per JSON object.
+    /// JSON input:
+    /// `[{"name":"Alice","age":30}, {"name":"Bob","age":25}]`
+    ///
+    /// DDL:
+    /// ```text
+    /// CREATE TABLE users (
+    ///     j2s_id  BIGINT PRIMARY KEY,
+    ///     name    TEXT,
+    ///     age     INTEGER
+    /// );
+    /// -- 2 rows: ("Alice",30), ("Bob",25)
+    /// ```
     #[default]
     Columns,
 
-    /// EAV pivot: one row per key-value pair — columns: `(key TEXT, value <type>)`.
+    /// EAV pivot: rotates dynamic keys into rows — `(key TEXT, value <type>)` instead of one column per key.
     ///
-    /// Trigger: many dynamic keys, all values share a compatible `PostgreSQL` type
-    /// (e.g. a nutrient map where every value is a FLOAT).
+    /// Trigger: more than `wide_column_threshold` distinct keys (default **100**, CLI flag
+    /// `--wide-column-threshold`), all values share a compatible PostgreSQL type (detected by
+    /// `suggest_wide_strategy`: if values mix TEXT + FLOAT + BOOL → `Jsonb` instead).
     ///
-    /// JSON: `{ "nutrients": { "energy": 250, "fat": 12, "salt": 0.3 } }`
-    /// → `products_nutrients(j2s_parent_id, key TEXT, value FLOAT)`
-    /// → rows: `("energy", 250)`, `("fat", 12)`, `("salt", 0.3)`.
+    /// JSON input (3 products, each with the same nutrient keys):
+    /// `[{"name":"Nutella","nutrients":{"energy":250,"fat":12,"salt":0.3}}, ...]`
+    ///
+    /// Without pivot, Pass 1 would produce one column per nutrient key (hundreds for real datasets).
+    /// With Pivot, the columns are rotated into rows:
+    ///
+    /// ```text
+    /// CREATE TABLE products_nutrients (
+    ///     j2s_parent_id  BIGINT,          -- FK to products.j2s_id
+    ///     key            TEXT NOT NULL,   -- the nutrient key ("energy", "fat", …)
+    ///     value          DOUBLE PRECISION -- the nutrient value
+    /// );
+    /// -- 3 rows per product (one per nutrient key):
+    /// -- ("energy",250), ("fat",12), ("salt",0.3)
+    /// ```
     Pivot,
 
-    /// Store the entire object as a single JSONB column.
+    /// Store the entire object as a single `JSONB` column.
     ///
-    /// Trigger: values are heterogeneous (mixed types) or structure varies too much for EAV.
+    /// Trigger (two independent paths):
+    /// - Wide table (> `wide_column_threshold`, default **100**) with heterogeneous value types
+    ///   (e.g. INTEGER + TEXT + BOOL in the same object) → `Pivot` is not possible.
+    /// - Any table exceeding the PostgreSQL hard limit of **1600** total columns after `finalize()`
+    ///   → forced by `apply_column_limit_guard` regardless of the wide threshold.
     ///
-    /// JSON: `{ "meta": { "v": 2, "tags": ["a","b"], "active": true } }`
-    /// → `products_meta(j2s_parent_id, meta JSONB)`
-    /// → one row: `('{"v":2,"tags":["a","b"],"active":true}')`.
+    /// JSON input:
+    /// `[{"name":"Nutella","meta":{"v":2,"tags":["a","b"],"active":true}}, ...]`
+    ///
+    /// DDL:
+    /// ```text
+    /// CREATE TABLE products_meta (
+    ///     j2s_parent_id  BIGINT,  -- FK to products.j2s_id
+    ///     data           JSONB    -- the whole object stored as-is
+    /// );
+    /// -- 1 row per product: ('{"v":2,"tags":["a","b"],"active":true}')
+    /// ```
     Jsonb,
 
-    /// Structured pivot: keys share a common prefix; their suffixes become typed columns.
+    /// Structured pivot: keys share a `{base}_{suffix}` pattern; suffixes become typed columns.
     ///
-    /// Trigger: suffix detector finds ≥ N keys following a `{base}` / `{base}_{suffix}` pattern
-    /// (e.g. `energy`, `energy_100g`, `energy_unit`).
+    /// Trigger: more than `wide_column_threshold` distinct keys (default **100**) AND at least
+    /// `SUFFIX_MIN_COVERAGE` (30%) of those keys follow a `{base}` / `{base}_{suffix}` pattern
+    /// (e.g. `energy`, `energy_100g`, `energy_unit`). One row per base group.
     ///
-    /// JSON: `{ "energy": 250, "energy_100g": 1046, "energy_unit": "kcal",
-    ///          "fat": 12,     "fat_100g": 50,       "fat_unit": "g" }`
-    /// → `nutrients(j2s_parent_id, j2s_key TEXT, value INTEGER, per_100g FLOAT, unit TEXT)`
-    /// → rows: `("energy", 250, 1046, "kcal")`, `("fat", 12, 50, "g")`.
+    /// JSON input (flat object with prefixed keys):
+    /// ```text
+    /// { "energy":250, "energy_100g":1046, "energy_unit":"kcal",
+    ///   "fat":12,     "fat_100g":50,      "fat_unit":"g" }
+    /// ```
+    ///
+    /// DDL — one column per detected suffix, one row per base:
+    /// ```text
+    /// CREATE TABLE products_nutrients (
+    ///     j2s_parent_id  BIGINT,
+    ///     j2s_key        TEXT NOT NULL,    -- the base name ("energy", "fat")
+    ///     value          INTEGER,          -- bare key value
+    ///     per_100g       DOUBLE PRECISION, -- "_100g" suffix
+    ///     unit           TEXT              -- "_unit" suffix
+    /// );
+    /// -- 2 rows: ("energy",250,1046,"kcal"), ("fat",12,50,"g")
+    /// ```
     StructuredPivot(SuffixSchema),
 
-    /// Sibling collapse: N structurally similar child tables are merged into one canonical table.
+    /// Sibling collapse: N child tables with the same schema merged into one, with a key column
+    /// identifying the origin. The original data columns are **preserved** (not rotated into EAV).
     ///
-    /// Trigger: ≥ `sibling_threshold` child tables whose column sets have pairwise Jaccard
-    /// similarity ≥ `min_jaccard`. The original sibling tables are removed from the schema.
+    /// Trigger: ≥ `sibling_threshold` child tables under the same parent whose column sets have
+    /// pairwise Jaccard similarity ≥ `min_jaccard`. The sibling tables disappear from the schema.
     ///
-    /// JSON: `{ "images": { "front": {"url":"a.jpg","w":100}, "back": {"url":"b.jpg","w":80} } }`
-    /// → `images(j2s_parent_id, key_id TEXT, url TEXT, w INTEGER)`
-    /// → rows: `("front","a.jpg",100)`, `("back","b.jpg",80)`.
+    /// JSON input — N objects under the same parent key, same fields:
+    /// ```text
+    /// { "images": {
+    ///     "front": {"url":"a.jpg","w":100,"h":50},
+    ///     "back":  {"url":"b.jpg","w":80, "h":40},
+    ///     "top":   {"url":"c.jpg","w":90        }
+    /// } }
+    /// ```
+    /// Pass 1 creates 3 sibling tables: `images_front`, `images_back`, `images_top`.
+    /// KeyedPivot merges them — columns are the **union** of all siblings, missing fields → NULL:
+    ///
+    /// ```text
+    /// CREATE TABLE images (
+    ///     j2s_parent_id  BIGINT,
+    ///     key_id         TEXT NOT NULL, -- "front" | "back" | "top"
+    ///     url            TEXT,
+    ///     w              INTEGER,
+    ///     h              INTEGER        -- NULL for "top" (field absent in that sibling)
+    /// );
+    /// -- 3 rows: ("front","a.jpg",100,50), ("back","b.jpg",80,40), ("top","c.jpg",90,NULL)
+    /// ```
     KeyedPivot(SiblingSchema),
 
-    /// Multi-group sibling collapse: siblings have two distinct key shapes (numeric + text).
+    /// Multi-group sibling collapse: like `KeyedPivot` but the sibling keys mix integers and slugs,
+    /// so two synthetic tables are produced — one per key shape. The parent becomes a routing table
+    /// (no rows, only `j2s_id`).
     ///
-    /// Trigger: same conditions as `KeyedPivot` but the key suffixes are a mix of integers
-    /// ("1","2") and slugs ("front","back"). Each shape group produces its own synthetic pivot
-    /// table; the parent itself becomes a pure routing table (no rows emitted in Pass 2).
+    /// Trigger: same Jaccard conditions as `KeyedPivot`, but `classify_key_shape` detects both
+    /// numeric keys ("1","2") and slug keys ("front","back") in the same sibling group.
     ///
-    /// JSON: `{ "media": { "1": {"url":"a"}, "2": {"url":"b"}, "front": {"url":"c"} } }`
-    /// → `media_num(parent_fk, key_id INTEGER, url TEXT)` — rows: `(1,"a")`, `(2,"b")`
-    /// → `media_txt(parent_fk, key_id TEXT, url TEXT)` — row: `("front","c")`.
+    /// JSON input — same parent key, mixed numeric + text child keys:
+    /// ```text
+    /// { "media": {
+    ///     "1":     {"url":"a.jpg","size":1200},
+    ///     "2":     {"url":"b.jpg","size":800 },
+    ///     "front": {"url":"c.jpg","size":950 }
+    /// } }
+    /// ```
+    /// Pass 1 creates 3 siblings. MultiKeyedPivot splits them into 2 synthetic tables:
+    ///
+    /// ```text
+    /// -- Parent: routing only, no data rows
+    /// CREATE TABLE media (j2s_id BIGINT PRIMARY KEY);
+    ///
+    /// -- Numeric group
+    /// CREATE TABLE media_key_num (
+    ///     j2s_parent_id  BIGINT,
+    ///     key_id         INTEGER NOT NULL, -- 1, 2
+    ///     url            TEXT,
+    ///     size           INTEGER
+    /// );
+    /// -- 2 rows: (1,"a.jpg",1200), (2,"b.jpg",800)
+    ///
+    /// -- Text group
+    /// CREATE TABLE media_key_txt (
+    ///     j2s_parent_id  BIGINT,
+    ///     key_id         TEXT NOT NULL,   -- "front"
+    ///     url            TEXT,
+    ///     size           INTEGER
+    /// );
+    /// -- 1 row: ("front","c.jpg",950)
+    /// ```
     MultiKeyedPivot(Vec<SiblingGroup>),
 
-    /// Root table split: bi-modal key frequency → main table + `{name}_wide` EAV companion.
+    /// Root table split: bi-modal key frequency → main table (stable columns) + `{name}_wide`
+    /// EAV companion (medium-frequency keys). Rare keys are dropped entirely.
     ///
-    /// Trigger: root table with many keys exhibiting a clear stable/rare frequency split.
-    /// - Keys with frequency ≥ `stable_threshold` → columns on the main table.
-    /// - Keys with `rare_threshold` ≤ freq < `stable_threshold` → EAV rows in `{name}_wide`.
-    /// - Keys with frequency < `rare_threshold` → dropped entirely.
+    /// Trigger: root table (no parent) with > `wide_column_threshold` distinct keys (default
+    /// **100**) AND object children, where key frequencies form two clusters: many always-present
+    /// keys + many rarely-present keys.
+    /// - freq ≥ `stable_threshold`                        → regular column on main table
+    /// - `rare_threshold` ≤ freq < `stable_threshold`    → EAV row in `{name}_wide`
+    /// - freq < `rare_threshold`                          → dropped (anomaly report)
     ///
-    /// JSON (over 1000 rows; "name" always present, "desc" in 60%, "extra" in 0.5%):
-    /// → `products(j2s_id UUID, name TEXT, desc TEXT)` — stable + medium keys
-    /// → `products_wide(j2s_anchor UUID, key TEXT, value TEXT)` — medium-freq keys as EAV
-    /// (key "extra" silently dropped — below `rare_threshold`).
+    /// JSON input (1000 products; "name" in 100% rows, "desc" in 60%, "promo_code" in 0.3%):
+    /// ```text
+    /// {"name":"Nutella","desc":"Chocolate spread","promo_code":"SAVE10", ...}
+    /// {"name":"Oreo",   "desc":"Cookies",                               ...}
+    /// ...
+    /// ```
+    ///
+    /// DDL — two tables produced:
+    /// ```text
+    /// -- Main table: stable keys become regular columns
+    /// CREATE TABLE products (
+    ///     j2s_id  UUID PRIMARY KEY,
+    ///     name    TEXT,   -- 100% frequency → stable column
+    ///     desc    TEXT    -- 60% frequency  → stable column (above stable_threshold)
+    /// );
+    ///
+    /// -- Companion: medium-frequency keys stored as EAV rows
+    /// CREATE TABLE products_wide (
+    ///     j2s_anchor  UUID,        -- FK to products.j2s_id
+    ///     key         TEXT NOT NULL,
+    ///     value       TEXT
+    /// );
+    /// -- "promo_code" dropped: 0.3% < rare_threshold → anomaly report only
+    /// ```
     AutoSplit {
         stable_threshold: f64,
         rare_threshold: f64,
@@ -205,16 +326,35 @@ pub enum InferredStrategy {
     ///
     /// Applied during `finalize()` before column building. No table or column is produced.
     /// The dropped key is recorded in the anomaly report so the user knows data was omitted.
+    /// Also used internally to mark sibling tables absorbed by `KeyedPivot`/`MultiKeyedPivot`.
+    ///
+    /// No DDL produced — the table or key is silently omitted from the schema.
     Ignore,
 
-    /// Normalize dynamic keys: each JSON key in the object becomes a row.
+    /// Normalize dynamic keys: each JSON key in the object becomes a row, with the key stored
+    /// as a typed ID column. Child object fields become regular columns (union across all keys).
     ///
-    /// Applied manually via the IHM (not auto-inferred). The key itself is stored as a typed
-    /// ID column; the remaining fields become regular columns (union across all keys).
+    /// Applied manually via the IHM (not auto-inferred). Similar to `KeyedPivot` but triggered
+    /// by the user, not by sibling detection.
     ///
-    /// JSON: `{ "images": { "12584": {"url":"a.jpg","w":100}, "99001": {"url":"b.jpg","w":80} } }`
-    /// → `images(j2s_parent_id, image_id TEXT, url TEXT, w INTEGER)`
-    /// → rows: `("12584","a.jpg",100)`, `("99001","b.jpg",80)`.
+    /// JSON input — arbitrary numeric IDs as keys, each with the same nested fields:
+    /// ```text
+    /// { "images": {
+    ///     "12584": {"url":"a.jpg","w":100},
+    ///     "99001": {"url":"b.jpg","w":80 }
+    /// } }
+    /// ```
+    ///
+    /// DDL — child tables collapsed into the parent, ID becomes a column:
+    /// ```text
+    /// CREATE TABLE images (
+    ///     j2s_parent_id  BIGINT,
+    ///     image_id       TEXT NOT NULL, -- the original JSON key ("12584", "99001")
+    ///     url            TEXT,
+    ///     w              INTEGER
+    /// );
+    /// -- 2 rows: ("12584","a.jpg",100), ("99001","b.jpg",80)
+    /// ```
     NormalizeDynamicKeys {
         /// Name of the column that will hold the original JSON key (e.g. `"image_id"`).
         id_column: String,
@@ -223,11 +363,21 @@ pub enum InferredStrategy {
     /// Flatten nested object: inlines the child's scalar fields as columns in the parent table.
     ///
     /// Applied manually via the IHM. The child table is removed from the schema.
-    /// Each inlined column is prefixed with `prefix` (e.g. `"nutrients_"`).
+    /// Each inlined column is prefixed with `prefix` to avoid name collisions.
     ///
-    /// JSON: `{ "name": "X", "nutrients": { "calories": 250, "fat": 12 } }`
-    /// → `product(name TEXT, nutrients_calories INTEGER, nutrients_fat INTEGER)`
-    /// (child table `product_nutrients` removed).
+    /// JSON input — nested object whose fields should land directly on the parent:
+    /// `[{"name":"Nutella","nutrients":{"calories":250,"fat":12}}, ...]`
+    ///
+    /// DDL — child table `product_nutrients` is removed, its columns appear on `products`:
+    /// ```text
+    /// CREATE TABLE products (
+    ///     j2s_id              BIGINT PRIMARY KEY,
+    ///     name                TEXT,
+    ///     nutrients_calories  INTEGER, -- prefix "nutrients_" + field "calories"
+    ///     nutrients_fat       INTEGER  -- prefix "nutrients_" + field "fat"
+    /// );
+    /// -- 1 row: ("Nutella",250,12)
+    /// ```
     Flatten {
         /// Prefix prepended to inlined column names (e.g. `"nutrients_"`).
         prefix: String,
@@ -235,14 +385,23 @@ pub enum InferredStrategy {
         max_depth: u8,
     },
 
-    /// Store the child object or array as a JSONB column directly on the parent table.
+    /// Store the child object or array as a `JSONB` column directly on the parent table.
     ///
     /// Applied manually via the IHM. The child table is removed from the schema.
-    /// One-to-one child → single JSONB object; one-to-many → JSONB array.
+    /// One-to-one child → single JSONB object; one-to-many child → JSONB array.
     ///
-    /// JSON: `{ "name": "X", "tags": ["a", "b", "c"] }`
-    /// → `product(name TEXT, tags JSONB)` — value stored as `'["a","b","c"]'`
-    /// (child table `product_tags` removed).
+    /// JSON input — child array that should stay inline rather than become a separate table:
+    /// `[{"name":"Nutella","tags":["chocolate","spread","jar"]}, ...]`
+    ///
+    /// DDL — child table `products_tags` is removed, the array lands as a JSONB column:
+    /// ```text
+    /// CREATE TABLE products (
+    ///     j2s_id  BIGINT PRIMARY KEY,
+    ///     name    TEXT,
+    ///     tags    JSONB   -- stored as '["chocolate","spread","jar"]'
+    /// );
+    /// -- 1 row: ("Nutella",'["chocolate","spread","jar"]')
+    /// ```
     JsonbFlatten,
 }
 
