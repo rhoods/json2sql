@@ -697,7 +697,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                                         crate::config::try_save(&state.read().project);
                                                     },
                                                 }
-                                                span { "Sibling detection " }
+                                                span { "Sibling collapse " }
                                                 span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(sibling)" }
                                             }
                                         }
