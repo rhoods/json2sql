@@ -125,6 +125,21 @@ impl WorkerConfig {
     }
 }
 
+/// Attempt to disable synchronous commit for faster bulk-load. Non-fatal if the server
+/// denies the privilege (RDS, Supabase, restricted PG) — any other error is propagated.
+async fn try_set_synchronous_commit_off(conn: &Client) -> Result<()> {
+    match conn.execute("SET synchronous_commit = off", &[]).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.as_db_error().is_some_and(|db| {
+            db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE
+        }) => {
+            eprintln!("WARNING: SET synchronous_commit = off not permitted — continuing without it");
+            Ok(())
+        }
+        Err(e) => Err(J2sError::Db(e)),
+    }
+}
+
 /// When the worker budget is reached: snapshot large sinks → interim COPY task,
 /// spill small sinks to disk. Called from within the worker loop.
 #[allow(clippy::too_many_lines)] // per-sink decision + spawn tightly coupled around sink_arc
@@ -132,14 +147,15 @@ fn trigger_budget_flush(
     sinks: &HashMap<String, Arc<Mutex<TempFileSink>>>,
     copy_handles: &mut Vec<InterimCopyHandle>,
     cfg: &WorkerConfig,
-) {
+) -> Result<()> {
     for (table_name, sink_arc) in sinks {
         let snap = {
             let mut s = sink_arc.lock().expect("sink mutex is not poisoned");
+            if s.bytes_buffered == 0 && s.row_count == 0 { continue; }
             if s.bytes_buffered >= cfg.interim_copy_threshold {
                 s.take_flush_snapshot()
             } else {
-                let _ = s.force_spill();
+                s.force_spill()?;
                 None
             }
         };
@@ -152,8 +168,7 @@ fn trigger_budget_flush(
             copy_handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
                 let conn = crate::db::connection::connect(&url).await?;
-                conn.execute("SET synchronous_commit = off", &[]).await
-                    .map_err(crate::error::J2sError::Db)?;
+                try_set_synchronous_commit_off(&conn).await?;
                 let rows = copy_snapshot_to_pg(snap, &conn).await?;
                 sink_arc2.lock().expect("sink mutex is not poisoned").apply_flush(rows);
                 if rows > 0 {
@@ -168,6 +183,7 @@ fn trigger_budget_flush(
             }));
         }
     }
+    Ok(())
 }
 
 /// Process one worker's stream of JSON byte chunks: parse, insert into sinks,
@@ -200,7 +216,7 @@ fn process_worker_item(
     *my_bytes += obj_len;
     if *my_bytes >= cfg.worker_budget {
         *my_bytes = 0;
-        trigger_budget_flush(sinks, copy_handles, cfg);
+        trigger_budget_flush(sinks, copy_handles, cfg)?;
     }
     Ok(())
 }
@@ -234,16 +250,30 @@ async fn run_worker(
 
 fn unwrap_and_sort_sinks(
     shared_sinks: HashMap<String, Arc<Mutex<TempFileSink>>>,
-) -> Vec<(String, TempFileSink)> {
+) -> Result<Vec<(String, TempFileSink)>> {
     let mut sinks: Vec<(String, TempFileSink)> = shared_sinks
         .into_iter()
-        .filter_map(|(name, arc)| {
-            let sink = Arc::try_unwrap(arc).ok()?.into_inner().ok()?;
-            if sink.row_count > 0 || sink.total_flushed > 0 { Some((name, sink)) } else { None }
+        .map(|(name, arc)| -> Result<Option<(String, TempFileSink)>> {
+            let mutex = Arc::try_unwrap(arc).map_err(|_| {
+                J2sError::InvalidInput(format!(
+                    "sink '{name}' still has multiple owners — possible data loss"
+                ))
+            })?;
+            let sink = mutex.into_inner().map_err(|_| {
+                J2sError::InvalidInput(format!("sink '{name}' mutex is poisoned"))
+            })?;
+            if sink.row_count > 0 || sink.total_flushed > 0 {
+                Ok(Some((name, sink)))
+            } else {
+                Ok(None)
+            }
         })
+        .collect::<Result<Vec<Option<_>>>>()?
+        .into_iter()
+        .flatten()
         .collect();
     sinks.sort_by(|a, b| a.0.cmp(&b.0));
-    sinks
+    Ok(sinks)
 }
 
 async fn collect_copy_results(
@@ -273,8 +303,7 @@ async fn collect_copy_results(
 async fn copy_batch(batch: Vec<(String, Vec<TempFileSink>)>, url: String, ptx: Option<ProgressTx>) -> Result<Vec<(String, u64)>> {
     use crate::db::connection::connect;
     let conn = connect(&url).await?;
-    conn.execute("SET synchronous_commit = off", &[]).await
-        .map_err(crate::error::J2sError::Db)?;
+    try_set_synchronous_commit_off(&conn).await?;
     let mut results = Vec::new();
     for (table_name, sinks) in batch {
         let rows = merge_copy_to_db(sinks, &conn).await?;
@@ -293,7 +322,7 @@ async fn phase_copy(
     progress_tx: Option<&ProgressTx>,
     interim_rows: HashMap<String, u64>,
 ) -> Result<HashMap<String, u64>> {
-    let all_sinks = unwrap_and_sort_sinks(shared_sinks);
+    let all_sinks = unwrap_and_sort_sinks(shared_sinks)?;
 
     let mut table_batches: Vec<Vec<(String, Vec<TempFileSink>)>> =
         (0..parallel).map(|_| Vec::new()).collect();
@@ -481,10 +510,6 @@ async fn join_phase_a(
         Ok(Err(e)) => return Err(e),
         Err(e) => return Err(J2sError::InvalidInput(format!("anomaly writer task panicked: {e}"))),
     };
-    if let Some(err) = first_error { return Err(err); }
-    if worker_died {
-        return Err(J2sError::InvalidInput("worker channel closed unexpectedly".into()));
-    }
     let mut interim_rows: HashMap<String, u64> = HashMap::new();
     for handle in all_copy_handles {
         match handle.await {
@@ -496,6 +521,9 @@ async fn join_phase_a(
         }
     }
     if let Some(err) = first_error { return Err(err); }
+    if worker_died {
+        return Err(J2sError::InvalidInput("worker channel closed unexpectedly".into()));
+    }
     Ok((merged_anomalies, interim_rows))
 }
 
@@ -816,6 +844,99 @@ mod tests {
         let mut bytes = b"{broken".to_vec();
         let result = super::parse_json_object(&mut bytes);
         assert!(result.is_err(), "invalid JSON must be an error");
+    }
+
+    #[tokio::test]
+    async fn join_phase_a_awaits_copy_handles_before_returning_worker_error() {
+        use crate::anomaly::collector::{AnomalyCollector, AnomalyEvent};
+        use crate::error::J2sError;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag2 = Arc::clone(&flag);
+
+        // Copy handle: sleeps 50 ms then sets the flag — proves it was awaited.
+        let copy_handle: super::InterimCopyHandle = tokio::task::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            flag2.store(true, Ordering::SeqCst);
+            Ok::<(String, u64), J2sError>(("t".to_string(), 0u64))
+        });
+
+        // Worker 1: succeeds and hands over the copy handle.
+        let worker1: super::WorkerHandle = tokio::task::spawn(async move {
+            Ok::<Vec<super::InterimCopyHandle>, J2sError>(vec![copy_handle])
+        });
+
+        // Worker 2: returns an error → sets first_error in join_phase_a.
+        let worker2: super::WorkerHandle = tokio::task::spawn(async {
+            Err::<Vec<super::InterimCopyHandle>, J2sError>(
+                J2sError::InvalidInput("worker failed".into()),
+            )
+        });
+
+        let (anomaly_tx, anomaly_rx) =
+            tokio::sync::mpsc::unbounded_channel::<AnomalyEvent>();
+        let anomaly_writer = tokio::task::spawn_blocking(move || {
+            let mut rx = anomaly_rx;
+            let collector = AnomalyCollector::new(None);
+            while rx.blocking_recv().is_some() {}
+            Ok::<AnomalyCollector, J2sError>(collector)
+        });
+
+        let result = super::join_phase_a(
+            vec![worker1, worker2],
+            anomaly_tx,
+            anomaly_writer,
+            false,
+        )
+        .await;
+
+        assert!(result.is_err(), "must propagate worker error");
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "copy handle must be awaited to completion before returning Err"
+        );
+    }
+
+    #[test]
+    fn unwrap_and_sort_sinks_shared_arc_is_error() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        let schema = crate::schema::table_schema::TableSchema::new(
+            "t".to_string(), vec!["t".to_string()], 0,
+        );
+        let sink = TempFileSink::new(&schema, "public", None);
+        let arc = Arc::new(Mutex::new(sink));
+        let _clone = Arc::clone(&arc); // strong count = 2 → must fail
+        let mut map: HashMap<String, Arc<Mutex<TempFileSink>>> = HashMap::new();
+        map.insert("t".to_string(), arc);
+        assert!(super::unwrap_and_sort_sinks(map).is_err());
+    }
+
+    #[test]
+    fn unwrap_and_sort_sinks_single_owner_succeeds() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        let mut schema = crate::schema::table_schema::TableSchema::new(
+            "t".to_string(), vec!["t".to_string()], 0,
+        );
+        schema.columns.push(ColumnSchema {
+            name: "col".to_string(),
+            original_name: "col".to_string(),
+            pg_type: PgType::Text,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
+        });
+        let mut sink = TempFileSink::new(&schema, "public", None);
+        sink.row_count = 1;
+        let arc = Arc::new(Mutex::new(sink));
+        let mut map: HashMap<String, Arc<Mutex<TempFileSink>>> = HashMap::new();
+        map.insert("t".to_string(), arc);
+        let result = super::unwrap_and_sort_sinks(map);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
     }
 
 }

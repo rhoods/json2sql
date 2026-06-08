@@ -162,7 +162,7 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
     let parent_path_key = schema.path.join(&PATH_SEP.to_string());
     let mut builder = RowBuilder::new();
     builder.push_uuid(row_id); // j2s_id (no j2s_parent_id for root)
-    let json_str = serde_json::to_string(&Value::Object(obj.clone())).unwrap_or_default();
+    let json_str = serde_json::to_string(obj).unwrap_or_default();
     match escape_copy_text(&json_str) {
         Some(escaped) => builder.push_value(&escaped),
         None => builder.push_null(), // null byte in JSON — treat as NULL
@@ -324,4 +324,81 @@ fn recurse_children<S: RowSink, A: AnomalyCollect>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use serde_json::Value;
+    use uuid::Uuid;
+    use crate::anomaly::collector::AnomalyCollector;
+    use crate::error::Result;
+    use crate::pass2::sink::RowSink;
+    use crate::schema::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
+    use crate::schema::type_tracker::PgType;
+    use super::{insert_object, InsertCtx};
+
+    struct CaptureSink(Vec<Vec<u8>>);
+    impl RowSink for CaptureSink {
+        fn write_row(&mut self, row: &[u8]) -> Result<()> {
+            self.0.push(row.to_vec());
+            Ok(())
+        }
+    }
+
+    fn make_jsonb_root_schema() -> TableSchema {
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        schema.inferred_strategy = InferredStrategy::Jsonb;
+        schema.columns.push(ColumnSchema {
+            name: "j2s_id".to_string(),
+            original_name: "j2s_id".to_string(),
+            pg_type: PgType::Uuid,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: false,
+        });
+        schema.columns.push(ColumnSchema {
+            name: "data".to_string(),
+            original_name: "data".to_string(),
+            pg_type: PgType::Jsonb,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
+        });
+        schema
+    }
+
+    /// write_root_jsonb must serialize the full object as valid JSONB.
+    /// Guards against regressions on the no-clone serialization path.
+    #[test]
+    fn write_root_jsonb_produces_valid_json_blob() {
+        let schema = make_jsonb_root_schema();
+        let path_map: HashMap<String, TableSchema> = HashMap::new();
+        let mut anomalies = AnomalyCollector::new(None);
+        let mut sinks: HashMap<String, CaptureSink> = HashMap::new();
+        sinks.insert("t".to_string(), CaptureSink(Vec::new()));
+
+        let obj: serde_json::Map<String, Value> =
+            serde_json::from_str(r#"{"name":"Widget","count":3}"#).unwrap();
+
+        insert_object(
+            &path_map,
+            &mut InsertCtx { sinks: &mut sinks, anomalies: &mut anomalies },
+            &schema,
+            &obj,
+            Uuid::nil(),
+            None,
+            None,
+        ).unwrap();
+
+        let rows = &sinks["t"].0;
+        assert_eq!(rows.len(), 1);
+
+        // Row format: uuid\tJSON\n — extract the JSONB column
+        let row = std::str::from_utf8(&rows[0]).unwrap();
+        let json_part = row.splitn(2, '\t').nth(1).unwrap().trim_end_matches('\n');
+        let v: Value = serde_json::from_str(json_part).expect("JSONB blob must be valid JSON");
+        assert_eq!(v["name"], "Widget");
+        assert_eq!(v["count"], 3);
+    }
 }

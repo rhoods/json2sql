@@ -22,30 +22,6 @@ use crate::db::error::pg_err;
 use crate::error::{J2sError, Result};
 use crate::schema::table_schema::TableSchema;
 
-async fn send_copy_data(
-    client: &Client,
-    copy_sql: &str,
-    table_name: &str,
-    file_data: &[u8],
-    pending: &[u8],
-) -> Result<()> {
-    let sink = client
-        .copy_in::<_, Bytes>(copy_sql)
-        .await
-        .map_err(|e| pg_err(&format!("COPY INTO {table_name}"), &e))?;
-    let mut pinned = Box::pin(sink);
-    for chunk in file_data.chunks(1024 * 1024) {
-        pinned.send(Bytes::copy_from_slice(chunk))
-            .await
-            .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
-    }
-    for chunk in pending.chunks(1024 * 1024) {
-        pinned.send(Bytes::copy_from_slice(chunk))
-            .await
-            .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
-    }
-    pinned.close().await.map_err(|e| pg_err(&format!("COPY close {table_name}"), &e))
-}
 
 /// NULL representation in `PostgreSQL` COPY text format.
 pub const COPY_NULL: &str = "\\N";
@@ -158,15 +134,18 @@ pub async fn copy_snapshot_to_pg(snap: FlushSnapshot, client: &Client) -> Result
         if let Some(ref p) = file_path { let _ = tokio::fs::remove_file(p).await; }
         return Ok(0);
     }
-    let file_data = if let Some(ref p) = file_path {
-        tokio::fs::read(p).await.map_err(J2sError::Io)?
-    } else {
-        Vec::new()
-    };
-    if let Some(ref p) = file_path { let _ = tokio::fs::remove_file(p).await; }
-    if !file_data.is_empty() || !pending.is_empty() {
-        send_copy_data(client, &copy_sql, &table_name, &file_data, &pending).await?;
+    let sink = client.copy_in::<_, Bytes>(&copy_sql).await
+        .map_err(|e| pg_err(&format!("COPY INTO {table_name}"), &e))?;
+    let mut pinned = Box::pin(sink);
+    if let Some(ref p) = file_path {
+        stream_file_chunks(p, &table_name, &mut pinned).await?;
+        let _ = tokio::fs::remove_file(p).await;
     }
+    for chunk in pending.chunks(1024 * 1024) {
+        pinned.send(Bytes::copy_from_slice(chunk)).await
+            .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
+    }
+    pinned.close().await.map_err(|e| pg_err(&format!("COPY close {table_name}"), &e))?;
     Ok(row_count)
 }
 
@@ -291,9 +270,13 @@ impl TempFileSink {
         if self.pending.is_empty() {
             return Ok(());
         }
-        let data = std::mem::take(&mut self.pending);
-        let file = self.ensure_file()?;
-        file.write_all(&data).map_err(J2sError::Io)?;
+        self.ensure_file()?;
+        // Split-borrow: self.writer (via file) and self.pending are distinct fields.
+        // pending is cleared only after a successful write to avoid data loss on I/O error.
+        if let Some(ref mut file) = self.writer {
+            file.write_all(&self.pending).map_err(J2sError::Io)?;
+        }
+        self.pending.clear();
         self.writer = None; // close FD immediately after write
         Ok(())
     }
@@ -345,86 +328,23 @@ impl TempFileSink {
         Ok(())
     }
 
-    /// Send all buffered rows to `PostgreSQL`, then reset the sink for reuse.
-    /// Data may be split between the temp file (previous spills) and `pending`
-    /// (rows accumulated since the last spill).
-    #[allow(dead_code)]
-    pub async fn flush_to_db(&mut self, client: &Client) -> Result<u64> {
-        if self.row_count == 0 {
-            return Ok(0);
-        }
+}
 
-        // Close the FD before reading (no flush needed — pending is separate).
-        self.writer = None;
-
-        // Collect on-disk data.
-        let file_data = if let Some(ref guard) = self.temp_file {
-            tokio::fs::read(&guard.0).await.map_err(J2sError::Io)?
-        } else {
-            Vec::new()
-        };
-
-        if !file_data.is_empty() || !self.pending.is_empty() {
-            send_copy_data(client, &self.copy_sql, &self.table_name, &file_data, &self.pending).await?;
-        }
-
-        // Truncate the on-disk file for reuse; clear the in-memory buffer.
-        if let Some(ref guard) = self.temp_file {
-            OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&guard.0)
-                .map_err(J2sError::Io)?;
-        }
-        self.pending.clear();
-
-        let flushed = self.row_count;
-        self.total_flushed += flushed;
-        self.row_count = 0;
-        self.bytes_buffered = 0;
-        Ok(flushed)
+/// Stream a file to an open COPY sink in 4 MiB chunks, avoiding a full in-memory load.
+async fn stream_file_chunks(
+    path: &Path,
+    table_name: &str,
+    pinned: &mut std::pin::Pin<Box<tokio_postgres::CopyInSink<Bytes>>>,
+) -> Result<()> {
+    let mut file = tokio::fs::File::open(path).await.map_err(J2sError::Io)?;
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    loop {
+        let n = file.read(&mut buf).await.map_err(J2sError::Io)?;
+        if n == 0 { break; }
+        pinned.send(Bytes::copy_from_slice(&buf[..n])).await
+            .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
     }
-
-    /// Flush all remaining rows to `PostgreSQL`.
-    /// Returns total rows sent (periodic flushes + this final call).
-    #[allow(dead_code)]
-    pub async fn copy_to_db(self, client: &Client) -> Result<u64> {
-        // Destructure — TempFileSink has no Drop; TempFilePath (in temp_file) does.
-        let Self {
-            row_count,
-            total_flushed,
-            bytes_buffered: _,
-            pending,
-            writer,
-            temp_file,
-            temp_dir: _,
-            copy_sql,
-            table_name,
-        } = self;
-
-        if row_count == 0 {
-            return Ok(total_flushed);
-        }
-
-        // Close FD if open (no flush needed — pending is the source of truth).
-        drop(writer);
-
-        // Read on-disk data (from previous spills).
-        let file_data = if let Some(ref guard) = temp_file {
-            tokio::fs::read(&guard.0).await.map_err(J2sError::Io)?
-        } else {
-            Vec::new()
-        };
-
-        // Delete the temp file before starting the COPY.
-        drop(temp_file);
-
-        if !file_data.is_empty() || !pending.is_empty() {
-            send_copy_data(client, &copy_sql, &table_name, &file_data, &pending).await?;
-        }
-
-        Ok(total_flushed + row_count)
-    }
+    Ok(())
 }
 
 /// Send all buffered rows from multiple sinks to `PostgreSQL` in a single COPY
@@ -437,18 +357,11 @@ async fn stream_sink_to_copy(
     sink: TempFileSink,
     table_name: &str,
 ) -> Result<()> {
-    let TempFileSink { row_count, total_flushed, pending, writer, temp_file, .. } = sink;
-    if row_count == 0 && total_flushed == 0 { return Ok(()); }
+    let TempFileSink { row_count, total_flushed: _, pending, writer, temp_file, .. } = sink;
+    if row_count == 0 { return Ok(()); }
     drop(writer);
     if let Some(ref guard) = temp_file {
-        let mut file = tokio::fs::File::open(&guard.0).await.map_err(J2sError::Io)?;
-        let mut buf = vec![0u8; 4 * 1024 * 1024];
-        loop {
-            let n = file.read(&mut buf).await.map_err(J2sError::Io)?;
-            if n == 0 { break; }
-            pinned.send(Bytes::copy_from_slice(&buf[..n])).await
-                .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
-        }
+        stream_file_chunks(&guard.0, table_name, pinned).await?;
     }
     drop(temp_file);
     for chunk in pending.chunks(1024 * 1024) {
@@ -459,10 +372,10 @@ async fn stream_sink_to_copy(
 }
 
 pub async fn merge_copy_to_db(sinks: Vec<TempFileSink>, client: &Client) -> Result<u64> {
-    let total_rows: u64 = sinks.iter().map(|s| s.total_flushed + s.row_count).sum();
-    if total_rows == 0 { return Ok(0); }
+    let phase_b_rows: u64 = sinks.iter().map(|s| s.row_count).sum();
+    if phase_b_rows == 0 { return Ok(0); }
     // Precondition: all sinks target the same table. Guaranteed by flush_task grouping.
-    let first = sinks.first().expect("sinks non-empty (total_rows > 0)");
+    let first = sinks.first().expect("sinks non-empty (phase_b_rows > 0)");
     debug_assert!(
         sinks.iter().all(|s| s.table_name == first.table_name),
         "merge_copy_to_db: sinks target different tables — caller must group by table_name"
@@ -476,7 +389,7 @@ pub async fn merge_copy_to_db(sinks: Vec<TempFileSink>, client: &Client) -> Resu
         stream_sink_to_copy(&mut pinned, s, &table_name).await?;
     }
     pinned.close().await.map_err(|e| pg_err(&format!("COPY close {table_name}"), &e))?;
-    Ok(total_rows)
+    Ok(phase_b_rows)
 }
 
 #[cfg(test)]
@@ -580,7 +493,8 @@ mod tests {
     // merge_copy_to_db tests (logic only — no PG connection required)
     // -------------------------------------------------------------------------
 
-    /// Total rows reported across sinks equals the sum of row_count from each.
+    /// merge_copy_to_db must return only Phase B rows (row_count), not total_flushed + row_count.
+    /// total_flushed is already tracked in interim_rows by collect_copy_results.
     #[test]
     fn merge_total_rows_sum_is_correct() {
         let mut s1 = make_sink();
@@ -590,8 +504,21 @@ mod tests {
         let mut s2 = make_sink();
         s2.write_row(b"row3\n").unwrap();
 
-        let total: u64 = [&s1, &s2].iter().map(|s| s.total_flushed + s.row_count).sum();
-        assert_eq!(total, 3);
+        let phase_b: u64 = [&s1, &s2].iter().map(|s| s.row_count).sum();
+        assert_eq!(phase_b, 3);
+    }
+
+    /// An interim-only sink (total_flushed > 0, row_count == 0) contributes 0 to Phase B.
+    #[test]
+    fn interim_sink_contributes_zero_to_phase_b() {
+        let mut sink = make_sink();
+        sink.write_row(b"row\n").unwrap();
+        let snap = sink.take_flush_snapshot().unwrap();
+        sink.apply_flush(snap.row_count);
+        assert_eq!(sink.row_count, 0, "no Phase B rows for interim-only sink");
+        assert_eq!(sink.total_flushed, 1, "Phase A row tracked separately");
+        let phase_b: u64 = sink.row_count;
+        assert_eq!(phase_b, 0);
     }
 
     /// Empty sinks (row_count == 0) must not count toward the total.
@@ -600,8 +527,8 @@ mod tests {
         let s_empty = make_sink();
         assert_eq!(s_empty.row_count, 0);
         assert_eq!(s_empty.total_flushed, 0);
-        let total: u64 = [&s_empty].iter().map(|s| s.total_flushed + s.row_count).sum();
-        assert_eq!(total, 0);
+        let phase_b: u64 = [&s_empty].iter().map(|s| s.row_count).sum();
+        assert_eq!(phase_b, 0);
     }
 
     /// Pending bytes from multiple sinks must be individually accessible
@@ -710,6 +637,26 @@ mod tests {
         // force_spill must fail: FD is closed, file is gone → OpenOptions::open → NotFound.
         let result = sink.force_spill();
         assert!(result.is_err(), "force_spill must propagate IO error when temp file is deleted");
+    }
+
+    /// After a failed force_spill, `pending` must still contain the original data.
+    /// Data must never be discarded before the write succeeds.
+    #[test]
+    fn spill_pending_preserved_on_io_error() {
+        let mut sink = make_sink();
+        sink.write_row(b"row\n").unwrap();
+        sink.force_spill().unwrap();
+        sink.hibernate();
+
+        let path = sink.temp_file.as_ref().unwrap().0.clone();
+        std::fs::remove_file(&path).unwrap();
+
+        sink.write_row(b"row2\n").unwrap();
+        assert_eq!(&sink.pending, b"row2\n", "pending must contain row2 before failed spill");
+
+        let result = sink.force_spill();
+        assert!(result.is_err(), "force_spill must propagate IO error");
+        assert_eq!(&sink.pending, b"row2\n", "pending must be preserved after failed spill");
     }
 
     /// Chunked read of a file larger than 4 MiB must accumulate all bytes without
@@ -840,5 +787,33 @@ mod tests {
     fn take_flush_snapshot_on_empty_sink_is_none() {
         let mut sink = make_sink();
         assert!(sink.take_flush_snapshot().is_none());
+    }
+
+    /// An interim-only sink (all rows already sent via Phase A) has row_count == 0.
+    /// stream_sink_to_copy must skip it to avoid opening an empty COPY session.
+    #[test]
+    fn interim_only_sink_has_zero_row_count() {
+        let mut sink = make_sink();
+        sink.write_row(b"row\n").unwrap();
+        let snap = sink.take_flush_snapshot().unwrap();
+        sink.apply_flush(snap.row_count);
+        assert_eq!(sink.row_count, 0, "no rows to write in Phase B");
+        assert!(sink.total_flushed > 0, "rows already counted from Phase A");
+    }
+
+    /// After take_flush_snapshot, both guard fields are zero — the sink is skippable.
+    /// Guards trigger_budget_flush's skip condition: bytes_buffered == 0 && row_count == 0.
+    #[test]
+    fn sink_after_snapshot_satisfies_empty_guard() {
+        let mut sink = make_sink();
+        sink.write_row(b"row\n").unwrap();
+        assert!(sink.take_flush_snapshot().is_some());
+
+        assert_eq!(sink.bytes_buffered, 0, "bytes_buffered must be zero after snapshot");
+        assert_eq!(sink.row_count, 0, "row_count must be zero after snapshot");
+
+        // force_spill on this sink must be a no-op (no temp file created).
+        sink.force_spill().unwrap();
+        assert!(sink.temp_file.is_none(), "no temp file must exist for a post-snapshot empty sink");
     }
 }
