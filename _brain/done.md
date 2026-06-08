@@ -8,6 +8,18 @@ Description courte de ce qui a été fait.
 
 Ajouter toujours EN HAUT du fichier. -->
 
+## 2026-06-08 — Table name trimming par suppression de segments gauches
+
+Remplace le hash immédiat par suppression progressive des segments de gauche quand un nom de table dépasse `PG_TABLE_MAX_IDENT` (53 chars).
+
+**Algorithme** : Phase 1 — supprime les segments de gauche un à un jusqu'à ce que le nom tienne. Phase 2 — fallback hash FNV-1a gardant parent direct + leaf (`parent_leaf_XXXXXXX`). Cas mono-segment : `leaf_XXXXXXX`.
+
+**Fichiers** : `src/schema/naming.rs` (`floor_char_boundary`, `truncate_table_name`, `ensure_unique` recâblé) + `src/schema/cascading/scoring.rs` (commentaire mis à jour).
+
+**Tests** : 294 passent (+15 nouveaux). `truncate_to_pg_limit` (colonnes) inchangée.
+
+**Breaking change** : `TruncatedName.pg_name` dans vieux snapshots est hash-based — diverge silencieusement des nouveaux noms.
+
 ## 2026-06-07 — Refactoring finalisation de schéma : InferredStrategy + UserOverride (T1–T10)
 
 Sprint complet — 10 tâches, 271 tests passent, zéro warning.

@@ -1,5 +1,5 @@
 # Tâches en cours — json2sql
 
-_Mis à jour automatiquement en fin de session._
+_Mis à jour : 2026-06-08 — feature table-name-trimming terminée_
 
-_(vide — sprint 2026-06-07 terminé, voir `_brain/done.md`)_
+Aucune tâche en cours.

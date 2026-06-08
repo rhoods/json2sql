@@ -199,7 +199,7 @@ impl NamingRegistry {
     }
 
     fn ensure_unique(&mut self, sanitized: &str, original_key: &str) -> String {
-        let truncated = truncate_to_limit(sanitized, original_key, PG_TABLE_MAX_IDENT);
+        let truncated = truncate_table_name(sanitized, original_key, PG_TABLE_MAX_IDENT);
 
         // Record truncation if the name was shortened
         if truncated != sanitized {
@@ -325,6 +325,68 @@ fn truncate_to_pg_limit(sanitized: &str, original_key: &str) -> String {
     truncate_to_limit(sanitized, original_key, PG_MAX_IDENT)
 }
 
+/// Truncate `s` to at most `max_bytes` bytes, snapping back to the nearest valid UTF-8
+/// character boundary. Returns a `&str` slice — never panics.
+fn floor_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if max_bytes >= s.len() { return s; }
+    let mut b = max_bytes;
+    while b > 0 && !s.is_char_boundary(b) { b -= 1; }
+    &s[..b]
+}
+
+/// Truncate a table name to `max_len` bytes by progressively stripping leading path segments
+/// (separated by [`PATH_SEP`]) before falling back to a hash suffix.
+///
+/// Strategy (in order):
+/// 1. If `sanitized` already fits — return as-is.
+/// 2. For each `start` in `1..segments.len()`: re-sanitize `segments[start..]` joined by `_`.
+///    Return the first result that fits.
+/// 3. Hash fallback: keep direct parent + leaf segment, truncated to fit, with a hash suffix
+///    that preserves uniqueness across different original paths.
+fn truncate_table_name(sanitized: &str, original_key: &str, max_len: usize) -> String {
+    if sanitized.len() <= max_len {
+        return sanitized.to_string();
+    }
+
+    let hash = short_hash(original_key);
+
+    // Phase 1 — strip leading segments one at a time
+    let segs: Vec<&str> = original_key.split(PATH_SEP).collect();
+    for start in 1..segs.len() {
+        let joined = segs[start..].join("_");
+        let candidate = sanitize_identifier(&joined);
+        if candidate.len() <= max_len {
+            return candidate;
+        }
+    }
+
+    // Phase 2 — hash fallback
+    // Single-segment path: no parent concept, format = "{leaf_truncated}_{hash}"
+    if segs.len() < 2 {
+        let leaf = sanitize_identifier(segs[0]);
+        let leaf_used = floor_char_boundary(&leaf, max_len - HASH_SUFFIX_LEN);
+        return format!("{leaf_used}_{hash}");
+    }
+
+    // Multi-segment: format = "{parent_truncated}_{leaf_truncated}_{hash}"
+    // Budget: parent_len + 1 (sep) + leaf_len + HASH_SUFFIX_LEN ≤ max_len
+    // content_budget = max_len - HASH_SUFFIX_LEN covers "parent_sep_leaf"
+    let content_budget = max_len - HASH_SUFFIX_LEN;
+    let parent_sanitized = sanitize_identifier(segs[segs.len() - 2]);
+    let leaf_sanitized = sanitize_identifier(segs[segs.len() - 1]);
+
+    // Reserve at least 1 byte for leaf + 1 for the separator between parent and leaf
+    let parent_max = content_budget.saturating_sub(2);
+    let parent_used = floor_char_boundary(&parent_sanitized, parent_max);
+
+    let leaf_budget = content_budget.saturating_sub(parent_used.len() + 1);
+    if leaf_budget == 0 {
+        return format!("{parent_used}_{hash}");
+    }
+    let leaf_used = floor_char_boundary(&leaf_sanitized, leaf_budget);
+    format!("{parent_used}_{leaf_used}_{hash}")
+}
+
 /// Compute a 7-char hex hash of a string using FNV-1a 64-bit.
 /// Implemented inline for stability — output is guaranteed identical across
 /// dependency updates and must not change without a snapshot format version bump.
@@ -344,6 +406,165 @@ fn short_hash(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- floor_char_boundary ---
+
+    #[test]
+    fn floor_char_boundary_within_bounds_returns_whole() {
+        assert_eq!(floor_char_boundary("hello", 10), "hello");
+        assert_eq!(floor_char_boundary("hello", 5), "hello");
+    }
+
+    #[test]
+    fn floor_char_boundary_ascii_exact_boundary() {
+        assert_eq!(floor_char_boundary("hello", 3), "hel");
+        assert_eq!(floor_char_boundary("hello", 0), "");
+    }
+
+    #[test]
+    fn floor_char_boundary_utf8_snaps_to_char_boundary() {
+        // "カ" is 3 bytes (E3 82 AB) — slicing at 1 or 2 would be invalid
+        let s = "カルシウム"; // 5 × 3 = 15 bytes
+        assert_eq!(floor_char_boundary(s, 3), "カ");
+        assert_eq!(floor_char_boundary(s, 2), "");  // snaps back past incomplete カ
+        assert_eq!(floor_char_boundary(s, 1), "");
+        assert_eq!(floor_char_boundary(s, 4), "カ"); // 4 is mid-"ル", snaps to 3
+        assert_eq!(floor_char_boundary(s, 6), "カル");
+    }
+
+    #[test]
+    fn floor_char_boundary_mixed_ascii_utf8() {
+        let s = "ja:カルシウム"; // "ja:" = 3 bytes, then 3-byte chars
+        assert_eq!(floor_char_boundary(s, 3), "ja:");
+        assert_eq!(floor_char_boundary(s, 5), "ja:"); // mid-"カ", snaps to 3
+        assert_eq!(floor_char_boundary(s, 6), "ja:カ");
+    }
+
+    #[test]
+    fn floor_char_boundary_empty_string() {
+        assert_eq!(floor_char_boundary("", 0), "");
+        assert_eq!(floor_char_boundary("", 5), "");
+    }
+
+    // --- truncate_table_name ---
+
+    fn key(segs: &[&str]) -> String { segs.join(&PATH_SEP.to_string()) }
+
+    #[test]
+    fn truncate_table_no_truncation_needed() {
+        let k = key(&["users", "orders"]);
+        assert_eq!(truncate_table_name("users_orders", &k, 53), "users_orders");
+    }
+
+    #[test]
+    fn truncate_table_phase1_removes_one_segment() {
+        // "openfoodfacts_products_images_selected_nutrition_new_lc_sizes" = 61 chars > 53
+        // segments[1..] = ["selected_nutrition_new_lc_sizes"] = 31 chars ≤ 53
+        let k = key(&["openfoodfacts_products_images", "selected_nutrition_new_lc_sizes"]);
+        let sanitized = "openfoodfacts_products_images_selected_nutrition_new_lc_sizes";
+        let result = truncate_table_name(sanitized, &k, 53);
+        assert_eq!(result, "selected_nutrition_new_lc_sizes");
+    }
+
+    #[test]
+    fn truncate_table_phase1_removes_two_segments() {
+        // max_len=15 so only the last segment ("end") fits alone
+        let k = key(&["root", "medium_segment", "end"]);
+        // start=1: "medium_segment_end" = 18 > 15
+        // start=2: "end" = 3 ≤ 15 ✓
+        let sanitized = "root_medium_segment_end";
+        let result = truncate_table_name(sanitized, &k, 15);
+        assert_eq!(result, "end");
+    }
+
+    #[test]
+    fn truncate_table_phase2_fallback_hash() {
+        // max_len=15: even the leaf alone (20 chars) > 15 → Phase 2
+        let k = key(&["root", "parent_long", "leaf_is_too_long_yes"]);
+        let sanitized = "root_parent_long_leaf_is_too_long_yes";
+        let result = truncate_table_name(sanitized, &k, 15);
+        assert!(result.len() <= 15, "result '{}' is {} chars", result, result.len());
+        // Must end with the hash of the original key
+        let h = short_hash(&k);
+        assert!(result.ends_with(&format!("_{h}")), "result '{result}' must end with _{h}");
+        // Must contain parent prefix "paren" (5 chars from "parent_long")
+        assert!(result.starts_with("paren"), "result '{result}' must start with parent prefix");
+    }
+
+    #[test]
+    fn truncate_table_phase2_single_segment() {
+        // No PATH_SEP — single segment longer than max_len → leaf-only fallback
+        let k = "this_is_a_single_and_very_long_segment";
+        let result = truncate_table_name(k, k, 15);
+        assert!(result.len() <= 15, "result '{}' is {} chars", result, result.len());
+        let h = short_hash(k);
+        assert!(result.ends_with(&format!("_{h}")), "must end with hash");
+        // Format: {leaf_truncated}_{hash} — no double-parent
+        assert!(result.starts_with("this_is"), "must start with leaf prefix");
+    }
+
+    #[test]
+    fn truncate_table_phase2_result_fits_real_pg_limit() {
+        // Real-world: path with leaf > 53 chars (padded to 55)
+        let leaf = "a".repeat(55);
+        let k = format!("root{}{}", PATH_SEP, leaf);
+        let sanitized = format!("root_{}", "a".repeat(55));
+        let result = truncate_table_name(&sanitized, &k, PG_TABLE_MAX_IDENT);
+        assert!(result.len() <= PG_TABLE_MAX_IDENT,
+            "result '{}' is {} chars (> {})", result, result.len(), PG_TABLE_MAX_IDENT);
+    }
+
+    #[test]
+    fn truncate_table_real_world_openfoodfacts() {
+        // Real-world: 4-level deep path, first trim finds fit at level 2
+        let k = key(&["openfoodfacts_org", "products", "nutriments", "energy_kcal_100g_details"]);
+        // "openfoodfacts_org_products_nutriments_energy_kcal_100g_details" = 62 > 53
+        // start=1: "products_nutriments_energy_kcal_100g_details" = 44 ≤ 53 ✓
+        let sanitized = "openfoodfacts_org_products_nutriments_energy_kcal_100g_details";
+        let result = truncate_table_name(sanitized, &k, 53);
+        assert_eq!(result, "products_nutriments_energy_kcal_100g_details");
+    }
+
+    #[test]
+    fn truncate_table_two_different_paths_produce_different_names() {
+        // Even after trimming to the same tail, different original_keys → different hashes
+        let k1 = key(&["prefix_a", "parent_long", "leaf_is_too_long_yes"]);
+        let k2 = key(&["prefix_b", "parent_long", "leaf_is_too_long_yes"]);
+        let s = "prefix_x_parent_long_leaf_is_too_long_yes";
+        let r1 = truncate_table_name(s, &k1, 15);
+        let r2 = truncate_table_name(s, &k2, 15);
+        assert_ne!(r1, r2, "different original paths must produce different fallback names");
+    }
+
+    #[test]
+    fn truncate_table_utf8_segment_no_panic() {
+        // Japanese chars in the parent segment — sanitize_identifier strips non-ASCII,
+        // so floor_char_boundary always receives ASCII output (no UTF-8 boundary panic).
+        let k = key(&["root", "ja:カルシウム", "details_very_very_long_name_yes_indeed"]);
+        // "root_ja_details_very_very_long_name_yes_indeed" after full sanitization
+        let sanitized = sanitize_identifier("root_ja:カルシウム_details_very_very_long_name_yes_indeed");
+        let result = truncate_table_name(&sanitized, &k, 15);
+        assert!(result.len() <= 15, "result '{}' exceeds 15 chars", result);
+        // Must be valid ASCII (no panics during construction)
+        assert!(result.is_ascii(), "result '{}' must be ASCII", result);
+    }
+
+    #[test]
+    fn truncate_table_collision_post_trim_resolved_by_counter() {
+        // Two paths that both Phase-1 trim to the same name ("shared_suffix") → collision.
+        // NamingRegistry must resolve to distinct names, both within PG_TABLE_MAX_IDENT.
+        let long_prefix_a = "a".repeat(40); // 40 chars → full name 54 chars > 53
+        let long_prefix_b = "b".repeat(40); // 40 chars → full name 54 chars > 53
+        let mut reg = NamingRegistry::new();
+        let name1 = reg.table_name(&[long_prefix_a, "shared_suffix".to_string()]);
+        let name2 = reg.table_name(&[long_prefix_b, "shared_suffix".to_string()]);
+        // Both trimmed via Phase 1 to "shared_suffix" — ensure_unique resolves the collision
+        assert_ne!(name1, name2, "colliding trimmed names must be deduplicated");
+        assert!(name1.len() <= PG_TABLE_MAX_IDENT, "name1 '{}' too long", name1);
+        assert!(name2.len() <= PG_TABLE_MAX_IDENT, "name2 '{}' too long", name2);
+        // The first registered keeps the clean trimmed name
+        assert_eq!(name1, "shared_suffix");
+    }
 
     #[test]
     fn test_basic_sanitize() {

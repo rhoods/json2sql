@@ -143,9 +143,10 @@ pub(super) fn unique_cluster_suffix(
     }
 }
 
-/// Truncate a raw table name to fit `PostgreSQL`'s 63-byte identifier limit.
-/// Appends a 7-char FNV-1a hex suffix when truncation is needed, matching the
-/// strategy used by `NamingRegistry` for consistency.
+/// Truncate a raw pivot table name to fit `PostgreSQL`'s 63-byte identifier limit.
+/// Uses a hash suffix strategy (FNV-1a, 7 hex chars) — intentionally different from
+/// `NamingRegistry::truncate_table_name` which strips leading path segments first.
+/// Pivot names are synthetic (not hierarchical paths), so segment-stripping is not applicable.
 pub(super) fn pg_truncate_name(raw: &str) -> String {
     const MAX: usize = 63;
     if raw.len() <= MAX {
