@@ -126,20 +126,43 @@ pub struct FlushSnapshot {
     pub table_name: String,
 }
 
+/// Fails with `Io(NotFound)` if `file_path` is `Some` but the file no longer exists,
+/// preventing an orphaned COPY session that would otherwise be opened first.
+async fn verify_spill_file_exists(file_path: &Option<PathBuf>) -> Result<()> {
+    if let Some(ref p) = file_path {
+        if !tokio::fs::try_exists(p).await.map_err(J2sError::Io)? {
+            return Err(J2sError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("spill file missing before COPY: {}", p.display()),
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort deletion of the spill file. Silently ignores I/O errors.
+async fn cleanup_spill_file(file_path: &Option<PathBuf>) {
+    if let Some(ref p) = file_path {
+        let _ = tokio::fs::remove_file(p).await;
+    }
+}
+
 /// Copy the data in `snap` to `PostgreSQL`, then delete the spill file.
 /// Returns the number of rows sent (= `snap.row_count`).
 pub async fn copy_snapshot_to_pg(snap: FlushSnapshot, client: &Client) -> Result<u64> {
     let FlushSnapshot { copy_sql, file_path, pending, row_count, table_name } = snap;
     if row_count == 0 {
-        if let Some(ref p) = file_path { let _ = tokio::fs::remove_file(p).await; }
+        cleanup_spill_file(&file_path).await;
         return Ok(0);
     }
+    verify_spill_file_exists(&file_path).await?;
     let sink = client.copy_in::<_, Bytes>(&copy_sql).await
         .map_err(|e| pg_err(&format!("COPY INTO {table_name}"), &e))?;
     let mut pinned = Box::pin(sink);
     if let Some(ref p) = file_path {
-        stream_file_chunks(p, &table_name, &mut pinned).await?;
-        let _ = tokio::fs::remove_file(p).await;
+        let result = stream_file_chunks(p, &table_name, &mut pinned).await;
+        cleanup_spill_file(&file_path).await;
+        result?;
     }
     for chunk in pending.chunks(1024 * 1024) {
         pinned.send(Bytes::copy_from_slice(chunk)).await
@@ -276,7 +299,7 @@ impl TempFileSink {
         if let Some(ref mut file) = self.writer {
             file.write_all(&self.pending).map_err(J2sError::Io)?;
         }
-        self.pending.clear();
+        let _ = std::mem::take(&mut self.pending);
         self.writer = None; // close FD immediately after write
         Ok(())
     }
@@ -337,11 +360,11 @@ async fn stream_file_chunks(
     pinned: &mut std::pin::Pin<Box<tokio_postgres::CopyInSink<Bytes>>>,
 ) -> Result<()> {
     let mut file = tokio::fs::File::open(path).await.map_err(J2sError::Io)?;
-    let mut buf = vec![0u8; 4 * 1024 * 1024];
     loop {
-        let n = file.read(&mut buf).await.map_err(J2sError::Io)?;
-        if n == 0 { break; }
-        pinned.send(Bytes::copy_from_slice(&buf[..n])).await
+        let mut buf = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
+        tokio::io::AsyncReadExt::read_buf(&mut file, &mut buf).await.map_err(J2sError::Io)?;
+        if buf.is_empty() { break; }
+        pinned.send(buf.freeze()).await
             .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
     }
     Ok(())
@@ -815,5 +838,100 @@ mod tests {
         // force_spill on this sink must be a no-op (no temp file created).
         sink.force_spill().unwrap();
         assert!(sink.temp_file.is_none(), "no temp file must exist for a post-snapshot empty sink");
+    }
+
+    #[tokio::test]
+    async fn spill_file_removed_after_stream_error() {
+        // Validates the cleanup-before-propagate pattern: remove_file runs even on stream error.
+        // Tests `cleanup_spill_file` directly since the full path through copy_snapshot_to_pg
+        // requires a live PG connection.
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_path_buf();
+        drop(f); // disarm RAII guard; we manage the file ourselves
+        std::fs::write(&path, b"fake spill data").unwrap();
+        assert!(path.exists(), "precondition: file exists before cleanup");
+        super::cleanup_spill_file(&Some(path.clone())).await;
+        assert!(!path.exists(), "file must be removed even when called after an error");
+    }
+
+    #[tokio::test]
+    async fn spill_file_cleanup_noop_for_none() {
+        // No panic or error when file_path is None.
+        super::cleanup_spill_file(&None).await;
+    }
+
+    #[test]
+    fn force_spill_frees_pending_heap_allocation() {
+        // clear() retains Vec capacity; mem::take must drop it to 0 so RSS can be reclaimed.
+        let mut sink = make_sink();
+        let large_row = vec![b'x'; SPILL_THRESHOLD + 1];
+        sink.write_row(&large_row).unwrap(); // triggers spill internally
+        // After spill, pending was cleared. With mem::take, capacity must be 0.
+        assert_eq!(sink.pending.capacity(), 0, "spill() must free pending Vec capacity");
+    }
+
+    #[test]
+    fn force_spill_explicit_call_frees_pending_heap() {
+        // force_spill() is the public API; same invariant must hold.
+        let mut sink = make_sink();
+        sink.write_row(b"some data\n").unwrap();
+        // manually trigger spill below threshold via force_spill
+        sink.force_spill().unwrap();
+        assert_eq!(sink.pending.capacity(), 0, "force_spill() must free pending Vec capacity");
+    }
+
+    #[tokio::test]
+    async fn stream_file_chunks_reads_all_bytes_via_bytesmut() {
+        // Validates that the BytesMut::read_buf pattern reads the full file correctly.
+        // The send-to-CopyInSink path requires PG and is tested via integration tests.
+        use bytes::BytesMut;
+        use tokio::io::AsyncReadExt;
+
+        let content = b"line1\nline2\nline3\n";
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut f, content).unwrap();
+        let path = f.path().to_path_buf();
+
+        let mut file = tokio::fs::File::open(&path).await.unwrap();
+        let mut collected = Vec::new();
+        loop {
+            let mut buf = BytesMut::with_capacity(8); // small cap to force multiple iterations
+            file.read_buf(&mut buf).await.unwrap();
+            if buf.is_empty() { break; }
+            collected.extend_from_slice(&buf.freeze());
+        }
+        assert_eq!(collected, content, "BytesMut::read_buf must read all bytes without data loss");
+    }
+
+    #[tokio::test]
+    async fn stream_file_chunks_empty_file_produces_no_chunks() {
+        use bytes::BytesMut;
+        use tokio::io::AsyncReadExt;
+
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let mut file = tokio::fs::File::open(f.path()).await.unwrap();
+        let mut buf = BytesMut::with_capacity(4 * 1024 * 1024);
+        file.read_buf(&mut buf).await.unwrap();
+        assert!(buf.is_empty(), "empty file must produce zero bytes on first read_buf");
+    }
+
+    #[tokio::test]
+    async fn verify_spill_file_exists_ok_for_none() {
+        assert!(super::verify_spill_file_exists(&None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn verify_spill_file_exists_ok_when_file_present() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        assert!(super::verify_spill_file_exists(&Some(f.path().to_path_buf())).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn verify_spill_file_exists_err_when_file_missing() {
+        let path = std::path::PathBuf::from("/nonexistent/spill_file_xyz_test.bin");
+        let result = super::verify_spill_file_exists(&Some(path)).await;
+        assert!(result.is_err(), "missing spill file must return Err before opening COPY session");
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("spill file missing"), "error must identify the cause: {err_str}");
     }
 }

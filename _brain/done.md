@@ -8,6 +8,18 @@ Description courte de ce qui a été fait.
 
 Ajouter toujours EN HAUT du fichier. -->
 
+## 2026-06-09 — code_review fixes — Phase B+D performance & correctness
+
+7 findings de code review implémentés sur `ddl.rs`, `copy_sink.rs`, `runner.rs`. 311 tests passent.
+
+**Performance** : `apply_constraints_chunk` exécute `SET maintenance_work_mem='1GB'` + `SET synchronous_commit=off` sur chaque connexion DDL — élimine les tris multi-pass sur disque pour les gros index PK (Phase D). Phase B remplace le round-robin alphabétique par un bin-packing greedy (`distribute_sinks`, poids=`row_count` DESC) — connexion la moins chargée reçoit la prochaine table.
+
+**Robustesse** : sinks interim-only (`row_count==0`) filtrés avant Phase B (`unwrap_and_sort_sinks`). `verify_spill_file_exists` détecte les fichiers manquants avant d'ouvrir la session COPY. `cleanup_spill_file` garantit la suppression du spill file même si `stream_file_chunks` échoue.
+
+**Mémoire/perf I/O** : `stream_file_chunks` utilise `BytesMut::read_buf` + `freeze` (élimine 1 memcpy par chunk de 4 MiB). `spill()` utilise `mem::take` au lieu de `clear()` — libère la capacité heap entre les cycles de flush.
+
+**Fichiers** : `src/db/ddl.rs`, `src/db/copy_sink.rs`, `src/pass2/runner.rs`.
+
 ## 2026-06-08 — Table name trimming par suppression de segments gauches
 
 Remplace le hash immédiat par suppression progressive des segments de gauche quand un nom de table dépasse `PG_TABLE_MAX_IDENT` (53 chars).
