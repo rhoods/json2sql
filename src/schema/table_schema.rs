@@ -519,6 +519,10 @@ pub struct TableSchema {
     ///      Empty for all non-cascaded tables (routing falls back to `path_map` in Pass 2).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub child_routes: HashMap<String, String>,
+    /// Number of rows observed for this table during Pass 1. Zero for tables built from
+    /// snapshots that predate this field, or for tables created synthetically during finalization.
+    #[serde(default)]
+    pub row_count: u64,
 }
 
 impl TableSchema {
@@ -535,6 +539,7 @@ impl TableSchema {
             inferred_strategy: InferredStrategy::default(),
             flatten_sources: HashMap::new(),
             child_routes: HashMap::new(),
+            row_count: 0,
         }
     }
 

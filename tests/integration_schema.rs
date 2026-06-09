@@ -685,6 +685,7 @@ async fn test_parallel_copy() {
                 per_worker_budget: None,
                 min_interim_copy_bytes: None,
                 limit: None,
+                large_table_threshold: None,
             },
             None,
         ).await.unwrap();
@@ -751,6 +752,7 @@ async fn test_parallel_streaming_matches_sequential() {
                 per_worker_budget: None,
                 min_interim_copy_bytes: None,
                 limit: None,
+                large_table_threshold: None,
             },
             None,
         ).await.unwrap();
@@ -888,6 +890,7 @@ async fn test_pass2_flush_events_emitted_after_copy() {
                 per_worker_budget: None,
                 min_interim_copy_bytes: None,
                 limit: None,
+                large_table_threshold: None,
             },
             Some(ptx),
         ).await.unwrap();
@@ -974,6 +977,7 @@ async fn test_pass2_error_event_emitted_on_copy_failure() {
                 per_worker_budget: None,
                 min_interim_copy_bytes: None,
                 limit: None,
+                large_table_threshold: None,
             },
             Some(ptx),
         ).await;
@@ -1012,6 +1016,7 @@ async fn test_per_worker_budget_correctness() {
                 per_worker_budget: Some(1024 * 1024),
                 min_interim_copy_bytes: None,
                 limit: None,
+                large_table_threshold: None,
             },
             None,
         ).await.unwrap();
@@ -1045,6 +1050,7 @@ async fn test_per_worker_budget_minimum_threshold() {
                 per_worker_budget: Some(1),
                 min_interim_copy_bytes: None,
                 limit: None,
+                large_table_threshold: None,
             },
             None,
         ).await.unwrap();
@@ -1086,6 +1092,7 @@ async fn test_background_interim_copy_correctness() {
                 per_worker_budget: Some(1),
                 min_interim_copy_bytes: Some(1),
                 limit: None,
+                large_table_threshold: None,
             },
             None,
         ).await.unwrap();
@@ -1130,6 +1137,7 @@ async fn test_warn_on_nonempty_root_table_before_import() {
                 per_worker_budget: None,
                 min_interim_copy_bytes: None,
                 limit: None,
+                large_table_threshold: None,
             },
             Some(ptx),
         ).await;

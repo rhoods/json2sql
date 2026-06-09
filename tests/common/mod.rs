@@ -49,6 +49,7 @@ pub fn pass2_config(root_table: &str, pg_schema: &str) -> Pass2Config {
         per_worker_budget: None,
         min_interim_copy_bytes: None,
         limit: None,
+        large_table_threshold: None,
     }
 }
 

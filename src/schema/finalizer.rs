@@ -223,6 +223,7 @@ fn build_entry_schema(
     let mut schema = TableSchema::new(pg_name.clone(), entry.path.clone(), depth);
     schema.parent_table = parent_table;
     schema.child_kind.clone_from(&entry.child_kind);
+    schema.row_count = entry.row_count;
 
     push_generated_columns(&mut schema);
 

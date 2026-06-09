@@ -343,6 +343,10 @@ impl TempFileSink {
         self.total_flushed += rows;
     }
 
+    pub(crate) fn copy_sql(&self) -> &str {
+        &self.copy_sql
+    }
+
     pub fn write_row(&mut self, row: &[u8]) -> Result<()> {
         self.bytes_buffered += row.len() as u64;
         self.pending.extend_from_slice(row);
@@ -398,6 +402,27 @@ async fn stream_sink_to_copy(
         stream_file_chunks(&guard.0, table_name, pinned).await?;
     }
     drop(temp_file);
+    for chunk in pending.chunks(1024 * 1024) {
+        pinned.send(Bytes::copy_from_slice(chunk)).await
+            .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
+    }
+    Ok(())
+}
+
+/// Stream one `FlushSnapshot` into an already-open COPY STDIN session.
+/// Cleans up the spill file (if any) after streaming. Does NOT close the session.
+/// Called by the COPY-direct task to feed multiple snapshots into a single connection.
+pub(crate) async fn stream_snapshot_to_open_copy(
+    snap: FlushSnapshot,
+    pinned: &mut std::pin::Pin<Box<tokio_postgres::CopyInSink<Bytes>>>,
+) -> Result<()> {
+    let FlushSnapshot { file_path, pending, table_name, .. } = snap;
+    verify_spill_file_exists(&file_path).await?;
+    if let Some(ref p) = file_path {
+        let result = stream_file_chunks(p, &table_name, pinned).await;
+        cleanup_spill_file(&file_path).await;
+        result?;
+    }
     for chunk in pending.chunks(1024 * 1024) {
         pinned.send(Bytes::copy_from_slice(chunk)).await
             .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;

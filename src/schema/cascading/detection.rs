@@ -701,6 +701,7 @@ fn build_multi_group_entry(
         inferred_strategy: InferredStrategy::SiblingCollapse(sibling_schema),
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
+        row_count: 0,
     };
     (schema, co_siblings)
 }
@@ -949,6 +950,7 @@ fn build_co_sibling_schema(
         inferred_strategy: InferredStrategy::Columns,
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
+        row_count: 0,
     };
     (t_name, t_schema)
 }
@@ -1054,6 +1056,7 @@ fn build_sub_pivot_schema(
         inferred_strategy: InferredStrategy::SiblingCollapse(sibling_schema),
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
+        row_count: 0,
     }
 }
 

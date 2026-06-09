@@ -42,6 +42,7 @@ fn base_config(root: &str, input: &str) -> PipelineConfig {
         anomaly_dir: None,
         temp_dir: None,
         limit: None,
+        large_table_threshold: None,
         anomaly_format: AnomalyFormat::Json,
         anomaly_output: None,
         max_anomaly_rate: None,

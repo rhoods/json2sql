@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
                 anomaly_dir: cli.anomaly_dir,
                 temp_dir: cli.temp_dir,
                 limit: cli.limit,
+                large_table_threshold: None,
                 anomaly_format: cli.anomaly_format,
                 anomaly_output: cli.anomaly_output,
                 max_anomaly_rate: cli.max_anomaly_rate,

@@ -58,6 +58,9 @@ pub struct PipelineConfig {
     pub temp_dir: Option<PathBuf>,
     /// Stop Pass 2 after N root objects. `None` = full import.
     pub limit: Option<u64>,
+    /// Tables with `total_observed >= large_table_threshold` bypass temp files and stream
+    /// directly via a persistent COPY STDIN task. `None` = disabled.
+    pub large_table_threshold: Option<u64>,
     /// Format for the anomaly summary report.
     pub anomaly_format: AnomalyFormat,
     /// Write the anomaly summary report to this file (stdout if `None`).
@@ -139,6 +142,7 @@ async fn run_pass2(
             per_worker_budget: None,
             min_interim_copy_bytes: None,
             limit: cfg.limit,
+            large_table_threshold: cfg.large_table_threshold,
         },
         None,
     )

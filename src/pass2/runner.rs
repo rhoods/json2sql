@@ -20,8 +20,9 @@ use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use futures_util::SinkExt;
 use crate::anomaly::collector::{AnomalyCollector, AnomalyEvent, AnomalyProxy};
-use crate::db::copy_sink::{copy_snapshot_to_pg, merge_copy_to_db, TempFileSink};
+use crate::db::copy_sink::{copy_snapshot_to_pg, merge_copy_to_db, stream_snapshot_to_open_copy, FlushSnapshot, TempFileSink};
 use crate::schema::PATH_SEP;
 use crate::db::ddl::{add_constraints, ConstraintWarning};
 use crate::error::{J2sError, Result};
@@ -37,6 +38,12 @@ type CopyHandle = tokio::task::JoinHandle<Result<Vec<(String, u64)>>>;
 type InterimCopyHandle = tokio::task::JoinHandle<Result<(String, u64)>>;
 /// Phase A worker handle: returns the interim copy handles it spawned.
 type WorkerHandle = tokio::task::JoinHandle<Result<Vec<InterimCopyHandle>>>;
+/// COPY-direct task handle: one persistent task streams all snapshots for one large table.
+type CopyDirectHandle = tokio::task::JoinHandle<Result<(String, u64)>>;
+
+/// Channel capacity for COPY-direct snapshot senders: bounds in-flight snapshot memory
+/// (max COPY_DIRECT_CHANNEL_CAP × PER_WORKER_FLUSH_THRESHOLD bytes per large table).
+pub(crate) const COPY_DIRECT_CHANNEL_CAP: usize = 4;
 
 /// Wall-clock breakdown of the two main phases of Pass 2.
 #[allow(dead_code)]
@@ -92,6 +99,10 @@ pub struct Pass2Config {
     /// Stop pass 2 after inserting this many root objects. None = full import.
     /// Some(0) = create tables with no rows.
     pub limit: Option<u64>,
+    /// Tables with `total_observed >= large_table_threshold` bypass temp files and stream
+    /// directly to PostgreSQL via a persistent COPY STDIN task. None = disabled (all tables
+    /// use the temp file path).
+    pub large_table_threshold: Option<u64>,
 }
 
 fn validate_run_params(parallel: usize) -> Result<()> {
@@ -111,17 +122,21 @@ struct WorkerConfig {
     copy_sem: Arc<tokio::sync::Semaphore>,
     worker_budget: u64,
     interim_copy_threshold: u64,
+    /// Senders to persistent COPY-direct tasks for large tables.
+    /// Workers call `try_send` instead of spilling to disk for these tables.
+    copy_direct_senders: Arc<HashMap<String, tokio::sync::mpsc::Sender<FlushSnapshot>>>,
 }
 
 impl WorkerConfig {
-    const fn new(
+    fn new(
         pg_url: String,
         progress_tx: Option<ProgressTx>,
         copy_sem: Arc<tokio::sync::Semaphore>,
         worker_budget: u64,
         interim_copy_threshold: u64,
+        copy_direct_senders: Arc<HashMap<String, tokio::sync::mpsc::Sender<FlushSnapshot>>>,
     ) -> Self {
-        Self { pg_url, progress_tx, copy_sem, worker_budget, interim_copy_threshold }
+        Self { pg_url, progress_tx, copy_sem, worker_budget, interim_copy_threshold, copy_direct_senders }
     }
 }
 
@@ -149,6 +164,25 @@ fn trigger_budget_flush(
     cfg: &WorkerConfig,
 ) -> Result<()> {
     for (table_name, sink_arc) in sinks {
+        // Large-table path: stream snapshots directly to the persistent COPY task.
+        if let Some(direct_tx) = cfg.copy_direct_senders.get(table_name) {
+            let mut s = sink_arc.lock().expect("sink mutex is not poisoned");
+            if s.bytes_buffered == 0 && s.row_count == 0 { continue; }
+            match direct_tx.try_reserve() {
+                Ok(permit) => {
+                    if let Some(snap) = s.take_flush_snapshot() {
+                        permit.send(snap);
+                    }
+                }
+                Err(_) => {
+                    // Channel full: backpressure — spill to disk as fallback.
+                    s.force_spill()?;
+                }
+            }
+            continue;
+        }
+
+        // Small-table path: existing interim-COPY logic.
         let snap = {
             let mut s = sink_arc.lock().expect("sink mutex is not poisoned");
             if s.bytes_buffered == 0 && s.row_count == 0 { continue; }
@@ -242,10 +276,38 @@ async fn run_worker(
         };
         process_worker_item(bytes, &mut sinks, &mut proxy, &mut copy_handles, &path_map, &root_schema, &cfg, &mut my_bytes)?;
     }
-    for sink_arc in sinks.values() {
-        let _ = sink_arc.lock().expect("sink mutex is not poisoned").force_spill();
-    }
+    worker_teardown_flush(&sinks, &cfg).await?;
     Ok(copy_handles)
+}
+
+/// Worker teardown: flush each sink's remaining data after the streaming loop ends.
+///
+/// Large tables (in `cfg.copy_direct_senders`): take final snapshot and send to the
+/// persistent COPY task via a guaranteed (blocking) send.
+/// Small tables: spill remaining in-memory bytes to disk for Phase B.
+async fn worker_teardown_flush(
+    sinks: &HashMap<String, Arc<Mutex<TempFileSink>>>,
+    cfg: &WorkerConfig,
+) -> Result<()> {
+    for (table_name, sink_arc) in sinks {
+        if let Some(direct_tx) = cfg.copy_direct_senders.get(table_name) {
+            let snap = {
+                let mut s = sink_arc.lock().expect("sink mutex is not poisoned");
+                if s.row_count == 0 { continue; }
+                s.take_flush_snapshot()
+            };
+            if let Some(snap) = snap {
+                direct_tx.send(snap).await.map_err(|_| {
+                    J2sError::InvalidInput(format!(
+                        "copy_direct task disconnected at teardown for {table_name}"
+                    ))
+                })?;
+            }
+        } else {
+            let _ = sink_arc.lock().expect("sink mutex is not poisoned").force_spill();
+        }
+    }
+    Ok(())
 }
 
 fn unwrap_and_sort_sinks(
@@ -501,9 +563,13 @@ async fn dispatch_loop(
 
 /// Join Phase A workers, await the anomaly writer, and collect interim COPY results.
 /// Returns `(merged_anomalies, interim_rows)`.
+///
+/// `copy_direct_handles` are awaited AFTER workers finish (workers drop their senders,
+/// which causes the COPY-direct tasks to finish their COPY sessions).
 #[allow(clippy::too_many_lines)] // sequential join pipeline, error accumulation pattern non-factorisable
 async fn join_phase_a(
     worker_handles: Vec<WorkerHandle>,
+    copy_direct_handles: Vec<CopyDirectHandle>,
     anomaly_tx: tokio::sync::mpsc::UnboundedSender<AnomalyEvent>,
     anomaly_writer_handle: tokio::task::JoinHandle<Result<AnomalyCollector>>,
     worker_died: bool,
@@ -536,6 +602,16 @@ async fn join_phase_a(
             }}
         }
     }
+    // Workers have dropped their senders → COPY-direct tasks see channel closed and finish.
+    for handle in copy_direct_handles {
+        match handle.await {
+            Ok(Ok((table_name, rows))) => { *interim_rows.entry(table_name).or_insert(0) += rows; }
+            Ok(Err(e)) => { if first_error.is_none() { first_error = Some(e); } }
+            Err(e) => { if first_error.is_none() {
+                first_error = Some(J2sError::InvalidInput(format!("copy_direct task panic: {e}")));
+            }}
+        }
+    }
     if let Some(err) = first_error { return Err(err); }
     if worker_died {
         return Err(J2sError::InvalidInput("worker channel closed unexpectedly".into()));
@@ -549,6 +625,78 @@ async fn join_phase_a(
 /// **The caller is responsible for creating tables** (without constraints)
 /// via `db::ddl::create_tables_no_constraints()` before calling this function.
 ///
+/// Returns the set of table names whose `row_count` (from Pass 1) is >= `threshold`.
+/// Returns an empty set when `threshold` is `None`, disabling the COPY-direct path.
+fn classify_tables(schemas: &[TableSchema], threshold: Option<u64>) -> std::collections::HashSet<String> {
+    let Some(t) = threshold else { return std::collections::HashSet::new(); };
+    schemas.iter().filter(|s| s.row_count >= t).map(|s| s.name.clone()).collect()
+}
+
+/// Inner loop for a COPY-direct task: receives `FlushSnapshot`s on `rx` and streams them
+/// into a single open COPY STDIN session for `table_name`. Returns `(table_name, total_rows)`.
+///
+/// The task owns its own PG connection so it never contends with the interim-copy semaphore.
+/// When the sender side is dropped, `rx.recv()` returns `None` and the COPY is finished.
+async fn run_copy_direct_task(
+    table_name: String,
+    copy_sql: String,
+    pg_url: String,
+    mut rx: tokio::sync::mpsc::Receiver<FlushSnapshot>,
+    _copy_sem: Arc<tokio::sync::Semaphore>,
+    progress_tx: Option<ProgressTx>,
+) -> Result<(String, u64)> {
+    let (client, connection) = tokio_postgres::connect(&pg_url, tokio_postgres::NoTls)
+        .await
+        .map_err(J2sError::Db)?;
+    tokio::spawn(async move { drop(connection.await) });
+
+    let sink = client
+        .copy_in::<_, bytes::Bytes>(&copy_sql)
+        .await
+        .map_err(J2sError::Db)?;
+    let mut pinned = Box::pin(sink);
+
+    let mut total_rows: u64 = 0;
+    while let Some(snap) = rx.recv().await {
+        let rows = snap.row_count;
+        stream_snapshot_to_open_copy(snap, &mut pinned).await?;
+        total_rows += rows;
+        if let Some(ref tx) = progress_tx {
+            let _ = tx.send(ProgressEvent::Pass2Flush {
+                table_name: table_name.clone(),
+                rows_flushed: rows,
+            });
+        }
+    }
+
+    pinned.close().await.map_err(J2sError::Db)?;
+
+    Ok((table_name, total_rows))
+}
+
+/// Spawns a persistent COPY-direct task for `table_name`.
+///
+/// Returns the sender (workers use it to forward `FlushSnapshot`s) and the task handle.
+/// The COPY session ends when the last sender is dropped.
+fn spawn_copy_direct_task(
+    table_name: String,
+    copy_sql: String,
+    pg_url: String,
+    copy_sem: Arc<tokio::sync::Semaphore>,
+    progress_tx: Option<ProgressTx>,
+) -> (tokio::sync::mpsc::Sender<FlushSnapshot>, CopyDirectHandle) {
+    let (tx, rx) = tokio::sync::mpsc::channel(COPY_DIRECT_CHANNEL_CAP);
+    let handle = tokio::spawn(run_copy_direct_task(
+        table_name,
+        copy_sql,
+        pg_url,
+        rx,
+        copy_sem,
+        progress_tx,
+    ));
+    (tx, handle)
+}
+
 fn find_root_schema(schemas: &[TableSchema], root_table: &str, sep: &str) -> Result<TableSchema> {
     schemas
         .iter()
@@ -589,6 +737,7 @@ pub async fn run(
 ) -> Result<Pass2Result> {
     let worker_budget = config.per_worker_budget.unwrap_or(PER_WORKER_FLUSH_THRESHOLD);
     let interim_copy_threshold = config.min_interim_copy_bytes.unwrap_or(MIN_SINK_COPY_BYTES);
+    let large_table_set = classify_tables(schemas, config.large_table_threshold);
 
     validate_run_params(config.parallel)?;
     let total_bytes = file_size(path)?;
@@ -615,10 +764,39 @@ pub async fn run(
     let root_schema_arc: Arc<TableSchema> = Arc::new(root_schema.clone());
     let copy_sem: Arc<tokio::sync::Semaphore> = Arc::new(tokio::sync::Semaphore::new(parallel));
     let shared_sinks = build_shared_sinks(schemas, &config.pg_schema, config.temp_dir.as_deref());
-    let worker_cfg = WorkerConfig::new(pg_url.to_string(), progress_tx.clone(), copy_sem.clone(), worker_budget, interim_copy_threshold);
+
+    // Spawn persistent COPY-direct tasks for large tables; collect their senders for workers.
+    let mut copy_direct_handles: Vec<CopyDirectHandle> = Vec::new();
+    let mut direct_senders_map: HashMap<String, tokio::sync::mpsc::Sender<FlushSnapshot>> = HashMap::new();
+    for table_name in &large_table_set {
+        if let Some(sink_arc) = shared_sinks.get(table_name) {
+            let copy_sql = sink_arc.lock().expect("sink mutex is not poisoned").copy_sql().to_string();
+            let (tx, handle) = spawn_copy_direct_task(
+                table_name.clone(),
+                copy_sql,
+                pg_url.to_string(),
+                copy_sem.clone(),
+                progress_tx.clone(),
+            );
+            direct_senders_map.insert(table_name.clone(), tx);
+            copy_direct_handles.push(handle);
+        }
+    }
+
+    let worker_cfg = WorkerConfig::new(
+        pg_url.to_string(),
+        progress_tx.clone(),
+        copy_sem.clone(),
+        worker_budget,
+        interim_copy_threshold,
+        Arc::new(direct_senders_map),
+    );
     let (senders, worker_handles) = spawn_pass2_workers(
         parallel, &shared_sinks, &anomaly_tx, &path_map_arc, &root_schema_arc, &cancel, &worker_cfg,
     );
+    // Drop run()'s ref to copy_direct senders: only workers hold refs now.
+    // When workers finish (in join_phase_a), all senders drop → COPY-direct tasks complete.
+    drop(worker_cfg);
 
     let stream_start = Instant::now();
     let (rows_processed, worker_died) = dispatch_loop(&mut reader, &senders, progress_tx.as_ref(), progress.as_ref(), config.limit, total_bytes).await?;
@@ -630,7 +808,7 @@ pub async fn run(
     eprintln!("Pass 2 streaming done ({parallel} workers). Flushing remaining rows to PostgreSQL...");
 
     let (merged_anomalies, interim_rows) =
-        join_phase_a(worker_handles, anomaly_tx, anomaly_writer_handle, worker_died).await?;
+        join_phase_a(worker_handles, copy_direct_handles, anomaly_tx, anomaly_writer_handle, worker_died).await?;
 
     // Phase B — COPY remaining data to PG.
     let copy_start = Instant::now();
@@ -696,7 +874,8 @@ fn spawn_pass2_workers(
 
 #[cfg(test)]
 mod tests {
-    use super::{Pass2Config, Pass2Timing, validate_run_params};
+    use std::collections::HashMap;
+    use super::{classify_tables, spawn_copy_direct_task, Pass2Config, Pass2Timing, validate_run_params};
     use crate::db::copy_sink::TempFileSink;
     use crate::schema::table_schema::{ColumnSchema, TableSchema};
     use crate::schema::type_tracker::PgType;
@@ -737,6 +916,7 @@ mod tests {
             per_worker_budget: None,
             min_interim_copy_bytes: None,
             limit: None,
+            large_table_threshold: None,
         };
         assert!(cfg.limit.is_none());
     }
@@ -752,8 +932,41 @@ mod tests {
             per_worker_budget: None,
             min_interim_copy_bytes: None,
             limit: Some(0),
+            large_table_threshold: None,
         };
         assert_eq!(cfg.limit, Some(0));
+    }
+
+    #[test]
+    fn pass2_config_large_table_threshold_none_disables_direct() {
+        let cfg = Pass2Config {
+            root_table: "root".to_string(),
+            pg_schema: "public".to_string(),
+            parallel: 1,
+            anomaly_dir: None,
+            temp_dir: None,
+            per_worker_budget: None,
+            min_interim_copy_bytes: None,
+            limit: None,
+            large_table_threshold: None,
+        };
+        assert!(cfg.large_table_threshold.is_none());
+    }
+
+    #[test]
+    fn pass2_config_large_table_threshold_some_is_preserved() {
+        let cfg = Pass2Config {
+            root_table: "root".to_string(),
+            pg_schema: "public".to_string(),
+            parallel: 1,
+            anomaly_dir: None,
+            temp_dir: None,
+            per_worker_budget: None,
+            min_interim_copy_bytes: None,
+            limit: None,
+            large_table_threshold: Some(500_000),
+        };
+        assert_eq!(cfg.large_table_threshold, Some(500_000));
     }
 
     /// Validates the writer task pattern without a database:
@@ -902,6 +1115,7 @@ mod tests {
 
         let result = super::join_phase_a(
             vec![worker1, worker2],
+            vec![], // no copy_direct_handles for this test
             anomaly_tx,
             anomaly_writer,
             false,
@@ -912,6 +1126,42 @@ mod tests {
         assert!(
             flag.load(Ordering::SeqCst),
             "copy handle must be awaited to completion before returning Err"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_phase_a_awaits_copy_direct_handles_and_collects_rows() {
+        use crate::anomaly::collector::{AnomalyCollector, AnomalyEvent};
+        use crate::error::J2sError;
+
+        let worker: super::WorkerHandle = tokio::task::spawn(async {
+            Ok::<Vec<super::InterimCopyHandle>, J2sError>(vec![])
+        });
+        let copy_direct_handle: super::CopyDirectHandle = tokio::task::spawn(async {
+            Ok::<(String, u64), J2sError>(("large_table".to_string(), 42u64))
+        });
+
+        let (anomaly_tx, anomaly_rx) = tokio::sync::mpsc::unbounded_channel::<AnomalyEvent>();
+        let anomaly_writer = tokio::task::spawn_blocking(move || {
+            let mut rx = anomaly_rx;
+            let collector = AnomalyCollector::new(None);
+            while rx.blocking_recv().is_some() {}
+            Ok::<AnomalyCollector, J2sError>(collector)
+        });
+
+        let result = super::join_phase_a(
+            vec![worker],
+            vec![copy_direct_handle],
+            anomaly_tx,
+            anomaly_writer,
+            false,
+        ).await.unwrap();
+
+        let (_anomalies, interim_rows) = result;
+        assert_eq!(
+            interim_rows.get("large_table").copied().unwrap_or(0),
+            42,
+            "rows from CopyDirect handle must be collected in interim_rows"
         );
     }
 
@@ -1040,6 +1290,262 @@ mod tests {
         // "heavy" (bytes_buffered=1000) must be on conn0 (heaviest first)
         assert_eq!(batches[0][0].0, "heavy", "largest bytes_buffered assigned first");
         assert_eq!(batches[1][0].0, "light");
+    }
+
+    // -------------------------------------------------------------------------
+    // spawn_copy_direct_task tests
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn copy_direct_task_propagates_pg_connection_error() {
+        use std::sync::Arc;
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let (tx, handle) = spawn_copy_direct_task(
+            "t".to_string(),
+            "COPY public.t FROM STDIN".to_string(),
+            "postgres://invalid-host-xyz:9999/db".to_string(),
+            sem,
+            None,
+        );
+        drop(tx);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle,
+        ).await.expect("task must complete within timeout")
+         .expect("task must not panic");
+        assert!(result.is_err(), "must fail when PG is unreachable");
+    }
+
+    #[tokio::test]
+    async fn copy_direct_task_sender_is_bounded() {
+        use std::sync::Arc;
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let (tx, _handle) = spawn_copy_direct_task(
+            "t".to_string(),
+            "COPY public.t FROM STDIN".to_string(),
+            "postgres://invalid:9999/db".to_string(),
+            sem,
+            None,
+        );
+        assert_eq!(tx.max_capacity(), super::COPY_DIRECT_CHANNEL_CAP);
+    }
+
+    // -------------------------------------------------------------------------
+    // classify_tables tests
+    // -------------------------------------------------------------------------
+
+    fn make_schema_with_rows(name: &str, row_count: u64) -> crate::schema::table_schema::TableSchema {
+        let mut s = crate::schema::table_schema::TableSchema::new(
+            name.to_string(), vec![name.to_string()], 0,
+        );
+        s.row_count = row_count;
+        s
+    }
+
+    #[test]
+    fn classify_tables_none_threshold_returns_empty() {
+        let schemas = vec![
+            make_schema_with_rows("big", 1_000_000),
+            make_schema_with_rows("small", 100),
+        ];
+        let result = classify_tables(&schemas, None);
+        assert!(result.is_empty(), "None threshold must classify no tables as large");
+    }
+
+    #[test]
+    fn classify_tables_threshold_zero_classifies_all() {
+        let schemas = vec![
+            make_schema_with_rows("a", 0),
+            make_schema_with_rows("b", 1),
+        ];
+        let result = classify_tables(&schemas, Some(0));
+        assert_eq!(result.len(), 2, "threshold=0 must classify all tables");
+        assert!(result.contains("a"));
+        assert!(result.contains("b"));
+    }
+
+    #[test]
+    fn classify_tables_filters_by_row_count() {
+        let schemas = vec![
+            make_schema_with_rows("big", 500_000),
+            make_schema_with_rows("medium", 499_999),
+            make_schema_with_rows("small", 1_000),
+        ];
+        let result = classify_tables(&schemas, Some(500_000));
+        assert_eq!(result.len(), 1);
+        assert!(result.contains("big"), "only 'big' meets the threshold");
+        assert!(!result.contains("medium"));
+    }
+
+    #[test]
+    fn classify_tables_max_threshold_returns_empty() {
+        let schemas = vec![make_schema_with_rows("huge", u64::MAX)];
+        // Only u64::MAX itself would match u64::MAX threshold
+        let result = classify_tables(&schemas, Some(u64::MAX));
+        assert_eq!(result.len(), 1);
+        assert!(result.contains("huge"));
+    }
+
+    #[test]
+    fn classify_tables_empty_schemas_returns_empty() {
+        let result = classify_tables(&[], Some(100));
+        assert!(result.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // trigger_budget_flush tests — large-table direct path
+    // -------------------------------------------------------------------------
+
+    fn make_worker_cfg_with_direct_sender(
+        table: &str,
+        direct_tx: tokio::sync::mpsc::Sender<crate::db::copy_sink::FlushSnapshot>,
+    ) -> super::WorkerConfig {
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let mut senders = HashMap::new();
+        senders.insert(table.to_string(), direct_tx);
+        super::WorkerConfig::new(
+            "postgres://x".to_string(),
+            None,
+            sem,
+            1_000_000,
+            512 * 1024,
+            std::sync::Arc::new(senders),
+        )
+    }
+
+    fn make_sink_arc_with_row(table: &str) -> std::sync::Arc<std::sync::Mutex<crate::db::copy_sink::TempFileSink>> {
+        let schema = TableSchema::new(table.to_string(), vec![table.to_string()], 0);
+        let mut sink = crate::db::copy_sink::TempFileSink::new(&schema, "public", None);
+        sink.write_row(b"1\t2\n").unwrap();
+        std::sync::Arc::new(std::sync::Mutex::new(sink))
+    }
+
+    #[test]
+    fn trigger_budget_flush_large_table_sends_snapshot_when_channel_has_room() {
+        let table = "orders";
+        let (direct_tx, mut direct_rx) = tokio::sync::mpsc::channel(4);
+        let cfg = make_worker_cfg_with_direct_sender(table, direct_tx);
+        let sink_arc = make_sink_arc_with_row(table);
+        let sinks = [(table.to_string(), std::sync::Arc::clone(&sink_arc))].into_iter().collect();
+        let mut copy_handles = Vec::new();
+
+        super::trigger_budget_flush(&sinks, &mut copy_handles, &cfg).unwrap();
+
+        assert!(direct_rx.try_recv().is_ok(), "snapshot must be sent to direct channel");
+        assert_eq!(sink_arc.lock().unwrap().row_count, 0, "sink must be reset after snapshot");
+        assert!(copy_handles.is_empty(), "no interim copy handle for large table");
+    }
+
+    #[test]
+    fn trigger_budget_flush_large_table_spills_to_disk_when_channel_full() {
+        let table = "orders";
+        let (direct_tx, _direct_rx) = tokio::sync::mpsc::channel(1);
+        // Fill the channel so it's full
+        let schema = TableSchema::new(table.to_string(), vec![table.to_string()], 0);
+        let dummy_sink = crate::db::copy_sink::TempFileSink::new(&schema, "public", None);
+        let dummy_snap = {
+            let mut s2 = dummy_sink;
+            s2.write_row(b"x\n").unwrap();
+            s2.take_flush_snapshot().unwrap()
+        };
+        direct_tx.try_send(dummy_snap).unwrap(); // fills the 1-capacity channel
+        let cfg = make_worker_cfg_with_direct_sender(table, direct_tx);
+
+        let sink_arc = make_sink_arc_with_row(table);
+        let sinks = [(table.to_string(), std::sync::Arc::clone(&sink_arc))].into_iter().collect();
+        let mut copy_handles = Vec::new();
+
+        super::trigger_budget_flush(&sinks, &mut copy_handles, &cfg).unwrap();
+
+        // Sink should have been spilled to disk (row_count unchanged — force_spill keeps row_count)
+        assert!(sink_arc.lock().unwrap().row_count > 0, "sink row_count preserved after disk spill");
+        assert!(copy_handles.is_empty(), "no interim copy handle for large table");
+    }
+
+    // -------------------------------------------------------------------------
+    // run_worker teardown tests — large-table final snapshot
+    // -------------------------------------------------------------------------
+
+    /// Build a minimal WorkerConfig suitable for teardown tests.
+    fn make_teardown_worker_cfg(
+        table: &str,
+        direct_tx: tokio::sync::mpsc::Sender<crate::db::copy_sink::FlushSnapshot>,
+    ) -> super::WorkerConfig {
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let mut senders = HashMap::new();
+        senders.insert(table.to_string(), direct_tx);
+        super::WorkerConfig::new(
+            "postgres://x".to_string(),
+            None,
+            sem,
+            u64::MAX, // never trigger budget flush during test
+            u64::MAX,
+            std::sync::Arc::new(senders),
+        )
+    }
+
+    #[tokio::test]
+    async fn run_worker_teardown_sends_final_snapshot_for_large_table() {
+        let table = "big_orders";
+        let (direct_tx, mut direct_rx) = tokio::sync::mpsc::channel(4);
+        let cfg = make_teardown_worker_cfg(table, direct_tx);
+
+        let sink_arc = make_sink_arc_with_row(table);
+        let sinks = [(table.to_string(), std::sync::Arc::clone(&sink_arc))].into_iter().collect();
+        super::worker_teardown_flush(&sinks, &cfg).await.unwrap();
+
+        assert!(direct_rx.try_recv().is_ok(), "final snapshot sent to direct channel at teardown");
+        assert_eq!(sink_arc.lock().unwrap().row_count, 0, "sink reset after teardown snapshot");
+    }
+
+    #[test]
+    fn run_worker_teardown_spills_to_disk_for_small_table() {
+        let table = "small_orders";
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let cfg = super::WorkerConfig::new(
+            "postgres://x".to_string(),
+            None,
+            sem,
+            u64::MAX,
+            u64::MAX,
+            std::sync::Arc::new(HashMap::new()), // no large-table senders
+        );
+
+        let sink_arc = make_sink_arc_with_row(table);
+        let sinks = [(table.to_string(), std::sync::Arc::clone(&sink_arc))].into_iter().collect();
+        // For small tables, teardown is sync (force_spill only) — test can be sync via blocking call
+        // Use try_reserve path: no channel, so force_spill is called synchronously.
+        // Since worker_teardown_flush is async, use tokio::runtime::Handle::current in a sync context
+        // OR convert this test to tokio::test as well:
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(super::worker_teardown_flush(&sinks, &cfg))
+            .unwrap();
+
+        assert!(sink_arc.lock().unwrap().row_count > 0, "small table row_count preserved after spill");
+    }
+
+    #[tokio::test]
+    async fn trigger_budget_flush_small_table_uses_interim_copy_when_above_threshold() {
+        let table = "small";
+        // No entry in copy_direct_senders for this table
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let cfg = super::WorkerConfig::new(
+            "postgres://x".to_string(),
+            None,
+            sem,
+            1_000_000,
+            1, // very low threshold so any data triggers snapshot
+            std::sync::Arc::new(HashMap::new()),
+        );
+        let sink_arc = make_sink_arc_with_row(table);
+        let sinks = [(table.to_string(), std::sync::Arc::clone(&sink_arc))].into_iter().collect();
+        let mut copy_handles: Vec<super::InterimCopyHandle> = Vec::new();
+
+        super::trigger_budget_flush(&sinks, &mut copy_handles, &cfg).unwrap();
+
+        assert!(!copy_handles.is_empty(), "interim copy handle spawned for small table above threshold");
     }
 
 }
