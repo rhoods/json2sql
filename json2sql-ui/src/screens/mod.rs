@@ -233,7 +233,22 @@ fn parse_ext(pattern: &str) -> Vec<String> {
         .collect()
 }
 
+// One dialog at a time — the OS only supports a single native file dialog per process.
+static PICKER_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+// RAII guard: resets PICKER_ACTIVE to false when dropped, even on panic or future cancellation.
+struct PickerGuard;
+impl Drop for PickerGuard {
+    fn drop(&mut self) {
+        PICKER_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub async fn pick_file(filters: &[(&str, &str)]) -> PickResult {
+    if PICKER_ACTIVE.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return PickResult::Cancelled;
+    }
+    let _guard = PickerGuard;
     let mut dialog = rfd::AsyncFileDialog::new().set_title("Select file");
     for (name, pattern) in filters {
         let exts = parse_ext(pattern);
@@ -244,6 +259,10 @@ pub async fn pick_file(filters: &[(&str, &str)]) -> PickResult {
 }
 
 pub async fn pick_folder() -> PickResult {
+    if PICKER_ACTIVE.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return PickResult::Cancelled;
+    }
+    let _guard = PickerGuard;
     let handle = rfd::AsyncFileDialog::new()
         .set_title("Select folder")
         .pick_folder()
@@ -252,6 +271,10 @@ pub async fn pick_folder() -> PickResult {
 }
 
 pub async fn pick_save_file(default_name: &str) -> PickResult {
+    if PICKER_ACTIVE.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return PickResult::Cancelled;
+    }
+    let _guard = PickerGuard;
     let handle = rfd::AsyncFileDialog::new()
         .set_title("Save schema as")
         .set_file_name(default_name)
@@ -951,5 +974,32 @@ mod tests {
         assert_eq!(progress_bar_class(true, 100), "prog thick");
         // Edge: done=true but pct still 0 (e.g. empty phase) → no animation
         assert_eq!(progress_bar_class(true, 0), "prog thick");
+    }
+
+    #[test]
+    fn picker_guard_resets_active_flag_on_drop() {
+        use std::sync::atomic::Ordering;
+        // Ensure clean state
+        PICKER_ACTIVE.store(false, Ordering::SeqCst);
+        // Simulate picker acquiring the flag
+        PICKER_ACTIVE.store(true, Ordering::SeqCst);
+        assert!(PICKER_ACTIVE.load(Ordering::SeqCst));
+        // Drop guard must reset the flag
+        drop(PickerGuard);
+        assert!(!PICKER_ACTIVE.load(Ordering::SeqCst), "PickerGuard drop must reset PICKER_ACTIVE to false");
+    }
+
+    #[test]
+    fn picker_active_swap_blocks_reentry() {
+        use std::sync::atomic::Ordering;
+        PICKER_ACTIVE.store(false, Ordering::SeqCst);
+        // First acquire succeeds (returns false = was not active)
+        let was_active = PICKER_ACTIVE.swap(true, Ordering::AcqRel);
+        assert!(!was_active, "first acquire should succeed");
+        // Second acquire fails (returns true = was already active)
+        let was_active2 = PICKER_ACTIVE.swap(true, Ordering::AcqRel);
+        assert!(was_active2, "second acquire must see flag already set");
+        // Cleanup
+        PICKER_ACTIVE.store(false, Ordering::SeqCst);
     }
 }

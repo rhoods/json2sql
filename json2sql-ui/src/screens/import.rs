@@ -92,10 +92,39 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
 
         state.write().abort_handle = Some(handle.abort_handle());
 
-        while let Some(event) = rx.recv().await {
-            let done = matches!(event, ProgressEvent::Pass2Done { .. });
-            state.write().apply_progress_event(event);
-            if done { break; }
+        // Throttle UI updates to ~10 Hz — prevents GTK event loop starvation on high-frequency
+        // progress events (1 per 1 000 rows), which causes "broken pipe" on display flush.
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut pending: Vec<ProgressEvent> = Vec::new();
+        let mut finished = false;
+
+        loop {
+            tokio::select! {
+                biased;
+                maybe = rx.recv() => match maybe {
+                    Some(event) => {
+                        if matches!(event, ProgressEvent::Pass2Done { .. }) {
+                            finished = true;
+                        }
+                        pending.push(event);
+                    }
+                    None => break,
+                },
+                _ = interval.tick() => {
+                    if !pending.is_empty() {
+                        let batch = std::mem::take(&mut pending);
+                        let mut s = state.write();
+                        for e in batch { s.apply_progress_event(e); }
+                    }
+                    if finished { break; }
+                }
+            }
+        }
+        // Flush residual events buffered between the last tick and channel close.
+        if !pending.is_empty() {
+            let mut s = state.write();
+            for e in pending { s.apply_progress_event(e); }
         }
 
         if let Ok(Err(e)) = handle.await {

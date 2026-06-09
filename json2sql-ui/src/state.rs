@@ -1106,4 +1106,36 @@ mod tests {
         s.apply_progress_event(ProgressEvent::ConstraintsStart { table_count: 225 });
         assert!(s.import.pass2_progress.copy_complete);
     }
+
+    #[test]
+    fn throttled_batch_with_done_sets_done_flag() {
+        // Simulates a batch of events applied together (as the throttled coroutine would do)
+        // including Pass2Done at the end. The resulting state must be identical to
+        // applying them one-by-one — and done must be true.
+        let mut s = AppState::default();
+        let batch = vec![
+            ProgressEvent::Pass2Progress { rows_processed: 5_000, bytes_read: 1024, total_bytes: 2048 },
+            ProgressEvent::Pass2Flush { table_name: "orders".to_string(), rows_flushed: 5_000 },
+            ProgressEvent::Pass2Done { total_rows: 5_000, anomaly_count: 0, constraint_warning_count: 0 },
+        ];
+        for e in batch { s.apply_progress_event(e); }
+        assert!(s.import.pass2_progress.done, "Pass2Done in batch must set done=true");
+        assert_eq!(s.import.pass2_progress.rows_processed, 5_000);
+        assert_eq!(s.import.pass2_progress.rows_per_table["orders"], 5_000);
+    }
+
+    #[test]
+    fn throttled_batch_residual_flush_preserves_last_log_line() {
+        // After the channel closes (None), any pending events must be flushed.
+        // This test verifies that Pass2Log in a residual batch appears in log_lines.
+        let mut s = AppState::default();
+        let residual = vec![
+            ProgressEvent::Pass2Log("Import complete".to_string()),
+        ];
+        for e in residual { s.apply_progress_event(e); }
+        assert!(
+            s.import.pass2_progress.log_lines.iter().any(|l| l.contains("Import complete")),
+            "residual log event must appear after flush"
+        );
+    }
 }

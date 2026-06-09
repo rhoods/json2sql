@@ -88,7 +88,9 @@ pub fn save_with_overrides(
     };
     let json = serde_json::to_string_pretty(&snapshot)
         .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {e}")))?;
-    std::fs::write(path, json).map_err(J2sError::Io)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &json).map_err(J2sError::Io)?;
+    std::fs::rename(&tmp, path).map_err(J2sError::Io)?;
     Ok(())
 }
 
@@ -215,5 +217,28 @@ mod tests {
         std::fs::write(tmp.path(), json).unwrap();
         let loaded = load(tmp.path()).unwrap();
         assert!(loaded.overflow_warnings.is_empty(), "old snapshots must deserialize with empty overflow_warnings");
+    }
+
+    #[test]
+    fn save_with_overrides_leaves_no_tmp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema.json");
+        save_with_overrides(&[], 0, &[], &[], &[], &[], &std::collections::HashMap::new(), &path).unwrap();
+        assert!(path.exists(), "target file must exist after save");
+        let tmp = path.with_extension("json.tmp");
+        assert!(!tmp.exists(), ".tmp file must be cleaned up after atomic save");
+    }
+
+    #[test]
+    fn save_with_overrides_does_not_corrupt_existing_on_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema.json");
+        // Write an initial valid snapshot
+        save_with_overrides(&[], 10, &[], &[], &[], &[], &std::collections::HashMap::new(), &path).unwrap();
+        // Overwrite with a different value
+        save_with_overrides(&[], 42, &[], &[], &[], &[], &std::collections::HashMap::new(), &path).unwrap();
+        // The file must be readable and contain the new value
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.total_rows, 42, "overwrite must produce a complete, readable file");
     }
 }

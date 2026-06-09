@@ -27,7 +27,8 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let mut right_collapsed: Signal<bool>            = use_signal(|| false);
     let mut filter_text:     Signal<String>          = use_signal(String::new);
     let mut warn_only:       Signal<bool>            = use_signal(|| false);
-    let save_feedback:   Signal<Option<Result<String, String>>> = use_signal(|| None);
+    let mut save_feedback:   Signal<Option<Result<String, String>>> = use_signal(|| None);
+    let mut picking_save:    Signal<bool>            = use_signal(|| false);
     let mut banner_dismissed: Signal<bool>           = use_signal(|| false);
     let mut anchor_idx:      Signal<usize>           = use_signal(|| 0);
 
@@ -129,7 +130,9 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                     // Save schema
                     button {
                         class: "btn ghost sm",
+                        disabled: picking_save(),
                         onclick: move |_| {
+                            if picking_save() { return; }
                             let s = state.read();
                             let schemas = s.schema.schemas.clone();
                             let total_rows = s.schema.pass1_progress.rows_scanned;
@@ -139,23 +142,30 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             let overrides = s.schema.strategy_overrides.clone();
                             let overflow_warnings = s.schema.overflow_warnings.clone();
                             drop(s);
-                            let mut fb = save_feedback;
                             spawn(async move {
+                                picking_save.set(true);
+                                save_feedback.set(None);
                                 if let PickResult::Selected(path) = pick_save_file("schema.json").await {
-                                    let result = json2sql::schema::persistence::save_with_overrides(
-                                        &schemas, total_rows, &truncated, &collisions, &stats, &overflow_warnings, &overrides, &path,
-                                    );
+                                    let filename = path.file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("schema.json")
+                                        .to_string();
+                                    let result = tokio::task::spawn_blocking(move || {
+                                        json2sql::schema::persistence::save_with_overrides(
+                                            &schemas, total_rows, &truncated, &collisions,
+                                            &stats, &overflow_warnings, &overrides, &path,
+                                        )
+                                    }).await;
                                     match result {
-                                        Ok(()) => fb.set(Some(Ok(
-                                            path.file_name().and_then(|n| n.to_str())
-                                                .unwrap_or("schema.json").to_string()
-                                        ))),
-                                        Err(e) => fb.set(Some(Err(e.to_string()))),
+                                        Ok(Ok(())) => save_feedback.set(Some(Ok(filename))),
+                                        Ok(Err(e)) => save_feedback.set(Some(Err(e.to_string()))),
+                                        Err(e)     => save_feedback.set(Some(Err(format!("Save failed: {e}")))),
                                     }
                                 }
+                                picking_save.set(false);
                             });
                         },
-                        "💾 Save"
+                        if picking_save() { "Saving…" } else { "💾 Save" }
                     }
                     if let Some(ref fb) = *save_feedback.read() {
                         match fb {
