@@ -51,6 +51,7 @@ Persistance config : `~/.config/json2sql/last_project.toml` (password exclu).
 
 ## Dette design ouverte
 - `_brain/structure_rework.md` — 3 problèmes architecture finalisation schéma (WideStrategy, apply_column_limit_guard, phases implicites)
+- **multi-fichiers / NameRegistry** — pour supporter l'analyse multi-fichiers, la `NameRegistry` doit être keyed sur le chemin JSON canonique complet (pas le nom tronqué) ; le nom DDL SQL devient une simple projection. Actuellement l'ordre d'enregistrement détermine qui gagne le nom propre en cas de collision post-Phase-1, ce qui est déterministe en single-file mais cassant si deux fichiers sont traités dans des ordres différents.
 
 ## Points d'attention
 - Tâche ouverte : compteur d'anomalies par table dans Strategy/Preview

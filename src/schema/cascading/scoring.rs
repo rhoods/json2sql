@@ -157,7 +157,7 @@ pub(super) fn pg_truncate_name(raw: &str) -> String {
         (acc ^ u64::from(b)).wrapping_mul(1_099_511_628_211)
     });
     let hash = format!("{:07x}", h & 0x0fff_ffff);
-    format!("{}_{}", &raw[..MAX - 8], hash)
+    format!("{}_{}", &raw[..raw.floor_char_boundary(MAX - 8)], hash)
 }
 
 /// Build per-sibling column sets for Jaccard computation.
@@ -310,6 +310,28 @@ mod tests {
     // bravo-first (before fix): col_sets[0]={a,b,c} → min=0.6 (misses the 0.4 pair)
     // alpha-first  (before fix): col_sets[0]={a,b}  → min=0.4
     // After fix (sort by name): alpha is always [0] → min=0.4 for both orderings.
+    #[test]
+    fn test_pg_truncate_name_utf8_no_panic() {
+        // 54 ASCII + 'é' (2 bytes) + 8 ASCII = 64 bytes total.
+        // Before fix: &raw[..55] panics — byte 55 is 0xA9, continuation byte of 'é'.
+        let name = format!("{}{}{}", "a".repeat(54), "é", "b".repeat(8));
+        assert!(name.len() > 63, "precondition: raw must exceed MAX");
+        let result = pg_truncate_name(&name);
+        assert!(result.len() <= 63, "truncated name must fit PG MAX_IDENT");
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok(), "result must be valid UTF-8");
+    }
+
+    #[test]
+    fn test_pg_truncate_name_ascii_unchanged() {
+        let short = "short_name";
+        assert_eq!(pg_truncate_name(short), short);
+        let exact = "a".repeat(63);
+        assert_eq!(pg_truncate_name(&exact), exact);
+        let long_ascii = "a".repeat(70);
+        let result = pg_truncate_name(&long_ascii);
+        assert_eq!(result.len(), 63);
+    }
+
     #[test]
     fn test_pairwise_jaccard_large_group_order_independent() {
         let mut schemas: Vec<TableSchema> = vec![

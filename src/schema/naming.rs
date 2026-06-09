@@ -82,11 +82,7 @@ impl ColumnNameRegistry {
             } else {
                 // Collision: every colliding field gets a hash suffix derived from its original name
                 let max_base = PG_MAX_IDENT - HASH_SUFFIX_LEN;
-                let base = if sanitized.len() > max_base {
-                    &sanitized[..max_base]
-                } else {
-                    sanitized.as_str()
-                };
+                let base = floor_char_boundary(sanitized, max_base);
                 let mut resolved_names = Vec::new();
                 for original in originals {
                     let hash = short_hash(original);
@@ -216,11 +212,14 @@ impl NamingRegistry {
             }
             // Name collision (two different paths produce the same sanitized name).
             // Append a numeric counter until we find a free slot.
-            let base_len = PG_TABLE_MAX_IDENT.saturating_sub(3); // room for "_NN"
-            let base = if sanitized.len() <= base_len { sanitized } else { &sanitized[..base_len] };
+            // Use `truncated` (the human-readable Phase-1 result) as base, not `sanitized`
+            // (the long pre-truncation form). Recompute base_len each iteration so the
+            // candidate never exceeds PG_TABLE_MAX_IDENT even when counter reaches 100+.
             let mut counter = 2usize;
             loop {
-                let candidate = format!("{base}_{counter}");
+                let suffix = format!("_{counter}");
+                let base = floor_char_boundary(&truncated, PG_TABLE_MAX_IDENT - suffix.len());
+                let candidate = format!("{base}{suffix}");
                 if !self.reverse.contains_key(candidate.as_str()) {
                     self.reverse.insert(candidate.clone(), original_key.to_string());
                     return candidate;
@@ -317,7 +316,7 @@ fn truncate_to_limit(sanitized: &str, original_key: &str, max_len: usize) -> Str
     }
     let hash = short_hash(original_key);
     let prefix_len = max_len - HASH_SUFFIX_LEN;
-    let prefix = &sanitized[..prefix_len];
+    let prefix = floor_char_boundary(sanitized, prefix_len);
     format!("{prefix}_{hash}")
 }
 
@@ -325,13 +324,8 @@ fn truncate_to_pg_limit(sanitized: &str, original_key: &str) -> String {
     truncate_to_limit(sanitized, original_key, PG_MAX_IDENT)
 }
 
-/// Truncate `s` to at most `max_bytes` bytes, snapping back to the nearest valid UTF-8
-/// character boundary. Returns a `&str` slice — never panics.
 fn floor_char_boundary(s: &str, max_bytes: usize) -> &str {
-    if max_bytes >= s.len() { return s; }
-    let mut b = max_bytes;
-    while b > 0 && !s.is_char_boundary(b) { b -= 1; }
-    &s[..b]
+    &s[..s.floor_char_boundary(max_bytes)]
 }
 
 /// Truncate a table name to `max_len` bytes by progressively stripping leading path segments
@@ -408,43 +402,6 @@ mod tests {
     use super::*;
 
     // --- floor_char_boundary ---
-
-    #[test]
-    fn floor_char_boundary_within_bounds_returns_whole() {
-        assert_eq!(floor_char_boundary("hello", 10), "hello");
-        assert_eq!(floor_char_boundary("hello", 5), "hello");
-    }
-
-    #[test]
-    fn floor_char_boundary_ascii_exact_boundary() {
-        assert_eq!(floor_char_boundary("hello", 3), "hel");
-        assert_eq!(floor_char_boundary("hello", 0), "");
-    }
-
-    #[test]
-    fn floor_char_boundary_utf8_snaps_to_char_boundary() {
-        // "カ" is 3 bytes (E3 82 AB) — slicing at 1 or 2 would be invalid
-        let s = "カルシウム"; // 5 × 3 = 15 bytes
-        assert_eq!(floor_char_boundary(s, 3), "カ");
-        assert_eq!(floor_char_boundary(s, 2), "");  // snaps back past incomplete カ
-        assert_eq!(floor_char_boundary(s, 1), "");
-        assert_eq!(floor_char_boundary(s, 4), "カ"); // 4 is mid-"ル", snaps to 3
-        assert_eq!(floor_char_boundary(s, 6), "カル");
-    }
-
-    #[test]
-    fn floor_char_boundary_mixed_ascii_utf8() {
-        let s = "ja:カルシウム"; // "ja:" = 3 bytes, then 3-byte chars
-        assert_eq!(floor_char_boundary(s, 3), "ja:");
-        assert_eq!(floor_char_boundary(s, 5), "ja:"); // mid-"カ", snaps to 3
-        assert_eq!(floor_char_boundary(s, 6), "ja:カ");
-    }
-
-    #[test]
-    fn floor_char_boundary_empty_string() {
-        assert_eq!(floor_char_boundary("", 0), "");
-        assert_eq!(floor_char_boundary("", 5), "");
-    }
 
     // --- truncate_table_name ---
 
@@ -564,6 +521,29 @@ mod tests {
         assert!(name2.len() <= PG_TABLE_MAX_IDENT, "name2 '{}' too long", name2);
         // The first registered keeps the clean trimmed name
         assert_eq!(name1, "shared_suffix");
+        // The collision suffix must use the truncated (short, human-readable) name as base.
+        // Before fix: name2 = "aaaa...bbbb_shared_suf_2" (from the long sanitized form).
+        // After fix:  name2 = "shared_suffix_2".
+        assert_eq!(name2, "shared_suffix_2",
+            "collision base must come from truncated name, not sanitized; got: {name2}");
+    }
+
+    #[test]
+    fn ensure_unique_counter_no_overflow_at_100() {
+        // Shared suffix of 51 chars → truncated = 51 chars → base_len = 50 with old static formula.
+        // At counter=100: base(50) + "_100"(4) = 54 > PG_TABLE_MAX_IDENT(53) before fix.
+        let shared: String = "s".repeat(51);
+        let mut reg = NamingRegistry::new();
+        for i in 0..102usize {
+            // Long prefix ensures sanitized > 53 chars → Phase-1 strips it → truncated = shared (51 chars).
+            let prefix = format!("{}{i:04}", "a".repeat(40));
+            let name = reg.table_name(&[prefix, shared.clone()]);
+            assert!(
+                name.len() <= PG_TABLE_MAX_IDENT,
+                "collision #{i}: '{name}' len={} > PG_TABLE_MAX_IDENT={PG_TABLE_MAX_IDENT}",
+                name.len()
+            );
+        }
     }
 
     #[test]
@@ -579,6 +559,28 @@ mod tests {
     fn test_no_double_underscore() {
         assert_eq!(sanitize_identifier("first__name"), "first_name");
         assert_eq!(sanitize_identifier("a--b"), "a_b");
+    }
+
+    #[test]
+    fn truncate_to_limit_utf8_no_panic() {
+        // 54 ASCII + 'é' (2 bytes) + padding: byte 55 is 0xA9 (continuation byte) = prefix_len boundary.
+        // PG_MAX_IDENT=63, HASH_SUFFIX_LEN=8 → prefix_len=55. Before fix: &s[..55] panics.
+        let s = format!("{}{}{}", "a".repeat(54), "é", "b".repeat(15));
+        assert!(s.len() > PG_MAX_IDENT, "precondition: must exceed limit");
+        let result = truncate_to_pg_limit(&s, &s);
+        assert!(result.len() <= PG_MAX_IDENT);
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok(), "result must be valid UTF-8");
+    }
+
+    #[test]
+    fn column_registry_build_utf8_no_panic() {
+        // Inject a multi-byte key directly into candidates (latent scenario: sanitize_identifier
+        // is ASCII-only today, but this guard protects against future Unicode extension).
+        // max_base = PG_MAX_IDENT - HASH_SUFFIX_LEN = 55. Key straddles that boundary.
+        let multi = format!("{}{}", "a".repeat(54), "é"); // len=56 > max_base=55
+        let mut reg = ColumnNameRegistry::new();
+        reg.candidates.insert(multi, vec!["field_a".to_string(), "field_b".to_string()]);
+        reg.build("test_table"); // must not panic
     }
 
     #[test]
@@ -645,7 +647,9 @@ mod tests {
         let mut reg = NamingRegistry::new();
         let path: Vec<String> = (0..10).map(|i| format!("level{}", i)).collect();
         let name = reg.table_name(&path);
-        assert!(name.len() <= PG_MAX_IDENT, "name too long: {} chars", name.len());
+        // Must fit PG_TABLE_MAX_IDENT (53), not just PG_MAX_IDENT (63):
+        // derived identifiers like fk_{name}_parent need the 10-char budget.
+        assert!(name.len() <= PG_TABLE_MAX_IDENT, "name too long: {} chars", name.len());
     }
 
     // --- dot-key fast path must produce identical output to the path-slice version ---
