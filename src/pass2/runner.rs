@@ -316,20 +316,21 @@ async fn copy_batch(batch: Vec<(String, Vec<TempFileSink>)>, url: String, ptx: O
 }
 
 /// Distribute sinks across `parallel` connections using greedy bin-packing.
-/// Sinks are sorted by `row_count` DESC so the heaviest tables are assigned first,
+/// Sinks are sorted by `bytes_buffered` DESC so the heaviest tables are assigned first,
 /// minimising the maximum per-connection total (Phase B wall time).
-/// Weight is `row_count` only — `total_flushed` is already in `interim_rows` (Phase A).
+/// Weight is `bytes_buffered` — bytes since the last Phase A snapshot, which reflects
+/// the actual COPY data volume for Phase B regardless of row width.
 fn distribute_sinks(
     mut sinks: Vec<(String, TempFileSink)>,
     parallel: usize,
 ) -> Vec<Vec<(String, Vec<TempFileSink>)>> {
     let mut batches: Vec<Vec<(String, Vec<TempFileSink>)>> =
         (0..parallel).map(|_| Vec::new()).collect();
-    sinks.sort_by(|a, b| b.1.row_count.cmp(&a.1.row_count));
+    sinks.sort_by(|a, b| b.1.bytes_buffered.cmp(&a.1.bytes_buffered));
     let mut loads = vec![0u64; parallel];
     for (name, sink) in sinks {
-        let min_idx = loads.iter().enumerate().min_by_key(|&(_, &v)| v).map(|(i, _)| i).unwrap_or(0);
-        loads[min_idx] += sink.row_count;
+        let min_idx = loads.iter().enumerate().min_by_key(|&(_, &v)| v).map(|(i, _)| i).expect("parallel >= 1 enforced by validate_run_params");
+        loads[min_idx] += sink.bytes_buffered;
         batches[min_idx].push((name, vec![sink]));
     }
     batches
@@ -979,19 +980,20 @@ mod tests {
         assert_eq!(result[0].0, "phase_b_table");
     }
 
-    fn make_sink_with_rows(name: &str, row_count: u64) -> TempFileSink {
+    fn make_sink_with_bytes(name: &str, bytes_buffered: u64) -> TempFileSink {
         let schema = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
         let mut sink = TempFileSink::new(&schema, "public", None);
-        sink.row_count = row_count;
+        sink.bytes_buffered = bytes_buffered;
+        sink.row_count = 1;
         sink
     }
 
     #[test]
     fn distribute_sinks_single_connection_all_to_conn0() {
         let sinks = vec![
-            ("a".to_string(), make_sink_with_rows("a", 10)),
-            ("b".to_string(), make_sink_with_rows("b", 5)),
-            ("c".to_string(), make_sink_with_rows("c", 3)),
+            ("a".to_string(), make_sink_with_bytes("a", 10)),
+            ("b".to_string(), make_sink_with_bytes("b", 5)),
+            ("c".to_string(), make_sink_with_bytes("c", 3)),
         ];
         let batches = super::distribute_sinks(sinks, 1);
         assert_eq!(batches.len(), 1);
@@ -1000,21 +1002,20 @@ mod tests {
 
     #[test]
     fn distribute_sinks_greedy_isolates_heaviest_table() {
-        // 2 connections, tables rows=[50, 25, 10, 5]
+        // 2 connections, bytes=[50, 25, 10, 5]
         // greedy: conn0=[50], conn1=[25,10,5] → loads 50 vs 40
         let sinks = vec![
-            ("big".to_string(), make_sink_with_rows("big", 50)),
-            ("med".to_string(), make_sink_with_rows("med", 25)),
-            ("sm1".to_string(), make_sink_with_rows("sm1", 10)),
-            ("sm2".to_string(), make_sink_with_rows("sm2", 5)),
+            ("big".to_string(), make_sink_with_bytes("big", 50)),
+            ("med".to_string(), make_sink_with_bytes("med", 25)),
+            ("sm1".to_string(), make_sink_with_bytes("sm1", 10)),
+            ("sm2".to_string(), make_sink_with_bytes("sm2", 5)),
         ];
         let batches = super::distribute_sinks(sinks, 2);
         assert_eq!(batches.len(), 2);
-        let total: u64 = batches.iter().flat_map(|b| b.iter()).map(|(_, sinks)| sinks[0].row_count).sum();
-        assert_eq!(total, 90, "all rows accounted for");
-        // The heaviest table should be alone on its connection
-        let isolated = batches.iter().any(|b| b.len() == 1 && b[0].1[0].row_count == 50);
-        assert!(isolated, "50-row table should be isolated on its own connection");
+        let total: u64 = batches.iter().flat_map(|b| b.iter()).map(|(_, sinks)| sinks[0].bytes_buffered).sum();
+        assert_eq!(total, 90, "all bytes accounted for");
+        let isolated = batches.iter().any(|b| b.len() == 1 && b[0].1[0].bytes_buffered == 50);
+        assert!(isolated, "50-byte table should be isolated on its own connection");
     }
 
     #[test]
@@ -1025,19 +1026,20 @@ mod tests {
     }
 
     #[test]
-    fn distribute_sinks_uses_row_count_not_total_flushed_as_weight() {
-        // total_flushed is Phase A data already in interim_rows — must not influence Phase B distribution
-        let mut sink_heavy = make_sink_with_rows("heavy", 1);
-        sink_heavy.total_flushed = 1000; // large Phase A history, irrelevant for Phase B
-        let sink_light = make_sink_with_rows("light", 50); // actually heavy in Phase B
+    fn distribute_sinks_uses_bytes_buffered_not_row_count_as_weight() {
+        // bytes_buffered is the Phase B load signal; row_count and total_flushed must not influence distribution
+        let mut sink_heavy = make_sink_with_bytes("heavy", 1000);
+        sink_heavy.total_flushed = 5; // Phase A history — irrelevant for Phase B distribution
+        let mut sink_light = make_sink_with_bytes("light", 10);
+        sink_light.row_count = 500; // many rows but small bytes — must be treated as light
         let sinks = vec![
             ("heavy".to_string(), sink_heavy),
             ("light".to_string(), sink_light),
         ];
         let batches = super::distribute_sinks(sinks, 2);
-        // "light" (row_count=50) should be on conn0 (heaviest first), "heavy" on conn1
-        assert_eq!(batches[0][0].0, "light", "largest row_count assigned first");
-        assert_eq!(batches[1][0].0, "heavy");
+        // "heavy" (bytes_buffered=1000) must be on conn0 (heaviest first)
+        assert_eq!(batches[0][0].0, "heavy", "largest bytes_buffered assigned first");
+        assert_eq!(batches[1][0].0, "light");
     }
 
 }

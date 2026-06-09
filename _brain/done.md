@@ -8,6 +8,22 @@ Description courte de ce qui a été fait.
 
 Ajouter toujours EN HAUT du fichier. -->
 
+## 2026-06-09 — Correctifs code review — 10 findings
+
+7 corrections sur `ddl.rs`, `pass2/runner.rs`, `copy_sink.rs`. 309 tests passent.
+
+**Sécurité/durabilité** : `SET maintenance_work_mem='1GB'` + `SET synchronous_commit=off` supprimés des connexions contraintes (Phase D) — élimine OOM avec high parallelism, régression durabilité WAL, et crash fatal sur RDS/Supabase.
+
+**Load-balancing** : `distribute_sinks` utilise `bytes_buffered` au lieu de `row_count` — corrige le sous-pondèrage des tables à lignes larges en Phase B.
+
+**Observabilité** : `cleanup_spill_file` log les erreurs de suppression sur stderr (était silencieux).
+
+**Performance** : `stream_file_chunks` buffer `BytesMut` alloué hors loop + `buf.split()` — élimine ~17 500 allocs de 4 MB sur un spill de 70 GB.
+
+**Robustesse** : contexte `NotFound` dans `stream_file_chunks` pour TOCTOU post-verify ; `unwrap_or(0)` → `.expect(...)` dans `distribute_sinks`.
+
+**Nettoyage** : test orphelin `stream_file_reads_all_bytes_in_chunks` supprimé ; idiome `let _ = mem::take` corrigé.
+
 ## 2026-06-09 — code_review fixes — Phase B+D performance & correctness
 
 7 findings de code review implémentés sur `ddl.rs`, `copy_sink.rs`, `runner.rs`. 311 tests passent.

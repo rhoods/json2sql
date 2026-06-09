@@ -140,10 +140,12 @@ async fn verify_spill_file_exists(file_path: &Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Best-effort deletion of the spill file. Silently ignores I/O errors.
+/// Best-effort deletion of the spill file. Logs I/O errors to stderr.
 async fn cleanup_spill_file(file_path: &Option<PathBuf>) {
     if let Some(ref p) = file_path {
-        let _ = tokio::fs::remove_file(p).await;
+        if let Err(e) = tokio::fs::remove_file(p).await {
+            eprintln!("WARNING: failed to remove spill file {}: {e}", p.display());
+        }
     }
 }
 
@@ -299,7 +301,7 @@ impl TempFileSink {
         if let Some(ref mut file) = self.writer {
             file.write_all(&self.pending).map_err(J2sError::Io)?;
         }
-        let _ = std::mem::take(&mut self.pending);
+        std::mem::take(&mut self.pending);
         self.writer = None; // close FD immediately after write
         Ok(())
     }
@@ -359,12 +361,21 @@ async fn stream_file_chunks(
     table_name: &str,
     pinned: &mut std::pin::Pin<Box<tokio_postgres::CopyInSink<Bytes>>>,
 ) -> Result<()> {
-    let mut file = tokio::fs::File::open(path).await.map_err(J2sError::Io)?;
+    let mut file = tokio::fs::File::open(path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            J2sError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("spill file missing during COPY {table_name}: {}", path.display()),
+            ))
+        } else {
+            J2sError::Io(e)
+        }
+    })?;
+    let mut buf = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
     loop {
-        let mut buf = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
         tokio::io::AsyncReadExt::read_buf(&mut file, &mut buf).await.map_err(J2sError::Io)?;
         if buf.is_empty() { break; }
-        pinned.send(buf.freeze()).await
+        pinned.send(buf.split().freeze()).await
             .map_err(|e| pg_err(&format!("COPY send {table_name}"), &e))?;
     }
     Ok(())
@@ -682,32 +693,6 @@ mod tests {
         assert_eq!(&sink.pending, b"row2\n", "pending must be preserved after failed spill");
     }
 
-    /// Chunked read of a file larger than 4 MiB must accumulate all bytes without
-    /// loading the full content at once. This validates the streaming read pattern
-    /// used by merge_copy_to_db independently of a PostgreSQL connection.
-    #[tokio::test]
-    async fn stream_file_reads_all_bytes_in_chunks() {
-        use tokio::io::AsyncReadExt;
-
-        let file_size = 5 * 1024 * 1024; // 5 MiB
-        let content: Vec<u8> = (0..file_size).map(|i| (i % 256) as u8).collect();
-
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        std::io::Write::write_all(&mut tmp, &content).unwrap();
-        let path = tmp.path().to_path_buf();
-
-        let mut file = tokio::fs::File::open(&path).await.unwrap();
-        let mut buf = vec![0u8; 4 * 1024 * 1024];
-        let mut received: Vec<u8> = Vec::new();
-        loop {
-            let n = file.read(&mut buf).await.unwrap();
-            if n == 0 { break; }
-            received.extend_from_slice(&buf[..n]);
-        }
-
-        assert_eq!(received.len(), file_size, "all bytes must be read across chunks");
-        assert_eq!(received, content, "byte content must be identical");
-    }
 
     /// With temp_dir=None, spilled file lands in the system temp directory.
     #[test]
@@ -882,7 +867,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_file_chunks_reads_all_bytes_via_bytesmut() {
-        // Validates that the BytesMut::read_buf pattern reads the full file correctly.
+        // Validates that the BytesMut::read_buf + split() pattern (used by stream_file_chunks)
+        // reads the full file correctly without data loss across multiple iterations.
         // The send-to-CopyInSink path requires PG and is tested via integration tests.
         use bytes::BytesMut;
         use tokio::io::AsyncReadExt;
@@ -894,13 +880,13 @@ mod tests {
 
         let mut file = tokio::fs::File::open(&path).await.unwrap();
         let mut collected = Vec::new();
+        let mut buf = BytesMut::with_capacity(8); // small cap to force multiple iterations; allocated once
         loop {
-            let mut buf = BytesMut::with_capacity(8); // small cap to force multiple iterations
             file.read_buf(&mut buf).await.unwrap();
             if buf.is_empty() { break; }
-            collected.extend_from_slice(&buf.freeze());
+            collected.extend_from_slice(&buf.split().freeze()); // split() leaves buf empty with capacity
         }
-        assert_eq!(collected, content, "BytesMut::read_buf must read all bytes without data loss");
+        assert_eq!(collected, content, "BytesMut::read_buf + split() must read all bytes without data loss");
     }
 
     #[tokio::test]

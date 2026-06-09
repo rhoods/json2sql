@@ -189,15 +189,6 @@ fn group_schemas_by_depth(schemas: &[TableSchema]) -> BTreeMap<usize, Vec<&Table
 /// Pre-built work item for one table's constraints: (`table_name`, `pk_sql`, `fk_sql_opt`).
 type ConstraintWork = (String, String, Option<String>);
 
-/// Returns the session-level SET commands to execute on every constraint connection.
-/// Using 1 GB for maintenance_work_mem avoids multi-pass disk sorts on large PK indexes
-/// while staying conservative enough for servers with limited RAM.
-fn constraint_session_sqls() -> [&'static str; 2] {
-    [
-        "SET maintenance_work_mem = '1GB'",
-        "SET synchronous_commit = off",
-    ]
-}
 
 /// Add PRIMARY KEY + FOREIGN KEY constraints after data has been loaded.
 ///
@@ -215,10 +206,6 @@ async fn apply_constraints_chunk(
         .await
         .map_err(|e| J2sError::DbContext(format!("constraints connection: {e}")))?;
     tokio::spawn(async move { let _ = connection.await; });
-    for sql in constraint_session_sqls() {
-        client.execute(sql, &[]).await
-            .map_err(|e| J2sError::DbContext(format!("{sql}: {e}")))?;
-    }
     let mut warnings: Vec<ConstraintWarning> = Vec::new();
     for (table_name, pk_sql, fk_sql_opt) in &chunk {
         client.execute(pk_sql.as_str(), &[]).await
@@ -567,11 +554,4 @@ mod tests {
         assert_eq!(levels, vec![0, 1], "BTreeMap preserves ascending order");
     }
 
-    #[test]
-    fn constraint_session_sqls_returns_set_commands() {
-        let sqls = super::constraint_session_sqls();
-        assert!(sqls[0].starts_with("SET maintenance_work_mem"), "first SET is maintenance_work_mem");
-        assert_eq!(sqls[1], "SET synchronous_commit = off", "second SET disables synchronous commit");
-        assert_eq!(sqls.len(), 2, "exactly two session-level SET commands");
-    }
 }
