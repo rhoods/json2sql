@@ -145,6 +145,8 @@ async fn run_pass2(
             large_table_threshold: cfg.large_table_threshold,
             copy_direct_channel_cap: None,
             min_spill_bytes: None,
+            ram_usage_factor: None,
+            min_budget_floor: None,
         },
         None,
     )

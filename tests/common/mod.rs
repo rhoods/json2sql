@@ -52,6 +52,8 @@ pub fn pass2_config(root_table: &str, pg_schema: &str) -> Pass2Config {
         large_table_threshold: None,
         copy_direct_channel_cap: None,
         min_spill_bytes: None,
+        ram_usage_factor: None,
+        min_budget_floor: None,
     }
 }
 

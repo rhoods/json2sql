@@ -688,6 +688,8 @@ async fn test_parallel_copy() {
                 large_table_threshold: None,
                 copy_direct_channel_cap: None,
                 min_spill_bytes: None,
+                ram_usage_factor: None,
+                min_budget_floor: None,
             },
             None,
         ).await.unwrap();
@@ -757,6 +759,8 @@ async fn test_parallel_streaming_matches_sequential() {
                 large_table_threshold: None,
                 copy_direct_channel_cap: None,
                 min_spill_bytes: None,
+                ram_usage_factor: None,
+                min_budget_floor: None,
             },
             None,
         ).await.unwrap();
@@ -897,6 +901,8 @@ async fn test_pass2_flush_events_emitted_after_copy() {
                 large_table_threshold: None,
                 copy_direct_channel_cap: None,
                 min_spill_bytes: None,
+                ram_usage_factor: None,
+                min_budget_floor: None,
             },
             Some(ptx),
         ).await.unwrap();
@@ -986,6 +992,8 @@ async fn test_pass2_error_event_emitted_on_copy_failure() {
                 large_table_threshold: None,
                 copy_direct_channel_cap: None,
                 min_spill_bytes: None,
+                ram_usage_factor: None,
+                min_budget_floor: None,
             },
             Some(ptx),
         ).await;
@@ -1027,6 +1035,8 @@ async fn test_per_worker_budget_correctness() {
                 large_table_threshold: None,
                 copy_direct_channel_cap: None,
                 min_spill_bytes: None,
+                ram_usage_factor: None,
+                min_budget_floor: None,
             },
             None,
         ).await.unwrap();
@@ -1063,6 +1073,8 @@ async fn test_per_worker_budget_minimum_threshold() {
                 large_table_threshold: None,
                 copy_direct_channel_cap: None,
                 min_spill_bytes: None,
+                ram_usage_factor: None,
+                min_budget_floor: None,
             },
             None,
         ).await.unwrap();
@@ -1107,6 +1119,8 @@ async fn test_background_interim_copy_correctness() {
                 large_table_threshold: None,
                 copy_direct_channel_cap: None,
                 min_spill_bytes: None,
+                ram_usage_factor: None,
+                min_budget_floor: None,
             },
             None,
         ).await.unwrap();
@@ -1154,6 +1168,8 @@ async fn test_warn_on_nonempty_root_table_before_import() {
                 large_table_threshold: None,
                 copy_direct_channel_cap: None,
                 min_spill_bytes: None,
+                ram_usage_factor: None,
+                min_budget_floor: None,
             },
             Some(ptx),
         ).await;

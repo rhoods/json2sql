@@ -42,7 +42,7 @@ type WorkerHandle = tokio::task::JoinHandle<Result<Vec<InterimCopyHandle>>>;
 type CopyDirectHandle = tokio::task::JoinHandle<Result<(String, u64)>>;
 
 /// Channel capacity for COPY-direct snapshot senders: bounds in-flight snapshot memory
-/// (max COPY_DIRECT_CHANNEL_CAP × PER_WORKER_FLUSH_THRESHOLD bytes per large table).
+/// (max COPY_DIRECT_CHANNEL_CAP × per_worker_budget bytes per large table).
 pub(crate) const COPY_DIRECT_CHANNEL_CAP: usize = 12;
 
 /// Wall-clock breakdown of the two main phases of Pass 2.
@@ -75,12 +75,54 @@ pub struct Pass2Result {
 
 const PROGRESS_INTERVAL: u64 = 1_000;
 
-/// Per-worker budget for in-memory pending data during Phase A.
-/// When the sum of all sinks' `bytes_buffered` exceeds this value, all sinks
-/// are force-spilled to disk, freeing the pending allocations. The budget
-/// then advances by the same amount so spills are evenly spaced throughout
-/// the streaming phase regardless of how many tables the schema has.
-pub const PER_WORKER_FLUSH_THRESHOLD: u64 = 256 * 1024 * 1024; // 256 MiB
+/// Default fraction of available RAM to allocate across all workers.
+const RAM_USAGE_FACTOR: f64 = 0.4;
+
+/// Minimum per-worker budget. Applied when the RAM-derived value falls below this.
+const MIN_BUDGET_FLOOR: u64 = 64 * 1024 * 1024; // 64 MiB
+
+/// Pure budget calculation from a known `available` bytes value. Extracted for unit testing.
+fn compute_budget_from_available(
+    available: u64,
+    num_workers: usize,
+    factor: f64,
+    floor: u64,
+    progress_tx: Option<&ProgressTx>,
+) -> u64 {
+    if available == 0 {
+        let msg = "WARNING: sysinfo returned 0 available memory — applying minimum budget per worker".to_string();
+        eprintln!("{msg}");
+        if let Some(tx) = progress_tx { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
+        return floor;
+    }
+    let raw = ((available as f64 * factor) / num_workers as f64) as u64;
+    if raw < floor {
+        let msg = format!(
+            "WARNING: available RAM too low for {num_workers} workers — applying minimum budget ({} MiB/worker)",
+            floor / 1024 / 1024
+        );
+        eprintln!("{msg}");
+        if let Some(tx) = progress_tx { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
+        floor
+    } else {
+        raw
+    }
+}
+
+/// Compute the per-worker flush budget.
+/// Returns `override_budget` immediately if set; otherwise queries sysinfo.
+fn compute_worker_budget(
+    num_workers: usize,
+    override_budget: Option<u64>,
+    factor: f64,
+    floor: u64,
+    progress_tx: Option<&ProgressTx>,
+) -> u64 {
+    if let Some(b) = override_budget { return b; }
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    compute_budget_from_available(sys.available_memory(), num_workers, factor, floor, progress_tx)
+}
 
 /// Minimum bytes a sink must hold before it gets an interim COPY to PG.
 /// Sinks below this are force-spilled to disk (RAM freed) and `COPYed` in Phase B.
@@ -90,7 +132,9 @@ const MIN_SINK_COPY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 /// Minimum bytes a sink must hold before it gets spilled to disk during a budget flush.
 /// Sinks below this are left in RAM — they don't contribute meaningfully to memory pressure
 /// and spilling them would create thousands of micro-files that slow down Phase B.
-const MIN_SPILL_BYTES: u64 = 1024 * 1024; // 1 MiB
+/// Aligned with MIN_SINK_COPY_BYTES so every sink that can go through interim-COPY is
+/// also eligible for disk spill; nothing falls between the two thresholds.
+const MIN_SPILL_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 
 /// All parameters controlling a Pass 2 run.
 pub struct Pass2Config {
@@ -113,6 +157,10 @@ pub struct Pass2Config {
     /// Minimum bytes a sink must hold to be spilled to disk during a budget flush.
     /// Sinks below this stay in RAM. None = use `MIN_SPILL_BYTES`.
     pub min_spill_bytes: Option<u64>,
+    /// RAM usage factor for dynamic budget calculation (0.0, 1.0]. None = 0.4.
+    pub ram_usage_factor: Option<f64>,
+    /// Minimum per-worker budget floor in bytes. None = MIN_BUDGET_FLOOR (64 MiB).
+    pub min_budget_floor: Option<u64>,
 }
 
 fn validate_run_params(parallel: usize) -> Result<()> {
@@ -764,12 +812,31 @@ pub async fn run(
     config: &Pass2Config,
     progress_tx: Option<ProgressTx>,
 ) -> Result<Pass2Result> {
-    let worker_budget = config.per_worker_budget.unwrap_or(PER_WORKER_FLUSH_THRESHOLD);
+    validate_run_params(config.parallel)?;
+
+    if let Some(f) = config.ram_usage_factor {
+        if f <= 0.0 || f > 1.0 {
+            return Err(J2sError::InvalidInput(format!(
+                "ram_usage_factor must be in (0.0, 1.0], got {f}"
+            )));
+        }
+    }
+    if let Some(b) = config.min_budget_floor {
+        if b == 0 {
+            return Err(J2sError::InvalidInput(
+                "min_budget_floor must be > 0".to_string(),
+            ));
+        }
+    }
+
     let interim_copy_threshold = config.min_interim_copy_bytes.unwrap_or(MIN_SINK_COPY_BYTES);
     let min_spill_bytes = config.min_spill_bytes.unwrap_or(MIN_SPILL_BYTES);
     let large_table_set = classify_tables(schemas, config.large_table_threshold);
 
-    validate_run_params(config.parallel)?;
+    let parallel = config.parallel.max(1);
+    let factor = config.ram_usage_factor.unwrap_or(RAM_USAGE_FACTOR);
+    let floor = config.min_budget_floor.unwrap_or(MIN_BUDGET_FLOOR);
+    let worker_budget = compute_worker_budget(parallel, config.per_worker_budget, factor, floor, progress_tx.as_ref());
     let total_bytes = file_size(path)?;
     let progress = progress_tx.is_none().then(|| ProgressTracker::new(total_bytes, "Pass 2"));
 
@@ -782,7 +849,6 @@ pub async fn run(
     }
     let (anomaly_tx, anomaly_writer_handle) = spawn_anomaly_writer(config.anomaly_dir.clone());
 
-    let parallel = config.parallel.max(1);
     preflight_warn_nonempty(schemas, client, &config.pg_schema, progress_tx.as_ref()).await;
 
     let cancel = CancellationToken::new();
@@ -907,10 +973,58 @@ fn spawn_pass2_workers(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use super::{classify_tables, spawn_copy_direct_task, Pass2Config, Pass2Timing, validate_run_params};
+    use super::{classify_tables, compute_worker_budget, spawn_copy_direct_task, Pass2Config, Pass2Timing, validate_run_params};
     use crate::db::copy_sink::TempFileSink;
     use crate::schema::table_schema::{ColumnSchema, TableSchema};
     use crate::schema::type_tracker::PgType;
+
+    // -------------------------------------------------------------------------
+    // compute_worker_budget tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn compute_worker_budget_override_bypasses_sysinfo() {
+        let budget = compute_worker_budget(8, Some(512 * 1024 * 1024), 0.4, 64 * 1024 * 1024, None);
+        assert_eq!(budget, 512 * 1024 * 1024, "override must be returned as-is");
+    }
+
+    #[test]
+    fn compute_worker_budget_floors_at_minimum() {
+        // Force floor: available = 1 byte, factor = 1.0, workers = 1
+        // raw = 1 byte < floor (64 MiB) → floor returned
+        let floor = 64 * 1024 * 1024_u64;
+        // We can't control sysinfo, so instead we test the floor via the math:
+        // if raw < floor, floor wins. Use a high worker count to make raw < floor.
+        // With a typical machine we can't guarantee available < floor, so we test
+        // the floor logic by using override=None and checking the result is >= floor.
+        let budget = compute_worker_budget(1, None, 0.4, floor, None);
+        assert!(budget >= floor, "budget must be at least the floor: got {budget}, floor={floor}");
+    }
+
+    #[test]
+    fn compute_worker_budget_zero_available_returns_floor() {
+        // Simulate sysinfo returning 0 by injecting zero via the internal helper.
+        // Since we can't mock sysinfo, we test the branch indirectly via compute_budget_from_available.
+        let floor = 64 * 1024 * 1024_u64;
+        let result = super::compute_budget_from_available(0, 4, 0.4, floor, None);
+        assert_eq!(result, floor, "available=0 must return floor");
+    }
+
+    #[test]
+    fn compute_worker_budget_normal_case() {
+        // 1 GiB available, 4 workers, factor 0.5 → raw = 128 MiB > 64 MiB floor
+        let available = 1024 * 1024 * 1024_u64;
+        let result = super::compute_budget_from_available(available, 4, 0.5, 64 * 1024 * 1024, None);
+        assert_eq!(result, 128 * 1024 * 1024, "1 GiB / 4 workers * 0.5 = 128 MiB");
+    }
+
+    #[test]
+    fn compute_worker_budget_raw_below_floor_returns_floor() {
+        // 100 MiB available, 4 workers, factor 0.1 → raw = 2.5 MiB < 64 MiB floor
+        let available = 100 * 1024 * 1024_u64;
+        let result = super::compute_budget_from_available(available, 4, 0.1, 64 * 1024 * 1024, None);
+        assert_eq!(result, 64 * 1024 * 1024, "raw below floor must return floor");
+    }
 
     #[test]
     fn pass2_timing_total_ms_is_sum() {
@@ -951,6 +1065,8 @@ mod tests {
             large_table_threshold: None,
             copy_direct_channel_cap: None,
             min_spill_bytes: None,
+            ram_usage_factor: None,
+            min_budget_floor: None,
         };
         assert!(cfg.limit.is_none());
     }
@@ -969,6 +1085,8 @@ mod tests {
             large_table_threshold: None,
             copy_direct_channel_cap: None,
             min_spill_bytes: None,
+            ram_usage_factor: None,
+            min_budget_floor: None,
         };
         assert_eq!(cfg.limit, Some(0));
     }
@@ -987,6 +1105,8 @@ mod tests {
             large_table_threshold: None,
             copy_direct_channel_cap: None,
             min_spill_bytes: None,
+            ram_usage_factor: None,
+            min_budget_floor: None,
         };
         assert!(cfg.large_table_threshold.is_none());
     }
@@ -1005,6 +1125,8 @@ mod tests {
             large_table_threshold: Some(500_000),
             copy_direct_channel_cap: None,
             min_spill_bytes: None,
+            ram_usage_factor: None,
+            min_budget_floor: None,
         };
         assert_eq!(cfg.large_table_threshold, Some(500_000));
     }
@@ -1651,7 +1773,7 @@ mod tests {
             1_000_000,
             4 * 1024 * 1024, // interim_copy_threshold: 4 MiB
             std::sync::Arc::new(HashMap::new()),
-            1024 * 1024,     // min_spill_bytes: 1 MiB — sink (4 bytes) is way below
+            4 * 1024 * 1024, // min_spill_bytes: 4 MiB — sink (4 bytes) is way below
         );
         let sink_arc = make_sink_arc_with_row(table); // 4 bytes buffered
         let sinks = [(table.to_string(), std::sync::Arc::clone(&sink_arc))].into_iter().collect();

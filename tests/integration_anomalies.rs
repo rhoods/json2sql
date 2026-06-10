@@ -51,6 +51,8 @@ async fn test_anomaly_dir_streaming() {
                 large_table_threshold: None,
                 copy_direct_channel_cap: None,
                 min_spill_bytes: None,
+                ram_usage_factor: None,
+                min_budget_floor: None,
             },
             None,
         ).await.unwrap();
