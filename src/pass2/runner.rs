@@ -87,6 +87,11 @@ pub const PER_WORKER_FLUSH_THRESHOLD: u64 = 256 * 1024 * 1024; // 256 MiB
 /// Prevents COPY overhead (~5 ms/table) on tables with very few rows.
 const MIN_SINK_COPY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 
+/// Minimum bytes a sink must hold before it gets spilled to disk during a budget flush.
+/// Sinks below this are left in RAM — they don't contribute meaningfully to memory pressure
+/// and spilling them would create thousands of micro-files that slow down Phase B.
+const MIN_SPILL_BYTES: u64 = 1024 * 1024; // 1 MiB
+
 /// All parameters controlling a Pass 2 run.
 pub struct Pass2Config {
     pub root_table: String,
@@ -105,6 +110,9 @@ pub struct Pass2Config {
     pub large_table_threshold: Option<u64>,
     /// Bounded channel capacity for COPY-direct tasks. None = use `COPY_DIRECT_CHANNEL_CAP`.
     pub copy_direct_channel_cap: Option<usize>,
+    /// Minimum bytes a sink must hold to be spilled to disk during a budget flush.
+    /// Sinks below this stay in RAM. None = use `MIN_SPILL_BYTES`.
+    pub min_spill_bytes: Option<u64>,
 }
 
 fn validate_run_params(parallel: usize) -> Result<()> {
@@ -124,6 +132,8 @@ struct WorkerConfig {
     copy_sem: Arc<tokio::sync::Semaphore>,
     worker_budget: u64,
     interim_copy_threshold: u64,
+    /// Minimum bytes a sink must hold to be spilled to disk during a budget flush.
+    min_spill_bytes: u64,
     /// Senders to persistent COPY-direct tasks for large tables.
     /// Workers call `try_send` instead of spilling to disk for these tables.
     copy_direct_senders: Arc<HashMap<String, tokio::sync::mpsc::Sender<FlushSnapshot>>>,
@@ -137,8 +147,9 @@ impl WorkerConfig {
         worker_budget: u64,
         interim_copy_threshold: u64,
         copy_direct_senders: Arc<HashMap<String, tokio::sync::mpsc::Sender<FlushSnapshot>>>,
+        min_spill_bytes: u64,
     ) -> Self {
-        Self { pg_url, progress_tx, copy_sem, worker_budget, interim_copy_threshold, copy_direct_senders }
+        Self { pg_url, progress_tx, copy_sem, worker_budget, interim_copy_threshold, min_spill_bytes, copy_direct_senders }
     }
 }
 
@@ -195,9 +206,12 @@ fn trigger_budget_flush(
             if s.bytes_buffered == 0 && s.row_count == 0 { continue; }
             if s.bytes_buffered >= cfg.interim_copy_threshold {
                 s.take_flush_snapshot()
-            } else {
+            } else if s.bytes_buffered >= cfg.min_spill_bytes {
                 s.force_spill()?;
                 None
+            } else {
+                // Sink is too small to justify a disk write — leave in RAM.
+                continue;
             }
         };
         if let Some(snap) = snap {
@@ -752,6 +766,7 @@ pub async fn run(
 ) -> Result<Pass2Result> {
     let worker_budget = config.per_worker_budget.unwrap_or(PER_WORKER_FLUSH_THRESHOLD);
     let interim_copy_threshold = config.min_interim_copy_bytes.unwrap_or(MIN_SINK_COPY_BYTES);
+    let min_spill_bytes = config.min_spill_bytes.unwrap_or(MIN_SPILL_BYTES);
     let large_table_set = classify_tables(schemas, config.large_table_threshold);
 
     validate_run_params(config.parallel)?;
@@ -806,6 +821,7 @@ pub async fn run(
         worker_budget,
         interim_copy_threshold,
         Arc::new(direct_senders_map),
+        min_spill_bytes,
     );
     let (senders, worker_handles) = spawn_pass2_workers(
         parallel, &shared_sinks, &anomaly_tx, &path_map_arc, &root_schema_arc, &cancel, &worker_cfg,
@@ -934,6 +950,7 @@ mod tests {
             limit: None,
             large_table_threshold: None,
             copy_direct_channel_cap: None,
+            min_spill_bytes: None,
         };
         assert!(cfg.limit.is_none());
     }
@@ -951,6 +968,7 @@ mod tests {
             limit: Some(0),
             large_table_threshold: None,
             copy_direct_channel_cap: None,
+            min_spill_bytes: None,
         };
         assert_eq!(cfg.limit, Some(0));
     }
@@ -968,6 +986,7 @@ mod tests {
             limit: None,
             large_table_threshold: None,
             copy_direct_channel_cap: None,
+            min_spill_bytes: None,
         };
         assert!(cfg.large_table_threshold.is_none());
     }
@@ -985,6 +1004,7 @@ mod tests {
             limit: None,
             large_table_threshold: Some(500_000),
             copy_direct_channel_cap: None,
+            min_spill_bytes: None,
         };
         assert_eq!(cfg.large_table_threshold, Some(500_000));
     }
@@ -1447,6 +1467,7 @@ mod tests {
             1_000_000,
             512 * 1024,
             std::sync::Arc::new(senders),
+            1, // min_spill_bytes: 1 byte — always spill in these tests
         )
     }
 
@@ -1534,6 +1555,7 @@ mod tests {
             u64::MAX, // never trigger budget flush during test
             u64::MAX,
             std::sync::Arc::new(senders),
+            1, // min_spill_bytes: irrelevant for teardown tests
         )
     }
 
@@ -1562,6 +1584,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             std::sync::Arc::new(HashMap::new()), // no large-table senders
+            1,
         );
 
         let sink_arc = make_sink_arc_with_row(table);
@@ -1615,6 +1638,32 @@ mod tests {
         assert!(sink_arc.lock().unwrap().row_count > 0, "data spilled to disk when channel full");
     }
 
+    /// trigger_budget_flush must NOT spill a sink whose bytes_buffered < min_spill_bytes.
+    /// The sink stays in RAM — no disk file created, bytes_buffered remains > 0.
+    #[test]
+    fn trigger_budget_flush_tiny_sink_stays_in_memory() {
+        let table = "tiny";
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let cfg = super::WorkerConfig::new(
+            "postgres://x".to_string(),
+            None,
+            sem,
+            1_000_000,
+            4 * 1024 * 1024, // interim_copy_threshold: 4 MiB
+            std::sync::Arc::new(HashMap::new()),
+            1024 * 1024,     // min_spill_bytes: 1 MiB — sink (4 bytes) is way below
+        );
+        let sink_arc = make_sink_arc_with_row(table); // 4 bytes buffered
+        let sinks = [(table.to_string(), std::sync::Arc::clone(&sink_arc))].into_iter().collect();
+        let mut copy_handles: Vec<super::InterimCopyHandle> = Vec::new();
+
+        super::trigger_budget_flush(&sinks, &mut copy_handles, &cfg).unwrap();
+
+        let s = sink_arc.lock().unwrap();
+        assert!(s.has_pending_data(), "tiny sink must stay in RAM, not spilled to disk");
+        assert!(copy_handles.is_empty(), "no copy handle for tiny sink");
+    }
+
     #[tokio::test]
     async fn trigger_budget_flush_small_table_uses_interim_copy_when_above_threshold() {
         let table = "small";
@@ -1627,6 +1676,7 @@ mod tests {
             1_000_000,
             1, // very low threshold so any data triggers snapshot
             std::sync::Arc::new(HashMap::new()),
+            1, // min_spill_bytes: 1 byte — always eligible
         );
         let sink_arc = make_sink_arc_with_row(table);
         let sinks = [(table.to_string(), std::sync::Arc::clone(&sink_arc))].into_iter().collect();

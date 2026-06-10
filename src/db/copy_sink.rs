@@ -316,6 +316,13 @@ impl TempFileSink {
         self.spill()
     }
 
+    /// Returns true if there is in-memory data not yet spilled to disk.
+    /// Only used in tests to verify MIN_SPILL_BYTES behavior.
+    #[cfg(test)]
+    pub fn has_pending_data(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     /// Atomically extract all buffered data for a background async COPY, and reset
     /// this sink so new writes immediately go to a fresh file.
     ///
