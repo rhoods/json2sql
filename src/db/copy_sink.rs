@@ -157,7 +157,10 @@ pub async fn copy_snapshot_to_pg(snap: FlushSnapshot, client: &Client) -> Result
         cleanup_spill_file(&file_path).await;
         return Ok(0);
     }
-    verify_spill_file_exists(&file_path).await?;
+    if let Err(e) = verify_spill_file_exists(&file_path).await {
+        cleanup_spill_file(&file_path).await;
+        return Err(e);
+    }
     let sink = client.copy_in::<_, Bytes>(&copy_sql).await
         .map_err(|e| pg_err(&format!("COPY INTO {table_name}"), &e))?;
     let mut pinned = Box::pin(sink);
@@ -417,7 +420,10 @@ pub(crate) async fn stream_snapshot_to_open_copy(
     pinned: &mut std::pin::Pin<Box<tokio_postgres::CopyInSink<Bytes>>>,
 ) -> Result<()> {
     let FlushSnapshot { file_path, pending, table_name, .. } = snap;
-    verify_spill_file_exists(&file_path).await?;
+    if let Err(e) = verify_spill_file_exists(&file_path).await {
+        cleanup_spill_file(&file_path).await;
+        return Err(e);
+    }
     if let Some(ref p) = file_path {
         let result = stream_file_chunks(p, &table_name, pinned).await;
         cleanup_spill_file(&file_path).await;

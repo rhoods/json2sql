@@ -143,6 +143,7 @@ async fn run_pass2(
             min_interim_copy_bytes: None,
             limit: cfg.limit,
             large_table_threshold: cfg.large_table_threshold,
+            copy_direct_channel_cap: None,
         },
         None,
     )

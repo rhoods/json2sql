@@ -49,6 +49,7 @@ async fn test_anomaly_dir_streaming() {
                 min_interim_copy_bytes: None,
                 limit: None,
                 large_table_threshold: None,
+                copy_direct_channel_cap: None,
             },
             None,
         ).await.unwrap();

@@ -86,6 +86,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 min_interim_copy_bytes: None,
                 limit: import_limit,
                 large_table_threshold: None,
+                copy_direct_channel_cap: None,
             };
             json2sql::pass2::runner::run(&source_file, &schemas, &client, &pg_url, &cfg, Some(tx))
             .await
