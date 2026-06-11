@@ -8,6 +8,24 @@ Description courte de ce qui a été fait.
 
 Ajouter toujours EN HAUT du fichier. -->
 
+## 2026-06-10 — Fix code review + observabilité Pass2 (6 findings runner.rs)
+
+6 corrections chirurgicales dans `src/pass2/runner.rs` + 2 champs observabilité dans `copy_sink.rs`. 346 tests passent.
+
+**Critical — Fix #1** : `copy_sem` retiré de `run_copy_direct_task` / `spawn_copy_direct_task` — supprime le deadlock quand `|large_table_set| >= parallel` (copy_direct tasks tenaient tous les permits, bloquant les interim-COPY tasks → deadlock). Test `copy_direct_task_blocks_when_semaphore_exhausted` supprimé (testait le bug), remplacé par `copy_direct_task_completes_without_semaphore`.
+
+**High — Fix #2** : `per_worker_budget = Some(0)` validé dans `validate_run_params` → erreur explicite. Évitait un flush sur chaque ligne JSON.
+
+**Medium — Fix #3** : `worker_teardown_flush` distingue `TrySendError::Closed` (propager erreur, copy_direct task crashée) vs `Full` (spill disque normal). Avant : crash silencieux masqué.
+
+**Medium — Fix #4** : `MIN_SPILL_BYTES` abaissé de 4 MiB à 512 KiB — la branche spill dans `trigger_budget_flush` était morte (MIN_SPILL == MIN_SINK_COPY == 4 MiB). Sur un schéma 255 tables, des centaines de sinks sub-4 MiB s'accumulaient en RAM jusqu'au teardown → 110 GB sur disque après streaming. Désormais, les sinks entre 512 KiB et 4 MiB sont spillés progressivement.
+
+**Low — Fix #5+6** : Commentaire ligne 44 (cap × per_worker_budget → cap × SPILL_THRESHOLD ≈ 48 MiB) ; docstring `worker_teardown_flush` ("guaranteed blocking send" → "non-blocking try_reserve").
+
+**Phase 2 — Observabilité** : `bytes_sent_direct` et `bytes_spilled` ajoutés à `TempFileSink`. Log par table après Phase A : `[Pass2 routing] table=X: sent_direct=NB spilled=MB`. Permet de diagnostiquer le ratio mémoire→PG direct vs disque→Phase B sur le fichier 70 GB / 255 tables.
+
+**Fichiers** : `src/pass2/runner.rs`, `src/db/copy_sink.rs`.
+
 ## 2026-06-09 — Correctifs code review — 10 findings
 
 7 corrections sur `ddl.rs`, `pass2/runner.rs`, `copy_sink.rs`. 309 tests passent.

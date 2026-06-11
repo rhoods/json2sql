@@ -42,7 +42,7 @@ type WorkerHandle = tokio::task::JoinHandle<Result<Vec<InterimCopyHandle>>>;
 type CopyDirectHandle = tokio::task::JoinHandle<Result<(String, u64)>>;
 
 /// Channel capacity for COPY-direct snapshot senders: bounds in-flight snapshot memory
-/// (max COPY_DIRECT_CHANNEL_CAP × per_worker_budget bytes per large table).
+/// (max COPY_DIRECT_CHANNEL_CAP × SPILL_THRESHOLD (~4 MiB) bytes per large table ≈ 48 MiB).
 pub(crate) const COPY_DIRECT_CHANNEL_CAP: usize = 12;
 
 /// Wall-clock breakdown of the two main phases of Pass 2.
@@ -130,11 +130,11 @@ fn compute_worker_budget(
 const MIN_SINK_COPY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 
 /// Minimum bytes a sink must hold before it gets spilled to disk during a budget flush.
-/// Sinks below this are left in RAM — they don't contribute meaningfully to memory pressure
-/// and spilling them would create thousands of micro-files that slow down Phase B.
-/// Aligned with MIN_SINK_COPY_BYTES so every sink that can go through interim-COPY is
-/// also eligible for disk spill; nothing falls between the two thresholds.
-const MIN_SPILL_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
+/// Sinks below this are left in RAM. Set below MIN_SINK_COPY_BYTES so that mid-range sinks
+/// (too small for interim-COPY overhead but non-trivial in size) are offloaded during budget
+/// pressure rather than accumulating unbounded in RAM across all workers — critical for schemas
+/// with hundreds of small tables (e.g. 255+ tables from sibling-fused JSON).
+const MIN_SPILL_BYTES: u64 = 512 * 1024; // 512 KiB
 
 /// All parameters controlling a Pass 2 run.
 pub struct Pass2Config {
@@ -163,10 +163,15 @@ pub struct Pass2Config {
     pub min_budget_floor: Option<u64>,
 }
 
-fn validate_run_params(parallel: usize) -> Result<()> {
+fn validate_run_params(parallel: usize, per_worker_budget: Option<u64>) -> Result<()> {
     if parallel == 0 {
         return Err(J2sError::InvalidInput(
             "parallel must be >= 1 (0 would produce an empty connection pool)".to_string(),
+        ));
+    }
+    if per_worker_budget == Some(0) {
+        return Err(J2sError::InvalidInput(
+            "per_worker_budget must be > 0 (use None for automatic budget)".to_string(),
         ));
     }
     Ok(())
@@ -231,7 +236,9 @@ fn trigger_budget_flush(
             if s.bytes_buffered == 0 && s.row_count == 0 { continue; }
             match direct_tx.try_reserve() {
                 Ok(permit) => {
+                    let bytes_before = s.bytes_buffered;
                     if let Some(snap) = s.take_flush_snapshot() {
+                        s.bytes_sent_direct += bytes_before;
                         permit.send(snap);
                     }
                 }
@@ -351,8 +358,8 @@ async fn run_worker(
 
 /// Worker teardown: flush each sink's remaining data after the streaming loop ends.
 ///
-/// Large tables (in `cfg.copy_direct_senders`): take final snapshot and send to the
-/// persistent COPY task via a guaranteed (blocking) send.
+/// Large tables (in `cfg.copy_direct_senders`): take final snapshot and send via non-blocking
+/// `try_reserve`; falls back to disk spill when channel is Full, returns Err when Closed.
 /// Small tables: spill remaining in-memory bytes to disk for Phase B.
 fn worker_teardown_flush(
     sinks: &HashMap<String, Arc<Mutex<TempFileSink>>>,
@@ -364,13 +371,19 @@ fn worker_teardown_flush(
             if s.row_count == 0 { continue; }
             match direct_tx.try_reserve() {
                 Ok(permit) => {
+                    let bytes_before = s.bytes_buffered;
                     if let Some(snap) = s.take_flush_snapshot() {
+                        s.bytes_sent_direct += bytes_before;
                         permit.send(snap);
                     }
                 }
-                Err(_) => {
-                    // Channel full or task already finished — spill to disk for Phase B.
+                Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
                     s.force_spill()?;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                    return Err(J2sError::InvalidInput(format!(
+                        "copy_direct task for '{table_name}' closed at teardown — task may have crashed (check copy_direct task error for root cause)"
+                    )));
                 }
             }
         } else {
@@ -712,10 +725,8 @@ async fn run_copy_direct_task(
     copy_sql: String,
     pg_url: String,
     mut rx: tokio::sync::mpsc::Receiver<FlushSnapshot>,
-    copy_sem: Arc<tokio::sync::Semaphore>,
     progress_tx: Option<ProgressTx>,
 ) -> Result<(String, u64)> {
-    let _permit = copy_sem.acquire_owned().await.expect("semaphore closed");
     let (client, connection) = tokio_postgres::connect(&pg_url, tokio_postgres::NoTls)
         .await
         .map_err(J2sError::Db)?;
@@ -758,7 +769,6 @@ fn spawn_copy_direct_task(
     table_name: String,
     copy_sql: String,
     pg_url: String,
-    copy_sem: Arc<tokio::sync::Semaphore>,
     progress_tx: Option<ProgressTx>,
     cap: Option<usize>,
 ) -> (tokio::sync::mpsc::Sender<FlushSnapshot>, CopyDirectHandle) {
@@ -768,7 +778,6 @@ fn spawn_copy_direct_task(
         copy_sql,
         pg_url,
         rx,
-        copy_sem,
         progress_tx,
     ));
     (tx, handle)
@@ -796,6 +805,31 @@ fn build_shared_sinks(
         .collect()
 }
 
+fn log_routing_stats(
+    shared_sinks: &HashMap<String, Arc<Mutex<TempFileSink>>>,
+    progress_tx: Option<&ProgressTx>,
+) {
+    let mut entries: Vec<(String, u64, u64)> = shared_sinks
+        .iter()
+        .filter_map(|(name, arc)| {
+            let s = arc.lock().expect("sink mutex is not poisoned");
+            if s.bytes_sent_direct > 0 || s.bytes_spilled > 0 {
+                Some((name.clone(), s.bytes_sent_direct, s.bytes_spilled))
+            } else {
+                None
+            }
+        })
+        .collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+    for (table, sent, spilled) in entries {
+        let msg = format!("[Pass2 routing] table={table}: sent_direct={sent}B spilled={spilled}B");
+        eprintln!("{msg}");
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(ProgressEvent::Pass2Log(msg));
+        }
+    }
+}
+
 /// Internal phases:
 ///   B — N workers (parallel ≥ 1) stream root objects round-robin into
 ///       per-table `TempFileSink` buffers. A dedicated flush task runs
@@ -812,7 +846,7 @@ pub async fn run(
     config: &Pass2Config,
     progress_tx: Option<ProgressTx>,
 ) -> Result<Pass2Result> {
-    validate_run_params(config.parallel)?;
+    validate_run_params(config.parallel, config.per_worker_budget)?;
 
     if let Some(f) = config.ram_usage_factor {
         if f <= 0.0 || f > 1.0 {
@@ -871,7 +905,6 @@ pub async fn run(
                 table_name.clone(),
                 copy_sql,
                 pg_url.to_string(),
-                copy_sem.clone(),
                 progress_tx.clone(),
                 config.copy_direct_channel_cap,
             );
@@ -907,6 +940,8 @@ pub async fn run(
 
     let (merged_anomalies, interim_rows) =
         join_phase_a(worker_handles, copy_direct_handles, anomaly_tx, anomaly_writer_handle, worker_died).await?;
+
+    log_routing_stats(&shared_sinks, progress_tx.as_ref());
 
     // Phase B — COPY remaining data to PG.
     let copy_start = Instant::now();
@@ -1041,14 +1076,28 @@ mod tests {
     #[test]
     fn run_params_parallel_zero_is_invalid() {
         assert!(matches!(
-            validate_run_params(0),
+            validate_run_params(0, None),
             Err(crate::error::J2sError::InvalidInput(_))
         ));
     }
 
     #[test]
     fn run_params_parallel_one_is_valid() {
-        assert!(validate_run_params(1).is_ok());
+        assert!(validate_run_params(1, None).is_ok());
+    }
+
+    #[test]
+    fn per_worker_budget_zero_returns_error() {
+        assert!(matches!(
+            validate_run_params(1, Some(0)),
+            Err(crate::error::J2sError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn per_worker_budget_nonzero_is_valid() {
+        assert!(validate_run_params(1, Some(1)).is_ok());
+        assert!(validate_run_params(1, Some(64 * 1024 * 1024)).is_ok());
     }
 
     #[test]
@@ -1460,13 +1509,10 @@ mod tests {
 
     #[tokio::test]
     async fn copy_direct_task_propagates_pg_connection_error() {
-        use std::sync::Arc;
-        let sem = Arc::new(tokio::sync::Semaphore::new(1));
         let (tx, handle) = spawn_copy_direct_task(
             "t".to_string(),
             "COPY public.t FROM STDIN".to_string(),
             "postgres://invalid-host-xyz:9999/db".to_string(),
-            sem,
             None,
             None,
         );
@@ -1481,13 +1527,10 @@ mod tests {
 
     #[tokio::test]
     async fn copy_direct_task_sender_cap_none_uses_default() {
-        use std::sync::Arc;
-        let sem = Arc::new(tokio::sync::Semaphore::new(1));
         let (tx, _handle) = spawn_copy_direct_task(
             "t".to_string(),
             "COPY public.t FROM STDIN".to_string(),
             "postgres://invalid:9999/db".to_string(),
-            sem,
             None,
             None,
         );
@@ -1496,17 +1539,35 @@ mod tests {
 
     #[tokio::test]
     async fn copy_direct_task_sender_cap_some_is_preserved() {
-        use std::sync::Arc;
-        let sem = Arc::new(tokio::sync::Semaphore::new(1));
         let (tx, _handle) = spawn_copy_direct_task(
             "t".to_string(),
             "COPY public.t FROM STDIN".to_string(),
             "postgres://invalid:9999/db".to_string(),
-            sem,
             None,
             Some(8),
         );
         assert_eq!(tx.max_capacity(), 8);
+    }
+
+    /// copy_direct task must complete (with PG error) without needing a semaphore permit —
+    /// it owns its own connection and must never contend with the interim-copy semaphore.
+    #[tokio::test]
+    async fn copy_direct_task_completes_without_semaphore() {
+        let (tx, handle) = spawn_copy_direct_task(
+            "t".to_string(),
+            "COPY public.t FROM STDIN".to_string(),
+            "postgres://invalid-host-xyz:9999/db".to_string(),
+            None,
+            None,
+        );
+        drop(tx);
+        // Task must reach the PG connection attempt (and fail) without blocking on any semaphore.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle,
+        ).await.expect("task must not block — no semaphore to wait on")
+         .expect("task must not panic");
+        assert!(result.is_err(), "expected PG connection error, not a hang");
     }
 
     // -------------------------------------------------------------------------
@@ -1716,28 +1777,6 @@ mod tests {
         assert!(sink_arc.lock().unwrap().row_count > 0, "small table row_count preserved after spill");
     }
 
-    /// After fix #1, run_copy_direct_task acquires a semaphore permit before connecting.
-    /// With 0 available permits the task must block and not complete within the timeout.
-    #[tokio::test]
-    async fn copy_direct_task_blocks_when_semaphore_exhausted() {
-        use std::sync::Arc;
-        let sem = Arc::new(tokio::sync::Semaphore::new(0)); // no permits available
-        let (tx, handle) = spawn_copy_direct_task(
-            "t".to_string(),
-            "COPY public.t FROM STDIN".to_string(),
-            "postgres://invalid:9999/db".to_string(),
-            sem,
-            None,
-            None,
-        );
-        drop(tx);
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            handle,
-        ).await;
-        assert!(result.is_err(), "task must block waiting for semaphore permit");
-    }
-
     /// After fix 1b, worker_teardown_flush falls back to force_spill when the direct
     /// channel is full instead of blocking on send().await.
     #[test]
@@ -1758,6 +1797,21 @@ mod tests {
         // Must complete immediately (no blocking send) and spill to disk
         super::worker_teardown_flush(&sinks, &cfg).unwrap();
         assert!(sink_arc.lock().unwrap().row_count > 0, "data spilled to disk when channel full");
+    }
+
+    /// worker_teardown_flush must return Err when the copy_direct channel is closed
+    /// (receiver dropped = task crashed). Silent spill would mask the root-cause error.
+    #[test]
+    fn run_worker_teardown_errors_when_direct_channel_closed() {
+        let table = "big_orders";
+        let (direct_tx, direct_rx) = tokio::sync::mpsc::channel(4);
+        drop(direct_rx); // simulate crashed copy_direct task
+        let cfg = make_teardown_worker_cfg(table, direct_tx);
+        let sink_arc = make_sink_arc_with_row(table);
+        let sinks = [(table.to_string(), std::sync::Arc::clone(&sink_arc))].into_iter().collect();
+
+        let result = super::worker_teardown_flush(&sinks, &cfg);
+        assert!(result.is_err(), "must propagate error when copy_direct channel is closed");
     }
 
     /// trigger_budget_flush must NOT spill a sink whose bytes_buffered < min_spill_bytes.
@@ -1807,6 +1861,61 @@ mod tests {
         super::trigger_budget_flush(&sinks, &mut copy_handles, &cfg).unwrap();
 
         assert!(!copy_handles.is_empty(), "interim copy handle spawned for small table above threshold");
+    }
+
+    /// When a snapshot is sent via copy_direct channel, bytes_sent_direct must be
+    /// incremented by the bytes_buffered value that was in the sink before the snapshot.
+    #[test]
+    fn trigger_budget_flush_large_table_increments_bytes_sent_direct() {
+        let table = "orders";
+        let (direct_tx, mut direct_rx) = tokio::sync::mpsc::channel(4);
+        let cfg = make_worker_cfg_with_direct_sender(table, direct_tx);
+        let sink_arc = make_sink_arc_with_row(table); // 4 bytes buffered
+        let expected_bytes = sink_arc.lock().unwrap().bytes_buffered;
+        let sinks = [(table.to_string(), std::sync::Arc::clone(&sink_arc))].into_iter().collect();
+        let mut copy_handles = Vec::new();
+
+        super::trigger_budget_flush(&sinks, &mut copy_handles, &cfg).unwrap();
+        let _ = direct_rx.try_recv(); // consume the snapshot
+
+        let s = sink_arc.lock().unwrap();
+        assert_eq!(s.bytes_sent_direct, expected_bytes, "bytes_sent_direct must reflect bytes in the snapshot");
+    }
+
+    /// Sink between min_spill_bytes and interim_copy_threshold must be spilled to disk —
+    /// not kept in RAM, not sent via interim-COPY. This is the path that was dead when
+    /// MIN_SPILL_BYTES == MIN_SINK_COPY_BYTES.
+    #[test]
+    fn trigger_budget_flush_mid_range_sink_spills_to_disk() {
+        let table = "mid";
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let cfg = super::WorkerConfig::new(
+            "postgres://x".to_string(),
+            None,
+            sem,
+            1_000_000,
+            1000, // interim_copy_threshold: 1000 bytes
+            std::sync::Arc::new(HashMap::new()),
+            100,  // min_spill_bytes: 100 bytes — sink (4 bytes via make_sink_arc_with_row) is below
+        );
+        // Sink has 4 bytes buffered: below interim threshold (1000) but also below min_spill (100)
+        // → stays in RAM. To hit the spill path we need bytes >= 100 && < 1000.
+        // Build a sink manually with 500 bytes.
+        let schema = TableSchema::new(table.to_string(), vec![table.to_string()], 0);
+        let mut sink = crate::db::copy_sink::TempFileSink::new(&schema, "public", None);
+        // Write enough rows to reach 500 bytes
+        let row = b"col1\tcol2\tcol3\n"; // 15 bytes
+        for _ in 0..34 { sink.write_row(row).unwrap(); } // 34 * 15 = 510 bytes
+        let sink_arc = std::sync::Arc::new(std::sync::Mutex::new(sink));
+
+        let sinks = [(table.to_string(), std::sync::Arc::clone(&sink_arc))].into_iter().collect();
+        let mut copy_handles: Vec<super::InterimCopyHandle> = Vec::new();
+
+        super::trigger_budget_flush(&sinks, &mut copy_handles, &cfg).unwrap();
+
+        let s = sink_arc.lock().unwrap();
+        assert!(!s.has_pending_data(), "mid-range sink must be spilled to disk, not kept in RAM");
+        assert!(copy_handles.is_empty(), "no interim copy handle for mid-range sink (below threshold)");
     }
 
 }

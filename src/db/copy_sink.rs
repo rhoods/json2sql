@@ -207,6 +207,10 @@ pub struct TempFileSink {
     /// Raw bytes written since the last flush. Used by the runner to decide
     /// when to trigger an interim COPY to bound per-worker disk usage.
     pub bytes_buffered: u64,
+    /// Total bytes sent directly to PG via the copy_direct channel (Phase A, no disk).
+    pub bytes_sent_direct: u64,
+    /// Total bytes written to disk across all spills (auto + force). Phase B path.
+    pub bytes_spilled: u64,
     /// In-memory row data. Survives hibernation. Spilled to disk when it grows
     /// past `SPILL_THRESHOLD`.
     pending: Vec<u8>,
@@ -240,6 +244,8 @@ impl TempFileSink {
             row_count: 0,
             total_flushed: 0,
             bytes_buffered: 0,
+            bytes_sent_direct: 0,
+            bytes_spilled: 0,
             pending: Vec::new(),
             writer: None,
             temp_file: None,
@@ -298,6 +304,7 @@ impl TempFileSink {
         if self.pending.is_empty() {
             return Ok(());
         }
+        let spill_len = self.pending.len() as u64;
         self.ensure_file()?;
         // Split-borrow: self.writer (via file) and self.pending are distinct fields.
         // pending is cleared only after a successful write to avoid data loss on I/O error.
@@ -306,6 +313,7 @@ impl TempFileSink {
         }
         std::mem::take(&mut self.pending);
         self.writer = None; // close FD immediately after write
+        self.bytes_spilled += spill_len;
         Ok(())
     }
 
@@ -957,5 +965,40 @@ mod tests {
         assert!(result.is_err(), "missing spill file must return Err before opening COPY session");
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("spill file missing"), "error must identify the cause: {err_str}");
+    }
+
+    #[test]
+    fn bytes_spilled_increments_on_force_spill() {
+        let mut sink = make_sink();
+        let row = b"hello\n";
+        sink.write_row(row).unwrap();
+        assert_eq!(sink.bytes_spilled, 0, "no spill yet");
+        sink.force_spill().unwrap();
+        assert_eq!(sink.bytes_spilled, row.len() as u64, "bytes_spilled must reflect force_spill bytes");
+    }
+
+    #[test]
+    fn bytes_spilled_accumulates_across_multiple_force_spills() {
+        let mut sink = make_sink();
+        let row = b"row\n";
+        sink.write_row(row).unwrap();
+        sink.force_spill().unwrap();
+        sink.write_row(row).unwrap();
+        sink.force_spill().unwrap();
+        assert_eq!(sink.bytes_spilled, row.len() as u64 * 2, "bytes_spilled accumulates");
+    }
+
+    #[test]
+    fn bytes_spilled_increments_on_auto_spill_in_write_row() {
+        let mut sink = make_sink();
+        let large_row = vec![b'x'; SPILL_THRESHOLD + 1];
+        sink.write_row(&large_row).unwrap();
+        assert_eq!(sink.bytes_spilled, large_row.len() as u64, "auto-spill in write_row must increment bytes_spilled");
+    }
+
+    #[test]
+    fn bytes_sent_direct_starts_at_zero() {
+        let sink = make_sink();
+        assert_eq!(sink.bytes_sent_direct, 0);
     }
 }
