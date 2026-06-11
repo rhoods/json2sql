@@ -182,3 +182,7 @@ NOT NULL uniquement pour colonnes générées (`j2s_id`, `j2s_parent_id`, `j2s_o
 
 ## 2026-03-23 — Fix FK violation flush
 Flush de toutes les tables en ordre topologique quand n'importe quelle table atteint le seuil de batch.
+## 2026-06-11 — Task 9 complete : TempFileSink entièrement supprimé
+copy_sink.rs, sink.rs, runner.rs, et tous les tests d'intégration nettoyés. Pipeline 100%% MemSink.
+cargo build : 0 erreur, 0 warning. cargo test --lib : 290 tests passent.
+

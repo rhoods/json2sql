@@ -1,7 +1,8 @@
-//! Pass 2 — data insertion into `PostgreSQL`.
+//! Pass 2 — data insertion into PostgreSQL.
 //!
-//! Workers stream the JSON a second time, coerce values via [`coercer`], and bulk-load
-//! rows via `COPY FROM STDIN`. See [`runner`] for the main entry points.
+//! N workers stream the JSON round-robin into local `MemSink` buffers. A concurrent
+//! `run_flusher` task drains those buffers to PostgreSQL via `COPY FROM STDIN` as they fill,
+//! eliminating the need for temp files. See [`runner`] for the main entry point.
 pub mod coercer;
 pub mod insert;
 pub mod runner;

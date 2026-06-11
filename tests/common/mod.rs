@@ -45,15 +45,10 @@ pub fn pass2_config(root_table: &str, pg_schema: &str) -> Pass2Config {
         pg_schema: pg_schema.to_string(),
         parallel: 1,
         anomaly_dir: None,
-        temp_dir: None,
-        per_worker_budget: None,
-        min_interim_copy_bytes: None,
         limit: None,
-        large_table_threshold: None,
-        copy_direct_channel_cap: None,
-        min_spill_bytes: None,
-        ram_usage_factor: None,
-        min_budget_floor: None,
+        mem_flush_threshold_bytes: None,
+        ram_high_watermark: None,
+        ram_low_watermark: None,
     }
 }
 
