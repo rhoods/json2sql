@@ -75,17 +75,17 @@ fn ram_used_ratio(available: u64, total: u64) -> f64 {
     total.saturating_sub(available) as f64 / total as f64
 }
 
-fn format_ram_pause_log(ratio: f64, high: f64, available_mb: u64, total_mb: u64) -> String {
+fn format_flusher_pause_log(total_mb: u64, high_mb: u64) -> String {
     format!(
-        "[FLUSHER] RAM {:.1}% > high {:.1}% — workers pausés ({} MB avail / {} MB total)",
-        ratio * 100.0, high * 100.0, available_mb, total_mb
+        "[FLUSHER] {} MB en buffers > {} MB seuil — workers pausés",
+        total_mb, high_mb
     )
 }
 
-fn format_ram_resume_log(ratio: f64, low: f64) -> String {
+fn format_flusher_resume_log(total_mb: u64, low_mb: u64) -> String {
     format!(
-        "[FLUSHER] RAM {:.1}% < low {:.1}% — workers repris",
-        ratio * 100.0, low * 100.0
+        "[FLUSHER] {} MB en buffers < {} MB seuil — workers repris",
+        total_mb, low_mb
     )
 }
 
@@ -100,11 +100,13 @@ fn format_copy_done_log(table_id: &str, elapsed_ms: u128) -> String {
     format!("[FLUSHER] COPY done '{table_id}' — {elapsed_ms} ms")
 }
 
-fn format_ram_clear_empty_log(ratio: f64) -> String {
-    format!(
-        "[FLUSHER] buffers vides — pause levée (RAM {:.1}%, PG cache empêche la baisse)",
-        ratio * 100.0
-    )
+/// Returns the key of the non-empty buffer with the most bytes, or `None` if all are empty.
+/// Used to pick the best candidate for a proactive flush during RAM pressure.
+fn find_largest_buffer(buffers: &HashMap<String, bytes::BytesMut>) -> Option<String> {
+    buffers.iter()
+        .filter(|(_, b)| !b.is_empty())
+        .max_by_key(|(_, b)| b.len())
+        .map(|(k, _)| k.clone())
 }
 
 /// Flush one table's pending buffer to PostgreSQL and update accounting.
@@ -151,8 +153,13 @@ async fn flush_table_to_pg(
 /// Concurrent flusher task: receives `(table_id, bytes, row_count)` batches from workers,
 /// accumulates per-table `BytesMut` buffers, and COPYs to PostgreSQL when:
 /// - a table's buffer exceeds `mem_flush_threshold_bytes`, or
-/// - system RAM usage exceeds `ram_high_watermark` (flushes the largest table; pauses workers).
-/// Workers are unpaused when RAM drops below `ram_low_watermark`.
+/// - the flusher's own total buffered bytes exceed `DEFAULT_HIGH_FLUSHER_BYTES` (flushes
+///   the largest table and pauses workers until buffers drop below `DEFAULT_LOW_FLUSHER_BYTES`).
+///
+/// Unlike a system-RAM-based signal, the total_buffered counter is unaffected by PostgreSQL's
+/// buffer cache growth, which would otherwise keep `available_memory()` permanently above any
+/// watermark during bulk imports.
+///
 /// Returns total row count per table after draining all remaining buffers.
 pub(crate) async fn run_flusher(
     mut rx: tokio::sync::mpsc::Receiver<(String, bytes::Bytes, u64)>,
@@ -173,28 +180,34 @@ pub(crate) async fn run_flusher(
     let mut buffers: HashMap<String, bytes::BytesMut> = HashMap::new();
     let mut pending_rows: HashMap<String, u64> = HashMap::new();
     let mut total_rows: HashMap<String, u64> = HashMap::new();
+    let mut total_buffered: u64 = 0;
     let mut sys = sysinfo::System::new();
     let mut ram_tick = tokio::time::interval(std::time::Duration::from_secs(1));
     ram_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // Use select! so the RAM check fires on a 1-second timer independent of message arrival.
-    // Without this, pausing workers stops messages → flusher blocks on recv → pause never clears.
     loop {
         tokio::select! {
             _ = ram_tick.tick() => {
                 sys.refresh_memory();
                 let ratio = ram_used_ratio(sys.available_memory(), sys.total_memory());
+                eprintln!("[FLUSHER] RAM tick — {:.1}% RAM, {} MB dans buffers flusher",
+                    ratio * 100.0, total_buffered / 1024 / 1024);
                 if ratio > ram_high_watermark {
                     let available_mb = sys.available_memory() / 1024 / 1024;
                     let total_mb = sys.total_memory() / 1024 / 1024;
-                    // Log only on the pause→paused transition to avoid log noise.
-                    if !pause_flag.load(Ordering::Acquire) {
-                        let msg = format_ram_pause_log(ratio, ram_high_watermark, available_mb, total_mb);
-                        eprintln!("{msg}");
-                        if let Some(tx) = progress_tx.as_ref() { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
-                    }
-                    pause_flag.store(true, Ordering::Release);
-                    for table_id in find_all_nonempty_buffers(&buffers) {
+                    eprintln!("[FLUSHER] RAM {:.1}% > high {:.1}% ({} MB avail / {} MB total) — PG buffer cache (informatif)",
+                        ratio * 100.0, ram_high_watermark * 100.0, available_mb, total_mb);
+                }
+                // Proactive flush when workers are paused: flusher's rx.recv() arm is not called
+                // while workers spin, so the ram_tick is the only way to drain flusher buffers.
+                // Flush tables largest-first and stop as soon as total_buffered < LOW —
+                // avoids unnecessary small COPYs while still making meaningful progress.
+                if pause_flag.load(Ordering::Acquire) {
+                    let mut candidates = find_all_nonempty_buffers(&buffers);
+                    candidates.sort_by_key(|k| std::cmp::Reverse(buffers.get(k).map_or(0, |b| b.len())));
+                    for table_id in candidates {
+                        if total_buffered < DEFAULT_LOW_FLUSHER_BYTES { break; }
+                        let pre_flush = buffers.get(&table_id).map_or(0, |b| b.len() as u64);
                         if let Err(e) = flush_table_to_pg(
                             &table_id, &mut buffers, &mut pending_rows, &mut total_rows,
                             &copy_sql_map, &conn, progress_tx.as_ref(), &error_flag,
@@ -202,36 +215,74 @@ pub(crate) async fn run_flusher(
                             pause_flag.store(false, Ordering::Release);
                             return Err(e);
                         }
+                        total_buffered = total_buffered.saturating_sub(pre_flush);
                     }
-                    // PG buffer cache prevents RAM from dropping below the low watermark.
-                    // If all flusher buffers are now empty, keeping workers paused is
-                    // counterproductive — the bounded channel (cap=1024) provides backpressure.
-                    if find_all_nonempty_buffers(&buffers).is_empty() {
-                        let msg = format_ram_clear_empty_log(ratio);
+                    if total_buffered < DEFAULT_LOW_FLUSHER_BYTES {
+                        let msg = format_flusher_resume_log(
+                            total_buffered / 1024 / 1024,
+                            DEFAULT_LOW_FLUSHER_BYTES / 1024 / 1024,
+                        );
                         eprintln!("{msg}");
                         if let Some(tx) = progress_tx.as_ref() { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
                         pause_flag.store(false, Ordering::Release);
                     }
-                } else if ratio < ram_low_watermark {
-                    if pause_flag.load(Ordering::Acquire) {
-                        let msg = format_ram_resume_log(ratio, ram_low_watermark);
-                        eprintln!("{msg}");
-                        if let Some(tx) = progress_tx.as_ref() { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
-                    }
-                    pause_flag.store(false, Ordering::Release);
                 }
+                let _ = (ram_low_watermark, ram_high_watermark); // used for RAM logging above
             }
             msg = rx.recv() => {
                 let Some((table_id, bytes, rows)) = msg else { break; };
+                total_buffered += bytes.len() as u64;
                 buffers.entry(table_id.clone()).or_default().extend_from_slice(&bytes);
                 *pending_rows.entry(table_id.clone()).or_insert(0) += rows;
+
+                // Per-table threshold flush
                 if buffers[&table_id].len() as u64 >= mem_flush_threshold_bytes {
+                    let pre_flush = buffers.get(&table_id).map_or(0, |b| b.len() as u64);
                     if let Err(e) = flush_table_to_pg(
                         &table_id, &mut buffers, &mut pending_rows, &mut total_rows,
                         &copy_sql_map, &conn, progress_tx.as_ref(), &error_flag,
                     ).await {
                         pause_flag.store(false, Ordering::Release);
                         return Err(e);
+                    }
+                    total_buffered = total_buffered.saturating_sub(pre_flush);
+                }
+
+                // Pause workers when the flusher's own buffers are overloaded.
+                // total_buffered measures our actual in-process bytes — immune to PG buffer cache.
+                if total_buffered > DEFAULT_HIGH_FLUSHER_BYTES && !pause_flag.load(Ordering::Acquire) {
+                    let msg = format_flusher_pause_log(
+                        total_buffered / 1024 / 1024,
+                        DEFAULT_HIGH_FLUSHER_BYTES / 1024 / 1024,
+                    );
+                    eprintln!("{msg}");
+                    if let Some(tx) = progress_tx.as_ref() { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
+                    pause_flag.store(true, Ordering::Release);
+                }
+
+                // Eager flush when paused: the channel may still carry a few in-flight messages
+                // sent by workers just before they detected the pause flag. Flush the largest
+                // table on each such message to keep total_buffered moving downward.
+                if pause_flag.load(Ordering::Acquire) {
+                    if let Some(largest) = find_largest_buffer(&buffers) {
+                        let pre_flush = buffers.get(&largest).map_or(0, |b| b.len() as u64);
+                        if let Err(e) = flush_table_to_pg(
+                            &largest, &mut buffers, &mut pending_rows, &mut total_rows,
+                            &copy_sql_map, &conn, progress_tx.as_ref(), &error_flag,
+                        ).await {
+                            pause_flag.store(false, Ordering::Release);
+                            return Err(e);
+                        }
+                        total_buffered = total_buffered.saturating_sub(pre_flush);
+                        if total_buffered < DEFAULT_LOW_FLUSHER_BYTES {
+                            let msg = format_flusher_resume_log(
+                                total_buffered / 1024 / 1024,
+                                DEFAULT_LOW_FLUSHER_BYTES / 1024 / 1024,
+                            );
+                            eprintln!("{msg}");
+                            if let Some(tx) = progress_tx.as_ref() { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
+                            pause_flag.store(false, Ordering::Release);
+                        }
                     }
                 }
             }
@@ -278,13 +329,21 @@ fn effective_worker_threshold(mem_flush_threshold: u64, parallel: usize) -> u64 
     (mem_flush_threshold / parallel as u64).max(1)
 }
 
-/// Default RAM high-watermark: pause workers when system RAM exceeds this ratio.
-/// Set conservatively to leave headroom for PostgreSQL buffer cache growth during bulk loads.
+/// Default RAM high-watermark: log a warning when system RAM exceeds this ratio.
+/// Used for observability only — the actual pause trigger is `DEFAULT_HIGH_FLUSHER_BYTES`.
 pub(crate) const DEFAULT_RAM_HIGH_WATERMARK: f64 = 0.70;
 
-/// Default RAM low-watermark: resume workers when system RAM drops below this ratio.
-/// Set well below the high mark to account for slow HDD page eviction by PostgreSQL.
+/// Default RAM low-watermark: kept for config validation and backward compatibility.
 pub(crate) const DEFAULT_RAM_LOW_WATERMARK: f64 = 0.50;
+
+/// Flusher's own in-process buffer high-water mark (512 MiB).
+/// Workers are paused when the flusher's total buffered bytes exceeds this.
+/// Independent of system RAM — unaffected by PostgreSQL's buffer cache.
+pub(crate) const DEFAULT_HIGH_FLUSHER_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Flusher's own in-process buffer low-water mark (128 MiB).
+/// Workers are resumed when the flusher's total buffered bytes drops below this.
+pub(crate) const DEFAULT_LOW_FLUSHER_BYTES: u64 = 128 * 1024 * 1024;
 
 fn validate_run_params(parallel: usize) -> Result<()> {
     if parallel == 0 {
@@ -376,7 +435,8 @@ async fn process_worker_item_diskless(
 }
 
 /// Diskless worker: local MemSink accumulation, sends batches to `run_flusher` via channel.
-/// Checks `error_flag` each iteration (flusher fatal error) and yields on `pause_flag` (RAM pressure).
+/// Checks `error_flag` each iteration (flusher fatal error) and yields on `pause_flag`
+/// (flusher buffer pressure). Workers spin without draining — flusher controls when to resume.
 #[allow(clippy::too_many_arguments)]
 async fn run_worker_diskless(
     mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
@@ -397,15 +457,9 @@ async fn run_worker_diskless(
             return Err(J2sError::InvalidInput("flusher reported a fatal PG error — aborting worker".to_string()));
         }
         if pause_flag.load(Ordering::Relaxed) {
-            // Drain local sinks before spinning: gives the flusher real data to COPY to PG,
-            // which is the only way RAM pressure can drop and the pause be cleared.
-            for (table_id, sink) in sinks.iter_mut() {
-                if sink.buf.is_empty() { continue; }
-                let chunk = std::mem::take(&mut sink.buf).freeze();
-                let rows = std::mem::replace(&mut sink.row_count, 0);
-                flush_tx.send((table_id.clone(), chunk, rows)).await
-                    .map_err(|_| J2sError::InvalidInput("flusher channel closed during pause drain".to_string()))?;
-            }
+            // Spin without draining: flusher has 512 MB+ of its own buffered data and needs to
+            // COPY it down before accepting more. Adding more data via a drain would increase
+            // total_buffered and delay the resume. Flusher controls the pause lifecycle.
             while pause_flag.load(Ordering::Relaxed) && !error_flag.load(Ordering::Acquire) {
                 tokio::task::yield_now().await;
             }
@@ -581,6 +635,9 @@ async fn dispatch_loop(
             if limit.is_some_and(|n| rows_processed >= n) { break 'dispatch; }
             robin = (robin + 1) % parallel;
             update_row_progress(progress, progress_tx, rows_processed, reader.bytes_read(), total_bytes);
+            if rows_processed % 10_000 == 0 {
+                eprintln!("[DISPATCH] {} records, {} MB scanned", rows_processed, reader.bytes_read() / 1024 / 1024);
+            }
         }
     }
     Ok((rows_processed, worker_died))
@@ -645,7 +702,7 @@ pub async fn run(
     let _cancel_guard = cancel.clone().drop_guard();
 
     let copy_sql_map = build_copy_sql_map(schemas, &config.pg_schema);
-    let (flush_tx, flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(1024);
+    let (flush_tx, flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(256);
     let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let error_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flusher_handle = tokio::spawn(run_flusher(
@@ -979,15 +1036,24 @@ mod tests {
     }
 
     #[test]
-    fn default_ram_high_watermark_leaves_headroom_for_pg_cache() {
-        // PG buffer cache grows as data is inserted — trigger pause before cache fills RAM.
+    fn default_ram_high_watermark_is_logging_threshold() {
+        // RAM watermarks are now informational only — actual pause uses total_buffered.
         assert_eq!(super::DEFAULT_RAM_HIGH_WATERMARK, 0.70);
     }
 
     #[test]
-    fn default_ram_low_watermark_waits_for_pg_cache_eviction() {
-        // PG evicts pages to disk slowly on HDD — wait well below high before resuming.
+    fn default_ram_low_watermark_kept_for_config_compat() {
         assert_eq!(super::DEFAULT_RAM_LOW_WATERMARK, 0.50);
+    }
+
+    #[test]
+    fn default_high_flusher_bytes_is_512_mb() {
+        assert_eq!(super::DEFAULT_HIGH_FLUSHER_BYTES, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn default_low_flusher_bytes_is_128_mb() {
+        assert_eq!(super::DEFAULT_LOW_FLUSHER_BYTES, 128 * 1024 * 1024);
     }
 
     #[test]
@@ -1288,75 +1354,21 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // pause drain tests — worker must drain local sinks before spinning on pause_flag
-    // -------------------------------------------------------------------------
-
-    /// Verifies that when pause_flag is set and the worker has data in local sinks,
-    /// it sends that data to flush_tx BEFORE entering the spin loop.
-    /// Without the fix, flush_rx.recv() would time out (data stays in the worker).
-    #[tokio::test]
-    async fn worker_drains_local_sinks_before_pause_spin() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::time::Duration;
-
-        let schema = make_schema_with_rows("root", 0);
-        let sep = crate::schema::PATH_SEP.to_string();
-        let path_map = Arc::new(HashMap::from([(schema.path.join(&sep), schema.clone())]));
-        let root_schema = Arc::new(schema);
-        let (anomaly_tx, _) = tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
-        let (flush_tx, mut flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(16);
-        let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let error_flag = Arc::new(AtomicBool::new(false));
-        let pause_flag = Arc::new(AtomicBool::new(true)); // already paused at start
-
-        // Pre-populate a sink with data before the worker starts
-        let mut worker_sinks: HashMap<String, crate::db::copy_sink::MemSink> = HashMap::new();
-        let s = make_schema_with_rows("root", 0);
-        let mut sink = crate::db::copy_sink::MemSink::new(&s, "public");
-        sink.write_row(b"row1\n").unwrap();
-        worker_sinks.insert("root".to_string(), sink);
-
-        let pf = Arc::clone(&pause_flag);
-        let worker_handle = tokio::spawn(super::run_worker_diskless(
-            item_rx, worker_sinks, anomaly_tx, path_map, root_schema,
-            cancel, flush_tx, Arc::clone(&pause_flag), Arc::clone(&error_flag),
-            64 * 1024 * 1024,
-        ));
-
-        // Worker must drain the pre-populated sink to flush_tx before entering the spin.
-        let msg = tokio::time::timeout(Duration::from_millis(200), flush_rx.recv())
-            .await
-            .expect("worker must drain sinks to flush_tx when pause_flag is set — timed out")
-            .expect("flush_tx must not be closed");
-        assert_eq!(msg.0, "root", "drained table must be 'root'");
-        assert_eq!(&msg.1[..], b"row1\n", "drained bytes must match pre-populated sink");
-        assert_eq!(msg.2, 1, "row count must be 1");
-
-        // Clear pause so worker can exit cleanly.
-        pf.store(false, Ordering::Release);
-        let _ = tokio::time::timeout(Duration::from_millis(200), worker_handle).await;
-    }
-
-    // -------------------------------------------------------------------------
     // RAM watermark log format tests
     // -------------------------------------------------------------------------
 
     #[test]
-    fn ram_pause_log_contains_ratio_watermark_and_memory() {
-        let msg = super::format_ram_pause_log(0.732, 0.70, 18_400, 64_000);
-        assert!(msg.contains("73.2%"), "must show used ratio: {msg}");
-        assert!(msg.contains("70.0%"), "must show high watermark: {msg}");
-        assert!(msg.contains("18400"), "must show available MB: {msg}");
-        assert!(msg.contains("64000"), "must show total MB: {msg}");
+    fn flusher_pause_log_contains_current_and_threshold_mb() {
+        let msg = super::format_flusher_pause_log(600, 512);
+        assert!(msg.contains("600"), "must show current MB: {msg}");
+        assert!(msg.contains("512"), "must show threshold MB: {msg}");
     }
 
     #[test]
-    fn ram_resume_log_contains_ratio_and_watermark() {
-        let msg = super::format_ram_resume_log(0.481, 0.50);
-        assert!(msg.contains("48.1%"), "must show used ratio: {msg}");
-        assert!(msg.contains("50.0%"), "must show low watermark: {msg}");
+    fn flusher_resume_log_contains_current_and_threshold_mb() {
+        let msg = super::format_flusher_resume_log(100, 128);
+        assert!(msg.contains("100"), "must show current MB: {msg}");
+        assert!(msg.contains("128"), "must show threshold MB: {msg}");
     }
 
     #[test]
@@ -1374,31 +1386,33 @@ mod tests {
         assert!(msg.contains("2341"), "must show duration ms: {msg}");
     }
 
+    // -------------------------------------------------------------------------
+    // find_largest_buffer tests
+    // -------------------------------------------------------------------------
+
     #[test]
-    fn ram_clear_empty_log_contains_ratio_and_pg_cache_mention() {
-        let msg = super::format_ram_clear_empty_log(0.714);
-        assert!(msg.contains("71.4%"), "must show RAM ratio: {msg}");
-        assert!(msg.contains("PG cache"), "must mention PG cache cause: {msg}");
+    fn find_largest_buffer_returns_key_of_largest_nonempty() {
+        let mut buffers = HashMap::new();
+        let mut big = bytes::BytesMut::new();
+        big.extend_from_slice(&vec![0u8; 1000]);
+        buffers.insert("big".to_string(), big);
+        let mut small = bytes::BytesMut::new();
+        small.extend_from_slice(&vec![0u8; 100]);
+        buffers.insert("small".to_string(), small);
+        assert_eq!(super::find_largest_buffer(&buffers), Some("big".to_string()));
     }
 
     #[test]
-    fn pause_cleared_when_flusher_buffers_empty_after_ram_flush() {
-        // Deadlock scenario: pause_flag is set, flusher flushed everything,
-        // PG buffer cache absorbed the memory — buffers are now empty.
-        // Decision: clear pause (workers will be throttled by channel backpressure).
-        let buffers: std::collections::HashMap<String, bytes::BytesMut> = std::collections::HashMap::new();
-        let should_clear = super::find_all_nonempty_buffers(&buffers).is_empty();
-        assert!(should_clear, "pause must be cleared when all flusher buffers are empty");
+    fn find_largest_buffer_returns_none_when_all_empty() {
+        let mut buffers = HashMap::new();
+        buffers.insert("t".to_string(), bytes::BytesMut::new());
+        assert_eq!(super::find_largest_buffer(&buffers), None);
     }
 
     #[test]
-    fn pause_kept_when_flusher_buffers_still_have_data() {
-        let mut buffers = std::collections::HashMap::new();
-        let mut buf = bytes::BytesMut::new();
-        buf.extend_from_slice(b"unflushed data");
-        buffers.insert("t1".to_string(), buf);
-        let should_clear = super::find_all_nonempty_buffers(&buffers).is_empty();
-        assert!(!should_clear, "pause must not be cleared when flusher buffers still have data");
+    fn find_largest_buffer_returns_none_for_empty_map() {
+        let buffers: HashMap<String, bytes::BytesMut> = HashMap::new();
+        assert_eq!(super::find_largest_buffer(&buffers), None);
     }
 
     // -------------------------------------------------------------------------
