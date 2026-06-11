@@ -34,7 +34,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         }
         state.write().import.pass2_progress = crate::state::Pass2Progress::default();
 
-        let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, pg_schema, pass2_parallel, import_limit) = {
+        let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, pg_schema, pass2_parallel, import_limit, verbose_logs) = {
             let source_file_opt = state.read().project.source_file.clone();
             let Some(path) = source_file_opt else {
                 state.write().cancel();
@@ -56,6 +56,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 s.project.pg_schema.clone(),
                 s.project.pass2_parallel,
                 s.project.import_limit,
+                s.project.verbose_logs,
             )
         };
 
@@ -84,6 +85,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 mem_flush_threshold_bytes: None,
                 ram_high_watermark: None,
                 ram_low_watermark: None,
+                verbose: verbose_logs,
             };
             json2sql::pass2::runner::run(&source_file, &schemas, &client, &pg_url, &cfg, Some(tx))
             .await

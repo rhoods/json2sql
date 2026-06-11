@@ -171,6 +171,7 @@ pub(crate) async fn run_flusher(
     mem_flush_threshold_bytes: u64,
     ram_high_watermark: f64,
     ram_low_watermark: f64,
+    verbose: bool,
 ) -> Result<HashMap<String, u64>> {
     use std::sync::atomic::Ordering;
 
@@ -190,13 +191,15 @@ pub(crate) async fn run_flusher(
             _ = ram_tick.tick() => {
                 sys.refresh_memory();
                 let ratio = ram_used_ratio(sys.available_memory(), sys.total_memory());
-                eprintln!("[FLUSHER] RAM tick — {:.1}% RAM, {} MB dans buffers flusher",
-                    ratio * 100.0, total_buffered / 1024 / 1024);
-                if ratio > ram_high_watermark {
-                    let available_mb = sys.available_memory() / 1024 / 1024;
-                    let total_mb = sys.total_memory() / 1024 / 1024;
-                    eprintln!("[FLUSHER] RAM {:.1}% > high {:.1}% ({} MB avail / {} MB total) — PG buffer cache (informatif)",
-                        ratio * 100.0, ram_high_watermark * 100.0, available_mb, total_mb);
+                if verbose {
+                    eprintln!("[FLUSHER] RAM tick — {:.1}% RAM, {} MB dans buffers flusher",
+                        ratio * 100.0, total_buffered / 1024 / 1024);
+                    if ratio > ram_high_watermark {
+                        let available_mb = sys.available_memory() / 1024 / 1024;
+                        let total_mb = sys.total_memory() / 1024 / 1024;
+                        eprintln!("[FLUSHER] RAM {:.1}% > high {:.1}% ({} MB avail / {} MB total) — PG buffer cache (informatif)",
+                            ratio * 100.0, ram_high_watermark * 100.0, available_mb, total_mb);
+                    }
                 }
                 // Proactive flush when workers are paused: flusher's rx.recv() arm is not called
                 // while workers spin, so the ram_tick is the only way to drain flusher buffers.
@@ -227,7 +230,7 @@ pub(crate) async fn run_flusher(
                         pause_flag.store(false, Ordering::Release);
                     }
                 }
-                let _ = (ram_low_watermark, ram_high_watermark); // used for RAM logging above
+                let _ = ram_low_watermark; // kept for config validation
             }
             msg = rx.recv() => {
                 let Some((table_id, bytes, rows)) = msg else { break; };
@@ -320,6 +323,9 @@ pub struct Pass2Config {
     pub ram_high_watermark: Option<f64>,
     /// Flusher unpauses workers below this RAM usage ratio. None = 0.50.
     pub ram_low_watermark: Option<f64>,
+    /// Emit verbose logs (RAM tick every second, DISPATCH progress every 10k rows).
+    /// Default false — high-frequency logs are noisy in normal use.
+    pub verbose: bool,
 }
 
 /// Per-worker flush threshold: divides the global threshold by worker count so that
@@ -619,6 +625,7 @@ async fn dispatch_loop(
     progress: Option<&ProgressTracker>,
     limit: Option<u64>,
     total_bytes: u64,
+    verbose: bool,
 ) -> Result<(u64, bool)> {
     let parallel = senders.len();
     let mut rows_processed = 0u64;
@@ -635,7 +642,7 @@ async fn dispatch_loop(
             if limit.is_some_and(|n| rows_processed >= n) { break 'dispatch; }
             robin = (robin + 1) % parallel;
             update_row_progress(progress, progress_tx, rows_processed, reader.bytes_read(), total_bytes);
-            if rows_processed % 10_000 == 0 {
+            if verbose && rows_processed % 10_000 == 0 {
                 eprintln!("[DISPATCH] {} records, {} MB scanned", rows_processed, reader.bytes_read() / 1024 / 1024);
             }
         }
@@ -680,6 +687,7 @@ pub async fn run(
     let mem_flush_threshold = config.mem_flush_threshold_bytes.unwrap_or(64 * 1024 * 1024);
     let ram_high = config.ram_high_watermark.unwrap_or(DEFAULT_RAM_HIGH_WATERMARK);
     let ram_low = config.ram_low_watermark.unwrap_or(DEFAULT_RAM_LOW_WATERMARK);
+    let verbose = config.verbose;
     validate_watermarks(ram_high, ram_low, mem_flush_threshold)?;
 
     let parallel = config.parallel.max(1);
@@ -715,6 +723,7 @@ pub async fn run(
         mem_flush_threshold,
         ram_high,
         ram_low,
+        verbose,
     ));
 
     let (mut reader, _format) = JsonReader::open(path)?;
@@ -748,7 +757,7 @@ pub async fn run(
 
     let stream_start = Instant::now();
     let (rows_processed, worker_died) = dispatch_loop(
-        &mut reader, &senders, progress_tx.as_ref(), progress.as_ref(), config.limit, total_bytes,
+        &mut reader, &senders, progress_tx.as_ref(), progress.as_ref(), config.limit, total_bytes, verbose,
     ).await?;
     drop(senders); // workers break their recv loops → drain local sinks → drop flush_tx + anomaly_tx
 
@@ -1125,6 +1134,7 @@ mod tests {
             mem_flush_threshold_bytes: None,
             ram_high_watermark: None,
             ram_low_watermark: None,
+            verbose: false,
         };
         assert!(cfg.limit.is_none());
     }
@@ -1140,6 +1150,7 @@ mod tests {
             mem_flush_threshold_bytes: None,
             ram_high_watermark: None,
             ram_low_watermark: None,
+            verbose: false,
         };
         assert_eq!(cfg.limit, Some(0));
     }

@@ -48,12 +48,8 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let mut picking_source  = use_signal(|| false);
     let mut picking_anomaly = use_signal(|| false);
     let mut picking_schema  = use_signal(|| false);
-    let mut picking_temp    = use_signal(|| false);
     let mut picker_error: Signal<Option<String>> = use_signal(|| None);
     let mut load_error:   Signal<Option<String>> = use_signal(|| None);
-
-    // ── Temp dir free-space probe ─────────────────────────────────────────
-    let mut temp_free_bytes: Signal<Option<u64>> = use_signal(|| None);
 
     // ── Derived values ────────────────────────────────────────────────────
     let source_file     = state.read().project.source_file.clone();
@@ -81,15 +77,8 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let anomaly_label = anomaly_dir.as_ref()
         .and_then(|p| p.file_name()).map_or_else(|| "None (anomalies discarded)".to_string(), |n| n.to_string_lossy().into_owned());
 
-    let temp_dir = state.read().project.temp_dir.clone();
-    let temp_label = temp_dir.as_ref()
-        .map_or_else(|| "System default (/tmp)".to_string(), |p| p.display().to_string());
-    let pg_host_is_local = {
-        let h = state.read().project.pg.host.clone();
-        h == "localhost" || h == "127.0.0.1" || h == "::1"
-    };
-    let temp_warn = (*temp_free_bytes.read()).and_then(|free| disk_warning_level(free, size_bytes.unwrap_or(0)));
     let import_limit = state.read().project.import_limit;
+    let verbose_logs = state.read().project.verbose_logs;
 
     let step1_done = source_file.is_some();
     let step2_done = true; // optional — always OK
@@ -567,88 +556,6 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
 
                                 div { class: "divider" }
 
-                                // ── Temp directory ────────────────────────
-                                h4 { style: "font-size:var(--fs-sm);margin:0 0 8px;color:var(--fg);", "Temp directory" }
-                                p { style: "font-size:var(--fs-xs);color:var(--fg-3);margin:0 0 10px;line-height:1.5;",
-                                    "Pass 2 writes all rows to temporary files before copying to PostgreSQL. Choose a directory with enough free space."
-                                }
-                                div { class: "field-row",
-                                    label { "Directory" }
-                                    input {
-                                        class: "input grow",
-                                        r#type: "text",
-                                        readonly: true,
-                                        value: "{temp_label}",
-                                    }
-                                    button {
-                                        class: "btn sm",
-                                        disabled: picking_temp(),
-                                        onclick: move |_| async move {
-                                            if picking_temp() { return; }
-                                            picking_temp.set(true);
-                                            let result = pick_folder().await;
-                                            picking_temp.set(false);
-                                            match result {
-                                                PickResult::Selected(dir) => {
-                                                    let probe_dir = dir.clone();
-                                                    state.write().project.temp_dir = Some(dir);
-                                                    crate::config::try_save(&state.read().project);
-                                                    // probe free space async
-                                                    spawn(async move {
-                                                        let free = tokio::task::spawn_blocking(move || {
-                                                            fs2::available_space(&probe_dir).ok()
-                                                        }).await.ok().flatten();
-                                                        temp_free_bytes.set(free);
-                                                    });
-                                                }
-                                                PickResult::Cancelled => {}
-                                                PickResult::NotAvailable => {
-                                                    picker_error.set(Some("Folder picker unavailable".to_string()));
-                                                }
-                                            }
-                                        },
-                                        "Choose…"
-                                    }
-                                    if temp_dir.is_some() {
-                                        button {
-                                            class: "btn ghost sm",
-                                            onclick: move |_| {
-                                                state.write().project.temp_dir = None;
-                                                temp_free_bytes.set(None);
-                                                crate::config::try_save(&state.read().project);
-                                            },
-                                            "✕"
-                                        }
-                                    }
-                                }
-                                // Disk space warning
-                                if let Some(level) = temp_warn {
-                                    if let Some(free) = *temp_free_bytes.read() {
-                                        {
-                                            let (cls, icon, msg) = match level {
-                                                DiskWarnLevel::Green  => ("alert success compact mt-sm", "✓", format!("Free: {} — sufficient", format_bytes(free))),
-                                                DiskWarnLevel::Yellow => ("alert warn compact mt-sm",    "⚠", format!("Free: {} — marginal (source file is {})", format_bytes(free), format_bytes(size_bytes.unwrap_or(0)))),
-                                                DiskWarnLevel::Red    => ("alert danger compact mt-sm",  "✗", format!("Free: {} — insufficient (source file is {})", format_bytes(free), format_bytes(size_bytes.unwrap_or(0)))),
-                                            };
-                                            rsx! {
-                                                div { class: "{cls}",
-                                                    span { "{icon}" }
-                                                    div { "{msg}" }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                if pg_host_is_local && size_bytes.is_some() {
-                                    div { style: "font-size:var(--fs-xs);color:var(--fg-3);margin-top:6px;padding:6px 10px;background:var(--info-bg);border-left:2px solid var(--info);border-radius:0 var(--r-sm) var(--r-sm) 0;line-height:1.5;",
-                                        "PostgreSQL appears to run locally — if its data directory is on the same disk, reserve "
-                                        b { "{format_bytes(size_bytes.unwrap_or(0) * 2)}" }
-                                        " total."
-                                    }
-                                }
-
-                                div { class: "divider" }
-
                                 h4 { style: "font-size:var(--fs-sm);margin:0 0 8px;color:var(--fg);", "Table handling" }
                                 div { class: "row gap-lg", style: "flex-wrap:wrap;",
                                     span {
@@ -784,6 +691,24 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                     div { class: "alert warn compact mt-sm",
                                         span { "⚠" }
                                         div { b { "Sample mode" } " — only the first " b { "{import_limit.unwrap()}" } " root objects will be imported." }
+                                    }
+                                }
+
+                                div { class: "divider" }
+
+                                h4 { style: "font-size:var(--fs-sm);margin:0 0 8px;color:var(--fg);", "Diagnostic logs" }
+                                label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: verbose_logs,
+                                        onchange: move |e| {
+                                            state.write().project.verbose_logs = e.value() == "true";
+                                            crate::config::try_save(&state.read().project);
+                                        },
+                                    }
+                                    span { "Verbose logs " }
+                                    span { style: "color:var(--fg-3);font-size:var(--fs-xs);",
+                                        "(RAM tick / sec, DISPATCH every 10k rows)"
                                     }
                                 }
                             }
@@ -986,64 +911,3 @@ fn PgConnectionForm(mut state: Signal<AppState>) -> Element {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Disk space warning logic (pure, testable)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum DiskWarnLevel {
-    /// free >= `source_size` * 1.2 — safe
-    Green,
-    /// free >= `source_size` — marginal
-    Yellow,
-    /// free < `source_size` — insufficient
-    Red,
-}
-
-/// Classify available disk space relative to the source file size.
-/// Returns `None` if `source_size` is 0 (no file selected yet).
-pub const fn disk_warning_level(free: u64, source_size: u64) -> Option<DiskWarnLevel> {
-    if source_size == 0 { return None; }
-    if free >= source_size * 12 / 10 {
-        Some(DiskWarnLevel::Green)
-    } else if free >= source_size {
-        Some(DiskWarnLevel::Yellow)
-    } else {
-        Some(DiskWarnLevel::Red)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn disk_warn_green_when_ample_space() {
-        assert_eq!(disk_warning_level(120, 100), Some(DiskWarnLevel::Green));
-    }
-
-    #[test]
-    fn disk_warn_green_at_exact_120_pct() {
-        assert_eq!(disk_warning_level(120_000, 100_000), Some(DiskWarnLevel::Green));
-    }
-
-    #[test]
-    fn disk_warn_yellow_between_100_and_120_pct() {
-        assert_eq!(disk_warning_level(110, 100), Some(DiskWarnLevel::Yellow));
-    }
-
-    #[test]
-    fn disk_warn_yellow_at_exact_100_pct() {
-        assert_eq!(disk_warning_level(100, 100), Some(DiskWarnLevel::Yellow));
-    }
-
-    #[test]
-    fn disk_warn_red_when_insufficient() {
-        assert_eq!(disk_warning_level(99, 100), Some(DiskWarnLevel::Red));
-    }
-
-    #[test]
-    fn disk_warn_none_when_no_source_file() {
-        assert_eq!(disk_warning_level(999_999, 0), None);
-    }
-}

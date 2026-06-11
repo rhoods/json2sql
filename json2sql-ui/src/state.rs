@@ -213,6 +213,8 @@ pub struct ProjectState {
     pub disabled_strategies: HashSet<StrategyName>,
     /// Stop pass 2 after this many root objects. None = full import (default).
     pub import_limit: Option<u64>,
+    /// Emit verbose pass 2 logs (RAM tick every second, DISPATCH every 10k rows). Default false.
+    pub verbose_logs: bool,
 }
 
 impl Default for ProjectState {
@@ -233,6 +235,7 @@ impl Default for ProjectState {
                 .min(8),
             disabled_strategies: HashSet::new(),
             import_limit: None,
+            verbose_logs: false,
         }
     }
 }

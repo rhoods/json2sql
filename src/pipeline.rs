@@ -137,6 +137,7 @@ async fn run_pass2(
             mem_flush_threshold_bytes: None,
             ram_high_watermark: None,
             ram_low_watermark: None,
+            verbose: false,
         },
         None,
     )
