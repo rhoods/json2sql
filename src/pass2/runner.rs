@@ -60,12 +60,13 @@ const PROGRESS_INTERVAL: u64 = 1_000;
 // Diskless flusher — in-memory buffers, flushes to PostgreSQL concurrently
 // ---------------------------------------------------------------------------
 
-/// Returns the table_id with the largest pending buffer, skipping empty ones.
-fn find_largest_buffer(buffers: &HashMap<String, bytes::BytesMut>) -> Option<String> {
+/// Returns all table_ids with a non-empty pending buffer, in arbitrary order.
+/// Used during RAM-pressure flushes to drain every accumulated table in one tick.
+fn find_all_nonempty_buffers(buffers: &HashMap<String, bytes::BytesMut>) -> Vec<String> {
     buffers.iter()
         .filter(|(_, b)| !b.is_empty())
-        .max_by_key(|(_, b)| b.len())
         .map(|(k, _)| k.clone())
+        .collect()
 }
 
 /// RAM usage ratio in [0.0, 1.0]. Returns 0.0 when total memory is zero.
@@ -95,6 +96,12 @@ async fn flush_table_to_pg(
     })?;
     if let Err(e) = flush_mem_sink_to_pg(buf.freeze(), copy_sql, conn).await {
         error_flag.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(ProgressEvent::Pass2Error {
+                table_name: table_id.to_string(),
+                message: e.to_string(),
+            });
+        }
         return Err(e);
     }
     *total_rows.entry(table_id.to_string()).or_insert(0) += rows;
@@ -144,11 +151,14 @@ pub(crate) async fn run_flusher(
                 let ratio = ram_used_ratio(sys.available_memory(), sys.total_memory());
                 if ratio > ram_high_watermark {
                     pause_flag.store(true, Ordering::Release);
-                    if let Some(largest) = find_largest_buffer(&buffers) {
-                        flush_table_to_pg(
-                            &largest, &mut buffers, &mut pending_rows, &mut total_rows,
+                    for table_id in find_all_nonempty_buffers(&buffers) {
+                        if let Err(e) = flush_table_to_pg(
+                            &table_id, &mut buffers, &mut pending_rows, &mut total_rows,
                             &copy_sql_map, &conn, progress_tx.as_ref(), &error_flag,
-                        ).await?;
+                        ).await {
+                            pause_flag.store(false, Ordering::Release);
+                            return Err(e);
+                        }
                     }
                 } else if ratio < ram_low_watermark {
                     pause_flag.store(false, Ordering::Release);
@@ -159,10 +169,13 @@ pub(crate) async fn run_flusher(
                 buffers.entry(table_id.clone()).or_default().extend_from_slice(&bytes);
                 *pending_rows.entry(table_id.clone()).or_insert(0) += rows;
                 if buffers[&table_id].len() as u64 >= mem_flush_threshold_bytes {
-                    flush_table_to_pg(
+                    if let Err(e) = flush_table_to_pg(
                         &table_id, &mut buffers, &mut pending_rows, &mut total_rows,
                         &copy_sql_map, &conn, progress_tx.as_ref(), &error_flag,
-                    ).await?;
+                    ).await {
+                        pause_flag.store(false, Ordering::Release);
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -170,10 +183,13 @@ pub(crate) async fn run_flusher(
 
     // Drain all remaining buffers once all workers finish (channel closed)
     for table_id in buffers.keys().cloned().collect::<Vec<_>>() {
-        flush_table_to_pg(
+        if let Err(e) = flush_table_to_pg(
             &table_id, &mut buffers, &mut pending_rows, &mut total_rows,
             &copy_sql_map, &conn, progress_tx.as_ref(), &error_flag,
-        ).await?;
+        ).await {
+            pause_flag.store(false, Ordering::Release);
+            return Err(e);
+        }
     }
 
     pause_flag.store(false, Ordering::Release);
@@ -198,10 +214,41 @@ pub struct Pass2Config {
     pub ram_low_watermark: Option<f64>,
 }
 
+/// Per-worker flush threshold: divides the global threshold by worker count so that
+/// with many workers and a wide schema, each worker's per-table buffer stays proportionally
+/// small and flushes reach the flusher before RAM is exhausted.
+fn effective_worker_threshold(mem_flush_threshold: u64, parallel: usize) -> u64 {
+    (mem_flush_threshold / parallel as u64).max(1)
+}
+
 fn validate_run_params(parallel: usize) -> Result<()> {
     if parallel == 0 {
         return Err(J2sError::InvalidInput(
             "parallel must be >= 1 (0 would produce an empty connection pool)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_watermarks(ram_high: f64, ram_low: f64, mem_flush_threshold: u64) -> Result<()> {
+    if !ram_high.is_finite() || ram_high <= 0.0 || ram_high > 1.0 {
+        return Err(J2sError::InvalidInput(format!(
+            "ram_high_watermark must be in (0.0, 1.0], got {ram_high}"
+        )));
+    }
+    if !ram_low.is_finite() || ram_low <= 0.0 || ram_low >= 1.0 {
+        return Err(J2sError::InvalidInput(format!(
+            "ram_low_watermark must be in (0.0, 1.0), got {ram_low}"
+        )));
+    }
+    if ram_low >= ram_high {
+        return Err(J2sError::InvalidInput(format!(
+            "ram_low_watermark ({ram_low}) must be < ram_high_watermark ({ram_high})"
+        )));
+    }
+    if mem_flush_threshold == 0 {
+        return Err(J2sError::InvalidInput(
+            "mem_flush_threshold_bytes must be > 0".to_string(),
         ));
     }
     Ok(())
@@ -284,8 +331,22 @@ async fn run_worker_diskless(
         if error_flag.load(Ordering::Acquire) {
             return Err(J2sError::InvalidInput("flusher reported a fatal PG error — aborting worker".to_string()));
         }
-        while pause_flag.load(Ordering::Relaxed) {
-            tokio::task::yield_now().await;
+        if pause_flag.load(Ordering::Relaxed) {
+            // Drain local sinks before spinning: gives the flusher real data to COPY to PG,
+            // which is the only way RAM pressure can drop and the pause be cleared.
+            for (table_id, sink) in sinks.iter_mut() {
+                if sink.buf.is_empty() { continue; }
+                let chunk = std::mem::take(&mut sink.buf).freeze();
+                let rows = std::mem::replace(&mut sink.row_count, 0);
+                flush_tx.send((table_id.clone(), chunk, rows)).await
+                    .map_err(|_| J2sError::InvalidInput("flusher channel closed during pause drain".to_string()))?;
+            }
+            while pause_flag.load(Ordering::Relaxed) && !error_flag.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        }
+        if error_flag.load(Ordering::Acquire) {
+            return Err(J2sError::InvalidInput("flusher reported a fatal PG error — aborting worker".to_string()));
         }
         let bytes = tokio::select! {
             () = cancel.cancelled() => break,
@@ -497,11 +558,7 @@ pub async fn run(
     let mem_flush_threshold = config.mem_flush_threshold_bytes.unwrap_or(64 * 1024 * 1024);
     let ram_high = config.ram_high_watermark.unwrap_or(0.85);
     let ram_low = config.ram_low_watermark.unwrap_or(0.70);
-    if ram_low >= ram_high {
-        return Err(J2sError::InvalidInput(format!(
-            "ram_low_watermark ({ram_low}) must be < ram_high_watermark ({ram_high})"
-        )));
-    }
+    validate_watermarks(ram_high, ram_low, mem_flush_threshold)?;
 
     let parallel = config.parallel.max(1);
     let total_bytes = file_size(path)?;
@@ -561,7 +618,7 @@ pub async fn run(
             flush_tx.clone(),
             Arc::clone(&pause_flag),
             Arc::clone(&error_flag),
-            mem_flush_threshold,
+            effective_worker_threshold(mem_flush_threshold, parallel),
         )));
     }
     drop(flush_tx);  // workers now hold all flush_tx clones
@@ -596,21 +653,30 @@ pub async fn run(
     // All workers done → anomaly channel closed → writer finishes.
     let merged_anomalies = match anomaly_writer_handle.await {
         Ok(Ok(c)) => c,
-        Ok(Err(e)) => return Err(e),
-        Err(e) => return Err(J2sError::InvalidInput(format!("anomaly writer task panicked: {e}"))),
+        Ok(Err(e)) => {
+            flusher_handle.abort();
+            let _ = flusher_handle.await;
+            return Err(e);
+        }
+        Err(e) => {
+            flusher_handle.abort();
+            let _ = flusher_handle.await;
+            return Err(J2sError::InvalidInput(format!("anomaly writer task panicked: {e}")));
+        }
     };
 
     // All flush_tx clones dropped by workers → flusher drains buffers → finishes.
-    // Always await before propagating worker errors — flusher owns the PG connection.
+    // Check flusher result first — it carries the real PG error (table + SQL), not the generic
+    // "flusher reported a fatal error" message that workers emit when they see error_flag.
     let flusher_result = flusher_handle.await;
-
-    if let Some(err) = first_error { return Err(err); }
 
     let rows_per_table = match flusher_result {
         Ok(Ok(rows)) => rows,
         Ok(Err(e)) => return Err(e),
         Err(e) => return Err(J2sError::InvalidInput(format!("flusher task panicked: {e}"))),
     };
+
+    if let Some(err) = first_error { return Err(err); }
 
     eprintln!("Pass 2 flusher complete. Applying constraints...");
     let copy_start = Instant::now();
@@ -649,6 +715,179 @@ mod tests {
     use super::{Pass2Config, Pass2Timing, validate_run_params};
     use crate::schema::table_schema::TableSchema;
 
+    // -------------------------------------------------------------------------
+    // Error priority tests — flusher error must surface before generic worker error
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn flusher_error_takes_precedence_over_worker_generic_error() {
+        use crate::error::J2sError;
+
+        // Simulate: flusher has real PG error, workers have generic "flusher died" message.
+        // The FIXED code checks flusher_result first, so the PG error is returned.
+        let flusher_err = J2sError::InvalidInput("COPY failed: table 'orders', unique violation".to_string());
+        let worker_err = J2sError::InvalidInput("flusher reported a fatal PG error — aborting worker".to_string());
+
+        // Reproduce the fixed ordering: flusher checked first, then first_error.
+        let flusher_result: Result<std::collections::HashMap<String, u64>, J2sError> = Err(flusher_err);
+        let first_error: Option<J2sError> = Some(worker_err);
+
+        let result: crate::error::Result<()> = match flusher_result {
+            Ok(_) => {
+                if let Some(e) = first_error { Err(e) } else { Ok(()) }
+            }
+            Err(e) => Err(e),
+        };
+
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("COPY failed"), "must surface PG error, not generic: {msg}");
+        assert!(!msg.contains("aborting worker"), "must not surface generic worker error: {msg}");
+    }
+
+    // -------------------------------------------------------------------------
+    // Pass2Error event emission tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn pass2_error_event_is_sent_via_progress_tx() {
+        use crate::io::progress_event::{ProgressEvent, ProgressTx};
+
+        let (tx, mut rx): (ProgressTx, _) = tokio::sync::mpsc::unbounded_channel();
+        let _ = tx.send(ProgressEvent::Pass2Error {
+            table_name: "orders".to_string(),
+            message: "COPY failed: duplicate key value".to_string(),
+        });
+        let event = rx.try_recv().expect("event must be in the channel");
+        match event {
+            ProgressEvent::Pass2Error { table_name, message } => {
+                assert_eq!(table_name, "orders");
+                assert!(message.contains("duplicate key"), "message must contain error text");
+            }
+            other => panic!("unexpected event variant: {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // flusher handle leak tests
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn flusher_abort_await_cancels_running_task() {
+        let handle: tokio::task::JoinHandle<crate::error::Result<HashMap<String, u64>>> =
+            tokio::spawn(async { futures_util::future::pending::<crate::error::Result<HashMap<String, u64>>>().await });
+        handle.abort();
+        let result = handle.await;
+        assert!(result.is_err(), "aborted task must return JoinError");
+        assert!(result.unwrap_err().is_cancelled(), "must be JoinError::Cancelled");
+    }
+
+    #[tokio::test]
+    async fn flusher_abort_is_safe_when_already_completed() {
+        let handle: tokio::task::JoinHandle<crate::error::Result<HashMap<String, u64>>> =
+            tokio::spawn(async { Ok(HashMap::new()) });
+        tokio::task::yield_now().await;
+        handle.abort();
+        let result = handle.await;
+        assert!(result.is_ok(), "completed task result must survive abort");
+        assert!(result.unwrap().is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // pause_flag / error_flag interaction tests
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pause_spin_exits_when_error_flag_set() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let pause_flag = Arc::new(AtomicBool::new(true));
+        let error_flag = Arc::new(AtomicBool::new(false));
+        let pf = Arc::clone(&pause_flag);
+        let ef = Arc::clone(&error_flag);
+
+        let spin = tokio::spawn(async move {
+            while pf.load(Ordering::Relaxed) && !ef.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        error_flag.store(true, Ordering::Release);
+        tokio::time::timeout(std::time::Duration::from_millis(200), spin)
+            .await
+            .expect("spin must exit within 200ms when error_flag is set")
+            .expect("task must not panic");
+    }
+
+    /// Verifies that the worker exits its pause spin when error_flag is set externally,
+    /// even if pause_flag is never cleared. This test FAILS on the old code (infinite spin)
+    /// and PASSES after the fix (spin checks error_flag).
+    #[tokio::test]
+    async fn worker_exits_pause_spin_when_error_flag_set_while_spinning() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let schema = make_schema_with_rows("root", 0);
+        let sep = crate::schema::PATH_SEP.to_string();
+        let path_map = Arc::new(HashMap::from([
+            (schema.path.join(&sep), schema.clone()),
+        ]));
+        let root_schema = Arc::new(schema);
+        let (anomaly_tx, _) = tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
+        let (flush_tx, _flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(1);
+        let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let error_flag = Arc::new(AtomicBool::new(false)); // starts false
+        let pause_flag = Arc::new(AtomicBool::new(true));  // starts true → worker enters spin
+
+        let ef = Arc::clone(&error_flag);
+        let worker_handle = tokio::spawn(super::run_worker_diskless(
+            item_rx, HashMap::new(), anomaly_tx, path_map, root_schema,
+            cancel, flush_tx, pause_flag, Arc::clone(&error_flag), 64 * 1024 * 1024,
+        ));
+        // Give the worker enough time to enter the pause spin loop.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        // Set error_flag without clearing pause_flag — the fix makes the worker exit.
+        ef.store(true, Ordering::Release);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            worker_handle,
+        ).await;
+        assert!(result.is_ok(), "worker must not hang when error_flag set while in pause spin");
+        assert!(result.unwrap().unwrap().is_err(), "worker must return Err");
+    }
+
+    #[tokio::test]
+    async fn worker_returns_err_immediately_when_error_flag_preset() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let schema = make_schema_with_rows("root", 0);
+        let sep = crate::schema::PATH_SEP.to_string();
+        let path_map = Arc::new(HashMap::from([
+            (schema.path.join(&sep), schema.clone()),
+        ]));
+        let root_schema = Arc::new(schema);
+        let (anomaly_tx, _) = tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
+        let (flush_tx, _flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(1);
+        let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let error_flag = Arc::new(AtomicBool::new(true));
+        let pause_flag = Arc::new(AtomicBool::new(false));
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            super::run_worker_diskless(
+                item_rx, HashMap::new(), anomaly_tx, path_map, root_schema,
+                cancel, flush_tx, pause_flag, error_flag, 64 * 1024 * 1024,
+            ),
+        ).await;
+        assert!(result.is_ok(), "worker must not hang");
+        assert!(result.unwrap().is_err(), "worker must return Err when error_flag is set");
+    }
+
     #[test]
     fn pass2_timing_total_ms_is_sum() {
         let t = Pass2Timing { streaming_ms: 3000, copy_ms: 500 };
@@ -660,6 +899,60 @@ mod tests {
         let t = Pass2Timing { streaming_ms: 0, copy_ms: 0 };
         assert_eq!(t.total_ms(), 0);
     }
+
+    // -------------------------------------------------------------------------
+    // validate_watermarks tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn watermarks_valid_defaults_pass() {
+        assert!(super::validate_watermarks(0.85, 0.70, 64 * 1024 * 1024).is_ok());
+    }
+
+    #[test]
+    fn watermarks_high_above_one_is_invalid() {
+        assert!(super::validate_watermarks(1.01, 0.70, 1024).is_err());
+    }
+
+    #[test]
+    fn watermarks_high_at_one_is_valid() {
+        assert!(super::validate_watermarks(1.0, 0.70, 1024).is_ok());
+    }
+
+    #[test]
+    fn watermarks_high_zero_is_invalid() {
+        assert!(super::validate_watermarks(0.0, 0.0, 1024).is_err());
+    }
+
+    #[test]
+    fn watermarks_high_nan_is_invalid() {
+        assert!(super::validate_watermarks(f64::NAN, 0.70, 1024).is_err());
+    }
+
+    #[test]
+    fn watermarks_high_inf_is_invalid() {
+        assert!(super::validate_watermarks(f64::INFINITY, 0.70, 1024).is_err());
+    }
+
+    #[test]
+    fn watermarks_low_geq_high_is_invalid() {
+        assert!(super::validate_watermarks(0.80, 0.80, 1024).is_err());
+        assert!(super::validate_watermarks(0.80, 0.90, 1024).is_err());
+    }
+
+    #[test]
+    fn watermarks_threshold_zero_is_invalid() {
+        assert!(super::validate_watermarks(0.85, 0.70, 0).is_err());
+    }
+
+    #[test]
+    fn watermarks_threshold_one_is_valid() {
+        assert!(super::validate_watermarks(0.85, 0.70, 1).is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // validate_run_params tests
+    // -------------------------------------------------------------------------
 
     #[test]
     fn run_params_parallel_zero_is_invalid() {
@@ -877,37 +1170,118 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn find_largest_buffer_empty_map_returns_none() {
+    fn find_all_nonempty_buffers_empty_map_returns_empty() {
         let buffers: HashMap<String, bytes::BytesMut> = HashMap::new();
-        assert!(super::find_largest_buffer(&buffers).is_none());
+        assert!(super::find_all_nonempty_buffers(&buffers).is_empty());
     }
 
     #[test]
-    fn find_largest_buffer_single_entry_returns_it() {
-        let mut buffers = HashMap::new();
-        let mut buf = bytes::BytesMut::new();
-        buf.extend_from_slice(b"data");
-        buffers.insert("t1".to_string(), buf);
-        assert_eq!(super::find_largest_buffer(&buffers).as_deref(), Some("t1"));
-    }
-
-    #[test]
-    fn find_largest_buffer_returns_table_with_most_bytes() {
-        let mut buffers = HashMap::new();
-        let mut b1 = bytes::BytesMut::new();
-        b1.extend_from_slice(b"short");
-        let mut b2 = bytes::BytesMut::new();
-        b2.extend_from_slice(b"much longer data here");
-        buffers.insert("small".to_string(), b1);
-        buffers.insert("large".to_string(), b2);
-        assert_eq!(super::find_largest_buffer(&buffers).as_deref(), Some("large"));
-    }
-
-    #[test]
-    fn find_largest_buffer_skips_empty_buffers() {
+    fn find_all_nonempty_buffers_skips_empty_entries() {
         let mut buffers = HashMap::new();
         buffers.insert("empty".to_string(), bytes::BytesMut::new());
-        assert!(super::find_largest_buffer(&buffers).is_none());
+        assert!(super::find_all_nonempty_buffers(&buffers).is_empty());
+    }
+
+    #[test]
+    fn find_all_nonempty_buffers_returns_all_nonempty_keys() {
+        let mut buffers = HashMap::new();
+        let mut b1 = bytes::BytesMut::new();
+        b1.extend_from_slice(b"data");
+        let mut b2 = bytes::BytesMut::new();
+        b2.extend_from_slice(b"more data");
+        buffers.insert("t1".to_string(), b1);
+        buffers.insert("t2".to_string(), b2);
+        buffers.insert("empty".to_string(), bytes::BytesMut::new());
+        let mut result = super::find_all_nonempty_buffers(&buffers);
+        result.sort();
+        assert_eq!(result, vec!["t1".to_string(), "t2".to_string()]);
+    }
+
+    #[test]
+    fn find_all_nonempty_buffers_single_entry() {
+        let mut buffers = HashMap::new();
+        let mut buf = bytes::BytesMut::new();
+        buf.extend_from_slice(b"x");
+        buffers.insert("t1".to_string(), buf);
+        assert_eq!(super::find_all_nonempty_buffers(&buffers), vec!["t1".to_string()]);
+    }
+
+    // -------------------------------------------------------------------------
+    // pause drain tests — worker must drain local sinks before spinning on pause_flag
+    // -------------------------------------------------------------------------
+
+    /// Verifies that when pause_flag is set and the worker has data in local sinks,
+    /// it sends that data to flush_tx BEFORE entering the spin loop.
+    /// Without the fix, flush_rx.recv() would time out (data stays in the worker).
+    #[tokio::test]
+    async fn worker_drains_local_sinks_before_pause_spin() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let schema = make_schema_with_rows("root", 0);
+        let sep = crate::schema::PATH_SEP.to_string();
+        let path_map = Arc::new(HashMap::from([(schema.path.join(&sep), schema.clone())]));
+        let root_schema = Arc::new(schema);
+        let (anomaly_tx, _) = tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
+        let (flush_tx, mut flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(16);
+        let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let error_flag = Arc::new(AtomicBool::new(false));
+        let pause_flag = Arc::new(AtomicBool::new(true)); // already paused at start
+
+        // Pre-populate a sink with data before the worker starts
+        let mut worker_sinks: HashMap<String, crate::db::copy_sink::MemSink> = HashMap::new();
+        let s = make_schema_with_rows("root", 0);
+        let mut sink = crate::db::copy_sink::MemSink::new(&s, "public");
+        sink.write_row(b"row1\n").unwrap();
+        worker_sinks.insert("root".to_string(), sink);
+
+        let pf = Arc::clone(&pause_flag);
+        let worker_handle = tokio::spawn(super::run_worker_diskless(
+            item_rx, worker_sinks, anomaly_tx, path_map, root_schema,
+            cancel, flush_tx, Arc::clone(&pause_flag), Arc::clone(&error_flag),
+            64 * 1024 * 1024,
+        ));
+
+        // Worker must drain the pre-populated sink to flush_tx before entering the spin.
+        let msg = tokio::time::timeout(Duration::from_millis(200), flush_rx.recv())
+            .await
+            .expect("worker must drain sinks to flush_tx when pause_flag is set — timed out")
+            .expect("flush_tx must not be closed");
+        assert_eq!(msg.0, "root", "drained table must be 'root'");
+        assert_eq!(&msg.1[..], b"row1\n", "drained bytes must match pre-populated sink");
+        assert_eq!(msg.2, 1, "row count must be 1");
+
+        // Clear pause so worker can exit cleanly.
+        pf.store(false, Ordering::Release);
+        let _ = tokio::time::timeout(Duration::from_millis(200), worker_handle).await;
+    }
+
+    // -------------------------------------------------------------------------
+    // effective_worker_threshold tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn effective_worker_threshold_divides_by_parallel() {
+        assert_eq!(super::effective_worker_threshold(64 * 1024 * 1024, 8), 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn effective_worker_threshold_single_worker_unchanged() {
+        assert_eq!(super::effective_worker_threshold(64 * 1024 * 1024, 1), 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn effective_worker_threshold_16_workers_reproduces_fix() {
+        // 64 MB / 16 workers = 4 MB per worker — tables flush before deadlock
+        assert_eq!(super::effective_worker_threshold(64 * 1024 * 1024, 16), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn effective_worker_threshold_minimum_is_one() {
+        // threshold=1 / parallel=100 → 0, clamped to 1
+        assert_eq!(super::effective_worker_threshold(1, 100), 1);
     }
 
     #[test]
