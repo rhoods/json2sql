@@ -75,6 +75,31 @@ fn ram_used_ratio(available: u64, total: u64) -> f64 {
     total.saturating_sub(available) as f64 / total as f64
 }
 
+fn format_ram_pause_log(ratio: f64, high: f64, available_mb: u64, total_mb: u64) -> String {
+    format!(
+        "[FLUSHER] RAM {:.1}% > high {:.1}% — workers pausés ({} MB avail / {} MB total)",
+        ratio * 100.0, high * 100.0, available_mb, total_mb
+    )
+}
+
+fn format_ram_resume_log(ratio: f64, low: f64) -> String {
+    format!(
+        "[FLUSHER] RAM {:.1}% < low {:.1}% — workers repris",
+        ratio * 100.0, low * 100.0
+    )
+}
+
+fn format_copy_start_log(table_id: &str, buf_len: usize, rows: u64) -> String {
+    format!(
+        "[FLUSHER] COPY '{table_id}' — {} MB, {rows} rows",
+        buf_len / 1024 / 1024
+    )
+}
+
+fn format_copy_done_log(table_id: &str, elapsed_ms: u128) -> String {
+    format!("[FLUSHER] COPY done '{table_id}' — {elapsed_ms} ms")
+}
+
 /// Flush one table's pending buffer to PostgreSQL and update accounting.
 /// Removes the table from `buffers` and `pending_rows`, adds to `total_rows`.
 /// Sets `error_flag` and returns `Err` on PG failure.
@@ -94,6 +119,8 @@ async fn flush_table_to_pg(
     let copy_sql = copy_sql_map.get(table_id).ok_or_else(|| {
         J2sError::InvalidInput(format!("flusher: no copy_sql for table '{table_id}'"))
     })?;
+    eprintln!("{}", format_copy_start_log(table_id, buf.len(), rows));
+    let copy_start = std::time::Instant::now();
     if let Err(e) = flush_mem_sink_to_pg(buf.freeze(), copy_sql, conn).await {
         error_flag.store(true, std::sync::atomic::Ordering::Release);
         if let Some(tx) = progress_tx {
@@ -104,6 +131,7 @@ async fn flush_table_to_pg(
         }
         return Err(e);
     }
+    eprintln!("{}", format_copy_done_log(table_id, copy_start.elapsed().as_millis()));
     *total_rows.entry(table_id.to_string()).or_insert(0) += rows;
     if rows > 0 {
         if let Some(tx) = progress_tx {
@@ -150,6 +178,11 @@ pub(crate) async fn run_flusher(
                 sys.refresh_memory();
                 let ratio = ram_used_ratio(sys.available_memory(), sys.total_memory());
                 if ratio > ram_high_watermark {
+                    let available_mb = sys.available_memory() / 1024 / 1024;
+                    let total_mb = sys.total_memory() / 1024 / 1024;
+                    let msg = format_ram_pause_log(ratio, ram_high_watermark, available_mb, total_mb);
+                    eprintln!("{msg}");
+                    if let Some(tx) = progress_tx.as_ref() { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
                     pause_flag.store(true, Ordering::Release);
                     for table_id in find_all_nonempty_buffers(&buffers) {
                         if let Err(e) = flush_table_to_pg(
@@ -161,6 +194,11 @@ pub(crate) async fn run_flusher(
                         }
                     }
                 } else if ratio < ram_low_watermark {
+                    if pause_flag.load(Ordering::Acquire) {
+                        let msg = format_ram_resume_log(ratio, ram_low_watermark);
+                        eprintln!("{msg}");
+                        if let Some(tx) = progress_tx.as_ref() { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
+                    }
                     pause_flag.store(false, Ordering::Release);
                 }
             }
@@ -1280,6 +1318,41 @@ mod tests {
         // Clear pause so worker can exit cleanly.
         pf.store(false, Ordering::Release);
         let _ = tokio::time::timeout(Duration::from_millis(200), worker_handle).await;
+    }
+
+    // -------------------------------------------------------------------------
+    // RAM watermark log format tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn ram_pause_log_contains_ratio_watermark_and_memory() {
+        let msg = super::format_ram_pause_log(0.732, 0.70, 18_400, 64_000);
+        assert!(msg.contains("73.2%"), "must show used ratio: {msg}");
+        assert!(msg.contains("70.0%"), "must show high watermark: {msg}");
+        assert!(msg.contains("18400"), "must show available MB: {msg}");
+        assert!(msg.contains("64000"), "must show total MB: {msg}");
+    }
+
+    #[test]
+    fn ram_resume_log_contains_ratio_and_watermark() {
+        let msg = super::format_ram_resume_log(0.481, 0.50);
+        assert!(msg.contains("48.1%"), "must show used ratio: {msg}");
+        assert!(msg.contains("50.0%"), "must show low watermark: {msg}");
+    }
+
+    #[test]
+    fn copy_start_log_contains_table_size_and_rows() {
+        let msg = super::format_copy_start_log("ingredients_debug", 67_108_864, 7_664_150);
+        assert!(msg.contains("ingredients_debug"), "must show table name: {msg}");
+        assert!(msg.contains("64"), "must show size in MB: {msg}");
+        assert!(msg.contains("7664150"), "must show row count: {msg}");
+    }
+
+    #[test]
+    fn copy_done_log_contains_table_and_duration() {
+        let msg = super::format_copy_done_log("ingredients_debug", 2_341);
+        assert!(msg.contains("ingredients_debug"), "must show table name: {msg}");
+        assert!(msg.contains("2341"), "must show duration ms: {msg}");
     }
 
     // -------------------------------------------------------------------------
