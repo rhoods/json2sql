@@ -208,9 +208,9 @@ pub struct Pass2Config {
     /// Per-table buffer size before the diskless worker sends a batch to the flusher.
     /// None = 64 MiB.
     pub mem_flush_threshold_bytes: Option<u64>,
-    /// Flusher pauses workers above this RAM usage ratio. None = 0.85.
+    /// Flusher pauses workers above this RAM usage ratio. None = 0.70.
     pub ram_high_watermark: Option<f64>,
-    /// Flusher unpauses workers below this RAM usage ratio. None = 0.70.
+    /// Flusher unpauses workers below this RAM usage ratio. None = 0.50.
     pub ram_low_watermark: Option<f64>,
 }
 
@@ -220,6 +220,14 @@ pub struct Pass2Config {
 fn effective_worker_threshold(mem_flush_threshold: u64, parallel: usize) -> u64 {
     (mem_flush_threshold / parallel as u64).max(1)
 }
+
+/// Default RAM high-watermark: pause workers when system RAM exceeds this ratio.
+/// Set conservatively to leave headroom for PostgreSQL buffer cache growth during bulk loads.
+pub(crate) const DEFAULT_RAM_HIGH_WATERMARK: f64 = 0.70;
+
+/// Default RAM low-watermark: resume workers when system RAM drops below this ratio.
+/// Set well below the high mark to account for slow HDD page eviction by PostgreSQL.
+pub(crate) const DEFAULT_RAM_LOW_WATERMARK: f64 = 0.50;
 
 fn validate_run_params(parallel: usize) -> Result<()> {
     if parallel == 0 {
@@ -556,8 +564,8 @@ pub async fn run(
     validate_run_params(config.parallel)?;
 
     let mem_flush_threshold = config.mem_flush_threshold_bytes.unwrap_or(64 * 1024 * 1024);
-    let ram_high = config.ram_high_watermark.unwrap_or(0.85);
-    let ram_low = config.ram_low_watermark.unwrap_or(0.70);
+    let ram_high = config.ram_high_watermark.unwrap_or(DEFAULT_RAM_HIGH_WATERMARK);
+    let ram_low = config.ram_low_watermark.unwrap_or(DEFAULT_RAM_LOW_WATERMARK);
     validate_watermarks(ram_high, ram_low, mem_flush_threshold)?;
 
     let parallel = config.parallel.max(1);
@@ -906,7 +914,23 @@ mod tests {
 
     #[test]
     fn watermarks_valid_defaults_pass() {
-        assert!(super::validate_watermarks(0.85, 0.70, 64 * 1024 * 1024).is_ok());
+        assert!(super::validate_watermarks(
+            super::DEFAULT_RAM_HIGH_WATERMARK,
+            super::DEFAULT_RAM_LOW_WATERMARK,
+            64 * 1024 * 1024,
+        ).is_ok());
+    }
+
+    #[test]
+    fn default_ram_high_watermark_leaves_headroom_for_pg_cache() {
+        // PG buffer cache grows as data is inserted — trigger pause before cache fills RAM.
+        assert_eq!(super::DEFAULT_RAM_HIGH_WATERMARK, 0.70);
+    }
+
+    #[test]
+    fn default_ram_low_watermark_waits_for_pg_cache_eviction() {
+        // PG evicts pages to disk slowly on HDD — wait well below high before resuming.
+        assert_eq!(super::DEFAULT_RAM_LOW_WATERMARK, 0.50);
     }
 
     #[test]
