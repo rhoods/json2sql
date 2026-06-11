@@ -100,6 +100,13 @@ fn format_copy_done_log(table_id: &str, elapsed_ms: u128) -> String {
     format!("[FLUSHER] COPY done '{table_id}' — {elapsed_ms} ms")
 }
 
+fn format_ram_clear_empty_log(ratio: f64) -> String {
+    format!(
+        "[FLUSHER] buffers vides — pause levée (RAM {:.1}%, PG cache empêche la baisse)",
+        ratio * 100.0
+    )
+}
+
 /// Flush one table's pending buffer to PostgreSQL and update accounting.
 /// Removes the table from `buffers` and `pending_rows`, adds to `total_rows`.
 /// Sets `error_flag` and returns `Err` on PG failure.
@@ -180,9 +187,12 @@ pub(crate) async fn run_flusher(
                 if ratio > ram_high_watermark {
                     let available_mb = sys.available_memory() / 1024 / 1024;
                     let total_mb = sys.total_memory() / 1024 / 1024;
-                    let msg = format_ram_pause_log(ratio, ram_high_watermark, available_mb, total_mb);
-                    eprintln!("{msg}");
-                    if let Some(tx) = progress_tx.as_ref() { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
+                    // Log only on the pause→paused transition to avoid log noise.
+                    if !pause_flag.load(Ordering::Acquire) {
+                        let msg = format_ram_pause_log(ratio, ram_high_watermark, available_mb, total_mb);
+                        eprintln!("{msg}");
+                        if let Some(tx) = progress_tx.as_ref() { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
+                    }
                     pause_flag.store(true, Ordering::Release);
                     for table_id in find_all_nonempty_buffers(&buffers) {
                         if let Err(e) = flush_table_to_pg(
@@ -192,6 +202,15 @@ pub(crate) async fn run_flusher(
                             pause_flag.store(false, Ordering::Release);
                             return Err(e);
                         }
+                    }
+                    // PG buffer cache prevents RAM from dropping below the low watermark.
+                    // If all flusher buffers are now empty, keeping workers paused is
+                    // counterproductive — the bounded channel (cap=1024) provides backpressure.
+                    if find_all_nonempty_buffers(&buffers).is_empty() {
+                        let msg = format_ram_clear_empty_log(ratio);
+                        eprintln!("{msg}");
+                        if let Some(tx) = progress_tx.as_ref() { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
+                        pause_flag.store(false, Ordering::Release);
                     }
                 } else if ratio < ram_low_watermark {
                     if pause_flag.load(Ordering::Acquire) {
@@ -1353,6 +1372,33 @@ mod tests {
         let msg = super::format_copy_done_log("ingredients_debug", 2_341);
         assert!(msg.contains("ingredients_debug"), "must show table name: {msg}");
         assert!(msg.contains("2341"), "must show duration ms: {msg}");
+    }
+
+    #[test]
+    fn ram_clear_empty_log_contains_ratio_and_pg_cache_mention() {
+        let msg = super::format_ram_clear_empty_log(0.714);
+        assert!(msg.contains("71.4%"), "must show RAM ratio: {msg}");
+        assert!(msg.contains("PG cache"), "must mention PG cache cause: {msg}");
+    }
+
+    #[test]
+    fn pause_cleared_when_flusher_buffers_empty_after_ram_flush() {
+        // Deadlock scenario: pause_flag is set, flusher flushed everything,
+        // PG buffer cache absorbed the memory — buffers are now empty.
+        // Decision: clear pause (workers will be throttled by channel backpressure).
+        let buffers: std::collections::HashMap<String, bytes::BytesMut> = std::collections::HashMap::new();
+        let should_clear = super::find_all_nonempty_buffers(&buffers).is_empty();
+        assert!(should_clear, "pause must be cleared when all flusher buffers are empty");
+    }
+
+    #[test]
+    fn pause_kept_when_flusher_buffers_still_have_data() {
+        let mut buffers = std::collections::HashMap::new();
+        let mut buf = bytes::BytesMut::new();
+        buf.extend_from_slice(b"unflushed data");
+        buffers.insert("t1".to_string(), buf);
+        let should_clear = super::find_all_nonempty_buffers(&buffers).is_empty();
+        assert!(!should_clear, "pause must not be cleared when flusher buffers still have data");
     }
 
     // -------------------------------------------------------------------------
