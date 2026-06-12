@@ -115,7 +115,9 @@ impl MemSink {
     }
 }
 
-/// Flush `buf` to PostgreSQL via `COPY FROM STDIN`.
+const COPY_CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB per COPY feed call
+
+/// Flush `buf` to PostgreSQL via `COPY FROM STDIN`, streaming in 4 MiB chunks.
 /// No-op when `buf` is empty — avoids opening a COPY session for zero data.
 /// Row count tracking is the caller's responsibility.
 pub async fn flush_mem_sink_to_pg(buf: Bytes, copy_sql: &str, client: &Client) -> crate::error::Result<()> {
@@ -125,8 +127,15 @@ pub async fn flush_mem_sink_to_pg(buf: Bytes, copy_sql: &str, client: &Client) -
     let sink = client.copy_in::<_, Bytes>(copy_sql).await
         .map_err(|e| pg_err("COPY FROM STDIN (MemSink)", &e))?;
     let mut pinned = Box::pin(sink);
-    pinned.send(buf).await
-        .map_err(|e| pg_err("COPY send (MemSink)", &e))?;
+    let mut offset = 0;
+    while offset < buf.len() {
+        let end = (offset + COPY_CHUNK_SIZE).min(buf.len());
+        pinned.feed(buf.slice(offset..end)).await
+            .map_err(|e| pg_err("COPY feed chunk (MemSink)", &e))?;
+        offset = end;
+    }
+    pinned.flush().await
+        .map_err(|e| pg_err("COPY flush (MemSink)", &e))?;
     pinned.close().await
         .map_err(|e| pg_err("COPY close (MemSink)", &e))?;
     Ok(())
@@ -177,5 +186,66 @@ mod tests {
         sink.write_row(b"").unwrap();
         assert_eq!(sink.row_count, 1);
         assert!(sink.buf.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // flush_mem_sink_to_pg chunking logic tests (no PG required)
+    // -------------------------------------------------------------------------
+
+    fn collect_chunks(buf: &Bytes, chunk_size: usize) -> Vec<Bytes> {
+        let mut chunks = Vec::new();
+        let mut offset = 0;
+        while offset < buf.len() {
+            let end = (offset + chunk_size).min(buf.len());
+            chunks.push(buf.slice(offset..end));
+            offset = end;
+        }
+        chunks
+    }
+
+    #[test]
+    fn chunking_buf_smaller_than_chunk_yields_one_chunk() {
+        let buf = Bytes::from(vec![1u8; 1024]);
+        let chunks = collect_chunks(&buf, 4 * 1024 * 1024);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 1024);
+    }
+
+    #[test]
+    fn chunking_buf_exactly_one_chunk_size() {
+        let chunk_size = 4 * 1024 * 1024;
+        let buf = Bytes::from(vec![0u8; chunk_size]);
+        let chunks = collect_chunks(&buf, chunk_size);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), chunk_size);
+    }
+
+    #[test]
+    fn chunking_buf_one_chunk_plus_remainder() {
+        let chunk_size = 4 * 1024 * 1024;
+        let buf = Bytes::from(vec![0u8; chunk_size + 100]);
+        let chunks = collect_chunks(&buf, chunk_size);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), chunk_size);
+        assert_eq!(chunks[1].len(), 100);
+    }
+
+    #[test]
+    fn chunking_buf_multiple_full_chunks() {
+        let chunk_size = 4 * 1024 * 1024;
+        let buf = Bytes::from(vec![0u8; chunk_size * 3]);
+        let chunks = collect_chunks(&buf, chunk_size);
+        assert_eq!(chunks.len(), 3);
+        for c in &chunks { assert_eq!(c.len(), chunk_size); }
+    }
+
+    #[test]
+    fn chunking_preserves_all_data() {
+        let data: Vec<u8> = (0u8..=255).cycle().take(10_000).collect();
+        let buf = Bytes::from(data.clone());
+        let chunk_size = 1000;
+        let chunks = collect_chunks(&buf, chunk_size);
+        let reassembled: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        assert_eq!(reassembled, data);
     }
 }

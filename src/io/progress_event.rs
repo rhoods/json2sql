@@ -101,4 +101,16 @@ mod tests {
             let _ = format!("{e:?}");
         }
     }
+
+    #[test]
+    fn pass2_error_constructs_with_table_name_and_message() {
+        let e = ProgressEvent::Pass2Error {
+            table_name: "orders".to_string(),
+            message: "COPY failed: duplicate key".to_string(),
+        };
+        let cloned = e.clone();
+        let debug = format!("{cloned:?}");
+        assert!(debug.contains("orders"));
+        assert!(debug.contains("duplicate key"));
+    }
 }
