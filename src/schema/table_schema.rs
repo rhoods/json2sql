@@ -505,7 +505,7 @@ pub struct TableSchema {
     /// Depth in the hierarchy (root = 0)
     pub depth: usize,
     /// How wide-table keys are materialized — set by `finalize()`, optionally mutated by `apply_user_overrides`.
-    #[serde(alias = "wide_strategy")]
+    #[serde(alias = "wide_strategy", default)]
     pub inferred_strategy: InferredStrategy,
     /// Maps prefixed column name → source JSON field for columns inlined via Flatten strategy.
     /// e.g. `nutrients_calories` → `nutrients` means: look up `obj["nutrients"]["calories"]`.

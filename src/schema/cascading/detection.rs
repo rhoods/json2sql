@@ -687,6 +687,8 @@ fn build_multi_group_entry(
     let sibling_schema = SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: parent.array_children, data_col_name: "j2s_data".to_string() };
     let pivot_name = g.pivot_table_name.clone();
     let absorbed_idx: Vec<usize> = g.absorbed_names.iter().filter_map(|n| name_to_idx.get(n.as_str()).copied()).collect();
+    // Sum absorbed tables' row_count as an approximation for classify_tables.
+    let source_row_count: u64 = absorbed_idx.iter().map(|&i| schemas[i].row_count).sum();
     let mut co_siblings: Vec<CoSiblingGroup> = Vec::new();
     for (json_key, siblings, arr) in collect_children_by_key(schemas, &absorbed_idx, obj_map, arr_map) {
         if siblings.len() >= 2 { co_siblings.push(CoSiblingGroup { synthetic_parent_name: pivot_name.clone(), json_key, sibling_indices: siblings, array_children: arr }); }
@@ -701,7 +703,7 @@ fn build_multi_group_entry(
         inferred_strategy: InferredStrategy::SiblingCollapse(sibling_schema),
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
-        row_count: 0,
+        row_count: source_row_count,
     };
     (schema, co_siblings)
 }
@@ -934,6 +936,8 @@ fn build_co_sibling_schema(
     parent_path: Vec<String>,
     parent_name: String,
     union_cols: Vec<ColumnSchema>,
+    // Sum of sibling children's row_count — approximation for classify_tables.
+    source_row_count: u64,
 ) -> (String, TableSchema) {
     let t_name = pg_truncate_name(&format!("{}_{}", group.synthetic_parent_name, group.json_key));
     let mut cols = make_pivot_preamble(&parent_name, group.array_children);
@@ -950,7 +954,7 @@ fn build_co_sibling_schema(
         inferred_strategy: InferredStrategy::Columns,
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
-        row_count: 0,
+        row_count: source_row_count,
     };
     (t_name, t_schema)
 }
@@ -993,12 +997,13 @@ fn merge_co_sibling_group(
 ) -> Vec<CoSiblingGroup> {
     let children_refs: Vec<&TableSchema> = group.sibling_indices.iter().map(|&i| &schemas[i]).collect();
     let union_cols = build_union_columns(&children_refs);
+    let source_row_count: u64 = children_refs.iter().map(|s| s.row_count).sum();
 
     let parent_depth = schemas[parent_idx].depth;
     let parent_path = schemas[parent_idx].path.clone();
     let parent_name = schemas[parent_idx].name.clone();
 
-    let (t_name, t_schema) = build_co_sibling_schema(group, parent_depth, parent_path, parent_name, union_cols);
+    let (t_name, t_schema) = build_co_sibling_schema(group, parent_depth, parent_path, parent_name, union_cols, source_row_count);
     schemas[parent_idx].child_routes.insert(group.json_key.clone(), t_name.clone());
     schemas.push(t_schema);
 
@@ -1045,6 +1050,8 @@ fn build_sub_pivot_schema(
     parent_depth: usize,
     cols: Vec<ColumnSchema>,
     sibling_schema: SiblingSchema,
+    // Sum of source children's row_count — approximation for classify_tables.
+    source_row_count: u64,
 ) -> TableSchema {
     TableSchema {
         name: sub_pivot_name,
@@ -1056,7 +1063,7 @@ fn build_sub_pivot_schema(
         inferred_strategy: InferredStrategy::SiblingCollapse(sibling_schema),
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
-        row_count: 0,
+        row_count: source_row_count,
     }
 }
 
@@ -1081,8 +1088,9 @@ fn process_keyed_pivot_work_item(
     let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
     let co_sibs = collect_pivot_co_siblings(schemas, child_indices, &sub_pivot_name, obj_map, arr_map);
     reparent_and_update_routes(schemas, parent_idx, child_indices, &sub_pivot_name);
+    let source_row_count: u64 = child_indices.iter().map(|&i| schemas[i].row_count).sum();
     eprintln!("  SiblingCollapse post-pass: {} ({} orphan tables → sub-pivot {})", parent_name, child_indices.len(), sub_pivot_name);
-    Some((build_sub_pivot_schema(sub_pivot_name, parent_name, sub_path, parent_depth, cols, sibling_schema), co_sibs))
+    Some((build_sub_pivot_schema(sub_pivot_name, parent_name, sub_path, parent_depth, cols, sibling_schema, source_row_count), co_sibs))
 }
 
 /// parent's `child_routes` to point to the sub-pivot.  Their own children are returned as
@@ -1471,6 +1479,7 @@ mod tests {
             1,
             vec![],
             sib,
+            0,
         );
         assert_eq!(schema.name, "p_pivot");
         assert_eq!(schema.parent_table.as_deref(), Some("p"));
@@ -1933,5 +1942,84 @@ mod tests {
         let tb_name = &pb.child_routes["info"];
         assert!(schemas.iter().any(|s| &s.name == ta_name), "T table for pivot_a/desc must exist");
         assert!(schemas.iter().any(|s| &s.name == tb_name), "T table for pivot_b/info must exist");
+    }
+
+    #[test]
+    fn build_sub_pivot_schema_propagates_row_count() {
+        use crate::schema::table_schema::{SiblingSchema, KeyShape};
+        let sib = SiblingSchema {
+            key_col_name: "key".to_string(),
+            key_shape: KeyShape::Slug,
+            array_children: false,
+            data_col_name: "j2s_data".to_string(),
+        };
+        let schema = build_sub_pivot_schema(
+            "p_pivot".to_string(),
+            "p".to_string(),
+            vec!["p".to_string(), "key".to_string()],
+            1,
+            vec![],
+            sib,
+            42_000,
+        );
+        assert_eq!(schema.row_count, 42_000, "sub_pivot row_count must equal source_row_count");
+    }
+
+    #[test]
+    fn build_co_sibling_schema_propagates_row_count() {
+        use crate::schema::table_schema::ChildKind;
+        let group = CoSiblingGroup {
+            synthetic_parent_name: "pivot".to_string(),
+            json_key: "en".to_string(),
+            sibling_indices: vec![],
+            array_children: false,
+        };
+        let (_name, schema) = build_co_sibling_schema(
+            &group, 1,
+            vec!["parent".to_string(), "en".to_string()],
+            "parent".to_string(),
+            vec![],
+            75_000,
+        );
+        assert_eq!(schema.row_count, 75_000, "co_sibling row_count must equal source_row_count");
+    }
+
+    #[test]
+    fn build_multi_group_entry_propagates_sum_of_absorbed_row_counts() {
+        let mut parent = make_parent("p");
+        parent.row_count = 0;
+        let mut child_a = make_child_with_key("p_a", "p", "a", &["v"]);
+        child_a.row_count = 30_000;
+        let mut child_b = make_child_with_key("p_b", "p", "b", &["v"]);
+        child_b.row_count = 20_000;
+        let schemas = vec![parent, child_a, child_b];
+
+        let mut name_to_idx = std::collections::HashMap::new();
+        for (i, s) in schemas.iter().enumerate() { name_to_idx.insert(s.name.clone(), i); }
+
+        let mut obj_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        obj_map.insert("p".to_string(), vec![1, 2]);
+        let arr_map = std::collections::HashMap::new();
+
+        let g = SubgroupData {
+            pivot_table_name: "p_pivot".to_string(),
+            key_col_name: "key".to_string(),
+            key_shape: crate::schema::table_schema::KeyShape::Slug,
+            key_is_numeric: false,
+            path_segment: "pivot".to_string(),
+            union_cols: vec![],
+            absorbed_names: vec!["p_a".to_string(), "p_b".to_string()],
+            absorbed_path_segments: vec![],
+        };
+        let parent_ctx = ParentCtx {
+            name: "p",
+            path: &schemas[0].path.clone(),
+            depth: 0,
+            array_children: false,
+        };
+        let (schema, _) = build_multi_group_entry(
+            &g, &parent_ctx, &schemas, &name_to_idx, &obj_map, &arr_map,
+        );
+        assert_eq!(schema.row_count, 50_000, "multi_group row_count must be sum of absorbed row_counts");
     }
 }
