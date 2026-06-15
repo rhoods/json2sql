@@ -669,6 +669,7 @@ async fn test_parallel_copy() {
                 mem_flush_threshold_bytes: None,
                 ram_high_watermark: None,
                 ram_low_watermark: None,
+                verbose: false,
             },
             None,
         ).await.unwrap();
@@ -735,6 +736,7 @@ async fn test_parallel_streaming_matches_sequential() {
                 mem_flush_threshold_bytes: None,
                 ram_high_watermark: None,
                 ram_low_watermark: None,
+                verbose: false,
             },
             None,
         ).await.unwrap();
@@ -781,6 +783,7 @@ async fn test_warn_on_nonempty_root_table_before_import() {
                 mem_flush_threshold_bytes: None,
                 ram_high_watermark: None,
                 ram_low_watermark: None,
+                verbose: false,
             },
             Some(ptx),
         ).await;

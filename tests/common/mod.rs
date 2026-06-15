@@ -49,6 +49,7 @@ pub fn pass2_config(root_table: &str, pg_schema: &str) -> Pass2Config {
         mem_flush_threshold_bytes: None,
         ram_high_watermark: None,
         ram_low_watermark: None,
+        verbose: false,
     }
 }
 

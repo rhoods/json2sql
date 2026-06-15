@@ -77,101 +77,98 @@ impl SchemaFinalizer {
 
         let config = build_finalizer_config(self, text_threshold);
 
-        // Phase 1 — per-table: schema construction and wide-table strategy selection.
-        // Each table is processed independently and in parallel. All InferredStrategy values
-        // are set here. Phase 2 must not be started until Phase 1 is fully complete.
+        // Phase 1 — per-table: schema construction WITHOUT wide-table strategies yet.
+        // Each table is processed independently and in parallel. Defers InferredStrategy
+        // application until after cross-table fusion detection.
         let (mut schemas, all_collisions) =
-            apply_per_table_strategies(tables, naming, &config, &tables_with_object_children);
+            build_base_schemas(tables, naming, &tables_with_object_children);
 
-        // Phase 2 — cross-table: strategies that require the full schema set.
-        // Invariant: must run after Phase 1 (all per-table strategies are final going in).
-        let overflow_warnings = apply_cross_table_strategies(
-            &mut schemas,
-            self.sibling_threshold,
-            self.sibling_jaccard,
-            self.disabled_strategies.contains(&StrategyName::Sibling),
-            self.apply_pg_guard,
-        );
+        // Phase 2 — cross-table: sibling detection and fusion strategies (SiblingCollapse, KeyedPivot).
+        // Must run before per-table wide strategies so that fusible tables are merged
+        // before being split/pivoted individually.
+        if !self.disabled_strategies.contains(&StrategyName::Sibling) {
+            finalize_cascading(&mut schemas, self.sibling_threshold, self.sibling_jaccard);
+        }
+
+        // Post-cascade dedup: cascading can produce synthetic table names that collide
+        // with already-registered names. Keeps the first (pre-cascade) occurrence.
+        {
+            let mut seen = std::collections::HashSet::new();
+            schemas.retain(|s| seen.insert(s.name.clone()));
+        }
+
+        // Re-sort after cascade: finalize_cascading appends synthetic tables without
+        // maintaining topological (depth-then-name) order.
+        schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
+
+        // Phase 3 — per-table: apply wide-table strategies (Pivot, Jsonb, StructuredPivot, AutoSplit)
+        // to remaining tables after fusion is complete.
+        apply_wide_table_strategies(&mut schemas, tables, naming, &config, &tables_with_object_children);
+
+        // Phase 4 — cleanup: column limit guard and absorbed child exclusion.
+        let overflow_warnings = if self.apply_pg_guard {
+            apply_column_limit_guard(&mut schemas)
+        } else {
+            Vec::new()
+        };
+        exclude_absorbed_children(&mut schemas);
 
         (schemas, all_collisions, overflow_warnings)
     }
 }
 
-/// Phase 1: build one `TableSchema` per `TableEntry` and select per-table wide strategies.
+/// Phase 1: build base `TableSchema` per `TableEntry` WITHOUT wide-table strategies.
 /// Each table is processed independently (parallel). Returns schemas with initial dedup applied.
-fn apply_per_table_strategies(
+fn build_base_schemas(
+    tables: &IndexMap<String, TableEntry>,
+    naming: &NamingRegistry,
+    _tables_with_object_children: &std::collections::HashSet<String>,
+) -> (Vec<TableSchema>, Vec<ColumnCollision>) {
+    let entries: Vec<&TableEntry> = tables.values().collect();
+    let results: Vec<(TableSchema, Vec<ColumnCollision>)> = entries
+        .par_iter()
+        .map(|entry| build_entry_schema_base(entry, naming))
+        .collect();
+    let mut schemas: Vec<TableSchema> = Vec::with_capacity(results.len());
+    let mut all_collisions: Vec<ColumnCollision> = Vec::new();
+    for (schema, collisions) in results {
+        schemas.push(schema);
+        all_collisions.extend(collisions);
+    }
+    {
+        let mut seen = std::collections::HashSet::new();
+        schemas.retain(|s| seen.insert(s.name.clone()));
+    }
+    // Secondary sort by name within each depth level ensures deterministic ordering
+    schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
+    (schemas, all_collisions)
+}
+
+/// Phase 3: apply per-table wide strategies (Pivot, Jsonb, StructuredPivot, AutoSplit)
+/// to all remaining tables after fusion is complete.
+fn apply_wide_table_strategies(
+    schemas: &mut Vec<TableSchema>,
     tables: &IndexMap<String, TableEntry>,
     naming: &NamingRegistry,
     config: &FinalizerConfig,
     tables_with_object_children: &std::collections::HashSet<String>,
-) -> (Vec<TableSchema>, Vec<ColumnCollision>) {
-    let entries: Vec<&TableEntry> = tables.values().collect();
-    let results: Vec<(TableSchema, Option<TableSchema>, Vec<ColumnCollision>)> = entries
-        .par_iter()
-        .map(|entry| build_entry_schema(entry, naming, tables_with_object_children, config))
-        .collect();
-    let (mut schemas, all_collisions) = collect_build_results(results);
-    {
-        let mut seen = std::collections::HashSet::new();
-        schemas.retain(|s| seen.insert(s.name.clone()));
-    }
-    (schemas, all_collisions)
-}
-
-/// Phase 2: apply cross-table strategies that require the full schema set.
-/// Returns overflow warnings produced by the PG column-limit guard (empty if guard disabled).
-///
-/// Invariant: must be called after [`apply_per_table_strategies`] is fully complete.
-/// The PG guard can mutate strategies (e.g. `AutoSplit` → `Jsonb`), so
-/// `exclude_absorbed_children` runs last to reflect the final strategy state.
-fn apply_cross_table_strategies(
-    schemas: &mut Vec<TableSchema>,
-    sibling_threshold: usize,
-    sibling_jaccard: f64,
-    disable_sibling: bool,
-    apply_pg_guard: bool,
-) -> Vec<OverflowWarning> {
-    if !disable_sibling {
-        finalize_cascading(schemas, sibling_threshold, sibling_jaccard);
-    }
-    // Post-cascade dedup: cascading can produce synthetic table names (co-sibling path,
-    // _num/_txt split) that collide with already-registered names. Without this dedup,
-    // add_constraints() would attempt to add PRIMARY KEY twice → PostgreSQL 42P16.
-    // Keeps the first (pre-cascade, more stable) occurrence.
-    {
-        let mut seen = std::collections::HashSet::new();
-        schemas.retain(|s| seen.insert(s.name.clone()));
-    }
-    // Re-sort after cascade: finalize_cascading appends synthetic tables at the end of the
-    // Vec without inserting them at their correct depth position. A second sort restores
-    // topological (depth-then-name) order so the UI tree and pass2 flush order are correct.
-    schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
-    let overflow_warnings = if apply_pg_guard {
-        apply_column_limit_guard(schemas)
-    } else {
-        Vec::new()
-    };
-    exclude_absorbed_children(schemas);
-    overflow_warnings
-}
-
-fn collect_build_results(
-    results: Vec<(TableSchema, Option<TableSchema>, Vec<ColumnCollision>)>,
-) -> (Vec<TableSchema>, Vec<ColumnCollision>) {
-    let mut schemas: Vec<TableSchema> = Vec::with_capacity(results.len());
+) {
     let mut extra_schemas: Vec<TableSchema> = Vec::new();
-    let mut all_collisions: Vec<ColumnCollision> = Vec::new();
-    for (schema, extra, collisions) in results {
-        schemas.push(schema);
-        if let Some(e) = extra { extra_schemas.push(e); }
-        all_collisions.extend(collisions);
+    let schema_map: std::collections::HashMap<String, usize> =
+        schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+
+    for (path_key, entry) in tables {
+        let pg_name = naming.table_name_lookup_from_dot_key(path_key);
+        if let Some(&idx) = schema_map.get(&pg_name) {
+            if let Some(extra) = apply_wide_strategy(&mut schemas[idx], entry, config, tables_with_object_children) {
+                extra_schemas.push(extra);
+            }
+        }
     }
     schemas.extend(extra_schemas);
-    // Secondary sort by name within each depth level ensures schema ordering
-    // is fully deterministic regardless of par_iter() task scheduling order.
-    schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
-    (schemas, all_collisions)
 }
+
+
 
 fn build_finalizer_config(finalizer: &SchemaFinalizer, text_threshold: u32) -> FinalizerConfig {
     FinalizerConfig {
@@ -203,15 +200,13 @@ fn push_generated_columns(schema: &mut TableSchema) {
     }
 }
 
-/// Build the `TableSchema` for a single `TableEntry`.
+/// Build the base `TableSchema` for a single `TableEntry` WITHOUT applying wide-table strategies.
 ///
 /// Pure function — no access to `SchemaRegistry` state. Called in parallel via rayon.
-fn build_entry_schema(
+fn build_entry_schema_base(
     entry: &TableEntry,
     naming: &NamingRegistry,
-    tables_with_object_children: &std::collections::HashSet<String>,
-    config: &FinalizerConfig,
-) -> (TableSchema, Option<TableSchema>, Vec<ColumnCollision>) {
+) -> (TableSchema, Vec<ColumnCollision>) {
     let pg_name = naming.table_name_lookup_from_dot_key(&entry.path_key);
     let depth = entry.path.len().saturating_sub(1);
     let parent_table: Option<String> = if entry.parent_key.is_empty() {
@@ -240,13 +235,13 @@ fn build_entry_schema(
                 is_parent_fk: false,
             });
         }
-        return (schema, None, Vec::new());
+        return (schema, Vec::new());
     }
 
     let local_collisions = build_data_columns(&mut schema, entry, &pg_name);
-    let extra_schema = apply_wide_strategy(&mut schema, entry, config, tables_with_object_children);
-    (schema, extra_schema, local_collisions)
+    (schema, local_collisions)
 }
+
 
 /// Build regular data columns and array-as-column fields into `schema`.
 ///
@@ -313,6 +308,10 @@ fn apply_wide_strategy(
 ) -> Option<TableSchema> {
     let is_wide_eligible = matches!(entry.child_kind, Some(ChildKind::Object) | None);
     let data_col_count = schema.data_columns().count();
+
+    println!("---------------");
+    println!("{}: {} data columns, wide: {}", schema.name, data_col_count, is_wide_eligible);
+    println!(" config.wide_column_threshold =  '{}'", config.wide_column_threshold);
     if !is_wide_eligible || data_col_count <= config.wide_column_threshold {
         return None;
     }
@@ -329,6 +328,8 @@ fn apply_wide_strategy(
     let is_root = entry.parent_key.is_empty();
     let has_object_children = tables_with_object_children.contains(&entry.path_key);
 
+    println!("  stable columns: {stable_count} ({:.0}%)", ratio_stable * 100.0);
+
     if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && entry.row_count >= 10 {
         eprintln!(
             "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: Columns \
@@ -337,7 +338,9 @@ fn apply_wide_strategy(
         );
         return None;
     }
+    println!("  Eligible for wide strategy: is_root: {}, has_object_children: {}",is_root, has_object_children);
 
+    println!("---------------");
     if is_root && has_object_children {
         return Some(apply_autosplit_strategy(schema, entry, config, row_count, data_col_count, ratio_stable));
     }

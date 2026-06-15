@@ -108,7 +108,7 @@ pub fn format_bytes(b: u64) -> String {
 /// Maximum byte length before a JSON string value is inferred as TEXT (vs VARCHAR).
 pub const PASS1_TEXT_THRESHOLD: u32 = 256;
 /// Column count above which a table is flagged as "wide" and triggers overflow warnings.
-pub const PASS1_WIDE_COLUMN_THRESHOLD: usize = 100;
+pub const PASS1_WIDE_COLUMN_THRESHOLD: usize = 10;
 /// Minimum number of sibling tables required to attempt a sibling-group collapse.
 pub const PASS1_SIBLING_THRESHOLD: usize = 3;
 /// Minimum pairwise Jaccard similarity for a sibling group to be collapsed.

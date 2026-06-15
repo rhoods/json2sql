@@ -681,7 +681,6 @@ fn build_multi_group_entry(
     let mut cols = make_pivot_preamble(parent.name, parent.array_children);
     cols.push(ColumnSchema { name: g.key_col_name.clone(), original_name: g.key_col_name.clone(), pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false });
     for col in &g.union_cols { cols.push(col.clone()); }
-    cols.push(ColumnSchema { name: "j2s_data".to_string(), original_name: "j2s_data".to_string(), pg_type: PgType::Jsonb, not_null: false, is_generated: true, is_parent_fk: false });
     let mut path = parent.path.to_vec();
     path.push(g.path_segment.clone());
     let sibling_schema = SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: parent.array_children, data_col_name: "j2s_data".to_string() };
@@ -816,16 +815,11 @@ fn build_sibling_ctx(
     threshold: usize,
     min_jaccard: f64,
 ) -> Option<(SiblingDetectCtx, bool)> {
-    let effective: Vec<usize> =
-        if matches!(schemas[parent_idx].inferred_strategy, InferredStrategy::AutoSplit { .. }) {
-            let filtered: Vec<usize> = child_indices.iter().copied()
-                .filter(|&i| !matches!(schemas[i].inferred_strategy, InferredStrategy::Pivot))
-                .collect();
-            if filtered.len() < threshold { return None; }
-            filtered
-        } else {
-            child_indices.to_vec()
-        };
+    let filtered: Vec<usize> = child_indices.iter().copied()
+        .filter(|&i| !matches!(schemas[i].inferred_strategy, InferredStrategy::Pivot))
+        .collect();
+    if filtered.len() < threshold { return None; }
+    let effective: Vec<usize> = filtered;
     let (numeric_idx, non_numeric_idx): (Vec<usize>, Vec<usize>) =
         effective.iter().partition(|&&i| {
             schemas[i].path.last()
@@ -1202,14 +1196,6 @@ fn build_sub_pivot_columns(
         },
     ];
     cols.extend(union_cols.iter().cloned());
-    cols.push(ColumnSchema {
-        name: "j2s_data".to_string(),
-        original_name: "j2s_data".to_string(),
-        pg_type: PgType::Jsonb,
-        not_null: false,
-        is_generated: true,
-        is_parent_fk: false,
-    });
     cols
 }
 

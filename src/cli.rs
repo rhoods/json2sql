@@ -141,7 +141,7 @@ pub struct Cli {
     /// Tables with more data columns than this threshold are automatically assigned a `InferredStrategy`
     /// (Pivot or Jsonb). Override per table via --schema-config with `strategy = "pivot"|"jsonb"`.
     /// Set to 0 to disable automatic wide-table detection.
-    #[arg(long, default_value_t = 100, value_name = "N")]
+    #[arg(long, default_value_t = 10, value_name = "N")]
     pub wide_column_threshold: usize,
 
     /// Minimum number of sibling child tables required to trigger automatic `SiblingCollapse` merging.
@@ -152,7 +152,7 @@ pub struct Cli {
 
     /// Minimum Jaccard similarity (0.0–1.0) between sibling table column sets required for merging.
     /// Lower values allow merging tables with more schema divergence.
-    #[arg(long, default_value_t = 0.5, value_name = "F")]
+    #[arg(long, default_value_t = 0.8, value_name = "F")]
     pub sibling_jaccard: f64,
 
     /// Fraction of rows a key must appear in to be kept as a stable column in the main table

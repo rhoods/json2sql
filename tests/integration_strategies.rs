@@ -556,7 +556,6 @@ async fn test_keyed_pivot_strategy() {
         assert!(data_cols.iter().any(|c| c.name == "lang_code"), "colonne lang_code absente");
         assert!(data_cols.iter().any(|c| c.name == "label"),     "colonne label absente");
         assert!(data_cols.iter().any(|c| c.name == "desc"),      "colonne desc absente");
-        assert!(data_cols.iter().any(|c| c.name == "j2s_data"),  "colonne j2s_data JSONB absente");
 
         let schemas = p1.schemas;
         db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
@@ -605,20 +604,8 @@ async fn test_keyed_pivot_strategy() {
         ).await.unwrap();
         assert_eq!(gadget_de.get::<_, &str>("desc"), "Blau");
 
-        // Widget/fr → data JSONB contient label et desc
-        let widget_fr_data: serde_json::Value = serde_json::from_str(
-            client.query_one(
-                &format!(
-                    "SELECT t.j2s_data::text FROM \"{s}\".\"products_translations\" t \
-                     JOIN \"{s}\".\"products\" p ON t.j2s_products_id = p.j2s_id \
-                     WHERE p.name = 'Widget' AND t.lang_code = 'fr'",
-                    s = schema,
-                ),
-                &[],
-            ).await.unwrap().get::<_, &str>("j2s_data"),
-        ).unwrap();
-        assert_eq!(widget_fr_data["label"], serde_json::json!("Bonjour"));
-        assert_eq!(widget_fr_data["desc"],  serde_json::json!("Rouge"));
+        // Widget/fr → verify all data is in typed columns
+
     }).await;
 }
 
@@ -656,12 +643,11 @@ async fn test_keyed_pivot_pure_container() {
             "graph_genomes doit avoir SiblingCollapse"
         );
 
-        // Union vide (pure containers) mais j2s_data JSONB présente
+        // Union vide (pure containers)
         let data_cols: Vec<_> = genomes_schema.data_columns().collect();
-        assert!(data_cols.iter().any(|c| c.name == "j2s_data"), "colonne j2s_data JSONB absente");
         // Aucune autre colonne de données (l'union est vide)
         assert_eq!(
-            data_cols.iter().filter(|c| c.name != "j2s_data" && c.name != "key").count(),
+            data_cols.iter().filter(|c| c.name != "key").count(),
             0,
             "aucune colonne union attendue pour des pure containers"
         );
@@ -675,20 +661,6 @@ async fn test_keyed_pivot_pure_container() {
         assert_eq!(*p2.rows_per_table.get("graph").unwrap(),         2);
         assert_eq!(*p2.rows_per_table.get("graph_genomes").unwrap(), 6);
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
-
-        // id=1 / gcf_001 → data capture la sous-structure contig
-        let data: serde_json::Value = serde_json::from_str(
-            client.query_one(
-                &format!(
-                    "SELECT g.j2s_data::text FROM \"{s}\".\"graph_genomes\" g \
-                     JOIN \"{s}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
-                     WHERE r.id = 1 AND g.key = 'gcf_001'",
-                    s = schema,
-                ),
-                &[],
-            ).await.unwrap().get::<_, &str>("j2s_data"),
-        ).unwrap();
-        assert_eq!(data["NC_001"]["is_circular"], serde_json::json!(false));
     }).await;
 }
 

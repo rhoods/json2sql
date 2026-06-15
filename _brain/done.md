@@ -8,6 +8,28 @@ Description courte de ce qui a été fait.
 
 Ajouter toujours EN HAUT du fichier. -->
 
+## 2026-06-11 — Code review fixes — Pass 2 diskless pipeline (9 findings)
+
+9 bugs corrigés sur le pipeline diskless. 312 tests passent (lib + UI).
+
+**Critical #1** — Deadlock sur erreur PG en RAM-pressure : `run_flusher` vide `pause_flag` avant tout chemin d'erreur ; worker pause spin vérifie `error_flag` + re-check après spin. Sans ces deux fixes combinés, les workers se gelaient indefiniment sur erreur PG.
+
+**Critical #2** — Flusher leak : `flusher_handle.abort()` + await dans les deux bras d'erreur de `anomaly_writer_handle` dans `run()`.
+
+**High #3** — Error surfacing : `flusher_result` examiné avant `first_error` — retourne l'erreur PG réelle (table + SQL) au lieu du message générique "flusher reported a fatal error".
+
+**High #4** — `Pass2Error` event : `flush_table_to_pg` émet `ProgressEvent::Pass2Error { table_name, message }` en temps réel avant de retourner `Err`.
+
+**High #5** — UI dead code post-diskless : section "Temp directory", `picking_temp`, `temp_free_bytes`, `DiskWarnLevel`, `disk_warning_level` + 6 tests supprimés de `setup.rs`. `ProjectConfig.temp_dir` conservé pour compat TOML.
+
+**Medium #6+7** — Validation `Pass2Config` : `validate_watermarks` extraite et testée (9 tests) — `is_finite` + bornes `(0.0, 1.0]` pour `ram_high`, `(0.0, 1.0)` pour `ram_low`, `low < high`, `threshold > 0`.
+
+**Medium #8** — Flush toutes tables non-vides par tick RAM : `find_largest_buffer` remplacé par `find_all_nonempty_buffers` (4 tests).
+
+**Medium #9** — Chunked streaming dans `flush_mem_sink_to_pg` : boucle `feed` 4 MiB + `flush()` + `close()` (5 tests), remplace le `send(buf)` monolithique.
+
+**Fichiers** : `src/pass2/runner.rs`, `src/db/copy_sink.rs`, `json2sql-ui/src/screens/setup.rs`, `src/io/progress_event.rs`.
+
 ## 2026-06-10 — Fix code review + observabilité Pass2 (6 findings runner.rs)
 
 6 corrections chirurgicales dans `src/pass2/runner.rs` + 2 champs observabilité dans `copy_sink.rs`. 346 tests passent.
