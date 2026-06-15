@@ -426,37 +426,6 @@ mod tests {
         );
     }
 
-    /// j2s_data must be marked is_generated so it does not appear in data_columns().
-    /// If is_generated is false, data_columns() leaks j2s_data into type overrides,
-    /// stats collection, and Jaccard comparisons on already-finalized schemas.
-    #[test]
-    fn test_keyed_pivot_j2s_data_is_generated() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001, HashSet::new());
-
-        let mut langs = serde_json::Map::new();
-        for i in 0..5usize {
-            langs.insert(format!("lang_{}", i), json!({ "name": "foo", "value": 42 }));
-        }
-        let root = json!({ "id": 1, "translations": Value::Object(langs) });
-        reg.observe_root("root", make_root(&root));
-
-        let schemas = reg.finalize();
-        let translations = schemas.iter().find(|s| s.name == "root_translations").unwrap();
-
-        assert!(
-            matches!(translations.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-            "expected SiblingCollapse strategy"
-        );
-
-        let data_col_names: Vec<&str> =
-            translations.data_columns().map(|c| c.name.as_str()).collect();
-        assert!(
-            !data_col_names.contains(&"j2s_data"),
-            "j2s_data must not appear in data_columns() — got: {:?}",
-            data_col_names
-        );
-    }
-
     /// A JSON field name containing '.' must produce a child table at depth 1, not depth 2.
     /// Without normalization, "root.v1.0" splits into path ["root","v1","0"] → depth 2,
     /// breaking topological sort and Pass 2 flush order.

@@ -253,7 +253,6 @@ fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> 
         key_col_name: "key_id".to_string(),
         key_shape: KeyShape::Mixed,
         array_children: false,
-        data_col_name: String::new(),
     });
     merged
 }

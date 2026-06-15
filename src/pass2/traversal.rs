@@ -301,7 +301,6 @@ struct SiblingCollapseRowInput<'a> {
     sibling_schema: &'a SiblingSchema,
 }
 
-#[allow(clippy::too_many_lines)] // per-column loop with distinct branches for generated/key/data cols
 fn write_keyed_pivot_columns<A: AnomalyCollect>(
     builder: &mut RowBuilder,
     anomalies: &mut A,
@@ -310,12 +309,6 @@ fn write_keyed_pivot_columns<A: AnomalyCollect>(
 ) -> Result<()> {
     let row_id_str = ctx.row_id.to_string();
     for col in &schema.columns {
-        // data JSONB: is_generated but requires actual serialization
-        if col.name == ctx.sibling_schema.data_col_name {
-            let json_str = serde_json::to_string(ctx.child_obj).unwrap_or_default();
-            match escape_copy_text(&json_str) { Some(e) => builder.push_value(&e), None => builder.push_null() }
-            continue;
-        }
         if col.is_generated {
             if col.is_parent_fk { builder.push_uuid(ctx.parent_id); }
             else {

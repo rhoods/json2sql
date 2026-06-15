@@ -25,7 +25,6 @@ enum CollapseKind {
         key_col_name: String,
         key_shape: KeyShape,
         union_cols: Vec<ColumnSchema>,
-        data_col_name: String,
     },
     Multi { groups: Vec<SubgroupData> },
 }
@@ -270,7 +269,7 @@ fn try_unified_fallback(
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
         log_msg: format!("  Unified-fallback SiblingCollapse {}: {} ({} tables → 1, Jaccard {:.2})", kind_label, ctx.parent_name, ctx.child_indices.len(), unified_jaccard),
-        kind: CollapseKind::Single { key_col_name: "key".to_string(), key_shape, union_cols, data_col_name: String::new() },
+        kind: CollapseKind::Single { key_col_name: "key".to_string(), key_shape, union_cols },
         absorbed_indices: ctx.child_indices.clone(),
     })
 }
@@ -307,8 +306,8 @@ fn pick_unique_suffix(
 /// ```
 /// Two incompatible clusters despite the same "img_" prefix → two distinct pivot tables:
 /// ```sql
-/// CREATE TABLE p_img_key   (j2s_id uuid, j2s_p_id uuid, key text, col_a text, j2s_data jsonb);
-/// CREATE TABLE p_img_key_2 (j2s_id uuid, j2s_p_id uuid, key text, col_b text, j2s_data jsonb);
+/// CREATE TABLE p_img_key   (j2s_id uuid, j2s_p_id uuid, key text, col_a text);
+/// CREATE TABLE p_img_key_2 (j2s_id uuid, j2s_p_id uuid, key text, col_b text);
 /// ```
 fn try_cluster_fallback(
     schemas: &[TableSchema],
@@ -409,9 +408,9 @@ fn detect_mixed_collapse(
 ///   "tag_de": {"size":  "m"}, "tag_it": {"size":  "n"} }
 /// ```
 /// ```sql
-/// CREATE TABLE p_num       (j2s_id uuid, j2s_p_id uuid, key_id text, val   text, j2s_data jsonb);
-/// CREATE TABLE p_tag_key   (j2s_id uuid, j2s_p_id uuid, key   text, label text, j2s_data jsonb);
-/// CREATE TABLE p_tag_key_2 (j2s_id uuid, j2s_p_id uuid, key   text, size  text, j2s_data jsonb);
+/// CREATE TABLE p_num       (j2s_id uuid, j2s_p_id uuid, key_id text, val   text);
+/// CREATE TABLE p_tag_key   (j2s_id uuid, j2s_p_id uuid, key   text, label text);
+/// CREATE TABLE p_tag_key_2 (j2s_id uuid, j2s_p_id uuid, key   text, size  text);
 /// ```
 ///
 /// **Scenario 2 — `p_num` already exists in schemas (collision avoidance):**
@@ -420,7 +419,7 @@ fn detect_mixed_collapse(
 /// ```
 /// ```sql
 /// -- p_num already exists, new pivot gets a distinct name:
-/// CREATE TABLE p_num_2 (j2s_id uuid, j2s_p_id uuid, key_id text, val text, j2s_data jsonb);
+/// CREATE TABLE p_num_2 (j2s_id uuid, j2s_p_id uuid, key_id text, val text);
 /// ```
 fn assemble_mixed_collapse(
     schemas: &[TableSchema],
@@ -527,7 +526,6 @@ const HIGH_JACCARD: f64 = 0.9;
 /// CREATE TABLE p     (j2s_id uuid, own_col text);
 /// CREATE TABLE p_num (j2s_id uuid, j2s_p_id uuid, key_id text, v text);
 /// ```
-/// (`j2s_data jsonb` is always appended by the engine as an overflow column.)
 /// If `p_num` already exists in schemas, the pivot is named `p_num_2` (and so on).
 fn build_synthetic_pivot_collapse(
     schemas: &[TableSchema],
@@ -608,7 +606,6 @@ fn build_classic_keyed_pivot_collapse(
             key_col_name,
             key_shape,
             union_cols,
-            data_col_name: String::new(),
         },
         absorbed_indices: regular,
     }
@@ -620,12 +617,11 @@ fn apply_single_collapse(
     obj_map: &std::collections::HashMap<String, Vec<usize>>,
     arr_map: &std::collections::HashMap<String, Vec<usize>>,
 ) -> Vec<CoSiblingGroup> {
-    let CollapseKind::Single { key_col_name, key_shape, union_cols, data_col_name } = &collapse.kind else { return Vec::new(); };
+    let CollapseKind::Single { key_col_name, key_shape, union_cols } = &collapse.kind else { return Vec::new(); };
     let sibling_schema = SiblingSchema {
         key_col_name: key_col_name.clone(),
         key_shape: key_shape.clone(),
         array_children: collapse.array_children,
-        data_col_name: data_col_name.clone(),
     };
     let parent = &mut schemas[collapse.parent_idx];
     parent.columns.retain(|c| c.is_generated);
@@ -634,7 +630,6 @@ fn apply_single_collapse(
     }
     parent.columns.push(ColumnSchema { name: key_col_name.clone(), original_name: key_col_name.clone(), pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false });
     for col in union_cols { parent.columns.push(col.clone()); }
-    parent.columns.push(ColumnSchema { name: data_col_name.clone(), original_name: data_col_name.clone(), pg_type: PgType::Jsonb, not_null: false, is_generated: true, is_parent_fk: false });
     parent.inferred_strategy = InferredStrategy::SiblingCollapse(sibling_schema);
     let synthetic_parent_name = schemas[collapse.parent_idx].name.clone();
     collect_children_by_key(schemas, &collapse.absorbed_indices, obj_map, arr_map)
@@ -683,7 +678,7 @@ fn build_multi_group_entry(
     for col in &g.union_cols { cols.push(col.clone()); }
     let mut path = parent.path.to_vec();
     path.push(g.path_segment.clone());
-    let sibling_schema = SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: parent.array_children, data_col_name: String::new() };
+    let sibling_schema = SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: parent.array_children };
     let pivot_name = g.pivot_table_name.clone();
     let absorbed_idx: Vec<usize> = g.absorbed_names.iter().filter_map(|n| name_to_idx.get(n.as_str()).copied()).collect();
     // Sum absorbed tables' row_count as an approximation for classify_tables.
@@ -718,7 +713,7 @@ fn apply_multi_collapse(
     let sibling_groups = groups.iter().map(|g| crate::schema::table_schema::SiblingGroup {
         pivot_table: g.pivot_table_name.clone(),
         key_is_numeric: g.key_is_numeric,
-        sibling_schema: SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: collapse.array_children, data_col_name: String::new() },
+        sibling_schema: SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: collapse.array_children },
         absorbed_names: g.absorbed_names.clone(),
         path_segment: g.path_segment.clone(),
         absorbed_path_segments: g.absorbed_path_segments.clone(),
@@ -1078,7 +1073,7 @@ fn process_keyed_pivot_work_item(
     let (key_col_name, key_shape, union_cols, sub_pivot_name) =
         resolve_pivot_key_info(schemas, child_indices, &parent_name);
     let fk_col = format!("j2s_{parent_name}_id");
-    let sibling_schema = SiblingSchema { key_col_name: key_col_name.clone(), key_shape, array_children: false, data_col_name: String::new() };
+    let sibling_schema = SiblingSchema { key_col_name: key_col_name.clone(), key_shape, array_children: false };
     let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
     let co_sibs = collect_pivot_co_siblings(schemas, child_indices, &sub_pivot_name, obj_map, arr_map);
     reparent_and_update_routes(schemas, parent_idx, child_indices, &sub_pivot_name);
@@ -1456,7 +1451,6 @@ mod tests {
             key_col_name: "key".to_string(),
             key_shape: KeyShape::Slug,
             array_children: false,
-            data_col_name: String::new(),
         };
         let schema = build_sub_pivot_schema(
             "p_pivot".to_string(),
@@ -1636,12 +1630,12 @@ mod tests {
         // Avec le bug — les deux clusters reçoivent pivot_table_name = "p_img_key".
         // apply_multi_collapse pousse deux TableSchema "p_img_key" dans schemas ;
         // Pass 2 écrase le premier en path_map → cluster 1 silencieusement perdu :
-        //   CREATE TABLE p_img_key (j2s_id uuid, j2s_p_id uuid, key text, col_b text, j2s_data jsonb);
+        //   CREATE TABLE p_img_key (j2s_id uuid, j2s_p_id uuid, key text, col_b text);
         //   -- col_a / img_back / img_front jamais importés
         //
         // Après fix — deux tables distinctes, toutes les données importées :
-        //   CREATE TABLE p_img_key   (j2s_id uuid, j2s_p_id uuid, key text, col_a text, j2s_data jsonb);
-        //   CREATE TABLE p_img_key_2 (j2s_id uuid, j2s_p_id uuid, key text, col_b text, j2s_data jsonb);
+        //   CREATE TABLE p_img_key   (j2s_id uuid, j2s_p_id uuid, key text, col_a text);
+        //   CREATE TABLE p_img_key_2 (j2s_id uuid, j2s_p_id uuid, key text, col_b text);
         let parent = make_parent("p");
         let schemas = vec![
             parent,
@@ -1676,14 +1670,14 @@ mod tests {
         //     "tag_de": {"size":"…"},  "tag_it":  {"size":"…"} }
         //
         // Avec le bug — les deux clusters non-numériques reçoivent pivot_table_name = "p_tag_key" :
-        //   CREATE TABLE p_num     (j2s_id uuid, j2s_p_id uuid, key_id text, val text,  j2s_data jsonb);
-        //   CREATE TABLE p_tag_key (j2s_id uuid, j2s_p_id uuid, key   text, size text, j2s_data jsonb);
+        //   CREATE TABLE p_num     (j2s_id uuid, j2s_p_id uuid, key_id text, val text);
+        //   CREATE TABLE p_tag_key (j2s_id uuid, j2s_p_id uuid, key   text, size text);
         //   -- label / tag_fr / tag_en jamais importés (cluster 0 écrasé par cluster 1)
         //
         // Après fix :
-        //   CREATE TABLE p_num       (j2s_id uuid, j2s_p_id uuid, key_id text, val   text, j2s_data jsonb);
-        //   CREATE TABLE p_tag_key   (j2s_id uuid, j2s_p_id uuid, key   text, label text, j2s_data jsonb);
-        //   CREATE TABLE p_tag_key_2 (j2s_id uuid, j2s_p_id uuid, key   text, size  text, j2s_data jsonb);
+        //   CREATE TABLE p_num       (j2s_id uuid, j2s_p_id uuid, key_id text, val   text);
+        //   CREATE TABLE p_tag_key   (j2s_id uuid, j2s_p_id uuid, key   text, label text);
+        //   CREATE TABLE p_tag_key_2 (j2s_id uuid, j2s_p_id uuid, key   text, size  text);
         let parent = make_parent("p");
         let schemas = vec![
             parent,
@@ -1713,13 +1707,13 @@ mod tests {
         // Précondition : la table p_num existe déjà dans schemas (autre chemin JSON).
         //
         // Avec le bug — "num" est hardcodé sans vérifier schemas :
-        //   CREATE TABLE p_num (j2s_id uuid, j2s_p_id uuid, key_id text, val text, j2s_data jsonb);
+        //   CREATE TABLE p_num (j2s_id uuid, j2s_p_id uuid, key_id text, val text);
         //   -- deux TableSchema "p_num" dans le vecteur ; path_map n'en garde qu'un
         //   -- → les données de l'un des deux sont silencieusement perdues
         //
         // Après fix :
         //   CREATE TABLE p_num   (...);  -- ancienne table inchangée
-        //   CREATE TABLE p_num_2 (j2s_id uuid, j2s_p_id uuid, key_id text, val text, j2s_data jsonb);
+        //   CREATE TABLE p_num_2 (j2s_id uuid, j2s_p_id uuid, key_id text, val text);
         let parent = make_parent("p");
         let mut existing_num = make_parent("p_num");
         existing_num.parent_table = Some("p".to_string());
@@ -1746,12 +1740,12 @@ mod tests {
         // Précondition : la table p_num existe déjà dans schemas.
         //
         // Avec le bug — "num" hardcodé dans build_synthetic_pivot_collapse :
-        //   CREATE TABLE p_num (j2s_id uuid, j2s_p_id uuid, key_id text, v text, j2s_data jsonb);
+        //   CREATE TABLE p_num (j2s_id uuid, j2s_p_id uuid, key_id text, v text);
         //   -- deux TableSchema "p_num" → path_map écrase l'un ; données perdues
         //
         // Après fix :
         //   CREATE TABLE p_num   (...);  -- ancienne table inchangée
-        //   CREATE TABLE p_num_2 (j2s_id uuid, j2s_p_id uuid, key_id text, v text, j2s_data jsonb);
+        //   CREATE TABLE p_num_2 (j2s_id uuid, j2s_p_id uuid, key_id text, v text);
         let parent = make_parent("p");
         let mut existing_num = make_parent("p_num");
         existing_num.parent_table = Some("p".to_string());
@@ -1849,7 +1843,6 @@ mod tests {
                 key_col_name: "key".to_string(),
                 key_shape: KeyShape::Slug,
                 array_children: false,
-                data_col_name: String::new(),
             });
             t
         };
@@ -1897,7 +1890,6 @@ mod tests {
                 key_col_name: "key".to_string(),
                 key_shape: KeyShape::Slug,
                 array_children: false,
-                data_col_name: String::new(),
             });
             t
         };
@@ -1937,7 +1929,6 @@ mod tests {
             key_col_name: "key".to_string(),
             key_shape: KeyShape::Slug,
             array_children: false,
-            data_col_name: String::new(),
         };
         let schema = build_sub_pivot_schema(
             "p_pivot".to_string(),

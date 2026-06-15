@@ -65,10 +65,6 @@ pub enum KeyShape {
     Mixed,
 }
 
-fn default_data_col_name() -> String {
-    "j2s_data".to_string()
-}
-
 /// Metadata for a `SiblingCollapse` table (sibling tables collapsed into one).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SiblingSchema {
@@ -80,10 +76,6 @@ pub struct SiblingSchema {
     /// objects). Pass 2 iterates the array and emits one row per element with `j2s_order`.
     #[serde(default)]
     pub array_children: bool,
-    /// Name of the JSONB column that stores the raw child object/array.
-    /// Defaults to "data"; falls back to "`j2s_data`" if "data" collides with a union column.
-    #[serde(default = "default_data_col_name")]
-    pub data_col_name: String,
 }
 
 /// One key-shape subgroup within a `SiblingCollapseMulti` parent.
