@@ -86,7 +86,7 @@ pub fn build_sibling_collapse_from_siblings(
             key_col_name: key_col_name.to_string(),
             key_shape: classify_key_shape(&key_refs),
             array_children: false,
-            data_col_name: "j2s_data".to_string(),
+            data_col_name: String::new(),
         })
     };
 
@@ -117,7 +117,7 @@ fn build_mixed_keyed_pivot_strategy(
                 key_col_name: key_col_name.to_string(),
                 key_shape: classify_key_shape(&numeric_keys),
                 array_children: false,
-                data_col_name: "j2s_data".to_string(),
+                data_col_name: String::new(),
             },
             absorbed_names: numeric_names,
             path_segment: format!("{key_col_name}_num"),
@@ -130,7 +130,7 @@ fn build_mixed_keyed_pivot_strategy(
                 key_col_name: key_col_name.to_string(),
                 key_shape: classify_key_shape(&non_numeric_keys),
                 array_children: false,
-                data_col_name: "j2s_data".to_string(),
+                data_col_name: String::new(),
             },
             absorbed_names: non_numeric_names,
             path_segment: format!("{key_col_name}_txt"),

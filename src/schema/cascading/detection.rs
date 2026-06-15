@@ -270,7 +270,7 @@ fn try_unified_fallback(
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
         log_msg: format!("  Unified-fallback SiblingCollapse {}: {} ({} tables → 1, Jaccard {:.2})", kind_label, ctx.parent_name, ctx.child_indices.len(), unified_jaccard),
-        kind: CollapseKind::Single { key_col_name: "key".to_string(), key_shape, union_cols, data_col_name: "j2s_data".to_string() },
+        kind: CollapseKind::Single { key_col_name: "key".to_string(), key_shape, union_cols, data_col_name: String::new() },
         absorbed_indices: ctx.child_indices.clone(),
     })
 }
@@ -608,7 +608,7 @@ fn build_classic_keyed_pivot_collapse(
             key_col_name,
             key_shape,
             union_cols,
-            data_col_name: "j2s_data".to_string(),
+            data_col_name: String::new(),
         },
         absorbed_indices: regular,
     }
@@ -683,7 +683,7 @@ fn build_multi_group_entry(
     for col in &g.union_cols { cols.push(col.clone()); }
     let mut path = parent.path.to_vec();
     path.push(g.path_segment.clone());
-    let sibling_schema = SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: parent.array_children, data_col_name: "j2s_data".to_string() };
+    let sibling_schema = SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: parent.array_children, data_col_name: String::new() };
     let pivot_name = g.pivot_table_name.clone();
     let absorbed_idx: Vec<usize> = g.absorbed_names.iter().filter_map(|n| name_to_idx.get(n.as_str()).copied()).collect();
     // Sum absorbed tables' row_count as an approximation for classify_tables.
@@ -718,7 +718,7 @@ fn apply_multi_collapse(
     let sibling_groups = groups.iter().map(|g| crate::schema::table_schema::SiblingGroup {
         pivot_table: g.pivot_table_name.clone(),
         key_is_numeric: g.key_is_numeric,
-        sibling_schema: SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: collapse.array_children, data_col_name: "j2s_data".to_string() },
+        sibling_schema: SiblingSchema { key_col_name: g.key_col_name.clone(), key_shape: g.key_shape.clone(), array_children: collapse.array_children, data_col_name: String::new() },
         absorbed_names: g.absorbed_names.clone(),
         path_segment: g.path_segment.clone(),
         absorbed_path_segments: g.absorbed_path_segments.clone(),
@@ -1078,7 +1078,7 @@ fn process_keyed_pivot_work_item(
     let (key_col_name, key_shape, union_cols, sub_pivot_name) =
         resolve_pivot_key_info(schemas, child_indices, &parent_name);
     let fk_col = format!("j2s_{parent_name}_id");
-    let sibling_schema = SiblingSchema { key_col_name: key_col_name.clone(), key_shape, array_children: false, data_col_name: "j2s_data".to_string() };
+    let sibling_schema = SiblingSchema { key_col_name: key_col_name.clone(), key_shape, array_children: false, data_col_name: String::new() };
     let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
     let co_sibs = collect_pivot_co_siblings(schemas, child_indices, &sub_pivot_name, obj_map, arr_map);
     reparent_and_update_routes(schemas, parent_idx, child_indices, &sub_pivot_name);
@@ -1456,7 +1456,7 @@ mod tests {
             key_col_name: "key".to_string(),
             key_shape: KeyShape::Slug,
             array_children: false,
-            data_col_name: "j2s_data".to_string(),
+            data_col_name: String::new(),
         };
         let schema = build_sub_pivot_schema(
             "p_pivot".to_string(),
@@ -1849,7 +1849,7 @@ mod tests {
                 key_col_name: "key".to_string(),
                 key_shape: KeyShape::Slug,
                 array_children: false,
-                data_col_name: "j2s_data".to_string(),
+                data_col_name: String::new(),
             });
             t
         };
@@ -1897,7 +1897,7 @@ mod tests {
                 key_col_name: "key".to_string(),
                 key_shape: KeyShape::Slug,
                 array_children: false,
-                data_col_name: "j2s_data".to_string(),
+                data_col_name: String::new(),
             });
             t
         };
@@ -1937,7 +1937,7 @@ mod tests {
             key_col_name: "key".to_string(),
             key_shape: KeyShape::Slug,
             array_children: false,
-            data_col_name: "j2s_data".to_string(),
+            data_col_name: String::new(),
         };
         let schema = build_sub_pivot_schema(
             "p_pivot".to_string(),
