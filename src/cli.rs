@@ -141,7 +141,7 @@ pub struct Cli {
     /// Tables with more data columns than this threshold are automatically assigned a `InferredStrategy`
     /// (Pivot or Jsonb). Override per table via --schema-config with `strategy = "pivot"|"jsonb"`.
     /// Set to 0 to disable automatic wide-table detection.
-    #[arg(long, default_value_t = 10, value_name = "N")]
+    #[arg(long, default_value_t = 15, value_name = "N")]
     pub wide_column_threshold: usize,
 
     /// Minimum number of sibling child tables required to trigger automatic `SiblingCollapse` merging.
