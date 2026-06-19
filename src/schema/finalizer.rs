@@ -56,6 +56,20 @@ impl SchemaFinalizer {
     /// sorted topologically (parents before children).
     /// Returns `(schemas, column_collisions, overflow_warnings)`.
     /// `overflow_warnings` is non-empty only when `apply_pg_guard` is `true`.
+    /// Build the final schema from the collected `TableEntry` map.
+    ///
+    /// Ordering is constrained by two structural phases that cannot be interleaved:
+    ///
+    /// **Phase A — per-table (parallelisable):** Phases 1 and 3 process each table
+    /// independently. Phase 1 builds base schemas; Phase 3 applies wide-table strategies
+    /// (Pivot, Jsonb, AutoSplit…). These are safe to parallelise because each table is
+    /// self-contained at this point.
+    ///
+    /// **Phase B — cross-table (sequential):** Phase 2 runs sibling detection and
+    /// cascade fusion (SiblingCollapse, KeyedPivot). It *must* execute between Phase 1
+    /// and Phase 3: fusible tables must be merged into their final form before any
+    /// wide-table strategy is applied, otherwise the strategy targets a pre-fusion table
+    /// that no longer exists, producing either a missing table or a double-split.
     pub(crate) fn run(
         &self,
         tables: &IndexMap<String, TableEntry>,
