@@ -309,9 +309,6 @@ fn apply_wide_strategy(
     let is_wide_eligible = matches!(entry.child_kind, Some(ChildKind::Object) | None);
     let data_col_count = schema.data_columns().count();
 
-    println!("---------------");
-    println!("{}: {} data columns, wide: {}", schema.name, data_col_count, is_wide_eligible);
-    println!(" config.wide_column_threshold =  '{}'", config.wide_column_threshold);
     if !is_wide_eligible || data_col_count <= config.wide_column_threshold {
         return None;
     }
@@ -328,8 +325,6 @@ fn apply_wide_strategy(
     let is_root = entry.parent_key.is_empty();
     let has_object_children = tables_with_object_children.contains(&entry.path_key);
 
-    println!("  stable columns: {stable_count} ({:.0}%)", ratio_stable * 100.0);
-
     if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && entry.row_count >= 10 {
         eprintln!(
             "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: Columns \
@@ -338,9 +333,6 @@ fn apply_wide_strategy(
         );
         return None;
     }
-    println!("  Eligible for wide strategy: is_root: {}, has_object_children: {}",is_root, has_object_children);
-
-    println!("---------------");
     if is_root && has_object_children {
         return Some(apply_autosplit_strategy(schema, entry, config, row_count, data_col_count, ratio_stable));
     }
