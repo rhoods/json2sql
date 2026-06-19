@@ -65,6 +65,34 @@ impl SchemaConfig {
     }
 }
 
+/// Non-fatal warning emitted when a TOML config override references an unknown table,
+/// column, type, strategy, or group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigWarning {
+    UnknownTable(String),
+    UnknownColumn { table: String, column: String },
+    UnknownType    { table: String, column: String, type_str: String },
+    UnknownStrategy { table: String, strategy: String },
+    GroupMergeFailed { group: String, found: usize, expected: usize },
+}
+
+impl ConfigWarning {
+    pub fn to_message(&self) -> String {
+        match self {
+            Self::UnknownTable(t) =>
+                format!("schema-config: table '{t}' not found in inferred schema"),
+            Self::UnknownColumn { table, column } =>
+                format!("schema-config: column '{table}.{column}' not found"),
+            Self::UnknownType { table, column, type_str } =>
+                format!("schema-config: unknown type '{type_str}' for '{table}.{column}', ignored"),
+            Self::UnknownStrategy { table, strategy } =>
+                format!("schema-config: unknown strategy '{strategy}' for '{table}', ignored"),
+            Self::GroupMergeFailed { group, found, expected } =>
+                format!("group '{group}': {found}/{expected} member(s) found, merge ignored"),
+        }
+    }
+}
+
 struct DeferredNormalize { table_name: String, id_column: String }
 struct DeferredFlatten  { table_name: String, prefix: String, max_depth: u8 }
 
@@ -414,6 +442,62 @@ mod tests {
         assert_eq!(parse_pg_type("NONSENSE"), None);
     }
 
+    // --- ConfigWarning ---
+
+    #[test]
+    fn config_warning_to_message_unknown_table() {
+        let w = ConfigWarning::UnknownTable("orders".to_string());
+        assert!(w.to_message().contains("orders"));
+        assert!(w.to_message().contains("not found"));
+    }
+
+    #[test]
+    fn config_warning_to_message_unknown_column() {
+        let w = ConfigWarning::UnknownColumn { table: "users".to_string(), column: "age".to_string() };
+        let msg = w.to_message();
+        assert!(msg.contains("users"));
+        assert!(msg.contains("age"));
+    }
+
+    #[test]
+    fn config_warning_to_message_unknown_type() {
+        let w = ConfigWarning::UnknownType {
+            table: "users".to_string(),
+            column: "age".to_string(),
+            type_str: "BADTYPE".to_string(),
+        };
+        let msg = w.to_message();
+        assert!(msg.contains("BADTYPE"));
+        assert!(msg.contains("users"));
+        assert!(msg.contains("age"));
+    }
+
+    #[test]
+    fn config_warning_to_message_unknown_strategy() {
+        let w = ConfigWarning::UnknownStrategy { table: "tags".to_string(), strategy: "magic".to_string() };
+        let msg = w.to_message();
+        assert!(msg.contains("magic"));
+        assert!(msg.contains("tags"));
+    }
+
+    #[test]
+    fn config_warning_to_message_group_merge_failed() {
+        let w = ConfigWarning::GroupMergeFailed { group: "merged".to_string(), found: 1, expected: 3 };
+        let msg = w.to_message();
+        assert!(msg.contains("merged"));
+        assert!(msg.contains("1"));
+        assert!(msg.contains("3"));
+    }
+
+    #[test]
+    fn config_warning_clone_and_eq() {
+        let w = ConfigWarning::UnknownTable("t".to_string());
+        assert_eq!(w.clone(), ConfigWarning::UnknownTable("t".to_string()));
+        assert_ne!(w, ConfigWarning::UnknownTable("other".to_string()));
+    }
+
+    // --- apply_overrides (updated return type) ---
+
     #[test]
     fn test_apply_overrides() {
         use crate::schema::table_schema::{ColumnSchema, TableSchema};
@@ -437,7 +521,7 @@ mod tests {
         tables.insert("users".to_string(), cols);
         let config = SchemaConfig { tables, group: HashMap::new() };
 
-        apply_overrides(&mut schemas, &config);
+        apply_overrides(&mut schemas, &config).unwrap();
 
         let col = schemas[0].columns.iter().find(|c| c.name == "age").unwrap();
         assert_eq!(col.pg_type, PgType::Integer);
