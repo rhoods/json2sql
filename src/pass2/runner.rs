@@ -77,14 +77,14 @@ fn ram_used_ratio(available: u64, total: u64) -> f64 {
 
 fn format_flusher_pause_log(total_mb: u64, high_mb: u64) -> String {
     format!(
-        "[FLUSHER] {} MB en buffers > {} MB seuil — workers pausés",
+        "[FLUSHER] {} MB in buffers > {} MB threshold — workers paused",
         total_mb, high_mb
     )
 }
 
 fn format_flusher_resume_log(total_mb: u64, low_mb: u64) -> String {
     format!(
-        "[FLUSHER] {} MB en buffers < {} MB seuil — workers repris",
+        "[FLUSHER] {} MB in buffers < {} MB threshold — workers resumed",
         total_mb, low_mb
     )
 }

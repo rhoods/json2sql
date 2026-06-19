@@ -56,6 +56,20 @@ impl SchemaFinalizer {
     /// sorted topologically (parents before children).
     /// Returns `(schemas, column_collisions, overflow_warnings)`.
     /// `overflow_warnings` is non-empty only when `apply_pg_guard` is `true`.
+    /// Build the final schema from the collected `TableEntry` map.
+    ///
+    /// Ordering is constrained by two structural phases that cannot be interleaved:
+    ///
+    /// **Phase A — per-table (parallelisable):** Phases 1 and 3 process each table
+    /// independently. Phase 1 builds base schemas; Phase 3 applies wide-table strategies
+    /// (Pivot, Jsonb, AutoSplit…). These are safe to parallelise because each table is
+    /// self-contained at this point.
+    ///
+    /// **Phase B — cross-table (sequential):** Phase 2 runs sibling detection and
+    /// cascade fusion (SiblingCollapse, KeyedPivot). It *must* execute between Phase 1
+    /// and Phase 3: fusible tables must be merged into their final form before any
+    /// wide-table strategy is applied, otherwise the strategy targets a pre-fusion table
+    /// that no longer exists, producing either a missing table or a double-split.
     pub(crate) fn run(
         &self,
         tables: &IndexMap<String, TableEntry>,
@@ -309,9 +323,6 @@ fn apply_wide_strategy(
     let is_wide_eligible = matches!(entry.child_kind, Some(ChildKind::Object) | None);
     let data_col_count = schema.data_columns().count();
 
-    println!("---------------");
-    println!("{}: {} data columns, wide: {}", schema.name, data_col_count, is_wide_eligible);
-    println!(" config.wide_column_threshold =  '{}'", config.wide_column_threshold);
     if !is_wide_eligible || data_col_count <= config.wide_column_threshold {
         return None;
     }
@@ -328,8 +339,6 @@ fn apply_wide_strategy(
     let is_root = entry.parent_key.is_empty();
     let has_object_children = tables_with_object_children.contains(&entry.path_key);
 
-    println!("  stable columns: {stable_count} ({:.0}%)", ratio_stable * 100.0);
-
     if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && entry.row_count >= 10 {
         eprintln!(
             "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: Columns \
@@ -338,9 +347,6 @@ fn apply_wide_strategy(
         );
         return None;
     }
-    println!("  Eligible for wide strategy: is_root: {}, has_object_children: {}",is_root, has_object_children);
-
-    println!("---------------");
     if is_root && has_object_children {
         return Some(apply_autosplit_strategy(schema, entry, config, row_count, data_col_count, ratio_stable));
     }
