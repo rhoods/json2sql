@@ -98,20 +98,22 @@ struct DeferredFlatten  { table_name: String, prefix: String, max_depth: u8 }
 
 /// Apply type overrides from `config` to the finalized schemas.
 /// Matches by table name and column name (both sanitized `PostgreSQL` identifiers).
-/// Unknown tables or columns are silently ignored but reported via eprintln.
-pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) -> crate::error::Result<()> {
+/// Unknown tables, columns, types, or strategies are returned as `ConfigWarning` values
+/// rather than written to stderr — the caller decides how to display them.
+pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) -> crate::error::Result<Vec<ConfigWarning>> {
+    let mut warnings: Vec<ConfigWarning> = Vec::new();
     let mut deferred_normalize: Vec<DeferredNormalize> = Vec::new();
     let mut deferred_flatten:   Vec<DeferredFlatten>   = Vec::new();
 
     for (table_name, col_overrides) in &config.tables {
         match schemas.iter_mut().find(|s| &s.name == table_name) {
-            None => eprintln!("WARNING: schema-config: table '{table_name}' not found in inferred schema"),
+            None => warnings.push(ConfigWarning::UnknownTable(table_name.clone())),
             Some(schema) => {
                 // Strategy must run before suffix_columns so the column layout is correct.
                 // NormalizeDynamicKeys and Flatten are deferred (need full schemas slice).
-                apply_strategy_override(schema, table_name, col_overrides, &mut deferred_normalize, &mut deferred_flatten);
+                warnings.extend(apply_strategy_override(schema, table_name, col_overrides, &mut deferred_normalize, &mut deferred_flatten));
                 apply_suffix_columns_override(schema, table_name, col_overrides);
-                apply_column_type_overrides(schema, table_name, col_overrides);
+                warnings.extend(apply_column_type_overrides(schema, table_name, col_overrides));
             }
         }
     }
@@ -122,7 +124,7 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) ->
     for op in deferred_flatten {
         apply_flatten(schemas, &op.table_name, &op.prefix, op.max_depth)?;
     }
-    Ok(())
+    Ok(warnings)
 }
 
 fn toml_str(map: &HashMap<String, toml::Value>, key: &str) -> Option<String> {
@@ -136,8 +138,8 @@ fn apply_strategy_override(
     col_overrides: &HashMap<String, toml::Value>,
     deferred_normalize: &mut Vec<DeferredNormalize>,
     deferred_flatten: &mut Vec<DeferredFlatten>,
-) {
-    let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") else { return };
+) -> Vec<ConfigWarning> {
+    let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") else { return vec![] };
     match strategy_str.to_lowercase().as_str() {
         "pivot" => {
             if schema.inferred_strategy != InferredStrategy::Pivot {
@@ -169,8 +171,12 @@ fn apply_strategy_override(
                 .unwrap_or(1);
             deferred_flatten.push(DeferredFlatten { table_name: table_name.to_string(), prefix, max_depth });
         }
-        other => eprintln!("WARNING: schema-config: unknown strategy '{other}' for '{table_name}', ignored"),
+        other => return vec![ConfigWarning::UnknownStrategy {
+            table: table_name.to_string(),
+            strategy: other.to_string(),
+        }],
     }
+    vec![]
 }
 
 fn apply_suffix_columns_override(
@@ -204,16 +210,24 @@ fn apply_column_type_overrides(
     schema: &mut TableSchema,
     table_name: &str,
     col_overrides: &HashMap<String, toml::Value>,
-) {
+) -> Vec<ConfigWarning> {
+    let mut warnings = Vec::new();
     for (col_name, value) in col_overrides {
         if matches!(col_name.as_str(), "strategy" | "suffix_columns" | "id_column" | "prefix" | "max_depth") {
             continue;
         }
         let toml::Value::String(type_str) = value else { continue };
         match schema.columns.iter_mut().find(|c| &c.name == col_name) {
-            None => eprintln!("WARNING: schema-config: column '{table_name}.{col_name}' not found"),
+            None => warnings.push(ConfigWarning::UnknownColumn {
+                table: table_name.to_string(),
+                column: col_name.clone(),
+            }),
             Some(col) => match parse_pg_type(type_str) {
-                None => eprintln!("WARNING: schema-config: unknown type '{type_str}' for '{table_name}.{col_name}', ignored"),
+                None => warnings.push(ConfigWarning::UnknownType {
+                    table: table_name.to_string(),
+                    column: col_name.clone(),
+                    type_str: type_str.clone(),
+                }),
                 Some(pg_type) => {
                     eprintln!("  Override: {}.{} {} → {}", table_name, col_name, col.pg_type.as_sql(), pg_type.as_sql());
                     col.pg_type = pg_type;
@@ -221,6 +235,7 @@ fn apply_column_type_overrides(
             },
         }
     }
+    warnings
 }
 
 /// Appliquer les groupes de fusion définis dans la config.
@@ -496,7 +511,95 @@ mod tests {
         assert_ne!(w, ConfigWarning::UnknownTable("other".to_string()));
     }
 
-    // --- apply_overrides (updated return type) ---
+    // --- apply_overrides + helpers (return Vec<ConfigWarning>) ---
+
+    #[test]
+    fn apply_overrides_unknown_table_returns_warning() {
+        let mut schemas = vec![simple_table("users")];
+        let mut tables = HashMap::new();
+        tables.insert("ghost".to_string(), HashMap::new());
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert_eq!(warnings, vec![ConfigWarning::UnknownTable("ghost".to_string())]);
+    }
+
+    #[test]
+    fn apply_overrides_unknown_column_returns_warning() {
+        use crate::schema::table_schema::{ColumnSchema, TableSchema};
+        let mut schemas = vec![{
+            let mut s = TableSchema::new("users".to_string(), vec!["users".to_string()], 0);
+            s.columns.push(ColumnSchema {
+                name: "name".to_string(), original_name: "name".to_string(),
+                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+            });
+            s
+        }];
+        let mut tables = HashMap::new();
+        let mut cols = HashMap::new();
+        cols.insert("ghost_col".to_string(), toml::Value::String("TEXT".to_string()));
+        tables.insert("users".to_string(), cols);
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert_eq!(warnings, vec![ConfigWarning::UnknownColumn {
+            table: "users".to_string(), column: "ghost_col".to_string(),
+        }]);
+    }
+
+    #[test]
+    fn apply_overrides_unknown_type_returns_warning() {
+        use crate::schema::table_schema::{ColumnSchema, TableSchema};
+        let mut schemas = vec![{
+            let mut s = TableSchema::new("users".to_string(), vec!["users".to_string()], 0);
+            s.columns.push(ColumnSchema {
+                name: "age".to_string(), original_name: "age".to_string(),
+                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+            });
+            s
+        }];
+        let mut tables = HashMap::new();
+        let mut cols = HashMap::new();
+        cols.insert("age".to_string(), toml::Value::String("NONSENSE".to_string()));
+        tables.insert("users".to_string(), cols);
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert_eq!(warnings, vec![ConfigWarning::UnknownType {
+            table: "users".to_string(), column: "age".to_string(), type_str: "NONSENSE".to_string(),
+        }]);
+    }
+
+    #[test]
+    fn apply_overrides_unknown_strategy_returns_warning() {
+        let mut schemas = vec![simple_table("tags")];
+        let mut tables = HashMap::new();
+        let mut cols = HashMap::new();
+        cols.insert("strategy".to_string(), toml::Value::String("magic".to_string()));
+        tables.insert("tags".to_string(), cols);
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert_eq!(warnings, vec![ConfigWarning::UnknownStrategy {
+            table: "tags".to_string(), strategy: "magic".to_string(),
+        }]);
+    }
+
+    #[test]
+    fn apply_overrides_valid_override_no_warnings() {
+        use crate::schema::table_schema::{ColumnSchema, TableSchema};
+        let mut schemas = vec![{
+            let mut s = TableSchema::new("users".to_string(), vec!["users".to_string()], 0);
+            s.columns.push(ColumnSchema {
+                name: "age".to_string(), original_name: "age".to_string(),
+                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+            });
+            s
+        }];
+        let mut tables = HashMap::new();
+        let mut cols = HashMap::new();
+        cols.insert("age".to_string(), toml::Value::String("INTEGER".to_string()));
+        tables.insert("users".to_string(), cols);
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert!(warnings.is_empty());
+    }
 
     #[test]
     fn test_apply_overrides() {
@@ -521,7 +624,8 @@ mod tests {
         tables.insert("users".to_string(), cols);
         let config = SchemaConfig { tables, group: HashMap::new() };
 
-        apply_overrides(&mut schemas, &config).unwrap();
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert!(warnings.is_empty(), "valid override must produce no warnings");
 
         let col = schemas[0].columns.iter().find(|c| c.name == "age").unwrap();
         assert_eq!(col.pg_type, PgType::Integer);
