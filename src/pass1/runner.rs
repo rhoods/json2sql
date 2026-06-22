@@ -406,7 +406,13 @@ fn join_and_merge_workers(
             "Pass 1 worker thread panicked unexpectedly".to_string()
         )) {
             Ok(Ok(reg)) => { if worker_errors.is_empty() { merged.merge(reg); } }
-            Err(e) | Ok(Err(e)) => worker_errors.push(e.to_string()),
+            Err(e) | Ok(Err(e)) => {
+                let msg = match e {
+                    crate::error::J2sError::InvalidInput(m) => m,
+                    other => other.to_string(),
+                };
+                worker_errors.push(msg);
+            }
         }
     }
     let worker_err = if worker_errors.is_empty() {
@@ -649,6 +655,40 @@ mod tests {
             Err(e) => panic!("expected InvalidInput, got: {}", e),
             Ok(_)  => panic!("expected Err for non-object root element"),
         };
+    }
+
+    #[test]
+    fn test_parallel_worker_error_no_double_invalid_input_prefix() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"[42]").unwrap();
+        f.flush().unwrap();
+        let result = run_parallel(
+            f.path(),
+            &Pass1Config {
+                root_table: "root".to_string(),
+                text_threshold: 256,
+                array_as_pg_array: false,
+                wide_column_threshold: usize::MAX,
+                sibling_threshold: usize::MAX,
+                sibling_jaccard: 1.0,
+                stable_threshold: 0.0,
+                rare_threshold: 0.0,
+                disabled_strategies: HashSet::new(),
+                num_workers: Some(1),
+            },
+            None,
+        );
+        match result {
+            Err(crate::error::J2sError::InvalidInput(msg)) => {
+                assert!(
+                    !msg.contains("Invalid input:"),
+                    "aggregated error must not contain double 'Invalid input:' prefix, got: {msg}"
+                );
+            }
+            Err(e) => panic!("expected InvalidInput, got: {e}"),
+            Ok(_) => panic!("expected Err"),
+        }
     }
 
     use super::effective_workers;
