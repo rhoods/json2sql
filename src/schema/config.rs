@@ -78,6 +78,7 @@ pub enum ConfigWarning {
 }
 
 impl ConfigWarning {
+    #[allow(dead_code)]
     pub fn to_message(&self) -> String {
         match self {
             Self::UnknownTable(t) =>
@@ -269,11 +270,11 @@ pub fn apply_group_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConf
 pub fn apply_overrides_complete(
     schemas: &mut Vec<TableSchema>,
     config: &SchemaConfig,
-) -> crate::error::Result<()> {
-    apply_overrides(schemas, config)?;
-    apply_group_overrides(schemas, config);
+) -> crate::error::Result<Vec<ConfigWarning>> {
+    let mut warnings = apply_overrides(schemas, config)?;
+    warnings.extend(apply_group_overrides(schemas, config));
     crate::schema::finalizer::exclude_absorbed_children(schemas);
-    Ok(())
+    Ok(warnings)
 }
 
 #[allow(clippy::too_many_lines)] // struct construction pipeline: generated cols → key col → union cols → strategy
@@ -705,6 +706,32 @@ mod tests {
         let msg = w.to_message();
         assert!(msg.contains("magic"));
         assert!(msg.contains("g1"));
+    }
+
+    // --- apply_overrides_complete (aggregates both warning sources) ---
+
+    #[test]
+    fn apply_overrides_complete_aggregates_both_sources() {
+        let mut schemas = vec![simple_table("users")];
+        let mut tables = HashMap::new();
+        tables.insert("ghost".to_string(), HashMap::new());
+        let mut group = HashMap::new();
+        group.insert("g".to_string(), GroupConfig {
+            strategy: "keyed_pivot".to_string(),
+            members: vec!["a".to_string(), "b".to_string()],
+        });
+        let config = SchemaConfig { tables, group };
+        let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
+        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::UnknownTable(_))));
+        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::GroupMergeFailed { .. })));
+    }
+
+    #[test]
+    fn apply_overrides_complete_no_warnings_clean_config() {
+        let mut schemas = vec![simple_table("users")];
+        let config = SchemaConfig { tables: HashMap::new(), group: HashMap::new() };
+        let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
+        assert!(warnings.is_empty());
     }
 
     #[test]
