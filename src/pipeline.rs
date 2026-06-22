@@ -82,7 +82,7 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
     let (_stdin_temp, input_path) = resolve_input(std::mem::take(&mut cfg.input))?;
     let mut pass1 = load_or_infer_schema(&cfg, &input_path)?;
     report_pass1_warnings(&pass1, cfg.depth_limit);
-    post_process_schema(&mut pass1, &cfg)?;
+    let _config_warnings = post_process_schema(&mut pass1, &cfg)?;
 
     if cfg.dry_run {
         print_dry_run_ddl(&pass1.schemas, &cfg.pg_schema, cfg.drop_existing);
@@ -340,19 +340,20 @@ fn warn_depth(schemas: &[TableSchema], depth_limit: Option<usize>) {
 }
 
 /// Apply schema config overrides, save snapshot, and emit stats report.
-fn post_process_schema(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<()> {
-    apply_schema_config(pass1, cfg)?;
+fn post_process_schema(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<Vec<crate::schema::config::ConfigWarning>> {
+    let warnings = apply_schema_config(pass1, cfg)?;
     save_schema_snapshot(pass1, cfg)?;
-    emit_schema_report(pass1, cfg)
+    emit_schema_report(pass1, cfg)?;
+    Ok(warnings)
 }
 
-fn apply_schema_config(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<()> {
-    let Some(ref config_path) = cfg.schema_config else { return Ok(()) };
+fn apply_schema_config(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<Vec<crate::schema::config::ConfigWarning>> {
+    let Some(ref config_path) = cfg.schema_config else { return Ok(vec![]) };
     eprintln!("\nApplying schema overrides from '{}'...", config_path.display());
     let config = crate::schema::config::SchemaConfig::from_file(config_path)?;
-    crate::schema::config::apply_overrides_complete(&mut pass1.schemas, &config)?;
+    let warnings = crate::schema::config::apply_overrides_complete(&mut pass1.schemas, &config)?;
     eprintln!("Schema after overrides: {} tables", pass1.schemas.len());
-    Ok(())
+    Ok(warnings)
 }
 
 fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()> {
@@ -478,6 +479,74 @@ fn report_pass2_results(
 mod tests {
     use super::*;
     use crate::anomaly::collector::AnomalySummary;
+    use crate::anomaly::reporter::AnomalyFormat;
+    use crate::pass1::runner::Pass1Result;
+    use crate::schema::config::ConfigWarning;
+    use crate::schema::table_schema::TableSchema;
+
+    fn minimal_pass1(schemas: Vec<TableSchema>) -> Pass1Result {
+        Pass1Result {
+            schemas,
+            total_rows: 0,
+            stats: vec![],
+            truncated_names: vec![],
+            column_collisions: vec![],
+            overflow_warnings: vec![],
+        }
+    }
+
+    fn minimal_pipeline_cfg(schema_config: Option<std::path::PathBuf>) -> PipelineConfig {
+        PipelineConfig {
+            input: None,
+            root_table: "root".to_string(),
+            db_url: None,
+            pg_schema: "public".to_string(),
+            drop_existing: false,
+            dry_run: false,
+            text_threshold: 256,
+            array_as_pg_array: false,
+            depth_limit: None,
+            wide_column_threshold: 50,
+            sibling_threshold: 3,
+            sibling_jaccard: 0.8,
+            stable_threshold: 0.8,
+            rare_threshold: 0.01,
+            num_workers: 1,
+            disabled_strategies: std::collections::HashSet::new(),
+            parallel: 1,
+            anomaly_dir: None,
+            limit: None,
+            anomaly_format: AnomalyFormat::Json,
+            anomaly_output: None,
+            max_anomaly_rate: None,
+            schema_config,
+            schema_output: None,
+            schema_input: None,
+            schema_report: false,
+            schema_report_output: None,
+        }
+    }
+
+    #[test]
+    fn apply_schema_config_none_returns_empty() {
+        let mut pass1 = minimal_pass1(vec![]);
+        let cfg = minimal_pipeline_cfg(None);
+        let warnings = apply_schema_config(&mut pass1, &cfg).unwrap();
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn apply_schema_config_propagates_unknown_table_warning() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "[ghost_table]\nage = \"INTEGER\"\n").unwrap();
+
+        let mut pass1 = minimal_pass1(vec![
+            TableSchema::new("real_table".to_string(), vec!["real_table".to_string()], 0),
+        ]);
+        let cfg = minimal_pipeline_cfg(Some(tmp.path().to_path_buf()));
+        let warnings = apply_schema_config(&mut pass1, &cfg).unwrap();
+        assert_eq!(warnings, vec![ConfigWarning::UnknownTable("ghost_table".to_string())]);
+    }
 
     fn summary(table: &str, anomaly_count: u64, total_rows: u64) -> AnomalySummary {
         AnomalySummary {
