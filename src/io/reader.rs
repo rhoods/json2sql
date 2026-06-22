@@ -1348,6 +1348,52 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // collect_container regression tests (via next_raw)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_array_reader_collect_container_deeply_nested_roundtrip() {
+        // Verifies collect_container correctly handles multi-level depth;
+        // any state corruption (e.g. wrong depth count) would truncate or extend the output.
+        let obj = r#"{"a":{"b":{"c":{"d":[1,2,3],"e":true},"f":"hello"},"g":null}}"#;
+        let json = format!("[{obj}]");
+        let f = tmp_file(json.as_bytes());
+        let mut r = JsonArrayReader::open(f.path()).unwrap();
+        let raw = r.next_raw().unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).expect("must parse");
+        assert_eq!(parsed["a"]["b"]["c"]["d"][2], 3);
+        assert_eq!(parsed["a"]["b"]["f"], "hello");
+        assert!(r.next_raw().is_none(), "only one element");
+    }
+
+    #[test]
+    fn test_array_reader_collect_container_brackets_inside_strings() {
+        // Brackets and braces inside string values must not affect depth tracking.
+        let obj = r#"{"key":"value with } and ] and { and [ inside","num":42}"#;
+        let json = format!("[{obj}]");
+        let f = tmp_file(json.as_bytes());
+        let mut r = JsonArrayReader::open(f.path()).unwrap();
+        let raw = r.next_raw().unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).expect("must parse");
+        assert_eq!(parsed["num"], 42);
+        assert!(parsed["key"].as_str().unwrap().contains('}'));
+        assert!(r.next_raw().is_none(), "only one element");
+    }
+
+    #[test]
+    fn test_wrapper_reader_collect_container_escaped_quote_in_value() {
+        // Escaped quote inside a string must not close the string prematurely,
+        // ensuring escape_next state is handled correctly.
+        let json = br#"{"Items": [{"msg": "say \"hello\" now", "ok": true}]}"#;
+        let f = tmp_file(json);
+        let mut r = JsonRootWrapperReader::open(f.path(), vec!["Items".to_string()]).unwrap();
+        let raw = r.next_raw().unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).expect("must parse");
+        assert_eq!(parsed["ok"], true);
+        assert!(parsed["msg"].as_str().unwrap().contains("hello"));
+    }
+
+    // -------------------------------------------------------------------------
     // scan_chunk_into tests
     // -------------------------------------------------------------------------
 
