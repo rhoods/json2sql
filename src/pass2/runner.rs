@@ -443,9 +443,12 @@ async fn process_worker_item_diskless(
 /// Diskless worker: local MemSink accumulation, sends batches to `run_flusher` via channel.
 /// Checks `error_flag` each iteration (flusher fatal error) and yields on `pause_flag`
 /// (flusher buffer pressure). Workers spin without draining — flusher controls when to resume.
+/// For wrapper-format files, `key` carries the raw wrapper key and the worker resolves the
+/// correct root schema via `path_map`; for regular formats `key` is `None` and `root_schema`
+/// is used directly.
 #[allow(clippy::too_many_arguments)]
 async fn run_worker_diskless(
-    mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    mut rx: tokio::sync::mpsc::Receiver<(Option<String>, Vec<u8>)>,
     mut sinks: HashMap<String, crate::db::copy_sink::MemSink>,
     anomaly_tx: tokio::sync::mpsc::UnboundedSender<AnomalyEvent>,
     path_map: Arc<HashMap<String, TableSchema>>,
@@ -473,11 +476,14 @@ async fn run_worker_diskless(
         if error_flag.load(Ordering::Acquire) {
             return Err(J2sError::InvalidInput("flusher reported a fatal PG error — aborting worker".to_string()));
         }
-        let bytes = tokio::select! {
+        let (key, bytes) = tokio::select! {
             () = cancel.cancelled() => break,
             msg = rx.recv() => match msg { Some(b) => b, None => break },
         };
-        process_worker_item_diskless(bytes, &mut sinks, &mut proxy, &flush_tx, &path_map, &root_schema, mem_flush_threshold).await?;
+        let effective_root: &TableSchema = key.as_deref()
+            .and_then(|k| path_map.get(k))
+            .unwrap_or(&root_schema);
+        process_worker_item_diskless(bytes, &mut sinks, &mut proxy, &flush_tx, &path_map, effective_root, mem_flush_threshold).await?;
     }
     // Final flush: drain remaining sink buffers
     for (table_id, sink) in sinks.iter_mut() {
@@ -617,10 +623,11 @@ fn update_row_progress(
 }
 
 /// Dispatch raw JSON bytes from `reader` round-robin to workers.
+/// Each payload carries the current wrapper key (None for non-wrapper formats).
 /// Returns `(rows_processed, worker_died)`.
 async fn dispatch_loop(
     reader: &mut JsonReader,
-    senders: &[tokio::sync::mpsc::Sender<Vec<u8>>],
+    senders: &[tokio::sync::mpsc::Sender<(Option<String>, Vec<u8>)>],
     progress_tx: Option<&ProgressTx>,
     progress: Option<&ProgressTracker>,
     limit: Option<u64>,
@@ -634,7 +641,8 @@ async fn dispatch_loop(
     if limit != Some(0) {
         'dispatch: while let Some(item) = reader.next_raw() {
             let bytes = item?;
-            if senders[robin].send(bytes).await.is_err() {
+            let key = reader.current_key().map(str::to_string);
+            if senders[robin].send((key, bytes)).await.is_err() {
                 worker_died = true;
                 break 'dispatch;
             }
@@ -698,7 +706,17 @@ pub async fn run(
     let path_map: HashMap<String, TableSchema> = schemas.iter()
         .map(|s| (s.path.join(&sep), s.clone()))
         .collect();
-    let root_schema = find_root_schema(schemas, &config.root_table, &sep)?;
+
+    // Open reader early so we can inspect the format before spawning workers.
+    // For wrapper format, root table names come from wrapper keys (raw, as stored in s.path),
+    // not from config.root_table (the filename-derived fallback).
+    let (mut reader, format) = JsonReader::open(path)?;
+    let effective_root_table = if let crate::io::reader::JsonFormat::RootWrapper(ref keys) = format {
+        keys.first().cloned().unwrap_or_else(|| config.root_table.clone())
+    } else {
+        config.root_table.clone()
+    };
+    let root_schema = find_root_schema(schemas, &effective_root_table, &sep)?;
 
     if let Some(ref dir) = config.anomaly_dir {
         std::fs::create_dir_all(dir).map_err(J2sError::Io)?;
@@ -726,7 +744,6 @@ pub async fn run(
         verbose,
     ));
 
-    let (mut reader, _format) = JsonReader::open(path)?;
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
     let root_schema_arc: Arc<TableSchema> = Arc::new(root_schema);
 
@@ -734,7 +751,7 @@ pub async fn run(
     let mut senders = Vec::with_capacity(parallel);
     let mut worker_handles: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::with_capacity(parallel);
     for _ in 0..parallel {
-        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(WORKER_CHANNEL_CAP);
+        let (tx, rx) = tokio::sync::mpsc::channel::<(Option<String>, Vec<u8>)>(WORKER_CHANNEL_CAP);
         senders.push(tx);
         let worker_sinks: HashMap<String, crate::db::copy_sink::MemSink> = schemas.iter()
             .map(|s| (s.name.clone(), crate::db::copy_sink::MemSink::new(s, &config.pg_schema)))
@@ -966,7 +983,7 @@ mod tests {
         let root_schema = Arc::new(schema);
         let (anomaly_tx, _) = tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
         let (flush_tx, _flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(1);
-        let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<(Option<String>, Vec<u8>)>(1);
         let cancel = tokio_util::sync::CancellationToken::new();
         let error_flag = Arc::new(AtomicBool::new(false)); // starts false
         let pause_flag = Arc::new(AtomicBool::new(true));  // starts true → worker enters spin
@@ -1003,7 +1020,7 @@ mod tests {
         let root_schema = Arc::new(schema);
         let (anomaly_tx, _) = tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
         let (flush_tx, _flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(1);
-        let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<(Option<String>, Vec<u8>)>(1);
         let cancel = tokio_util::sync::CancellationToken::new();
         let error_flag = Arc::new(AtomicBool::new(true));
         let pause_flag = Arc::new(AtomicBool::new(false));
