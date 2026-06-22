@@ -436,7 +436,7 @@ impl AppState {
     /// Apply a `ProgressEvent` coming from a Pass 1 / Pass 2 runner.
     #[allow(clippy::too_many_lines)]
     pub fn apply_progress_event(&mut self, event: ProgressEvent) {
-        use ProgressEvent::{Pass1Progress, Pass1Done, Pass2Progress, Pass2Flush, Pass2AnomalyUpdate, Pass2Log, Pass2Done, Pass2Error, DdlStart, DdlProgress, DdlDone, ConstraintsStart, ConstraintsProgress, ConstraintsDone};
+        use ProgressEvent::{Pass1Log, Pass1Progress, Pass1Done, Pass2Progress, Pass2Flush, Pass2AnomalyUpdate, Pass2Log, Pass2Done, Pass2Error, DdlStart, DdlProgress, DdlDone, ConstraintsStart, ConstraintsProgress, ConstraintsDone};
         match event {
             Pass1Progress { rows_scanned, bytes_read, total_bytes } => {
                 self.schema.pass1_progress.rows_scanned = rows_scanned;
@@ -472,6 +472,9 @@ impl AppState {
             Pass2AnomalyUpdate { table_name, count } => {
                 self.import.pass2_progress.anomaly_counts_per_table
                     .insert(table_name, count);
+            }
+            Pass1Log(msg) => {
+                self.schema.pass1_progress.push_log(msg);
             }
             Pass2Log(msg) => {
                 self.import.pass2_progress.push_log(msg);
