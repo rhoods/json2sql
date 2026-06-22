@@ -12,6 +12,8 @@
 #[allow(dead_code)]
 pub enum ProgressEvent {
     // ── Pass 1 ───────────────────────────────────────────────────────────────
+    /// A plain-text informational message from Pass 1 (mirrors what the CLI prints to stderr).
+    Pass1Log(String),
     /// Periodic scan progress during schema inference.
     Pass1Progress {
         rows_scanned: u64,
@@ -85,6 +87,13 @@ pub type ProgressTx = tokio::sync::mpsc::UnboundedSender<ProgressEvent>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pass1_log_constructs_and_clones() {
+        let e = ProgressEvent::Pass1Log("Root wrapper detected — streaming keys: [Foods]".to_string());
+        let cloned = e.clone();
+        assert!(format!("{cloned:?}").contains("Foods"));
+    }
 
     #[test]
     fn ddl_and_constraints_variants_construct_and_clone() {

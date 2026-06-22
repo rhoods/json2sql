@@ -20,7 +20,7 @@ use simd_json;
 use crate::error::Result;
 use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
-use crate::io::reader::{file_size, JsonReader};
+use crate::io::reader::{file_size, JsonFormat, JsonReader};
 use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::finalizer::OverflowWarning;
 use crate::schema::registry::SchemaRegistry;
@@ -29,6 +29,16 @@ use crate::schema::strategies::StrategyName;
 use crate::schema::table_schema::TableSchema;
 
 const PROGRESS_INTERVAL: u64 = 1_000;
+
+fn emit_root_wrapper_warning(format: &JsonFormat, progress_tx: Option<&ProgressTx>) {
+    if let JsonFormat::RootWrapper(keys) = format {
+        let msg = format!("Root wrapper detected — streaming keys: [{}]", keys.join(", "));
+        eprintln!("{msg}");
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(ProgressEvent::Pass1Log(msg));
+        }
+    }
+}
 
 /// All parameters controlling a Pass 1 run.
 pub struct Pass1Config {
@@ -86,7 +96,8 @@ pub fn run(
         config.rare_threshold,
         config.disabled_strategies.clone(),
     );
-    let (mut reader, _format) = JsonReader::open(path)?;
+    let (mut reader, format) = JsonReader::open(path)?;
+    emit_root_wrapper_warning(&format, progress_tx.as_ref());
     let total_rows = scan_json_rows(&mut reader, &mut registry, config, progress.as_ref(), progress_tx.as_ref(), total_bytes)?;
     if let Some(ref bar) = progress { bar.finish(); }
     eprintln!("Pass 1 complete: {total_rows} rows, building schema...");
@@ -189,7 +200,16 @@ pub fn run_inspect(
     limit: usize,
 ) -> Result<InspectResult> {
     let mut registry = build_inspect_registry(config);
-    let (reader, _format) = JsonReader::open(path)?;
+    let (reader, format) = JsonReader::open(path)?;
+    emit_root_wrapper_warning(&format, None);
+    if let JsonFormat::RootWrapper(keys) = &format {
+        if keys.len() > 1 {
+            eprintln!(
+                "  Note: inspect limit applies to '{}' only (multi-key wrapper)",
+                keys[0]
+            );
+        }
+    }
     let (rows_scanned, sampled_objects) =
         scan_objects_with_limit(reader, &mut registry, &config.root_table, limit)?;
     let anomaly_count = registry.anomaly_iter().count();
@@ -355,7 +375,8 @@ fn read_and_dispatch(
     total_bytes: u64,
 ) -> Result<(u64, Option<crate::error::J2sError>)> {
     const PROGRESS_INTERVAL: u64 = 1_000;
-    let (mut reader, _format) = JsonReader::open(path)?;
+    let (mut reader, format) = JsonReader::open(path)?;
+    emit_root_wrapper_warning(&format, progress_tx);
     let mut total_rows = 0u64;
     let mut reader_err: Option<crate::error::J2sError> = None;
 
@@ -713,6 +734,88 @@ mod tests {
         let (n, warn) = effective_workers(cap + 1000);
         assert_eq!(n, cap, "must be clamped to cap");
         assert_eq!(warn, Some(cap), "must report the cap when clamping");
+    }
+
+    // ── wrapper format pipeline tests ───────────────────────────────────────
+
+    fn wrapper_config(root: &str) -> Pass1Config {
+        Pass1Config {
+            root_table: root.to_string(),
+            text_threshold: 256,
+            array_as_pg_array: false,
+            wide_column_threshold: usize::MAX,
+            sibling_threshold: usize::MAX,
+            sibling_jaccard: 1.0,
+            stable_threshold: 0.0,
+            rare_threshold: 0.0,
+            disabled_strategies: HashSet::new(),
+            num_workers: None,
+        }
+    }
+
+    #[test]
+    fn test_run_on_wrapper_mono_key_correct_row_count() {
+        let path = fixture("wrapper_mono.json");
+        let result = run(&path, &wrapper_config("foods"), None).unwrap();
+        assert_eq!(result.total_rows, 2);
+    }
+
+    #[test]
+    fn test_run_on_wrapper_multi_key_correct_row_count() {
+        let path = fixture("wrapper_multi.json");
+        let result = run(&path, &wrapper_config("foods"), None).unwrap();
+        assert_eq!(result.total_rows, 4); // 2 Foods + 2 Nutrients
+    }
+
+    #[test]
+    fn test_run_inspect_on_wrapper_succeeds() {
+        let path = fixture("wrapper_mono.json");
+        let result = run_inspect(&path, &inspect_config("foods"), 100).unwrap();
+        assert_eq!(result.rows_scanned, 2);
+        assert!(!result.schemas.is_empty());
+    }
+
+    #[test]
+    fn test_run_on_wrapper_sends_pass1log_to_ihm_channel() {
+        use crate::io::progress_event::ProgressEvent;
+        use tokio::sync::mpsc;
+        let path = fixture("wrapper_mono.json");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run(&path, &wrapper_config("foods"), Some(tx)).unwrap();
+        let events: Vec<ProgressEvent> = {
+            let mut v = Vec::new();
+            while let Ok(e) = rx.try_recv() { v.push(e); }
+            v
+        };
+        let log_msgs: Vec<&str> = events.iter().filter_map(|e| {
+            if let ProgressEvent::Pass1Log(msg) = e { Some(msg.as_str()) } else { None }
+        }).collect();
+        assert!(
+            log_msgs.iter().any(|m| m.contains("Root wrapper") && m.contains("Foods")),
+            "expected Pass1Log with wrapper warning, got: {log_msgs:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_parallel_on_wrapper_correct_row_count() {
+        let path = fixture("wrapper_mono.json");
+        let result = run_parallel(
+            &path,
+            &Pass1Config {
+                root_table: "foods".to_string(),
+                text_threshold: 256,
+                array_as_pg_array: false,
+                wide_column_threshold: usize::MAX,
+                sibling_threshold: usize::MAX,
+                sibling_jaccard: 1.0,
+                stable_threshold: 0.0,
+                rare_threshold: 0.0,
+                disabled_strategies: HashSet::new(),
+                num_workers: Some(2),
+            },
+            None,
+        ).unwrap();
+        assert_eq!(result.total_rows, 2);
     }
 
     #[test]
