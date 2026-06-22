@@ -73,6 +73,7 @@ pub enum ConfigWarning {
     UnknownColumn { table: String, column: String },
     UnknownType    { table: String, column: String, type_str: String },
     UnknownStrategy { table: String, strategy: String },
+    UnknownGroupStrategy { group: String, strategy: String },
     GroupMergeFailed { group: String, found: usize, expected: usize },
 }
 
@@ -87,6 +88,8 @@ impl ConfigWarning {
                 format!("schema-config: unknown type '{type_str}' for '{table}.{column}', ignored"),
             Self::UnknownStrategy { table, strategy } =>
                 format!("schema-config: unknown strategy '{strategy}' for '{table}', ignored"),
+            Self::UnknownGroupStrategy { group, strategy } =>
+                format!("schema-config: unknown group strategy '{strategy}' for group '{group}', ignored"),
             Self::GroupMergeFailed { group, found, expected } =>
                 format!("group '{group}': {found}/{expected} member(s) found, merge ignored"),
         }
@@ -240,15 +243,22 @@ fn apply_column_type_overrides(
 
 /// Appliquer les groupes de fusion définis dans la config.
 /// Doit être appelé APRÈS `apply_overrides` et AVANT la sauvegarde du snapshot.
-pub fn apply_group_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) {
+pub fn apply_group_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) -> Vec<ConfigWarning> {
+    let mut warnings = Vec::new();
     for (group_name, group_cfg) in &config.group {
         match group_cfg.strategy.to_lowercase().as_str() {
-            "keyed_pivot" => apply_keyed_pivot_merge(schemas, group_name, &group_cfg.members),
-            other => eprintln!(
-                "WARNING: group '{group_name}': stratégie '{other}' non supportée, ignoré"
-            ),
+            "keyed_pivot" => {
+                if let Some(w) = apply_keyed_pivot_merge(schemas, group_name, &group_cfg.members) {
+                    warnings.push(w);
+                }
+            }
+            other => warnings.push(ConfigWarning::UnknownGroupStrategy {
+                group: group_name.to_string(),
+                strategy: other.to_string(),
+            }),
         }
     }
+    warnings
 }
 
 /// Apply all config overrides in sequence, then re-run child exclusion.
@@ -259,11 +269,11 @@ pub fn apply_group_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConf
 pub fn apply_overrides_complete(
     schemas: &mut Vec<TableSchema>,
     config: &SchemaConfig,
-) -> crate::error::Result<()> {
-    apply_overrides(schemas, config)?;
-    apply_group_overrides(schemas, config);
+) -> crate::error::Result<Vec<ConfigWarning>> {
+    let mut warnings = apply_overrides(schemas, config)?;
+    warnings.extend(apply_group_overrides(schemas, config));
     crate::schema::finalizer::exclude_absorbed_children(schemas);
-    Ok(())
+    Ok(warnings)
 }
 
 #[allow(clippy::too_many_lines)] // struct construction pipeline: generated cols → key col → union cols → strategy
@@ -300,18 +310,18 @@ fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> 
     merged
 }
 
-fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, members: &[String]) {
+fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, members: &[String]) -> Option<ConfigWarning> {
     let mut indices: Vec<usize> = members
         .iter()
         .filter_map(|name| schemas.iter().position(|s| &s.name == name))
         .collect();
 
     if indices.len() < 2 {
-        eprintln!(
-            "WARNING: group '{}': {}/{} membre(s) trouvé(s), fusion ignorée",
-            group_name, indices.len(), members.len()
-        );
-        return;
+        return Some(ConfigWarning::GroupMergeFailed {
+            group: group_name.to_string(),
+            found: indices.len(),
+            expected: members.len(),
+        });
     }
     indices.sort_unstable();
     let insert_pos = indices[0];
@@ -331,6 +341,7 @@ fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, mem
         group_name,
         indices.len()
     );
+    None
 }
 
 /// Apply IHM strategy overrides (`Pivot | Jsonb | Skip`) to a mutable schema slice.
@@ -633,6 +644,93 @@ mod tests {
 
     fn simple_table(name: &str) -> TableSchema {
         TableSchema::new(name.to_string(), vec![name.to_string()], 0)
+    }
+
+    // --- apply_group_overrides (return Vec<ConfigWarning>) ---
+
+    #[test]
+    fn apply_group_overrides_merge_failure_returns_warning() {
+        let mut schemas = vec![simple_table("a")];
+        let mut group = HashMap::new();
+        group.insert("merged".to_string(), GroupConfig {
+            strategy: "keyed_pivot".to_string(),
+            members: vec!["a".to_string(), "b".to_string()],
+        });
+        let config = SchemaConfig { tables: HashMap::new(), group };
+        let warnings = apply_group_overrides(&mut schemas, &config);
+        assert_eq!(warnings, vec![ConfigWarning::GroupMergeFailed {
+            group: "merged".to_string(),
+            found: 1,
+            expected: 2,
+        }]);
+    }
+
+    #[test]
+    fn apply_group_overrides_unknown_strategy_returns_warning() {
+        let mut schemas = vec![simple_table("a"), simple_table("b")];
+        let mut group = HashMap::new();
+        group.insert("merged".to_string(), GroupConfig {
+            strategy: "magic".to_string(),
+            members: vec!["a".to_string(), "b".to_string()],
+        });
+        let config = SchemaConfig { tables: HashMap::new(), group };
+        let warnings = apply_group_overrides(&mut schemas, &config);
+        assert_eq!(warnings, vec![ConfigWarning::UnknownGroupStrategy {
+            group: "merged".to_string(),
+            strategy: "magic".to_string(),
+        }]);
+    }
+
+    #[test]
+    fn apply_group_overrides_valid_merge_no_warnings() {
+        let mut schemas = vec![simple_table("a"), simple_table("b")];
+        let mut group = HashMap::new();
+        group.insert("merged".to_string(), GroupConfig {
+            strategy: "keyed_pivot".to_string(),
+            members: vec!["a".to_string(), "b".to_string()],
+        });
+        let config = SchemaConfig { tables: HashMap::new(), group };
+        let warnings = apply_group_overrides(&mut schemas, &config);
+        assert!(warnings.is_empty());
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0].name, "merged");
+    }
+
+    #[test]
+    fn config_warning_to_message_unknown_group_strategy() {
+        let w = ConfigWarning::UnknownGroupStrategy {
+            group: "g1".to_string(),
+            strategy: "magic".to_string(),
+        };
+        let msg = w.to_message();
+        assert!(msg.contains("magic"));
+        assert!(msg.contains("g1"));
+    }
+
+    // --- apply_overrides_complete (aggregates both warning sources) ---
+
+    #[test]
+    fn apply_overrides_complete_aggregates_both_sources() {
+        let mut schemas = vec![simple_table("users")];
+        let mut tables = HashMap::new();
+        tables.insert("ghost".to_string(), HashMap::new());
+        let mut group = HashMap::new();
+        group.insert("g".to_string(), GroupConfig {
+            strategy: "keyed_pivot".to_string(),
+            members: vec!["a".to_string(), "b".to_string()],
+        });
+        let config = SchemaConfig { tables, group };
+        let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
+        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::UnknownTable(_))));
+        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::GroupMergeFailed { .. })));
+    }
+
+    #[test]
+    fn apply_overrides_complete_no_warnings_clean_config() {
+        let mut schemas = vec![simple_table("users")];
+        let config = SchemaConfig { tables: HashMap::new(), group: HashMap::new() };
+        let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
+        assert!(warnings.is_empty());
     }
 
     #[test]

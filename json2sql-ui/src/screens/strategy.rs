@@ -29,13 +29,15 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let mut warn_only:       Signal<bool>            = use_signal(|| false);
     let mut save_feedback:   Signal<Option<Result<String, String>>> = use_signal(|| None);
     let mut picking_save:    Signal<bool>            = use_signal(|| false);
-    let mut banner_dismissed: Signal<bool>           = use_signal(|| false);
+    let mut banner_dismissed:         Signal<bool> = use_signal(|| false);
+    let mut cfg_banner_dismissed:     Signal<bool> = use_signal(|| false);
     let mut anchor_idx:      Signal<usize>           = use_signal(|| 0);
 
     // ── Derived snapshot ──────────────────────────────────────────────────
     let schemas           = state.read().schema.schemas.clone();
     let overrides_snap    = state.read().schema.strategy_overrides.clone();
-    let overflow_warnings = state.read().schema.overflow_warnings.clone();
+    let overflow_warnings  = state.read().schema.overflow_warnings.clone();
+    let config_warnings    = state.read().schema.config_warnings.clone();
     let selected_indices  = state.read().schema.selected_table_indices.clone();
     let absorbed_names    = state.read().schema.absorbed_names.clone();
 
@@ -193,6 +195,29 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                     button {
                         style: "background:transparent;border:none;color:var(--warning);cursor:pointer;font-size:1rem;padding:0 4px;",
                         onclick: move |_| { banner_dismissed.set(true); },
+                        "×"
+                    }
+                }
+            }
+
+            // ── Config-warnings banner ────────────────────────────────────
+            if !config_warnings.is_empty() && !*cfg_banner_dismissed.read() {
+                div { style: "padding:6px 16px;background:#2A1A00;border-bottom:1px solid rgba(240,176,114,.2);display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;",
+                    span { style: "color:var(--warning);font-size:var(--fs-xs);font-weight:700;flex-shrink:0;",
+                        "⚠ Schema config warnings:"
+                    }
+                    div { style: "display:flex;flex-direction:column;gap:2px;flex:1;",
+                        for w in config_warnings.iter() {
+                            span {
+                                key: "{w.to_message()}",
+                                style: "font-family:'JetBrains Mono',monospace;font-size:var(--fs-xs);color:var(--warning);",
+                                "{w.to_message()}"
+                            }
+                        }
+                    }
+                    button {
+                        style: "background:transparent;border:none;color:var(--warning);cursor:pointer;font-size:1rem;padding:0 4px;flex-shrink:0;",
+                        onclick: move |_| { cfg_banner_dismissed.set(true); },
                         "×"
                     }
                 }

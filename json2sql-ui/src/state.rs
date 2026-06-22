@@ -8,6 +8,7 @@ use json2sql::schema::naming::{ColumnCollision, TruncatedName};
 use json2sql::schema::finalizer::OverflowWarning;
 use json2sql::schema::stats::ColumnStats;
 use json2sql::schema::strategies::StrategyName;
+use json2sql::schema::config::ConfigWarning;
 use json2sql::schema::table_schema::{TableSchema, UserOverride};
 
 // ---------------------------------------------------------------------------
@@ -273,6 +274,8 @@ pub struct SchemaState {
     pub schema_snapshot_loaded: bool,
     /// Tables absorbed by a manual sibling merge — hidden from the table list.
     pub absorbed_names: HashSet<String>,
+    /// Warnings from TOML config overrides (unknown table, column, type, strategy).
+    pub config_warnings: Vec<ConfigWarning>,
 }
 
 impl Default for SchemaState {
@@ -289,6 +292,7 @@ impl Default for SchemaState {
             pass1_stats: Vec::new(),
             schema_snapshot_loaded: false,
             absorbed_names: HashSet::new(),
+            config_warnings: Vec::new(),
         }
     }
 }
@@ -306,6 +310,7 @@ impl SchemaState {
         self.last_selected_idx = 0;
         self.schema_snapshot_loaded = false;
         self.absorbed_names = HashSet::new();
+        self.config_warnings = Vec::new();
     }
 
     /// Apply a Shift+click range-select.
@@ -747,6 +752,16 @@ mod tests {
         assert!(s.column_collisions.is_empty());
         assert!(s.pass1_stats.is_empty());
         assert!(!s.pass1_progress.done);
+        assert!(s.config_warnings.is_empty());
+    }
+
+    #[test]
+    fn schema_state_clear_resets_config_warnings() {
+        use json2sql::schema::config::ConfigWarning;
+        let mut s = SchemaState::default();
+        s.config_warnings = vec![ConfigWarning::UnknownTable("t".to_string())];
+        s.clear();
+        assert!(s.config_warnings.is_empty());
     }
 
     #[test]
