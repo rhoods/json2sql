@@ -829,39 +829,24 @@ impl JsonRootWrapperReader {
         let mut in_string = false;
         let mut escape_next = false;
         loop {
-            let b = match self.read_byte_tracked()? {
-                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON value".into())),
-                Some(b) => b,
-            };
-            self.buf.push(b);
-            if escape_next {
-                escape_next = false;
-                continue;
-            }
-            if in_string {
-                match b {
-                    b'\\' => escape_next = true,
-                    b'"' => in_string = false,
-                    _ => {}
+            let (n, found) = {
+                let chunk = self.reader.fill_buf().map_err(J2sError::Io)?;
+                if chunk.is_empty() {
+                    return Err(J2sError::InvalidInput("Unexpected EOF inside JSON value".into()));
                 }
-            } else {
-                match b {
-                    b'"' => in_string = true,
-                    b'{' | b'[' => depth += 1,
-                    b'}' | b']' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            if b != closer {
-                                return Err(J2sError::InvalidInput(format!(
-                                    "Mismatched bracket: expected '{}', got '{}'",
-                                    closer as char, b as char
-                                )));
-                            }
-                            return Ok(());
-                        }
-                    }
-                    _ => {}
-                }
+                scan_chunk_into(chunk, &mut self.buf, &mut depth, &mut in_string, &mut escape_next)
+            }; // chunk borrow ends before consume
+            self.reader.consume(n);
+            self.bytes_read += n as u64;
+            if let Some(b) = found {
+                return if b == closer {
+                    Ok(())
+                } else {
+                    Err(J2sError::InvalidInput(format!(
+                        "Mismatched bracket: expected '{}', got '{}'",
+                        closer as char, b as char
+                    )))
+                };
             }
         }
     }
@@ -1325,6 +1310,23 @@ mod tests {
         let _ = reader.next_raw().unwrap().unwrap();
         let b2 = reader.bytes_read();
         assert!(b1 > b0 && b2 > b1, "bytes_read must monotonically increase: {b0} < {b1} < {b2}");
+    }
+
+    #[test]
+    fn test_wrapper_reader_bytes_read_tracks_nested_container_content() {
+        // bytes_read must account for all bytes of nested containers, not just openers
+        let json = br#"{"Items": [{"nested": {"x": 1, "y": 2}}, {"z": 3}]}"#;
+        let f = tmp_file(json);
+        let mut r = JsonRootWrapperReader::open(f.path(), vec!["Items".to_string()]).unwrap();
+        let b0 = r.bytes_read();
+        let row1 = r.next_raw().unwrap().unwrap();
+        let b1 = r.bytes_read();
+        let row2 = r.next_raw().unwrap().unwrap();
+        let b2 = r.bytes_read();
+        assert!(b1 > b0, "bytes_read must increase after first nested object");
+        assert!(b2 > b1, "bytes_read must increase after second object");
+        assert!(b2 >= row1.len() as u64 + row2.len() as u64,
+            "bytes_read {b2} must be >= sum of row lengths {}", row1.len() + row2.len());
     }
 
     #[test]
