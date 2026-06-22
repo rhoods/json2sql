@@ -118,12 +118,15 @@ fn fmt_skip_value(reader: &mut impl BufRead, first_byte: u8) -> Result<()> {
     }
 }
 
-/// Scan a byte chunk for JSON structure boundaries, updating parser state.
+/// Scan a byte chunk for JSON structure boundaries, accumulating bytes into `buf`.
 ///
-/// Returns `(bytes_to_consume, Some(b))` when depth reaches 0 (b is the closing bracket),
+/// Returns `(bytes_consumed, Some(b))` when depth reaches 0 (b is the closing bracket),
 /// or `(chunk.len(), None)` if the closer was not found in this chunk.
-fn fmt_scan_chunk(
+/// The caller must check `chunk.is_empty()` before calling and handle EOF.
+/// The check `b == closer` and the mismatched-bracket error are the caller's responsibility.
+fn scan_chunk_into(
     chunk: &[u8],
+    buf: &mut Vec<u8>,
     depth: &mut u32,
     in_string: &mut bool,
     escape_next: &mut bool,
@@ -131,9 +134,11 @@ fn fmt_scan_chunk(
     for (i, &b) in chunk.iter().enumerate() {
         if *escape_next {
             *escape_next = false;
+            buf.push(b);
             continue;
         }
         if *in_string {
+            buf.push(b);
             match b {
                 b'\\' => *escape_next = true,
                 b'"' => *in_string = false,
@@ -141,15 +146,16 @@ fn fmt_scan_chunk(
             }
         } else {
             match b {
-                b'"' => *in_string = true,
-                b'{' | b'[' => *depth += 1,
+                b'"' => { *in_string = true; buf.push(b); }
+                b'{' | b'[' => { *depth += 1; buf.push(b); }
                 b'}' | b']' => {
                     *depth -= 1;
+                    buf.push(b);
                     if *depth == 0 {
                         return (i + 1, Some(b));
                     }
                 }
-                _ => {}
+                _ => { buf.push(b); }
             }
         }
     }
@@ -159,6 +165,7 @@ fn fmt_scan_chunk(
 /// Skip until the matching `closer` (`}` or `]`), opening brace already consumed.
 /// Reads in buffer-sized chunks via `fill_buf`/`consume` for large-file performance.
 fn fmt_skip_container(reader: &mut impl BufRead, closer: u8) -> Result<()> {
+    let mut scratch = Vec::new();
     let mut depth: u32 = 1;
     let mut in_string = false;
     let mut escape_next = false;
@@ -168,7 +175,8 @@ fn fmt_skip_container(reader: &mut impl BufRead, closer: u8) -> Result<()> {
             if buf.is_empty() {
                 return Err(J2sError::InvalidInput("Unexpected EOF inside JSON container".into()));
             }
-            fmt_scan_chunk(buf, &mut depth, &mut in_string, &mut escape_next)
+            scratch.clear();
+            scan_chunk_into(buf, &mut scratch, &mut depth, &mut in_string, &mut escape_next)
         }; // buf borrow ends before consume
         reader.consume(n);
         if let Some(b) = found {
@@ -1338,5 +1346,88 @@ mod tests {
         let _ = reader.next_raw().unwrap().unwrap();
         let b2 = reader.bytes_read();
         assert!(b1 > b0 && b2 > b1, "bytes_read must monotonically increase: {b0} < {b1} < {b2}");
+    }
+
+    // -------------------------------------------------------------------------
+    // scan_chunk_into tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn scan_chunk_into_accumulates_bytes_up_to_closer() {
+        let chunk = b"ello}world";
+        let mut buf = Vec::new();
+        let mut depth = 1u32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found, Some(b'}'));
+        assert_eq!(n, 5); // "ello}" = 5 bytes
+        assert_eq!(&buf, b"ello}");
+        assert_eq!(depth, 0);
+    }
+
+    #[test]
+    fn scan_chunk_into_no_closer_accumulates_full_chunk() {
+        let chunk = b"hello world";
+        let mut buf = Vec::new();
+        let mut depth = 1u32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found, None);
+        assert_eq!(n, chunk.len());
+        assert_eq!(&buf, b"hello world");
+    }
+
+    #[test]
+    fn scan_chunk_into_escape_next_carries_across_boundary() {
+        // Start already inside a string; chunk ends with '\' → escape_next must carry to next chunk
+        let chunk1 = b"ab\\";
+        let mut buf = Vec::new();
+        let mut depth = 1u32;
+        let mut in_string = true;
+        let mut escape_next = false;
+        let (n1, found1) = scan_chunk_into(chunk1, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found1, None);
+        assert_eq!(n1, 3);
+        assert!(escape_next, "escape_next must be set after trailing backslash inside string");
+        assert!(in_string, "still inside string");
+
+        // Second chunk: first byte '"' is the escaped char — must NOT close the string
+        let chunk2 = b"\"cd\"";
+        let (n2, found2) = scan_chunk_into(chunk2, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found2, None);
+        assert_eq!(n2, 4);
+        assert!(!escape_next, "escape consumed");
+        assert!(!in_string, "last unescaped '\"' closes the string");
+    }
+
+    #[test]
+    fn scan_chunk_into_nested_containers_increment_depth() {
+        // Opening '{' already consumed by caller — chunk is the content after it
+        let chunk = b"\"k\":[1,2]}";
+        let mut buf = Vec::new();
+        let mut depth = 1u32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found, Some(b'}'));
+        assert_eq!(n, chunk.len());
+        assert_eq!(&buf, chunk);
+        assert_eq!(depth, 0);
+    }
+
+    #[test]
+    fn scan_chunk_into_bracket_inside_string_not_counted() {
+        // '}' inside a string must not decrement depth
+        let chunk = b"\"}\"}";
+        let mut buf = Vec::new();
+        let mut depth = 1u32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found, Some(b'}'));
+        assert_eq!(n, 4); // full chunk consumed including real '}'
+        assert_eq!(depth, 0);
     }
 }
