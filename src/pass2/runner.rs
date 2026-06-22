@@ -707,6 +707,9 @@ pub async fn run(
         .map(|s| (s.path.join(&sep), s.clone()))
         .collect();
 
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(ProgressEvent::Pass2Log("Detecting JSON format…".to_string()));
+    }
     // Open reader early so we can inspect the format before spawning workers.
     // For wrapper format, root table names come from wrapper keys (raw, as stored in s.path),
     // not from config.root_table (the filename-derived fallback).
@@ -1509,6 +1512,25 @@ mod tests {
         let sql = map.get("products").expect("products must be present");
         assert!(sql.contains("myschema"), "COPY SQL must reference the pg_schema");
         assert!(sql.contains("products"), "COPY SQL must reference the table name");
+    }
+
+    // -------------------------------------------------------------------------
+    // Pass2Log detection event test
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn pass2_log_detecting_format_event_reaches_channel() {
+        use crate::io::progress_event::{ProgressEvent, ProgressTx};
+
+        let (tx, mut rx): (ProgressTx, _) = tokio::sync::mpsc::unbounded_channel();
+        let _ = tx.send(ProgressEvent::Pass2Log("Detecting JSON format…".to_string()));
+        let event = rx.try_recv().expect("Pass2Log event must be in the channel");
+        match event {
+            ProgressEvent::Pass2Log(msg) => {
+                assert!(msg.contains("Detecting"), "message must mention detection");
+            }
+            other => panic!("unexpected event variant: {other:?}"),
+        }
     }
 
 }
