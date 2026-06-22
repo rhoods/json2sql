@@ -934,6 +934,7 @@ impl Iterator for JsonRootWrapperReader {
 pub enum JsonReader {
     Lines(JsonLinesReader),
     Array(JsonArrayReader),
+    RootWrapper(JsonRootWrapperReader),
 }
 
 impl JsonReader {
@@ -943,29 +944,37 @@ impl JsonReader {
         match self {
             Self::Lines(r) => r.next_raw(),
             Self::Array(r) => r.next_raw(),
+            Self::RootWrapper(r) => r.next_raw(),
         }
     }
 
     pub fn open(path: &Path) -> Result<(Self, JsonFormat)> {
         let format = detect_format(path)?;
-        let reader = match &format {
+        let reader = match format.clone() {
             JsonFormat::Lines => Self::Lines(JsonLinesReader::open(path)?),
             JsonFormat::Array => Self::Array(JsonArrayReader::open(path)?),
-            JsonFormat::RootWrapper(_) => {
-                // Task 4: JsonRootWrapperReader not yet implemented.
-                return Err(J2sError::InvalidInput(
-                    "Root wrapper format detected but streaming is not yet implemented".to_string(),
-                ));
+            JsonFormat::RootWrapper(keys) => {
+                Self::RootWrapper(JsonRootWrapperReader::open(path, keys)?)
             }
         };
         Ok((reader, format))
     }
 
+    /// The wrapper key currently being streamed, or `None` for non-wrapper formats.
     #[must_use]
-    pub const fn bytes_read(&self) -> u64 {
+    pub fn current_key(&self) -> Option<&str> {
+        match self {
+            Self::RootWrapper(r) => r.current_key(),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn bytes_read(&self) -> u64 {
         match self {
             Self::Lines(r) => r.bytes_read(),
             Self::Array(r) => r.bytes_read(),
+            Self::RootWrapper(r) => r.bytes_read(),
         }
     }
 }
@@ -977,6 +986,7 @@ impl Iterator for JsonReader {
         match self {
             Self::Lines(r) => r.next(),
             Self::Array(r) => r.next(),
+            Self::RootWrapper(r) => r.next(),
         }
     }
 }
@@ -1257,5 +1267,54 @@ mod tests {
             std::iter::from_fn(|| r.next()).collect::<Result<_>>().unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0]["tags"], serde_json::json!(["a", "b"]));
+    }
+
+    // --- JsonReader unified entry point tests ---
+
+    #[test]
+    fn test_json_reader_open_wrapper_returns_root_wrapper_format() {
+        let f = tmp_file(br#"{"Foods": [{"id": 1}]}"#);
+        let (_reader, fmt) = JsonReader::open(f.path()).unwrap();
+        assert_eq!(fmt, JsonFormat::RootWrapper(vec!["Foods".to_string()]));
+    }
+
+    #[test]
+    fn test_json_reader_wrapper_streams_all_elements() {
+        let f = tmp_file(br#"{"K1": [{"a": 1}, {"a": 2}], "K2": [{"b": 10}]}"#);
+        let (mut reader, _fmt) = JsonReader::open(f.path()).unwrap();
+        let all: Vec<serde_json::Value> =
+            std::iter::from_fn(|| reader.next()).collect::<Result<_>>().unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_json_reader_current_key_wrapper() {
+        let f = tmp_file(br#"{"Foods": [{"id": 1}]}"#);
+        let (mut reader, _fmt) = JsonReader::open(f.path()).unwrap();
+        assert_eq!(reader.current_key(), Some("Foods"));
+        let _ = reader.next_raw().unwrap().unwrap();
+        // Still "Foods" until the next call discovers the array is exhausted
+        assert_eq!(reader.current_key(), Some("Foods"));
+        assert!(reader.next_raw().is_none());
+        assert_eq!(reader.current_key(), None);
+    }
+
+    #[test]
+    fn test_json_reader_current_key_returns_none_for_ndjson() {
+        let f = tmp_file(br#"{"a": 1}"#);
+        let (reader, _fmt) = JsonReader::open(f.path()).unwrap();
+        assert_eq!(reader.current_key(), None);
+    }
+
+    #[test]
+    fn test_json_reader_wrapper_bytes_read_increases() {
+        let f = tmp_file(br#"{"K1": [{"a": 1}], "K2": [{"b": 2}]}"#);
+        let (mut reader, _fmt) = JsonReader::open(f.path()).unwrap();
+        let b0 = reader.bytes_read();
+        let _ = reader.next_raw().unwrap().unwrap();
+        let b1 = reader.bytes_read();
+        let _ = reader.next_raw().unwrap().unwrap();
+        let b2 = reader.bytes_read();
+        assert!(b1 > b0 && b2 > b1, "bytes_read must monotonically increase: {b0} < {b1} < {b2}");
     }
 }
