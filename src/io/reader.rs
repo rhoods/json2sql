@@ -118,46 +118,68 @@ fn fmt_skip_value(reader: &mut impl BufRead, first_byte: u8) -> Result<()> {
     }
 }
 
+/// Scan a byte chunk for JSON structure boundaries, updating parser state.
+///
+/// Returns `(bytes_to_consume, Some(b))` when depth reaches 0 (b is the closing bracket),
+/// or `(chunk.len(), None)` if the closer was not found in this chunk.
+fn fmt_scan_chunk(
+    chunk: &[u8],
+    depth: &mut u32,
+    in_string: &mut bool,
+    escape_next: &mut bool,
+) -> (usize, Option<u8>) {
+    for (i, &b) in chunk.iter().enumerate() {
+        if *escape_next {
+            *escape_next = false;
+            continue;
+        }
+        if *in_string {
+            match b {
+                b'\\' => *escape_next = true,
+                b'"' => *in_string = false,
+                _ => {}
+            }
+        } else {
+            match b {
+                b'"' => *in_string = true,
+                b'{' | b'[' => *depth += 1,
+                b'}' | b']' => {
+                    *depth -= 1;
+                    if *depth == 0 {
+                        return (i + 1, Some(b));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (chunk.len(), None)
+}
+
 /// Skip until the matching `closer` (`}` or `]`), opening brace already consumed.
-/// Tracks depth and string escapes so nested containers are handled correctly.
+/// Reads in buffer-sized chunks via `fill_buf`/`consume` for large-file performance.
 fn fmt_skip_container(reader: &mut impl BufRead, closer: u8) -> Result<()> {
     let mut depth: u32 = 1;
     let mut in_string = false;
     let mut escape_next = false;
     loop {
-        match fmt_read_one(reader)? {
-            None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON container".into())),
-            Some(b) => {
-                if escape_next {
-                    escape_next = false;
-                    continue;
-                }
-                if in_string {
-                    match b {
-                        b'\\' => escape_next = true,
-                        b'"' => in_string = false,
-                        _ => {}
-                    }
-                } else {
-                    match b {
-                        b'"' => in_string = true,
-                        b'{' | b'[' => depth += 1,
-                        b'}' | b']' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                if b != closer {
-                                    return Err(J2sError::InvalidInput(format!(
-                                        "Mismatched bracket: expected '{}', got '{}'",
-                                        closer as char, b as char
-                                    )));
-                                }
-                                return Ok(());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+        let (n, found) = {
+            let buf = reader.fill_buf().map_err(J2sError::Io)?;
+            if buf.is_empty() {
+                return Err(J2sError::InvalidInput("Unexpected EOF inside JSON container".into()));
             }
+            fmt_scan_chunk(buf, &mut depth, &mut in_string, &mut escape_next)
+        }; // buf borrow ends before consume
+        reader.consume(n);
+        if let Some(b) = found {
+            return if b == closer {
+                Ok(())
+            } else {
+                Err(J2sError::InvalidInput(format!(
+                    "Mismatched bracket: expected '{}', got '{}'",
+                    closer as char, b as char
+                )))
+            };
         }
     }
 }

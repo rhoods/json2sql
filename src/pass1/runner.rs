@@ -96,6 +96,9 @@ pub fn run(
         config.rare_threshold,
         config.disabled_strategies.clone(),
     );
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(ProgressEvent::Pass1Log("Detecting JSON format…".to_string()));
+    }
     let (mut reader, format) = JsonReader::open(path)?;
     emit_root_wrapper_warning(&format, progress_tx.as_ref());
     let total_rows = scan_json_rows(&mut reader, &mut registry, config, progress.as_ref(), progress_tx.as_ref(), total_bytes)?;
@@ -380,6 +383,9 @@ fn read_and_dispatch(
     total_bytes: u64,
 ) -> Result<(u64, Option<crate::error::J2sError>)> {
     const PROGRESS_INTERVAL: u64 = 1_000;
+    if let Some(tx_prog) = progress_tx {
+        let _ = tx_prog.send(ProgressEvent::Pass1Log("Detecting JSON format…".to_string()));
+    }
     let (mut reader, format) = JsonReader::open(path)?;
     emit_root_wrapper_warning(&format, progress_tx);
     let mut total_rows = 0u64;
