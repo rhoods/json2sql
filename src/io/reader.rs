@@ -1,9 +1,11 @@
-//! JSON file streaming: auto-detects format (array vs. NDJSON), iterates top-level objects,
-//! and reports byte-level progress.
+//! JSON file streaming: auto-detects format (array, NDJSON, or root wrapper object),
+//! iterates top-level objects, and reports byte-level progress.
 //!
 //! [`JsonReader`] is the primary iterator; it parses via `simd_json` for performance.
-//! [`JsonFormat`] is detected from the first non-whitespace byte of the file —
-//! `[` for a JSON array, anything else for JSON-Lines (NDJSON).
+//! [`JsonFormat`] is detected by scanning the first object of the file:
+//! - `[` → [`JsonFormat::Array`]
+//! - `{` whose root-level values are all arrays, no second root object → [`JsonFormat::RootWrapper`]
+//! - `{` with a second root object following → [`JsonFormat::Lines`] (NDJSON)
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -20,34 +22,270 @@ fn simd_err(e: simd_json::Error) -> J2sError {
 }
 
 /// Detected format of the input file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JsonFormat {
     /// Top-level JSON array: `[{...}, {...}, ...]`
     Array,
     /// One JSON object per line (JSON-Lines / NDJSON)
     Lines,
+    /// Single root object whose values are all arrays: `{"K1": [{...}], "K2": [{...}]}`
+    /// The `Vec<String>` holds the key names in order of discovery.
+    RootWrapper(Vec<String>),
 }
 
-/// Detect the format by peeking at the first non-whitespace byte.
+/// Detect the format by scanning the first root-level structure of the file.
 pub fn detect_format(path: &Path) -> Result<JsonFormat> {
     let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut buf = [0u8; 1024];
-    let n = reader.read(&mut buf)?;
-    for &b in &buf[..n] {
-        if b.is_ascii_whitespace() {
-            continue;
-        }
-        return match b {
-            b'[' => Ok(JsonFormat::Array),
-            b'{' => Ok(JsonFormat::Lines),
-            other => Err(J2sError::InvalidInput(format!(
-                "Expected '[' or '{{' as first character, found '{}'",
-                other as char
-            ))),
-        };
+    let mut reader = BufReader::with_capacity(512 * 1024, file);
+    match fmt_skip_ws(&mut reader)? {
+        None => Err(J2sError::InvalidInput("File appears to be empty".to_string())),
+        Some(b'[') => Ok(JsonFormat::Array),
+        Some(b'{') => fmt_detect_root_object(&mut reader),
+        Some(other) => Err(J2sError::InvalidInput(format!(
+            "Expected '[' or '{{' as first character, found '{}'",
+            other as char
+        ))),
     }
-    Err(J2sError::InvalidInput("File appears to be empty".to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Format-detection helpers (fmt_ prefix — only used by detect_format)
+// ---------------------------------------------------------------------------
+
+fn fmt_read_one(reader: &mut impl BufRead) -> Result<Option<u8>> {
+    let mut b = [0u8; 1];
+    match reader.read_exact(&mut b) {
+        Ok(()) => Ok(Some(b[0])),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(J2sError::Io(e)),
+    }
+}
+
+/// Skip whitespace; return next non-whitespace byte, or `None` at EOF.
+fn fmt_skip_ws(reader: &mut impl BufRead) -> Result<Option<u8>> {
+    loop {
+        match fmt_read_one(reader)? {
+            None => return Ok(None),
+            Some(b) if b.is_ascii_whitespace() => {}
+            Some(b) => return Ok(Some(b)),
+        }
+    }
+}
+
+/// Skip whitespace and commas; return next other byte, or `None` at EOF.
+fn fmt_skip_ws_comma(reader: &mut impl BufRead) -> Result<Option<u8>> {
+    loop {
+        match fmt_read_one(reader)? {
+            None => return Ok(None),
+            Some(b',') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') => {}
+            Some(b) => return Ok(Some(b)),
+        }
+    }
+}
+
+/// Read a JSON string until the closing `"` (opening `"` already consumed).
+fn fmt_read_string(reader: &mut impl BufRead) -> Result<String> {
+    let mut s = Vec::new();
+    let mut escape_next = false;
+    loop {
+        match fmt_read_one(reader)? {
+            None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".into())),
+            Some(b) => {
+                if escape_next {
+                    s.push(b);
+                    escape_next = false;
+                } else if b == b'\\' {
+                    s.push(b);
+                    escape_next = true;
+                } else if b == b'"' {
+                    break;
+                } else {
+                    s.push(b);
+                }
+            }
+        }
+    }
+    String::from_utf8(s).map_err(|e| J2sError::InvalidInput(format!("Non-UTF-8 JSON key: {e}")))
+}
+
+/// Skip a complete JSON value whose first byte was `first_byte` (already consumed).
+fn fmt_skip_value(reader: &mut impl BufRead, first_byte: u8) -> Result<()> {
+    match first_byte {
+        b'{' => fmt_skip_container(reader, b'}'),
+        b'[' => fmt_skip_container(reader, b']'),
+        b'"' => fmt_skip_string_rest(reader),
+        _ => fmt_skip_primitive_rest(reader),
+    }
+}
+
+/// Skip until the matching `closer` (`}` or `]`), opening brace already consumed.
+/// Tracks depth and string escapes so nested containers are handled correctly.
+fn fmt_skip_container(reader: &mut impl BufRead, closer: u8) -> Result<()> {
+    let mut depth: u32 = 1;
+    let mut in_string = false;
+    let mut escape_next = false;
+    loop {
+        match fmt_read_one(reader)? {
+            None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON container".into())),
+            Some(b) => {
+                if escape_next {
+                    escape_next = false;
+                    continue;
+                }
+                if in_string {
+                    match b {
+                        b'\\' => escape_next = true,
+                        b'"' => in_string = false,
+                        _ => {}
+                    }
+                } else {
+                    match b {
+                        b'"' => in_string = true,
+                        b'{' | b'[' => depth += 1,
+                        b'}' | b']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                if b != closer {
+                                    return Err(J2sError::InvalidInput(format!(
+                                        "Mismatched bracket: expected '{}', got '{}'",
+                                        closer as char, b as char
+                                    )));
+                                }
+                                return Ok(());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Skip the rest of a JSON string (opening `"` already consumed).
+fn fmt_skip_string_rest(reader: &mut impl BufRead) -> Result<()> {
+    let mut escape_next = false;
+    loop {
+        match fmt_read_one(reader)? {
+            None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".into())),
+            Some(b) => {
+                if escape_next {
+                    escape_next = false;
+                } else {
+                    match b {
+                        b'\\' => escape_next = true,
+                        b'"' => return Ok(()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Skip a primitive value (number, bool, null — first byte already consumed).
+fn fmt_skip_primitive_rest(reader: &mut impl BufRead) -> Result<()> {
+    loop {
+        let buf = reader.fill_buf().map_err(J2sError::Io)?;
+        if buf.is_empty() {
+            break;
+        }
+        match buf[0] {
+            b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r' => break,
+            _ => {
+                reader.consume(1);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Determine whether a `{`-started file is NDJSON or a root wrapper object.
+///
+/// Called after the opening `{` has been consumed.
+///
+/// - If another root object follows → [`JsonFormat::Lines`] (NDJSON).
+/// - If all top-level values are arrays → [`JsonFormat::RootWrapper`].
+/// - If top-level values are mixed (some arrays, some not) → error.
+/// - If no arrays at all (single plain object) → [`JsonFormat::Lines`] (backward compat).
+fn fmt_detect_root_object(reader: &mut impl BufRead) -> Result<JsonFormat> {
+    let mut array_keys: Vec<String> = Vec::new();
+    let mut has_non_array = false;
+    let mut first_non_array_key: Option<String> = None;
+
+    loop {
+        match fmt_skip_ws_comma(reader)? {
+            None => {
+                return Err(J2sError::InvalidInput(
+                    "Unexpected EOF inside root JSON object".into(),
+                ))
+            }
+            Some(b'"') => {
+                let key = fmt_read_string(reader)?;
+
+                // Expect ':'
+                match fmt_skip_ws(reader)? {
+                    Some(b':') => {}
+                    Some(b) => {
+                        return Err(J2sError::InvalidInput(format!(
+                            "Expected ':' after key '{key}', found '{}'",
+                            b as char
+                        )))
+                    }
+                    None => {
+                        return Err(J2sError::InvalidInput(format!(
+                            "Unexpected EOF after key '{key}'"
+                        )))
+                    }
+                }
+
+                match fmt_skip_ws(reader)? {
+                    None => {
+                        return Err(J2sError::InvalidInput(format!(
+                            "Unexpected EOF after ':' for key '{key}'"
+                        )))
+                    }
+                    Some(b'[') => {
+                        array_keys.push(key);
+                        fmt_skip_container(reader, b']')?;
+                    }
+                    Some(first) => {
+                        if first_non_array_key.is_none() {
+                            first_non_array_key = Some(key);
+                        }
+                        has_non_array = true;
+                        fmt_skip_value(reader, first)?;
+                    }
+                }
+            }
+            Some(b'}') => {
+                // Root object closed. Peek for NDJSON marker (any non-whitespace follows).
+                return match fmt_skip_ws(reader)? {
+                    Some(_) => Ok(JsonFormat::Lines),
+                    None => {
+                        if has_non_array && !array_keys.is_empty() {
+                            Err(J2sError::InvalidInput(format!(
+                                "Root wrapper object contains non-array value for key '{}'. \
+                                 Only root objects where all values are arrays are supported.",
+                                first_non_array_key.as_deref().unwrap_or("?")
+                            )))
+                        } else if !array_keys.is_empty() {
+                            Ok(JsonFormat::RootWrapper(array_keys))
+                        } else {
+                            // Single root object with no array values — treat as NDJSON (single row).
+                            Ok(JsonFormat::Lines)
+                        }
+                    }
+                };
+            }
+            Some(other) => {
+                return Err(J2sError::InvalidInput(format!(
+                    "Unexpected character '{}' while scanning root JSON object",
+                    other as char
+                )));
+            }
+        }
+    }
 }
 
 /// Returns the file size in bytes (for progress bar).
@@ -389,9 +627,15 @@ impl JsonReader {
 
     pub fn open(path: &Path) -> Result<(Self, JsonFormat)> {
         let format = detect_format(path)?;
-        let reader = match format {
+        let reader = match &format {
             JsonFormat::Lines => Self::Lines(JsonLinesReader::open(path)?),
             JsonFormat::Array => Self::Array(JsonArrayReader::open(path)?),
+            JsonFormat::RootWrapper(_) => {
+                // Task 4: JsonRootWrapperReader not yet implemented.
+                return Err(J2sError::InvalidInput(
+                    "Root wrapper format detected but streaming is not yet implemented".to_string(),
+                ));
+            }
         };
         Ok((reader, format))
     }
@@ -494,5 +738,97 @@ mod tests {
         assert_eq!(raws.len(), 2);
         let v0: serde_json::Value = simd_json::from_slice(&mut raws[0].clone()).unwrap();
         assert_eq!(v0["a"], 1);
+    }
+
+    // --- detect_format tests ---
+
+    #[test]
+    fn test_detect_format_array() {
+        let f = tmp_file(b"[{\"a\": 1}]");
+        assert_eq!(detect_format(f.path()).unwrap(), JsonFormat::Array);
+    }
+
+    #[test]
+    fn test_detect_format_array_with_leading_whitespace() {
+        let f = tmp_file(b"  \n  [{\"a\": 1}]");
+        assert_eq!(detect_format(f.path()).unwrap(), JsonFormat::Array);
+    }
+
+    #[test]
+    fn test_detect_format_ndjson_two_objects() {
+        let f = tmp_file(b"{\"a\": 1}\n{\"b\": 2}");
+        assert_eq!(detect_format(f.path()).unwrap(), JsonFormat::Lines);
+    }
+
+    #[test]
+    fn test_detect_format_wrapper_mono_key() {
+        let f = tmp_file(b"{\"FoundationFoods\": [{\"id\": 1}]}");
+        assert_eq!(
+            detect_format(f.path()).unwrap(),
+            JsonFormat::RootWrapper(vec!["FoundationFoods".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_detect_format_wrapper_multi_key() {
+        let f = tmp_file(b"{\"K1\": [{\"a\": 1}], \"K2\": [{\"b\": 2}]}");
+        assert_eq!(
+            detect_format(f.path()).unwrap(),
+            JsonFormat::RootWrapper(vec!["K1".to_string(), "K2".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_detect_format_ndjson_first_object_has_array_value() {
+        // First object has an array value — must NOT be mistaken for a wrapper.
+        let f = tmp_file(b"{\"items\": [1, 2]}\n{\"items\": [3]}");
+        assert_eq!(detect_format(f.path()).unwrap(), JsonFormat::Lines);
+    }
+
+    #[test]
+    fn test_detect_format_single_object_non_array_values_is_ndjson() {
+        // Single root object with no array values → treated as NDJSON (one row).
+        let f = tmp_file(b"{\"a\": 1}");
+        assert_eq!(detect_format(f.path()).unwrap(), JsonFormat::Lines);
+    }
+
+    #[test]
+    fn test_detect_format_wrapper_mixed_values_returns_error() {
+        // Mixed: some arrays, some non-arrays → clear error.
+        let f = tmp_file(b"{\"meta\": {\"v\": 1}, \"foods\": [{\"id\": 1}]}");
+        let err = detect_format(f.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("meta") && err.contains("non-array"),
+            "error should name the key and say non-array, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_detect_format_empty_file_error() {
+        let f = tmp_file(b"");
+        assert!(detect_format(f.path()).is_err());
+    }
+
+    #[test]
+    fn test_detect_format_invalid_first_byte_error() {
+        let f = tmp_file(b"xyz");
+        assert!(detect_format(f.path()).is_err());
+    }
+
+    #[test]
+    fn test_detect_format_wrapper_nested_array_in_objects() {
+        // Array values containing objects with nested arrays must not confuse the scanner.
+        let f = tmp_file(b"{\"Foods\": [{\"tags\": [\"a\", \"b\"]}, {\"n\": 2}]}");
+        assert_eq!(
+            detect_format(f.path()).unwrap(),
+            JsonFormat::RootWrapper(vec!["Foods".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_detect_format_wrapper_key_with_escaped_quotes() {
+        let f = tmp_file(b"{\"key\\\"name\": [{\"x\": 1}]}");
+        let fmt = detect_format(f.path()).unwrap();
+        assert_eq!(fmt, JsonFormat::RootWrapper(vec!["key\\\"name".to_string()]));
     }
 }
