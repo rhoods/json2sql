@@ -82,7 +82,10 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
     let (_stdin_temp, input_path) = resolve_input(std::mem::take(&mut cfg.input))?;
     let mut pass1 = load_or_infer_schema(&cfg, &input_path)?;
     report_pass1_warnings(&pass1, cfg.depth_limit);
-    let _config_warnings = post_process_schema(&mut pass1, &cfg)?;
+    let config_warnings = post_process_schema(&mut pass1, &cfg)?;
+    for w in &config_warnings {
+        eprintln!("WARNING: {}", w.to_message());
+    }
 
     if cfg.dry_run {
         print_dry_run_ddl(&pass1.schemas, &cfg.pg_schema, cfg.drop_existing);

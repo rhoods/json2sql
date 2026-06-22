@@ -78,7 +78,6 @@ pub enum ConfigWarning {
 }
 
 impl ConfigWarning {
-    #[allow(dead_code)]
     pub fn to_message(&self) -> String {
         match self {
             Self::UnknownTable(t) =>
