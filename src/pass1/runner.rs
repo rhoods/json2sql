@@ -143,7 +143,8 @@ fn scan_json_rows(
         let value = item?;
         match value {
             Value::Object(ref obj) => {
-                registry.observe_root(&config.root_table, obj);
+                let root = reader.current_key().unwrap_or(&config.root_table);
+                registry.observe_root(root, obj);
                 total_rows += 1;
             }
             other => {
@@ -231,19 +232,22 @@ fn build_inspect_registry(config: &Pass1Config) -> SchemaRegistry {
 }
 
 fn scan_objects_with_limit(
-    reader: JsonReader,
+    mut reader: JsonReader,
     registry: &mut SchemaRegistry,
     root_table: &str,
     limit: usize,
 ) -> Result<(u64, Vec<Value>)> {
     let mut rows_scanned = 0u64;
     let mut sampled_objects: Vec<Value> = Vec::new();
-    for item in reader {
-        if rows_scanned >= limit as u64 { break; }
-        let value = item?;
+    while rows_scanned < limit as u64 {
+        let value = match reader.next() {
+            None => break,
+            Some(item) => item?,
+        };
+        let effective_root = reader.current_key().unwrap_or(root_table);
         match value {
             Value::Object(ref obj) => {
-                registry.observe_root(root_table, obj);
+                registry.observe_root(effective_root, obj);
                 rows_scanned += 1;
                 sampled_objects.push(Value::Object(obj.clone()));
             }
@@ -298,7 +302,7 @@ pub fn run_parallel(
 
     // Bounded MPMC channel — capacity: 4 slots per worker gives the reader a small lead.
     // At typical JSON object sizes (~1–100 KB), peak buffer ≈ num_workers × 4 × object_size.
-    let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(num_workers * 4);
+    let (tx, rx) = crossbeam_channel::bounded::<(Option<String>, Vec<u8>)>(num_workers * 4);
     let worker_handles = spawn_worker_threads(rx, config, num_workers);
 
     let (total_rows, reader_err) =
@@ -322,11 +326,11 @@ pub fn run_parallel(
 /// each worker holds its own clone.
 #[allow(clippy::needless_pass_by_value)] // rx is dropped here to signal workers that reading is done
 fn spawn_worker_threads(
-    rx: crossbeam_channel::Receiver<Vec<u8>>,
+    rx: crossbeam_channel::Receiver<(Option<String>, Vec<u8>)>,
     config: &Pass1Config,
     num_workers: usize,
 ) -> Vec<std::thread::JoinHandle<crate::error::Result<SchemaRegistry>>> {
-    let root = config.root_table.clone();
+    let fallback_root = config.root_table.clone();
     let disabled = config.disabled_strategies.clone();
     let (tt, apga, wct, st, sj, stable, rare) = (
         config.text_threshold, config.array_as_pg_array, config.wide_column_threshold,
@@ -337,14 +341,15 @@ fn spawn_worker_threads(
     let handles = (0..num_workers)
         .map(|_| {
             let rx = rx.clone();
-            let root = root.clone();
+            let fallback_root = fallback_root.clone();
             let disabled = disabled.clone();
             let mut reg = SchemaRegistry::new(tt, apga, wct, st, sj, stable, rare, disabled);
             std::thread::spawn(move || {
-                while let Ok(mut bytes) = rx.recv() {
+                while let Ok((key, mut bytes)) = rx.recv() {
+                    let root = key.as_deref().unwrap_or(&fallback_root);
                     // simd_json mutates the slice in-place (zero-copy parsing); bytes is owned here.
                     match simd_json::from_slice::<serde_json::Value>(&mut bytes) {
-                        Ok(serde_json::Value::Object(obj)) => reg.observe_root(&root, &obj),
+                        Ok(serde_json::Value::Object(obj)) => reg.observe_root(root, &obj),
                         Ok(other) => return Err(crate::error::J2sError::InvalidInput(format!(
                             "Expected JSON object at root level, found: {other}"
                         ))),
@@ -369,7 +374,7 @@ fn spawn_worker_threads(
 #[allow(clippy::needless_pass_by_value)] // tx is dropped at return to signal workers that reading is done
 fn read_and_dispatch(
     path: &Path,
-    tx: crossbeam_channel::Sender<Vec<u8>>,
+    tx: crossbeam_channel::Sender<(Option<String>, Vec<u8>)>,
     progress: Option<&ProgressTracker>,
     progress_tx: Option<&ProgressTx>,
     total_bytes: u64,
@@ -383,7 +388,8 @@ fn read_and_dispatch(
     while let Some(item) = reader.next_raw() {
         match item {
             Ok(bytes) => {
-                if tx.send(bytes).is_err() { break; } // all workers died
+                let key = reader.current_key().map(str::to_string);
+                if tx.send((key, bytes)).is_err() { break; } // all workers died
                 total_rows += 1;
             }
             Err(e) => { reader_err = Some(e); break; }
@@ -765,6 +771,56 @@ mod tests {
         let path = fixture("wrapper_multi.json");
         let result = run(&path, &wrapper_config("foods"), None).unwrap();
         assert_eq!(result.total_rows, 4); // 2 Foods + 2 Nutrients
+    }
+
+    #[test]
+    fn test_run_on_wrapper_table_named_after_key_not_config() {
+        let path = fixture("wrapper_mono.json");
+        let result = run(&path, &wrapper_config("wrong_name"), None).unwrap();
+        let names: Vec<&str> = result.schemas.iter().map(|s| s.name.as_str()).collect();
+        // SchemaRegistry normalises names; "Foods" → "foods"
+        assert!(names.contains(&"foods"), "table should be 'foods' (normalised wrapper key 'Foods'), got: {names:?}");
+        assert!(!names.contains(&"wrong_name"), "table must NOT be named after config.root_table");
+    }
+
+    #[test]
+    fn test_run_on_wrapper_multi_key_produces_separate_tables() {
+        let path = fixture("wrapper_multi.json");
+        let result = run(&path, &wrapper_config("wrong_name"), None).unwrap();
+        let names: Vec<&str> = result.schemas.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"foods"), "should have 'foods' table, got: {names:?}");
+        assert!(names.contains(&"nutrients"), "should have 'nutrients' table, got: {names:?}");
+    }
+
+    #[test]
+    fn test_run_inspect_on_wrapper_table_named_after_key() {
+        let path = fixture("wrapper_mono.json");
+        let result = run_inspect(&path, &inspect_config("wrong_name"), 100).unwrap();
+        let names: Vec<&str> = result.schemas.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"foods"), "inspect table should be 'foods' (normalised 'Foods'), got: {names:?}");
+    }
+
+    #[test]
+    fn test_run_parallel_on_wrapper_table_named_after_key() {
+        let path = fixture("wrapper_mono.json");
+        let result = run_parallel(
+            &path,
+            &Pass1Config {
+                root_table: "wrong_name".to_string(),
+                text_threshold: 256,
+                array_as_pg_array: false,
+                wide_column_threshold: usize::MAX,
+                sibling_threshold: usize::MAX,
+                sibling_jaccard: 1.0,
+                stable_threshold: 0.0,
+                rare_threshold: 0.0,
+                disabled_strategies: HashSet::new(),
+                num_workers: Some(1),
+            },
+            None,
+        ).unwrap();
+        let names: Vec<&str> = result.schemas.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"foods"), "parallel: table should be 'foods' (normalised 'Foods'), got: {names:?}");
     }
 
     #[test]
