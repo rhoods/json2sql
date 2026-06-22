@@ -607,6 +607,327 @@ impl Iterator for JsonArrayReader {
 }
 
 // ---------------------------------------------------------------------------
+// Root-wrapper object iterator — streams elements across N named arrays
+// ---------------------------------------------------------------------------
+
+/// Streaming iterator over a root wrapper object: `{"K1": [{...}], "K2": [{...}]}`.
+///
+/// Each named array is streamed in order. `current_key()` identifies which key is active.
+/// `bytes_read()` is cumulative across keys (never resets between arrays).
+pub struct JsonRootWrapperReader {
+    reader: BufReader<File>,
+    keys: Vec<String>,
+    current_key_idx: usize,
+    bytes_read: u64,
+    in_array: bool,
+    done: bool,
+    buf: Vec<u8>,
+}
+
+impl JsonRootWrapperReader {
+    /// Open `path`, consuming the opening `{` of the root wrapper object.
+    /// `keys` must be the key names in file order (as returned by [`detect_format`]).
+    pub fn open(path: &Path, keys: Vec<String>) -> Result<Self> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::with_capacity(512 * 1024, file);
+        let mut bytes_read = 0u64;
+        // Skip to opening '{'
+        loop {
+            let mut b = [0u8; 1];
+            match reader.read_exact(&mut b) {
+                Ok(()) => {
+                    bytes_read += 1;
+                    if b[0].is_ascii_whitespace() {
+                        continue;
+                    }
+                    if b[0] != b'{' {
+                        return Err(J2sError::InvalidInput(format!(
+                            "Expected '{{' as first character, found '{}'",
+                            b[0] as char
+                        )));
+                    }
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Err(J2sError::InvalidInput("File appears to be empty".into()));
+                }
+                Err(e) => return Err(J2sError::Io(e)),
+            }
+        }
+        Ok(Self {
+            reader,
+            keys,
+            current_key_idx: 0,
+            bytes_read,
+            in_array: false,
+            done: false,
+            buf: Vec::with_capacity(4096),
+        })
+    }
+
+    /// The key whose array is currently being streamed, or `None` when exhausted.
+    #[must_use]
+    pub fn current_key(&self) -> Option<&str> {
+        if self.done {
+            None
+        } else {
+            self.keys.get(self.current_key_idx).map(String::as_str)
+        }
+    }
+
+    /// Total bytes consumed from the file since open (cumulative across keys).
+    #[must_use]
+    pub const fn bytes_read(&self) -> u64 {
+        self.bytes_read
+    }
+
+    /// Return the raw bytes of the next JSON element across all wrapper arrays.
+    pub fn next_raw(&mut self) -> Option<Result<Vec<u8>>> {
+        loop {
+            if self.done {
+                return None;
+            }
+            if !self.in_array {
+                if self.current_key_idx >= self.keys.len() {
+                    self.done = true;
+                    return None;
+                }
+                if let Err(e) = self.advance_to_next_array() {
+                    return Some(Err(e));
+                }
+                self.in_array = true;
+            }
+            let first_byte = match self.skip_to_next_value() {
+                None => {
+                    // Current array exhausted — advance to next key
+                    self.in_array = false;
+                    self.current_key_idx += 1;
+                    continue;
+                }
+                Some(Err(e)) => return Some(Err(e)),
+                Some(Ok(b)) => b,
+            };
+            if let Err(e) = self.collect_value(first_byte) {
+                return Some(Err(e));
+            }
+            return Some(Ok(self.buf.clone()));
+        }
+    }
+
+    // -- internal helpers --
+
+    fn read_byte_tracked(&mut self) -> Result<Option<u8>> {
+        let mut b = [0u8; 1];
+        match self.reader.read_exact(&mut b) {
+            Ok(()) => {
+                self.bytes_read += 1;
+                Ok(Some(b[0]))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(e) => Err(J2sError::Io(e)),
+        }
+    }
+
+    /// Advance the reader to the `[` of the next wrapper key's array.
+    fn advance_to_next_array(&mut self) -> Result<()> {
+        // Skip whitespace/commas to '"' (key start)
+        loop {
+            match self.read_byte_tracked()? {
+                None => {
+                    return Err(J2sError::InvalidInput(
+                        "Unexpected EOF seeking next wrapper key".into(),
+                    ))
+                }
+                Some(b) if b.is_ascii_whitespace() || b == b',' => {}
+                Some(b'"') => break,
+                Some(b'}') => {
+                    return Err(J2sError::InvalidInput(
+                        "Root object closed before all expected keys were found".into(),
+                    ))
+                }
+                Some(b) => {
+                    return Err(J2sError::InvalidInput(format!(
+                        "Expected key '\"', found '{}' in wrapper object",
+                        b as char
+                    )))
+                }
+            }
+        }
+        // Skip key string (opening '"' already consumed above)
+        self.skip_string_rest()?;
+        // Skip whitespace to ':'
+        loop {
+            match self.read_byte_tracked()? {
+                None => return Err(J2sError::InvalidInput("Unexpected EOF after wrapper key".into())),
+                Some(b) if b.is_ascii_whitespace() => {}
+                Some(b':') => break,
+                Some(b) => {
+                    return Err(J2sError::InvalidInput(format!(
+                        "Expected ':' after wrapper key, found '{}'",
+                        b as char
+                    )))
+                }
+            }
+        }
+        // Skip whitespace to '['
+        loop {
+            match self.read_byte_tracked()? {
+                None => return Err(J2sError::InvalidInput("Unexpected EOF before array start".into())),
+                Some(b) if b.is_ascii_whitespace() => {}
+                Some(b'[') => return Ok(()),
+                Some(b) => {
+                    return Err(J2sError::InvalidInput(format!(
+                        "Expected '[' for wrapper key value, found '{}'",
+                        b as char
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Skip whitespace/commas inside an array; return next value byte or `None` on `]`.
+    fn skip_to_next_value(&mut self) -> Option<Result<u8>> {
+        loop {
+            match self.read_byte_tracked() {
+                Err(e) => return Some(Err(e)),
+                Ok(None) => {
+                    return Some(Err(J2sError::InvalidInput(
+                        "Unexpected EOF inside wrapper array".into(),
+                    )))
+                }
+                Ok(Some(b)) => match b {
+                    b' ' | b'\t' | b'\n' | b'\r' | b',' => {}
+                    b']' => return None,
+                    other => return Some(Ok(other)),
+                },
+            }
+        }
+    }
+
+    fn collect_value(&mut self, first_byte: u8) -> Result<()> {
+        self.buf.clear();
+        self.buf.push(first_byte);
+        match first_byte {
+            b'{' => self.collect_container(b'}'),
+            b'[' => self.collect_container(b']'),
+            b'"' => self.collect_string(),
+            _ => self.collect_primitive(),
+        }
+    }
+
+    fn collect_container(&mut self, closer: u8) -> Result<()> {
+        let mut depth: u32 = 1;
+        let mut in_string = false;
+        let mut escape_next = false;
+        loop {
+            let b = match self.read_byte_tracked()? {
+                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON value".into())),
+                Some(b) => b,
+            };
+            self.buf.push(b);
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            if in_string {
+                match b {
+                    b'\\' => escape_next = true,
+                    b'"' => in_string = false,
+                    _ => {}
+                }
+            } else {
+                match b {
+                    b'"' => in_string = true,
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            if b != closer {
+                                return Err(J2sError::InvalidInput(format!(
+                                    "Mismatched bracket: expected '{}', got '{}'",
+                                    closer as char, b as char
+                                )));
+                            }
+                            return Ok(());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn collect_string(&mut self) -> Result<()> {
+        let mut escape_next = false;
+        loop {
+            let b = match self.read_byte_tracked()? {
+                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".into())),
+                Some(b) => b,
+            };
+            self.buf.push(b);
+            if escape_next {
+                escape_next = false;
+            } else {
+                match b {
+                    b'\\' => escape_next = true,
+                    b'"' => return Ok(()),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn collect_primitive(&mut self) -> Result<()> {
+        loop {
+            let buf = self.reader.fill_buf().map_err(J2sError::Io)?;
+            if buf.is_empty() {
+                break;
+            }
+            match buf[0] {
+                b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r' => break,
+                b => {
+                    self.buf.push(b);
+                    self.reader.consume(1);
+                    self.bytes_read += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn skip_string_rest(&mut self) -> Result<()> {
+        let mut escape_next = false;
+        loop {
+            match self.read_byte_tracked()? {
+                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".into())),
+                Some(b) => {
+                    if escape_next {
+                        escape_next = false;
+                    } else {
+                        match b {
+                            b'\\' => escape_next = true,
+                            b'"' => return Ok(()),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Iterator for JsonRootWrapperReader {
+    type Item = Result<Value>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next_raw()? {
+            Err(e) => Some(Err(e)),
+            Ok(mut bytes) => Some(simd_json::from_slice(&mut bytes).map_err(simd_err)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unified entry point
 // ---------------------------------------------------------------------------
 
@@ -830,5 +1151,111 @@ mod tests {
         let f = tmp_file(b"{\"key\\\"name\": [{\"x\": 1}]}");
         let fmt = detect_format(f.path()).unwrap();
         assert_eq!(fmt, JsonFormat::RootWrapper(vec!["key\\\"name".to_string()]));
+    }
+
+    // --- JsonRootWrapperReader tests ---
+
+    #[test]
+    fn test_wrapper_reader_mono_key_streams_all_elements() {
+        let json = br#"{"Foods": [{"id": 1}, {"id": 2}, {"id": 3}]}"#;
+        let f = tmp_file(json);
+        let mut r = JsonRootWrapperReader::open(f.path(), vec!["Foods".to_string()]).unwrap();
+        let items: Vec<serde_json::Value> =
+            std::iter::from_fn(|| r.next()).collect::<Result<_>>().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["id"], 1);
+        assert_eq!(items[2]["id"], 3);
+    }
+
+    #[test]
+    fn test_wrapper_reader_multi_key_streams_all_elements() {
+        let json = br#"{"K1": [{"a": 1}, {"a": 2}], "K2": [{"b": 10}]}"#;
+        let f = tmp_file(json);
+        let keys = vec!["K1".to_string(), "K2".to_string()];
+        let items: Vec<serde_json::Value> =
+            std::iter::from_fn(|| JsonRootWrapperReader::open(f.path(), keys.clone()).unwrap().next())
+                .take(0) // just checking open doesn't panic
+                .collect::<Result<_>>().unwrap();
+        drop(items);
+
+        let mut r = JsonRootWrapperReader::open(f.path(), keys).unwrap();
+        let all: Vec<serde_json::Value> =
+            std::iter::from_fn(|| r.next()).collect::<Result<_>>().unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0]["a"], 1);
+        assert_eq!(all[1]["a"], 2);
+        assert_eq!(all[2]["b"], 10);
+    }
+
+    #[test]
+    fn test_wrapper_reader_current_key_tracks_active_key() {
+        let json = br#"{"K1": [{"a": 1}], "K2": [{"b": 2}]}"#;
+        let f = tmp_file(json);
+        let mut r =
+            JsonRootWrapperReader::open(f.path(), vec!["K1".to_string(), "K2".to_string()])
+                .unwrap();
+        // Before first element: current_key is K1 (not yet advanced)
+        assert_eq!(r.current_key(), Some("K1"));
+        let _first = r.next_raw().unwrap().unwrap();
+        assert_eq!(r.current_key(), Some("K1"));
+        let _second = r.next_raw().unwrap().unwrap(); // K2's first element
+        assert_eq!(r.current_key(), Some("K2"));
+        assert!(r.next_raw().is_none());
+        assert_eq!(r.current_key(), None);
+    }
+
+    #[test]
+    fn test_wrapper_reader_bytes_read_cumulative() {
+        let json = br#"{"K1": [{"a": 1}], "K2": [{"b": 2}]}"#;
+        let f = tmp_file(json);
+        let mut r =
+            JsonRootWrapperReader::open(f.path(), vec!["K1".to_string(), "K2".to_string()])
+                .unwrap();
+        let _ = r.next_raw().unwrap().unwrap(); // consume K1's element
+        let bytes_after_k1 = r.bytes_read();
+        let _ = r.next_raw().unwrap().unwrap(); // consume K2's element
+        let bytes_after_k2 = r.bytes_read();
+        assert!(
+            bytes_after_k2 > bytes_after_k1,
+            "bytes_read must increase: k1={bytes_after_k1} k2={bytes_after_k2}"
+        );
+    }
+
+    #[test]
+    fn test_wrapper_reader_empty_array_is_skipped() {
+        let json = br#"{"Empty": [], "Full": [{"x": 42}]}"#;
+        let f = tmp_file(json);
+        let mut r =
+            JsonRootWrapperReader::open(f.path(), vec!["Empty".to_string(), "Full".to_string()])
+                .unwrap();
+        let all: Vec<serde_json::Value> =
+            std::iter::from_fn(|| r.next()).collect::<Result<_>>().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0]["x"], 42);
+    }
+
+    #[test]
+    fn test_wrapper_reader_next_raw_parses_correctly() {
+        let json = br#"{"Items": [{"n": 1, "s": "hello"}, {"n": 2, "s": "world"}]}"#;
+        let f = tmp_file(json);
+        let mut r = JsonRootWrapperReader::open(f.path(), vec!["Items".to_string()]).unwrap();
+        let raws: Vec<Vec<u8>> =
+            std::iter::from_fn(|| r.next_raw()).collect::<Result<_>>().unwrap();
+        assert_eq!(raws.len(), 2);
+        let v0: serde_json::Value = simd_json::from_slice(&mut raws[0].clone()).unwrap();
+        let v1: serde_json::Value = simd_json::from_slice(&mut raws[1].clone()).unwrap();
+        assert_eq!(v0["s"], "hello");
+        assert_eq!(v1["s"], "world");
+    }
+
+    #[test]
+    fn test_wrapper_reader_nested_arrays_in_objects() {
+        let json = br#"{"Foods": [{"id": 1, "tags": ["a", "b"]}, {"id": 2, "tags": []}]}"#;
+        let f = tmp_file(json);
+        let mut r = JsonRootWrapperReader::open(f.path(), vec!["Foods".to_string()]).unwrap();
+        let all: Vec<serde_json::Value> =
+            std::iter::from_fn(|| r.next()).collect::<Result<_>>().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0]["tags"], serde_json::json!(["a", "b"]));
     }
 }
