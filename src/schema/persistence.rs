@@ -9,6 +9,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{J2sError, Result};
+use crate::io::reader::JsonFormat;
 use crate::schema::finalizer::OverflowWarning;
 use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::stats::ColumnStats;
@@ -36,6 +37,10 @@ pub struct SchemaSnapshot {
     /// — deserialized as empty vec via `serde(default)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overflow_warnings: Vec<OverflowWarning>,
+    /// JSON format detected during Pass 1. Absent in older snapshots — deserialized as
+    /// `None`, in which case pass2 re-detects the format by scanning the source file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_format: Option<JsonFormat>,
 }
 
 /// Save a Pass 1 result to a JSON file.
@@ -57,6 +62,7 @@ pub fn save(
         stats: stats.to_vec(),
         strategy_overrides: std::collections::HashMap::new(),
         overflow_warnings: overflow_warnings.to_vec(),
+        detected_format: None,
     };
     let json = serde_json::to_string_pretty(&snapshot)
         .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {e}")))?;
@@ -85,6 +91,7 @@ pub fn save_with_overrides(
         stats: stats.to_vec(),
         strategy_overrides: strategy_overrides.clone(),
         overflow_warnings: overflow_warnings.to_vec(),
+        detected_format: None,
     };
     let json = serde_json::to_string_pretty(&snapshot)
         .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {e}")))?;
@@ -130,6 +137,7 @@ mod tests {
             stats: vec![],
             strategy_overrides: HashMap::new(),
             overflow_warnings: vec![],
+            detected_format: None,
         }
     }
 
@@ -240,5 +248,44 @@ mod tests {
         // The file must be readable and contain the new value
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.total_rows, 42, "overwrite must produce a complete, readable file");
+    }
+
+    // --- detected_format field tests ---
+
+    #[test]
+    fn detected_format_defaults_none_on_old_snapshot() {
+        // Old snapshots without detected_format must deserialize with None.
+        let json = r#"{"version":2,"total_rows":0,"schemas":[],"truncated_names":[],"column_collisions":[],"stats":[]}"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert!(loaded.detected_format.is_none(), "old snapshots must deserialize detected_format as None");
+    }
+
+    #[test]
+    fn detected_format_round_trips_array() {
+        use crate::io::reader::JsonFormat;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut snap = empty_snapshot();
+        snap.detected_format = Some(JsonFormat::Array);
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        std::fs::write(tmp.path(), &json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(loaded.detected_format, Some(JsonFormat::Array));
+    }
+
+    #[test]
+    fn detected_format_round_trips_root_wrapper() {
+        use crate::io::reader::JsonFormat;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut snap = empty_snapshot();
+        snap.detected_format = Some(JsonFormat::RootWrapper(vec!["K1".to_string(), "K2".to_string()]));
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        std::fs::write(tmp.path(), &json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(
+            loaded.detected_format,
+            Some(JsonFormat::RootWrapper(vec!["K1".to_string(), "K2".to_string()]))
+        );
     }
 }
