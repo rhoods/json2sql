@@ -66,6 +66,9 @@ pub struct Pass1Result {
     pub column_collisions: Vec<ColumnCollision>,
     /// Tables auto-converted to JSONB because they exceeded `PostgreSQL`'s 1600-column limit.
     pub overflow_warnings: Vec<OverflowWarning>,
+    /// JSON format detected during pass1. `None` when restored from an old snapshot that
+    /// predates this field — pass2 will re-detect in that case.
+    pub detected_format: Option<JsonFormat>,
 }
 
 /// Run Pass 1: stream through the entire file and build the schema.
@@ -104,7 +107,7 @@ pub fn run(
     let total_rows = scan_json_rows(&mut reader, &mut registry, config, progress.as_ref(), progress_tx.as_ref(), total_bytes)?;
     if let Some(ref bar) = progress { bar.finish(); }
     eprintln!("Pass 1 complete: {total_rows} rows, building schema...");
-    Ok(build_pass1_result(registry, total_rows, progress_tx.as_ref()))
+    Ok(build_pass1_result(registry, total_rows, format, progress_tx.as_ref()))
 }
 
 fn report_progress(
@@ -165,6 +168,7 @@ fn scan_json_rows(
 fn build_pass1_result(
     mut registry: SchemaRegistry,
     total_rows: u64,
+    format: JsonFormat,
     progress_tx: Option<&ProgressTx>,
 ) -> Pass1Result {
     let (schemas, overflow_warnings) = registry.finalize_with_pg_guard();
@@ -177,7 +181,7 @@ fn build_pass1_result(
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
     }
-    Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings }
+    Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings, detected_format: Some(format) }
 }
 
 /// Result of an inspect run (raw schema, no strategies or guards applied).
@@ -308,7 +312,7 @@ pub fn run_parallel(
     let (tx, rx) = crossbeam_channel::bounded::<(Option<String>, Vec<u8>)>(num_workers * 4);
     let worker_handles = spawn_worker_threads(rx, config, num_workers);
 
-    let (total_rows, reader_err) =
+    let (total_rows, reader_err, format) =
         read_and_dispatch(path, tx, progress.as_ref(), progress_tx.as_ref(), total_bytes)?;
 
     let (merged, worker_err) = join_and_merge_workers(worker_handles, config);
@@ -321,7 +325,7 @@ pub fn run_parallel(
 
     flush_final_progress(progress_tx.as_ref(), total_rows, total_bytes, total_bytes);
     eprintln!("Pass 1 complete (parallel, {num_workers} workers): {total_rows} rows, building schema...");
-    Ok(build_pass1_result(merged, total_rows, progress_tx.as_ref()))
+    Ok(build_pass1_result(merged, total_rows, format, progress_tx.as_ref()))
 }
 
 /// Spawn `num_workers` threads, each consuming JSON object bytes from `rx` and building
@@ -371,9 +375,9 @@ fn spawn_worker_threads(
 
 /// Stream JSON objects from `path`, sending raw bytes to workers via `tx`.
 ///
-/// Returns `(total_rows, reader_err)`. Drops `tx` on return to signal workers that reading
-/// is done. Returns `Err` only for I/O errors opening the file; parse errors are returned
-/// as the `Option<J2sError>`.
+/// Returns `(total_rows, reader_err, format)`. Drops `tx` on return to signal workers that
+/// reading is done. Returns `Err` only for I/O errors opening the file; parse errors are
+/// returned as the `Option<J2sError>`.
 #[allow(clippy::needless_pass_by_value)] // tx is dropped at return to signal workers that reading is done
 fn read_and_dispatch(
     path: &Path,
@@ -381,7 +385,7 @@ fn read_and_dispatch(
     progress: Option<&ProgressTracker>,
     progress_tx: Option<&ProgressTx>,
     total_bytes: u64,
-) -> Result<(u64, Option<crate::error::J2sError>)> {
+) -> Result<(u64, Option<crate::error::J2sError>, JsonFormat)> {
     const PROGRESS_INTERVAL: u64 = 1_000;
     if let Some(tx_prog) = progress_tx {
         let _ = tx_prog.send(ProgressEvent::Pass1Log("Detecting JSON format…".to_string()));
@@ -415,7 +419,7 @@ fn read_and_dispatch(
         }
     }
     // tx dropped here — signals workers that reading is done.
-    Ok((total_rows, reader_err))
+    Ok((total_rows, reader_err, format))
 }
 
 /// Join all worker threads and merge their `SchemaRegistry` results.
@@ -886,5 +890,38 @@ mod tests {
         let (n, warn) = effective_workers(cap);
         assert_eq!(n, cap);
         assert!(warn.is_none(), "exactly at cap must not warn");
+    }
+
+    // --- detected_format in Pass1Result ---
+
+    #[test]
+    fn test_run_sets_detected_format_array() {
+        let path = fixture("users.json");
+        let result = run(&path, &wrapper_config("users"), None).unwrap();
+        assert_eq!(result.detected_format, Some(crate::io::reader::JsonFormat::Array));
+    }
+
+    #[test]
+    fn test_run_sets_detected_format_lines() {
+        let path = fixture("users.jsonl");
+        let result = run(&path, &wrapper_config("users"), None).unwrap();
+        assert_eq!(result.detected_format, Some(crate::io::reader::JsonFormat::Lines));
+    }
+
+    #[test]
+    fn test_run_sets_detected_format_root_wrapper() {
+        let path = fixture("wrapper_mono.json");
+        let result = run(&path, &wrapper_config("foods"), None).unwrap();
+        assert_eq!(
+            result.detected_format,
+            Some(crate::io::reader::JsonFormat::RootWrapper(vec!["Foods".to_string()]))
+        );
+    }
+
+    #[test]
+    fn test_run_parallel_sets_detected_format() {
+        let path = fixture("users.json");
+        let result = run_parallel(&path, &Pass1Config { num_workers: Some(2), ..wrapper_config("users") }, None).unwrap();
+        assert_eq!(result.detected_format, Some(crate::io::reader::JsonFormat::Array));
     }
 }
