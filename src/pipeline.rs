@@ -99,7 +99,7 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
         )
     })?;
     let client = connect_and_create_tables(db_url, &pass1.schemas, &cfg.pg_schema, cfg.drop_existing).await?;
-    let pass2 = run_pass2(&input_path, &pass1.schemas, &client, db_url, &cfg).await?;
+    let pass2 = run_pass2(&input_path, &pass1, &client, db_url, &cfg).await?;
     finalize_pass2(&pass2, &cfg)
 }
 
@@ -120,7 +120,7 @@ async fn connect_and_create_tables(
 
 async fn run_pass2(
     input_path: &Path,
-    schemas: &[TableSchema],
+    pass1: &Pass1Result,
     client: &tokio_postgres::Client,
     db_url: &str,
     cfg: &PipelineConfig,
@@ -128,7 +128,7 @@ async fn run_pass2(
     eprintln!("\nPass 2: inserting data...");
     crate::pass2::runner::run(
         input_path,
-        schemas,
+        &pass1.schemas,
         client,
         db_url,
         &crate::pass2::Pass2Config {
@@ -141,6 +141,7 @@ async fn run_pass2(
             ram_high_watermark: None,
             ram_low_watermark: None,
             verbose: false,
+            hint_format: pass1.detected_format.clone(),
         },
         None,
     )
@@ -226,6 +227,7 @@ fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
         truncated_names: snap.truncated_names,
         column_collisions: snap.column_collisions,
         overflow_warnings: snap.overflow_warnings,
+        detected_format: snap.detected_format,
     })
 }
 
@@ -361,15 +363,18 @@ fn apply_schema_config(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<
 
 fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()> {
     let Some(ref out_path) = cfg.schema_output else { return Ok(()) };
-    crate::schema::persistence::save(
-        &pass1.schemas,
-        pass1.total_rows,
-        &pass1.truncated_names,
-        &pass1.column_collisions,
-        &pass1.stats,
-        &pass1.overflow_warnings,
-        out_path,
-    )?;
+    let snapshot = crate::schema::persistence::SchemaSnapshot {
+        version: crate::schema::persistence::SCHEMA_FORMAT_VERSION,
+        total_rows: pass1.total_rows,
+        schemas: pass1.schemas.clone(),
+        truncated_names: pass1.truncated_names.clone(),
+        column_collisions: pass1.column_collisions.clone(),
+        stats: pass1.stats.clone(),
+        strategy_overrides: std::collections::HashMap::new(),
+        overflow_warnings: pass1.overflow_warnings.clone(),
+        detected_format: pass1.detected_format.clone(),
+    };
+    crate::schema::persistence::write_snapshot(&snapshot, out_path, false)?;
     eprintln!("Schema snapshot saved to '{}'.", out_path.display());
     Ok(())
 }
@@ -495,6 +500,7 @@ mod tests {
             truncated_names: vec![],
             column_collisions: vec![],
             overflow_warnings: vec![],
+            detected_format: None,
         }
     }
 

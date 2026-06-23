@@ -22,7 +22,7 @@ fn simd_err(e: simd_json::Error) -> J2sError {
 }
 
 /// Detected format of the input file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum JsonFormat {
     /// Top-level JSON array: `[{...}, {...}, ...]`
     Array,
@@ -118,12 +118,15 @@ fn fmt_skip_value(reader: &mut impl BufRead, first_byte: u8) -> Result<()> {
     }
 }
 
-/// Scan a byte chunk for JSON structure boundaries, updating parser state.
+/// Scan a byte chunk for JSON structure boundaries, accumulating bytes into `buf`.
 ///
-/// Returns `(bytes_to_consume, Some(b))` when depth reaches 0 (b is the closing bracket),
+/// Returns `(bytes_consumed, Some(b))` when depth reaches 0 (b is the closing bracket),
 /// or `(chunk.len(), None)` if the closer was not found in this chunk.
-fn fmt_scan_chunk(
+/// The caller must check `chunk.is_empty()` before calling and handle EOF.
+/// The check `b == closer` and the mismatched-bracket error are the caller's responsibility.
+fn scan_chunk_into(
     chunk: &[u8],
+    buf: &mut Vec<u8>,
     depth: &mut u32,
     in_string: &mut bool,
     escape_next: &mut bool,
@@ -131,9 +134,11 @@ fn fmt_scan_chunk(
     for (i, &b) in chunk.iter().enumerate() {
         if *escape_next {
             *escape_next = false;
+            buf.push(b);
             continue;
         }
         if *in_string {
+            buf.push(b);
             match b {
                 b'\\' => *escape_next = true,
                 b'"' => *in_string = false,
@@ -141,15 +146,16 @@ fn fmt_scan_chunk(
             }
         } else {
             match b {
-                b'"' => *in_string = true,
-                b'{' | b'[' => *depth += 1,
+                b'"' => { *in_string = true; buf.push(b); }
+                b'{' | b'[' => { *depth += 1; buf.push(b); }
                 b'}' | b']' => {
                     *depth -= 1;
+                    buf.push(b);
                     if *depth == 0 {
                         return (i + 1, Some(b));
                     }
                 }
-                _ => {}
+                _ => { buf.push(b); }
             }
         }
     }
@@ -159,6 +165,7 @@ fn fmt_scan_chunk(
 /// Skip until the matching `closer` (`}` or `]`), opening brace already consumed.
 /// Reads in buffer-sized chunks via `fill_buf`/`consume` for large-file performance.
 fn fmt_skip_container(reader: &mut impl BufRead, closer: u8) -> Result<()> {
+    let mut scratch = Vec::new();
     let mut depth: u32 = 1;
     let mut in_string = false;
     let mut escape_next = false;
@@ -168,7 +175,8 @@ fn fmt_skip_container(reader: &mut impl BufRead, closer: u8) -> Result<()> {
             if buf.is_empty() {
                 return Err(J2sError::InvalidInput("Unexpected EOF inside JSON container".into()));
             }
-            fmt_scan_chunk(buf, &mut depth, &mut in_string, &mut escape_next)
+            scratch.clear();
+            scan_chunk_into(buf, &mut scratch, &mut depth, &mut in_string, &mut escape_next)
         }; // buf borrow ends before consume
         reader.consume(n);
         if let Some(b) = found {
@@ -458,50 +466,29 @@ impl JsonArrayReader {
     }
 
     /// Collect the rest of a `{...}` or `[...]` container (opener already in buf).
-    #[allow(clippy::too_many_lines)] // inline state machine: depth tracking + string escape handling for nested containers
     fn collect_container(&mut self, closer: u8) -> Result<()> {
         let mut depth: u32 = 1;
         let mut in_string = false;
         let mut escape_next = false;
-
         loop {
-            let b = match self.read_byte() {
-                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON value".to_string())),
-                Some(Err(e)) => return Err(J2sError::Io(e)),
-                Some(Ok(b)) => b,
-            };
-            self.buf.push(b);
-
-            if escape_next {
-                escape_next = false;
-                continue;
-            }
-
-            if in_string {
-                match b {
-                    b'\\' => escape_next = true,
-                    b'"' => in_string = false,
-                    _ => {}
+            let (n, found) = {
+                let chunk = self.reader.fill_buf().map_err(J2sError::Io)?;
+                if chunk.is_empty() {
+                    return Err(J2sError::InvalidInput("Unexpected EOF inside JSON value".into()));
                 }
-            } else {
-                match b {
-                    b'"' => in_string = true,
-                    b'{' | b'[' => depth += 1,
-                    b'}' | b']' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            // Verify it's the right closer
-                            if b != closer {
-                                return Err(J2sError::InvalidInput(
-                                    format!("Mismatched bracket: expected '{}', got '{}'",
-                                        closer as char, b as char)
-                                ));
-                            }
-                            return Ok(());
-                        }
-                    }
-                    _ => {}
-                }
+                scan_chunk_into(chunk, &mut self.buf, &mut depth, &mut in_string, &mut escape_next)
+            }; // chunk borrow ends before consume
+            self.reader.consume(n);
+            self.bytes_read += n as u64;
+            if let Some(b) = found {
+                return if b == closer {
+                    Ok(())
+                } else {
+                    Err(J2sError::InvalidInput(format!(
+                        "Mismatched bracket: expected '{}', got '{}'",
+                        closer as char, b as char
+                    )))
+                };
             }
         }
     }
@@ -842,39 +829,24 @@ impl JsonRootWrapperReader {
         let mut in_string = false;
         let mut escape_next = false;
         loop {
-            let b = match self.read_byte_tracked()? {
-                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON value".into())),
-                Some(b) => b,
-            };
-            self.buf.push(b);
-            if escape_next {
-                escape_next = false;
-                continue;
-            }
-            if in_string {
-                match b {
-                    b'\\' => escape_next = true,
-                    b'"' => in_string = false,
-                    _ => {}
+            let (n, found) = {
+                let chunk = self.reader.fill_buf().map_err(J2sError::Io)?;
+                if chunk.is_empty() {
+                    return Err(J2sError::InvalidInput("Unexpected EOF inside JSON value".into()));
                 }
-            } else {
-                match b {
-                    b'"' => in_string = true,
-                    b'{' | b'[' => depth += 1,
-                    b'}' | b']' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            if b != closer {
-                                return Err(J2sError::InvalidInput(format!(
-                                    "Mismatched bracket: expected '{}', got '{}'",
-                                    closer as char, b as char
-                                )));
-                            }
-                            return Ok(());
-                        }
-                    }
-                    _ => {}
-                }
+                scan_chunk_into(chunk, &mut self.buf, &mut depth, &mut in_string, &mut escape_next)
+            }; // chunk borrow ends before consume
+            self.reader.consume(n);
+            self.bytes_read += n as u64;
+            if let Some(b) = found {
+                return if b == closer {
+                    Ok(())
+                } else {
+                    Err(J2sError::InvalidInput(format!(
+                        "Mismatched bracket: expected '{}', got '{}'",
+                        closer as char, b as char
+                    )))
+                };
             }
         }
     }
@@ -972,14 +944,20 @@ impl JsonReader {
 
     pub fn open(path: &Path) -> Result<(Self, JsonFormat)> {
         let format = detect_format(path)?;
-        let reader = match format.clone() {
-            JsonFormat::Lines => Self::Lines(JsonLinesReader::open(path)?),
-            JsonFormat::Array => Self::Array(JsonArrayReader::open(path)?),
-            JsonFormat::RootWrapper(keys) => {
-                Self::RootWrapper(JsonRootWrapperReader::open(path, keys)?)
-            }
-        };
+        let reader = Self::open_with_format(path, format.clone())?;
         Ok((reader, format))
+    }
+
+    /// Open a reader using a format that was already detected (e.g., loaded from a snapshot).
+    /// Skips format detection — the caller guarantees `format` matches the file content.
+    pub fn open_with_format(path: &Path, format: JsonFormat) -> Result<Self> {
+        match format {
+            JsonFormat::Lines => Ok(Self::Lines(JsonLinesReader::open(path)?)),
+            JsonFormat::Array => Ok(Self::Array(JsonArrayReader::open(path)?)),
+            JsonFormat::RootWrapper(keys) => {
+                Ok(Self::RootWrapper(JsonRootWrapperReader::open(path, keys)?))
+            }
+        }
     }
 
     /// The wrapper key currently being streamed, or `None` for non-wrapper formats.
@@ -1338,5 +1316,241 @@ mod tests {
         let _ = reader.next_raw().unwrap().unwrap();
         let b2 = reader.bytes_read();
         assert!(b1 > b0 && b2 > b1, "bytes_read must monotonically increase: {b0} < {b1} < {b2}");
+    }
+
+    #[test]
+    fn test_wrapper_reader_bytes_read_tracks_nested_container_content() {
+        // bytes_read must account for all bytes of nested containers, not just openers
+        let json = br#"{"Items": [{"nested": {"x": 1, "y": 2}}, {"z": 3}]}"#;
+        let f = tmp_file(json);
+        let mut r = JsonRootWrapperReader::open(f.path(), vec!["Items".to_string()]).unwrap();
+        let b0 = r.bytes_read();
+        let row1 = r.next_raw().unwrap().unwrap();
+        let b1 = r.bytes_read();
+        let row2 = r.next_raw().unwrap().unwrap();
+        let b2 = r.bytes_read();
+        assert!(b1 > b0, "bytes_read must increase after first nested object");
+        assert!(b2 > b1, "bytes_read must increase after second object");
+        assert!(b2 >= row1.len() as u64 + row2.len() as u64,
+            "bytes_read {b2} must be >= sum of row lengths {}", row1.len() + row2.len());
+    }
+
+    #[test]
+    fn test_array_reader_bytes_read_tracks_container_content() {
+        // bytes_read must account for all bytes of each scanned object, not just the opener
+        let json = b"[{\"key\": \"value\", \"nested\": {\"x\": 123}}, {\"b\": 2}]";
+        let f = tmp_file(json);
+        let mut r = JsonArrayReader::open(f.path()).unwrap();
+        let b0 = r.bytes_read();
+        let row1 = r.next_raw().unwrap().unwrap();
+        let b1 = r.bytes_read();
+        let row2 = r.next_raw().unwrap().unwrap();
+        let b2 = r.bytes_read();
+        assert!(b1 > b0, "bytes_read must increase after first object");
+        assert!(b2 > b1, "bytes_read must increase after second object");
+        // bytes_read after all rows must approach total file size
+        assert!(b2 >= row1.len() as u64 + row2.len() as u64,
+            "bytes_read {b2} must be at least sum of row lengths {}", row1.len() + row2.len());
+    }
+
+    // -------------------------------------------------------------------------
+    // collect_container regression tests (via next_raw)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_array_reader_collect_container_deeply_nested_roundtrip() {
+        // Verifies collect_container correctly handles multi-level depth;
+        // any state corruption (e.g. wrong depth count) would truncate or extend the output.
+        let obj = r#"{"a":{"b":{"c":{"d":[1,2,3],"e":true},"f":"hello"},"g":null}}"#;
+        let json = format!("[{obj}]");
+        let f = tmp_file(json.as_bytes());
+        let mut r = JsonArrayReader::open(f.path()).unwrap();
+        let raw = r.next_raw().unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).expect("must parse");
+        assert_eq!(parsed["a"]["b"]["c"]["d"][2], 3);
+        assert_eq!(parsed["a"]["b"]["f"], "hello");
+        assert!(r.next_raw().is_none(), "only one element");
+    }
+
+    #[test]
+    fn test_array_reader_collect_container_brackets_inside_strings() {
+        // Brackets and braces inside string values must not affect depth tracking.
+        let obj = r#"{"key":"value with } and ] and { and [ inside","num":42}"#;
+        let json = format!("[{obj}]");
+        let f = tmp_file(json.as_bytes());
+        let mut r = JsonArrayReader::open(f.path()).unwrap();
+        let raw = r.next_raw().unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).expect("must parse");
+        assert_eq!(parsed["num"], 42);
+        assert!(parsed["key"].as_str().unwrap().contains('}'));
+        assert!(r.next_raw().is_none(), "only one element");
+    }
+
+    #[test]
+    fn test_wrapper_reader_collect_container_escaped_quote_in_value() {
+        // Escaped quote inside a string must not close the string prematurely,
+        // ensuring escape_next state is handled correctly.
+        let json = br#"{"Items": [{"msg": "say \"hello\" now", "ok": true}]}"#;
+        let f = tmp_file(json);
+        let mut r = JsonRootWrapperReader::open(f.path(), vec!["Items".to_string()]).unwrap();
+        let raw = r.next_raw().unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).expect("must parse");
+        assert_eq!(parsed["ok"], true);
+        assert!(parsed["msg"].as_str().unwrap().contains("hello"));
+    }
+
+    // -------------------------------------------------------------------------
+    // scan_chunk_into tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn scan_chunk_into_accumulates_bytes_up_to_closer() {
+        let chunk = b"ello}world";
+        let mut buf = Vec::new();
+        let mut depth = 1u32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found, Some(b'}'));
+        assert_eq!(n, 5); // "ello}" = 5 bytes
+        assert_eq!(&buf, b"ello}");
+        assert_eq!(depth, 0);
+    }
+
+    #[test]
+    fn scan_chunk_into_no_closer_accumulates_full_chunk() {
+        let chunk = b"hello world";
+        let mut buf = Vec::new();
+        let mut depth = 1u32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found, None);
+        assert_eq!(n, chunk.len());
+        assert_eq!(&buf, b"hello world");
+    }
+
+    #[test]
+    fn scan_chunk_into_escape_next_carries_across_boundary() {
+        // Start already inside a string; chunk ends with '\' → escape_next must carry to next chunk
+        let chunk1 = b"ab\\";
+        let mut buf = Vec::new();
+        let mut depth = 1u32;
+        let mut in_string = true;
+        let mut escape_next = false;
+        let (n1, found1) = scan_chunk_into(chunk1, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found1, None);
+        assert_eq!(n1, 3);
+        assert!(escape_next, "escape_next must be set after trailing backslash inside string");
+        assert!(in_string, "still inside string");
+
+        // Second chunk: first byte '"' is the escaped char — must NOT close the string
+        let chunk2 = b"\"cd\"";
+        let (n2, found2) = scan_chunk_into(chunk2, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found2, None);
+        assert_eq!(n2, 4);
+        assert!(!escape_next, "escape consumed");
+        assert!(!in_string, "last unescaped '\"' closes the string");
+    }
+
+    #[test]
+    fn scan_chunk_into_nested_containers_increment_depth() {
+        // Opening '{' already consumed by caller — chunk is the content after it
+        let chunk = b"\"k\":[1,2]}";
+        let mut buf = Vec::new();
+        let mut depth = 1u32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found, Some(b'}'));
+        assert_eq!(n, chunk.len());
+        assert_eq!(&buf, chunk);
+        assert_eq!(depth, 0);
+    }
+
+    #[test]
+    fn scan_chunk_into_bracket_inside_string_not_counted() {
+        // '}' inside a string must not decrement depth
+        let chunk = b"\"}\"}";
+        let mut buf = Vec::new();
+        let mut depth = 1u32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        assert_eq!(found, Some(b'}'));
+        assert_eq!(n, 4); // full chunk consumed including real '}'
+        assert_eq!(depth, 0);
+    }
+
+    // --- JsonReader::open_with_format tests ---
+
+    #[test]
+    fn test_open_with_format_lines_reads_objects() {
+        let f = tmp_file(b"{\"a\":1}\n{\"b\":2}");
+        let mut r = JsonReader::open_with_format(f.path(), JsonFormat::Lines).unwrap();
+        let v1: serde_json::Value = r.next().unwrap().unwrap();
+        let v2: serde_json::Value = r.next().unwrap().unwrap();
+        assert_eq!(v1["a"], 1);
+        assert_eq!(v2["b"], 2);
+        assert!(r.next().is_none());
+    }
+
+    #[test]
+    fn test_open_with_format_array_reads_objects() {
+        let f = tmp_file(b"[{\"x\":10},{\"x\":20}]");
+        let mut r = JsonReader::open_with_format(f.path(), JsonFormat::Array).unwrap();
+        let v1: serde_json::Value = r.next().unwrap().unwrap();
+        let v2: serde_json::Value = r.next().unwrap().unwrap();
+        assert_eq!(v1["x"], 10);
+        assert_eq!(v2["x"], 20);
+        assert!(r.next().is_none());
+    }
+
+    #[test]
+    fn test_open_with_format_root_wrapper_reads_objects() {
+        let f = tmp_file(b"{\"K\":[{\"id\":1},{\"id\":2}]}");
+        let mut r = JsonReader::open_with_format(
+            f.path(),
+            JsonFormat::RootWrapper(vec!["K".to_string()]),
+        ).unwrap();
+        let v1: serde_json::Value = r.next().unwrap().unwrap();
+        let v2: serde_json::Value = r.next().unwrap().unwrap();
+        assert_eq!(v1["id"], 1);
+        assert_eq!(v2["id"], 2);
+        assert!(r.next().is_none());
+    }
+
+    // --- JsonFormat serde round-trip tests ---
+
+    #[test]
+    fn test_json_format_serde_lines() {
+        let fmt = JsonFormat::Lines;
+        let json = serde_json::to_string(&fmt).unwrap();
+        let back: JsonFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(fmt, back);
+    }
+
+    #[test]
+    fn test_json_format_serde_array() {
+        let fmt = JsonFormat::Array;
+        let json = serde_json::to_string(&fmt).unwrap();
+        let back: JsonFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(fmt, back);
+    }
+
+    #[test]
+    fn test_json_format_serde_root_wrapper() {
+        let fmt = JsonFormat::RootWrapper(vec!["K1".to_string(), "K2".to_string()]);
+        let json = serde_json::to_string(&fmt).unwrap();
+        let back: JsonFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(fmt, back);
+    }
+
+    #[test]
+    fn test_json_format_serde_root_wrapper_empty_keys() {
+        let fmt = JsonFormat::RootWrapper(vec![]);
+        let json = serde_json::to_string(&fmt).unwrap();
+        let back: JsonFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(fmt, back);
     }
 }

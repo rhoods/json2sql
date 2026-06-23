@@ -276,6 +276,9 @@ pub struct SchemaState {
     pub absorbed_names: HashSet<String>,
     /// Warnings from TOML config overrides (unknown table, column, type, strategy).
     pub config_warnings: Vec<ConfigWarning>,
+    /// JSON format detected during Pass 1, or loaded from snapshot. Used to skip
+    /// re-detection in Pass 2 and to persist the format when saving the snapshot.
+    pub detected_format: Option<json2sql::io::reader::JsonFormat>,
 }
 
 impl Default for SchemaState {
@@ -293,6 +296,7 @@ impl Default for SchemaState {
             schema_snapshot_loaded: false,
             absorbed_names: HashSet::new(),
             config_warnings: Vec::new(),
+            detected_format: None,
         }
     }
 }
@@ -311,6 +315,7 @@ impl SchemaState {
         self.schema_snapshot_loaded = false;
         self.absorbed_names = HashSet::new();
         self.config_warnings = Vec::new();
+        self.detected_format = None;
     }
 
     /// Apply a Shift+click range-select.
@@ -404,6 +409,7 @@ impl AppState {
         self.schema.schema_snapshot_loaded = true;
         self.schema.selected_table_indices = HashSet::from([0]);
         self.schema.last_selected_idx = 0;
+        self.schema.detected_format = snapshot.detected_format;
     }
 
     /// Remove a loaded snapshot and restore the default Pass 1 flow.

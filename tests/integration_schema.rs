@@ -670,6 +670,7 @@ async fn test_parallel_copy() {
                 ram_high_watermark: None,
                 ram_low_watermark: None,
                 verbose: false,
+                hint_format: None,
             },
             None,
         ).await.unwrap();
@@ -737,6 +738,7 @@ async fn test_parallel_streaming_matches_sequential() {
                 ram_high_watermark: None,
                 ram_low_watermark: None,
                 verbose: false,
+                hint_format: None,
             },
             None,
         ).await.unwrap();
@@ -784,6 +786,7 @@ async fn test_warn_on_nonempty_root_table_before_import() {
                 ram_high_watermark: None,
                 ram_low_watermark: None,
                 verbose: false,
+                hint_format: None,
             },
             Some(ptx),
         ).await;

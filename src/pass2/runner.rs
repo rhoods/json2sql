@@ -326,6 +326,10 @@ pub struct Pass2Config {
     /// Emit verbose logs (RAM tick every second, DISPATCH progress every 10k rows).
     /// Default false — high-frequency logs are noisy in normal use.
     pub verbose: bool,
+    /// JSON format detected during pass1 and persisted in the schema snapshot.
+    /// When `Some`, skips format re-detection. When `None` (old snapshot or direct call),
+    /// pass2 detects the format by scanning the source file.
+    pub hint_format: Option<crate::io::reader::JsonFormat>,
 }
 
 /// Per-worker flush threshold: divides the global threshold by worker count so that
@@ -707,10 +711,17 @@ pub async fn run(
         .map(|s| (s.path.join(&sep), s.clone()))
         .collect();
 
-    // Open reader early so we can inspect the format before spawning workers.
+    let (mut reader, format) = if let Some(known) = config.hint_format.clone() {
+        let reader = JsonReader::open_with_format(path, known.clone())?;
+        (reader, known)
+    } else {
+        if let Some(ref tx) = progress_tx {
+            let _ = tx.send(ProgressEvent::Pass2Log("Detecting JSON format…".to_string()));
+        }
+        JsonReader::open(path)?
+    };
     // For wrapper format, root table names come from wrapper keys (raw, as stored in s.path),
     // not from config.root_table (the filename-derived fallback).
-    let (mut reader, format) = JsonReader::open(path)?;
     let effective_root_table = if let crate::io::reader::JsonFormat::RootWrapper(ref keys) = format {
         keys.first().cloned().unwrap_or_else(|| config.root_table.clone())
     } else {
@@ -1152,6 +1163,7 @@ mod tests {
             ram_high_watermark: None,
             ram_low_watermark: None,
             verbose: false,
+            hint_format: None,
         };
         assert!(cfg.limit.is_none());
     }
@@ -1168,8 +1180,27 @@ mod tests {
             ram_high_watermark: None,
             ram_low_watermark: None,
             verbose: false,
+            hint_format: None,
         };
         assert_eq!(cfg.limit, Some(0));
+    }
+
+    #[test]
+    fn pass2_config_hint_format_skips_detection() {
+        use crate::io::reader::JsonFormat;
+        let cfg = Pass2Config {
+            root_table: "root".to_string(),
+            pg_schema: "public".to_string(),
+            parallel: 1,
+            anomaly_dir: None,
+            limit: None,
+            mem_flush_threshold_bytes: None,
+            ram_high_watermark: None,
+            ram_low_watermark: None,
+            verbose: false,
+            hint_format: Some(JsonFormat::Array),
+        };
+        assert_eq!(cfg.hint_format, Some(JsonFormat::Array));
     }
 
     /// Validates the writer task pattern without a database:
@@ -1509,6 +1540,25 @@ mod tests {
         let sql = map.get("products").expect("products must be present");
         assert!(sql.contains("myschema"), "COPY SQL must reference the pg_schema");
         assert!(sql.contains("products"), "COPY SQL must reference the table name");
+    }
+
+    // -------------------------------------------------------------------------
+    // Pass2Log detection event test
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn pass2_log_detecting_format_event_reaches_channel() {
+        use crate::io::progress_event::{ProgressEvent, ProgressTx};
+
+        let (tx, mut rx): (ProgressTx, _) = tokio::sync::mpsc::unbounded_channel();
+        let _ = tx.send(ProgressEvent::Pass2Log("Detecting JSON format…".to_string()));
+        let event = rx.try_recv().expect("Pass2Log event must be in the channel");
+        match event {
+            ProgressEvent::Pass2Log(msg) => {
+                assert!(msg.contains("Detecting"), "message must mention detection");
+            }
+            other => panic!("unexpected event variant: {other:?}"),
+        }
     }
 
 }

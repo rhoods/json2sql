@@ -49,6 +49,7 @@ async fn test_anomaly_dir_streaming() {
                 ram_high_watermark: None,
                 ram_low_watermark: None,
                 verbose: false,
+                hint_format: None,
             },
             None,
         ).await.unwrap();

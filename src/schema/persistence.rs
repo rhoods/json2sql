@@ -9,6 +9,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{J2sError, Result};
+use crate::io::reader::JsonFormat;
 use crate::schema::finalizer::OverflowWarning;
 use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::stats::ColumnStats;
@@ -17,7 +18,7 @@ use crate::schema::table_schema::{TableSchema, UserOverride};
 /// v2: table names are now capped at 53 chars (`PG_TABLE_MAX_IDENT`) instead of 63,
 /// ensuring all derived identifiers (pk_, fk_..._parent, j2s_..._id) fit within
 /// `PostgreSQL`'s 63-byte NAMEDATALEN limit. Snapshots from v1 must be regenerated.
-const SCHEMA_FORMAT_VERSION: u32 = 2;
+pub const SCHEMA_FORMAT_VERSION: u32 = 2;
 
 /// Serializable snapshot of a Pass 1 result, optionally including user strategy overrides.
 #[derive(Serialize, Deserialize)]
@@ -36,9 +37,29 @@ pub struct SchemaSnapshot {
     /// — deserialized as empty vec via `serde(default)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overflow_warnings: Vec<OverflowWarning>,
+    /// JSON format detected during Pass 1. Absent in older snapshots — deserialized as
+    /// `None`, in which case pass2 re-detects the format by scanning the source file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_format: Option<JsonFormat>,
 }
 
-/// Save a Pass 1 result to a JSON file.
+/// Serialize and write a snapshot to disk (atomic for `save_with_overrides`, direct for `save`).
+pub fn write_snapshot(snapshot: &SchemaSnapshot, path: &Path, atomic: bool) -> Result<()> {
+    let json = serde_json::to_string_pretty(snapshot)
+        .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {e}")))?;
+    if atomic {
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json).map_err(J2sError::Io)?;
+        std::fs::rename(&tmp, path).map_err(J2sError::Io)?;
+    } else {
+        std::fs::write(path, json).map_err(J2sError::Io)?;
+    }
+    Ok(())
+}
+
+/// Save a Pass 1 result to a JSON file. `detected_format` must be the format
+/// returned by `JsonReader::open` during pass1 — it is always known after a fresh run.
+#[allow(dead_code)]
 pub fn save(
     schemas: &[TableSchema],
     total_rows: u64,
@@ -46,6 +67,7 @@ pub fn save(
     column_collisions: &[ColumnCollision],
     stats: &[ColumnStats],
     overflow_warnings: &[OverflowWarning],
+    detected_format: JsonFormat,
     path: &Path,
 ) -> Result<()> {
     let snapshot = SchemaSnapshot {
@@ -57,14 +79,13 @@ pub fn save(
         stats: stats.to_vec(),
         strategy_overrides: std::collections::HashMap::new(),
         overflow_warnings: overflow_warnings.to_vec(),
+        detected_format: Some(detected_format),
     };
-    let json = serde_json::to_string_pretty(&snapshot)
-        .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {e}")))?;
-    std::fs::write(path, json).map_err(J2sError::Io)?;
-    Ok(())
+    write_snapshot(&snapshot, path, false)
 }
 
 /// Save a schema snapshot including user strategy overrides.
+/// `detected_format` must be the format detected during pass1 — always known at IHM save time.
 #[allow(dead_code)]
 pub fn save_with_overrides(
     schemas: &[TableSchema],
@@ -74,6 +95,7 @@ pub fn save_with_overrides(
     stats: &[ColumnStats],
     overflow_warnings: &[OverflowWarning],
     strategy_overrides: &std::collections::HashMap<String, UserOverride>,
+    detected_format: JsonFormat,
     path: &Path,
 ) -> Result<()> {
     let snapshot = SchemaSnapshot {
@@ -85,13 +107,9 @@ pub fn save_with_overrides(
         stats: stats.to_vec(),
         strategy_overrides: strategy_overrides.clone(),
         overflow_warnings: overflow_warnings.to_vec(),
+        detected_format: Some(detected_format),
     };
-    let json = serde_json::to_string_pretty(&snapshot)
-        .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {e}")))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json).map_err(J2sError::Io)?;
-    std::fs::rename(&tmp, path).map_err(J2sError::Io)?;
-    Ok(())
+    write_snapshot(&snapshot, path, true)
 }
 
 /// Load a Pass 1 result from a previously saved JSON snapshot.
@@ -118,6 +136,7 @@ pub fn load(path: &Path) -> Result<SchemaSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::reader::JsonFormat;
     use std::collections::HashMap;
 
     fn empty_snapshot() -> SchemaSnapshot {
@@ -130,6 +149,7 @@ mod tests {
             stats: vec![],
             strategy_overrides: HashMap::new(),
             overflow_warnings: vec![],
+            detected_format: None,
         }
     }
 
@@ -140,7 +160,7 @@ mod tests {
         let mut overrides: HashMap<String, UserOverride> = HashMap::new();
         overrides.insert("my_table".to_string(), UserOverride::Jsonb);
 
-        save_with_overrides(&[], 0, &[], &[], &[], &[], &overrides, tmp.path()).unwrap();
+        save_with_overrides(&[], 0, &[], &[], &[], &[], &overrides, JsonFormat::Lines, tmp.path()).unwrap();
         let loaded = load(tmp.path()).unwrap();
 
         assert!(matches!(
@@ -181,7 +201,7 @@ mod tests {
     #[test]
     fn v2_snapshot_round_trips() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        save(&[], 42, &[], &[], &[], &[], tmp.path()).unwrap();
+        save(&[], 42, &[], &[], &[], &[], JsonFormat::Lines, tmp.path()).unwrap();
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(loaded.version, SCHEMA_FORMAT_VERSION);
         assert_eq!(loaded.total_rows, 42);
@@ -201,7 +221,7 @@ mod tests {
             OverflowWarning { table_name: "wide_table".to_string(), original_column_count: 1700 },
             OverflowWarning { table_name: "another_wide".to_string(), original_column_count: 1800 },
         ];
-        save(&[], 0, &[], &[], &[], &warnings, tmp.path()).unwrap();
+        save(&[], 0, &[], &[], &[], &warnings, JsonFormat::Array, tmp.path()).unwrap();
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(loaded.overflow_warnings.len(), 2);
         assert_eq!(loaded.overflow_warnings[0].table_name, "wide_table");
@@ -223,7 +243,7 @@ mod tests {
     fn save_with_overrides_leaves_no_tmp_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("schema.json");
-        save_with_overrides(&[], 0, &[], &[], &[], &[], &std::collections::HashMap::new(), &path).unwrap();
+        save_with_overrides(&[], 0, &[], &[], &[], &[], &std::collections::HashMap::new(), JsonFormat::Lines, &path).unwrap();
         assert!(path.exists(), "target file must exist after save");
         let tmp = path.with_extension("json.tmp");
         assert!(!tmp.exists(), ".tmp file must be cleaned up after atomic save");
@@ -234,11 +254,76 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("schema.json");
         // Write an initial valid snapshot
-        save_with_overrides(&[], 10, &[], &[], &[], &[], &std::collections::HashMap::new(), &path).unwrap();
+        save_with_overrides(&[], 10, &[], &[], &[], &[], &std::collections::HashMap::new(), JsonFormat::Lines, &path).unwrap();
         // Overwrite with a different value
-        save_with_overrides(&[], 42, &[], &[], &[], &[], &std::collections::HashMap::new(), &path).unwrap();
+        save_with_overrides(&[], 42, &[], &[], &[], &[], &std::collections::HashMap::new(), JsonFormat::Lines, &path).unwrap();
         // The file must be readable and contain the new value
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.total_rows, 42, "overwrite must produce a complete, readable file");
+    }
+
+    // --- detected_format field tests ---
+
+    #[test]
+    fn save_stores_detected_format() {
+        use crate::io::reader::JsonFormat;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        save(&[], 0, &[], &[], &[], &[], JsonFormat::Lines, tmp.path()).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(loaded.detected_format, Some(JsonFormat::Lines));
+    }
+
+    #[test]
+    fn save_with_overrides_stores_detected_format() {
+        use crate::io::reader::JsonFormat;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        save_with_overrides(
+            &[], 0, &[], &[], &[], &[],
+            &std::collections::HashMap::new(),
+            JsonFormat::RootWrapper(vec!["K".to_string()]),
+            tmp.path(),
+        ).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(
+            loaded.detected_format,
+            Some(JsonFormat::RootWrapper(vec!["K".to_string()]))
+        );
+    }
+
+    #[test]
+    fn detected_format_defaults_none_on_old_snapshot() {
+        // Old snapshots without detected_format must deserialize with None.
+        let json = r#"{"version":2,"total_rows":0,"schemas":[],"truncated_names":[],"column_collisions":[],"stats":[]}"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert!(loaded.detected_format.is_none(), "old snapshots must deserialize detected_format as None");
+    }
+
+    #[test]
+    fn detected_format_round_trips_array() {
+        use crate::io::reader::JsonFormat;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut snap = empty_snapshot();
+        snap.detected_format = Some(JsonFormat::Array);
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        std::fs::write(tmp.path(), &json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(loaded.detected_format, Some(JsonFormat::Array));
+    }
+
+    #[test]
+    fn detected_format_round_trips_root_wrapper() {
+        use crate::io::reader::JsonFormat;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut snap = empty_snapshot();
+        snap.detected_format = Some(JsonFormat::RootWrapper(vec!["K1".to_string(), "K2".to_string()]));
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        std::fs::write(tmp.path(), &json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(
+            loaded.detected_format,
+            Some(JsonFormat::RootWrapper(vec!["K1".to_string(), "K2".to_string()]))
+        );
     }
 }
