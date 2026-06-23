@@ -22,7 +22,7 @@ fn simd_err(e: simd_json::Error) -> J2sError {
 }
 
 /// Detected format of the input file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum JsonFormat {
     /// Top-level JSON array: `[{...}, {...}, ...]`
     Array,
@@ -1474,5 +1474,39 @@ mod tests {
         assert_eq!(found, Some(b'}'));
         assert_eq!(n, 4); // full chunk consumed including real '}'
         assert_eq!(depth, 0);
+    }
+
+    // --- JsonFormat serde round-trip tests ---
+
+    #[test]
+    fn test_json_format_serde_lines() {
+        let fmt = JsonFormat::Lines;
+        let json = serde_json::to_string(&fmt).unwrap();
+        let back: JsonFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(fmt, back);
+    }
+
+    #[test]
+    fn test_json_format_serde_array() {
+        let fmt = JsonFormat::Array;
+        let json = serde_json::to_string(&fmt).unwrap();
+        let back: JsonFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(fmt, back);
+    }
+
+    #[test]
+    fn test_json_format_serde_root_wrapper() {
+        let fmt = JsonFormat::RootWrapper(vec!["K1".to_string(), "K2".to_string()]);
+        let json = serde_json::to_string(&fmt).unwrap();
+        let back: JsonFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(fmt, back);
+    }
+
+    #[test]
+    fn test_json_format_serde_root_wrapper_empty_keys() {
+        let fmt = JsonFormat::RootWrapper(vec![]);
+        let json = serde_json::to_string(&fmt).unwrap();
+        let back: JsonFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(fmt, back);
     }
 }
