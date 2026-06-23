@@ -50,6 +50,7 @@ pub fn pass2_config(root_table: &str, pg_schema: &str) -> Pass2Config {
         ram_high_watermark: None,
         ram_low_watermark: None,
         verbose: false,
+        hint_format: None,
     }
 }
 

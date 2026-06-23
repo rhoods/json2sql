@@ -136,13 +136,17 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                         onclick: move |_| {
                             if picking_save() { return; }
                             let s = state.read();
-                            let schemas = s.schema.schemas.clone();
-                            let total_rows = s.schema.pass1_progress.rows_scanned;
-                            let truncated = s.schema.truncated_names.clone();
-                            let collisions = s.schema.column_collisions.clone();
-                            let stats = s.schema.pass1_stats.clone();
-                            let overrides = s.schema.strategy_overrides.clone();
-                            let overflow_warnings = s.schema.overflow_warnings.clone();
+                            let snapshot = json2sql::schema::persistence::SchemaSnapshot {
+                                version: json2sql::schema::persistence::SCHEMA_FORMAT_VERSION,
+                                schemas: s.schema.schemas.clone(),
+                                total_rows: s.schema.pass1_progress.rows_scanned,
+                                truncated_names: s.schema.truncated_names.clone(),
+                                column_collisions: s.schema.column_collisions.clone(),
+                                stats: s.schema.pass1_stats.clone(),
+                                strategy_overrides: s.schema.strategy_overrides.clone(),
+                                overflow_warnings: s.schema.overflow_warnings.clone(),
+                                detected_format: s.schema.detected_format.clone(),
+                            };
                             drop(s);
                             spawn(async move {
                                 picking_save.set(true);
@@ -153,10 +157,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                         .unwrap_or("schema.json")
                                         .to_string();
                                     let result = tokio::task::spawn_blocking(move || {
-                                        json2sql::schema::persistence::save_with_overrides(
-                                            &schemas, total_rows, &truncated, &collisions,
-                                            &stats, &overflow_warnings, &overrides, &path,
-                                        )
+                                        json2sql::schema::persistence::write_snapshot(&snapshot, &path, true)
                                     }).await;
                                     match result {
                                         Ok(Ok(())) => save_feedback.set(Some(Ok(filename))),

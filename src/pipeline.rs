@@ -99,7 +99,7 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
         )
     })?;
     let client = connect_and_create_tables(db_url, &pass1.schemas, &cfg.pg_schema, cfg.drop_existing).await?;
-    let pass2 = run_pass2(&input_path, &pass1.schemas, &client, db_url, &cfg).await?;
+    let pass2 = run_pass2(&input_path, &pass1, &client, db_url, &cfg).await?;
     finalize_pass2(&pass2, &cfg)
 }
 
@@ -120,7 +120,7 @@ async fn connect_and_create_tables(
 
 async fn run_pass2(
     input_path: &Path,
-    schemas: &[TableSchema],
+    pass1: &Pass1Result,
     client: &tokio_postgres::Client,
     db_url: &str,
     cfg: &PipelineConfig,
@@ -128,7 +128,7 @@ async fn run_pass2(
     eprintln!("\nPass 2: inserting data...");
     crate::pass2::runner::run(
         input_path,
-        schemas,
+        &pass1.schemas,
         client,
         db_url,
         &crate::pass2::Pass2Config {
@@ -141,6 +141,7 @@ async fn run_pass2(
             ram_high_watermark: None,
             ram_low_watermark: None,
             verbose: false,
+            hint_format: pass1.detected_format.clone(),
         },
         None,
     )

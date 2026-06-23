@@ -944,14 +944,20 @@ impl JsonReader {
 
     pub fn open(path: &Path) -> Result<(Self, JsonFormat)> {
         let format = detect_format(path)?;
-        let reader = match format.clone() {
-            JsonFormat::Lines => Self::Lines(JsonLinesReader::open(path)?),
-            JsonFormat::Array => Self::Array(JsonArrayReader::open(path)?),
-            JsonFormat::RootWrapper(keys) => {
-                Self::RootWrapper(JsonRootWrapperReader::open(path, keys)?)
-            }
-        };
+        let reader = Self::open_with_format(path, format.clone())?;
         Ok((reader, format))
+    }
+
+    /// Open a reader using a format that was already detected (e.g., loaded from a snapshot).
+    /// Skips format detection — the caller guarantees `format` matches the file content.
+    pub fn open_with_format(path: &Path, format: JsonFormat) -> Result<Self> {
+        match format {
+            JsonFormat::Lines => Ok(Self::Lines(JsonLinesReader::open(path)?)),
+            JsonFormat::Array => Ok(Self::Array(JsonArrayReader::open(path)?)),
+            JsonFormat::RootWrapper(keys) => {
+                Ok(Self::RootWrapper(JsonRootWrapperReader::open(path, keys)?))
+            }
+        }
     }
 
     /// The wrapper key currently being streamed, or `None` for non-wrapper formats.
@@ -1474,6 +1480,44 @@ mod tests {
         assert_eq!(found, Some(b'}'));
         assert_eq!(n, 4); // full chunk consumed including real '}'
         assert_eq!(depth, 0);
+    }
+
+    // --- JsonReader::open_with_format tests ---
+
+    #[test]
+    fn test_open_with_format_lines_reads_objects() {
+        let f = tmp_file(b"{\"a\":1}\n{\"b\":2}");
+        let mut r = JsonReader::open_with_format(f.path(), JsonFormat::Lines).unwrap();
+        let v1: serde_json::Value = r.next().unwrap().unwrap();
+        let v2: serde_json::Value = r.next().unwrap().unwrap();
+        assert_eq!(v1["a"], 1);
+        assert_eq!(v2["b"], 2);
+        assert!(r.next().is_none());
+    }
+
+    #[test]
+    fn test_open_with_format_array_reads_objects() {
+        let f = tmp_file(b"[{\"x\":10},{\"x\":20}]");
+        let mut r = JsonReader::open_with_format(f.path(), JsonFormat::Array).unwrap();
+        let v1: serde_json::Value = r.next().unwrap().unwrap();
+        let v2: serde_json::Value = r.next().unwrap().unwrap();
+        assert_eq!(v1["x"], 10);
+        assert_eq!(v2["x"], 20);
+        assert!(r.next().is_none());
+    }
+
+    #[test]
+    fn test_open_with_format_root_wrapper_reads_objects() {
+        let f = tmp_file(b"{\"K\":[{\"id\":1},{\"id\":2}]}");
+        let mut r = JsonReader::open_with_format(
+            f.path(),
+            JsonFormat::RootWrapper(vec!["K".to_string()]),
+        ).unwrap();
+        let v1: serde_json::Value = r.next().unwrap().unwrap();
+        let v2: serde_json::Value = r.next().unwrap().unwrap();
+        assert_eq!(v1["id"], 1);
+        assert_eq!(v2["id"], 2);
+        assert!(r.next().is_none());
     }
 
     // --- JsonFormat serde round-trip tests ---

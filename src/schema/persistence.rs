@@ -18,7 +18,7 @@ use crate::schema::table_schema::{TableSchema, UserOverride};
 /// v2: table names are now capped at 53 chars (`PG_TABLE_MAX_IDENT`) instead of 63,
 /// ensuring all derived identifiers (pk_, fk_..._parent, j2s_..._id) fit within
 /// `PostgreSQL`'s 63-byte NAMEDATALEN limit. Snapshots from v1 must be regenerated.
-pub(crate) const SCHEMA_FORMAT_VERSION: u32 = 2;
+pub const SCHEMA_FORMAT_VERSION: u32 = 2;
 
 /// Serializable snapshot of a Pass 1 result, optionally including user strategy overrides.
 #[derive(Serialize, Deserialize)]
@@ -44,7 +44,7 @@ pub struct SchemaSnapshot {
 }
 
 /// Serialize and write a snapshot to disk (atomic for `save_with_overrides`, direct for `save`).
-pub(crate) fn write_snapshot(snapshot: &SchemaSnapshot, path: &Path, atomic: bool) -> Result<()> {
+pub fn write_snapshot(snapshot: &SchemaSnapshot, path: &Path, atomic: bool) -> Result<()> {
     let json = serde_json::to_string_pretty(snapshot)
         .map_err(|e| J2sError::InvalidInput(format!("Schema serialization failed: {e}")))?;
     if atomic {

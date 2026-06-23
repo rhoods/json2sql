@@ -103,6 +103,7 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 s.schema.truncated_names = result.truncated_names;
                 s.schema.column_collisions = result.column_collisions;
                 s.schema.pass1_stats = result.stats;
+                s.schema.detected_format = result.detected_format;
                 s.schema.schema_snapshot_loaded = false;
             }
             Ok(Err(e)) => {
