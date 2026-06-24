@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
+use std::time::Instant;
 
 use futures_util::future::try_join_all;
 use tokio_postgres::Client;
@@ -190,26 +191,58 @@ fn group_schemas_by_depth(schemas: &[TableSchema]) -> BTreeMap<usize, Vec<&Table
 type ConstraintWork = (String, String, Option<String>);
 
 
+/// Compute `maintenance_work_mem` in MB from available RAM.
+/// Floor: 256 MB (protects low-memory machines). Cap: `cap_mb` (default 4096 = 4 GB).
+fn calc_maintenance_work_mem_mb(available_bytes: u64, cap_mb: u64) -> u64 {
+    (available_bytes / 1024 / 1024 / 2).max(256).min(cap_mb)
+}
+
 /// Add PRIMARY KEY + FOREIGN KEY constraints after data has been loaded.
 ///
 /// Processes schemas level-by-level (grouped by `depth`): all tables at depth N
 /// are constrained in parallel before moving to depth N+1.  Within each level,
 /// each worker applies PK then FK for its assigned tables on a dedicated connection.
+/// Configure a fresh constraints connection: set `maintenance_work_mem` (non-fatal) and
+/// `synchronous_commit = off` (non-fatal on `INSUFFICIENT_PRIVILEGE`, fatal otherwise).
+async fn try_configure_constraints_conn(client: &Client, maintenance_work_mem_mb: u64) -> Result<()> {
+    if let Err(e) = client.execute(
+        &format!("SET maintenance_work_mem = '{maintenance_work_mem_mb}MB'"),
+        &[],
+    ).await {
+        eprintln!("WARNING: SET maintenance_work_mem failed — {e}");
+    }
+    match client.execute("SET synchronous_commit = off", &[]).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.as_db_error().is_some_and(|db| {
+            db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE
+        }) => {
+            eprintln!("WARNING: SET synchronous_commit = off not permitted — continuing without it");
+            Ok(())
+        }
+        Err(e) => Err(J2sError::Db(e)),
+    }
+}
+
 async fn apply_constraints_chunk(
     chunk: Vec<ConstraintWork>,
     db_url: String,
     done: Arc<AtomicUsize>,
     total: usize,
     ptx: Option<ProgressTx>,
+    maintenance_work_mem_mb: u64,
 ) -> Result<Vec<ConstraintWarning>> {
     let (client, connection) = tokio_postgres::connect(&db_url, tokio_postgres::NoTls)
         .await
         .map_err(|e| J2sError::DbContext(format!("constraints connection: {e}")))?;
     tokio::spawn(async move { let _ = connection.await; });
+    try_configure_constraints_conn(&client, maintenance_work_mem_mb).await?;
+
     let mut warnings: Vec<ConstraintWarning> = Vec::new();
     for (table_name, pk_sql, fk_sql_opt) in &chunk {
+        let pk_start = Instant::now();
         client.execute(pk_sql.as_str(), &[]).await
             .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {table_name}"), &e))?;
+        eprintln!("[CONSTRAINTS] PK {table_name}: {}ms", pk_start.elapsed().as_millis());
         constraint_progress(&done, total, ptx.as_ref());
         if let Some(fk_sql) = fk_sql_opt {
             if let Err(e) = client.execute(fk_sql.as_str(), &[]).await {
@@ -243,6 +276,10 @@ pub async fn add_constraints(
 
     emit(progress_tx, ProgressEvent::ConstraintsStart { table_count: schemas.len() });
 
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let maintenance_work_mem_mb = calc_maintenance_work_mem_mb(sys.available_memory(), 4096);
+
     let levels = group_schemas_by_depth(schemas);
     let mut all_warnings: Vec<ConstraintWarning> = Vec::new();
 
@@ -264,6 +301,7 @@ pub async fn add_constraints(
                 Arc::clone(&done),
                 total,
                 ptx.clone(),
+                maintenance_work_mem_mb,
             )
         }).collect();
 
@@ -535,7 +573,7 @@ mod tests {
     #[test]
     fn group_schemas_by_depth_sibling_tables_same_level() {
         let root = make_root_schema();
-        let mut child1 = make_child_schema();
+        let child1 = make_child_schema();
         let mut child2 = make_child_schema();
         child2.name = "tags2".to_string();
         let schemas = vec![root, child1, child2];
@@ -552,6 +590,23 @@ mod tests {
         let groups = group_schemas_by_depth(&schemas);
         let levels: Vec<usize> = groups.keys().copied().collect();
         assert_eq!(levels, vec![0, 1], "BTreeMap preserves ascending order");
+    }
+
+    #[test]
+    fn maintenance_work_mem_mb_floor_on_zero_available() {
+        assert_eq!(calc_maintenance_work_mem_mb(0, 4096), 256);
+    }
+
+    #[test]
+    fn maintenance_work_mem_mb_cap_on_large_ram() {
+        // 32 GB available → raw = 16384 MB → capped at 4096
+        assert_eq!(calc_maintenance_work_mem_mb(32 * 1024 * 1024 * 1024, 4096), 4096);
+    }
+
+    #[test]
+    fn maintenance_work_mem_mb_nominal_2gb() {
+        // 2 GB available → raw = 1024 MB → no floor, no cap
+        assert_eq!(calc_maintenance_work_mem_mb(2 * 1024 * 1024 * 1024, 4096), 1024);
     }
 
 }
