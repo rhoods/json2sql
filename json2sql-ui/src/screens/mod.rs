@@ -335,11 +335,15 @@ pub const fn strategy_badge(s: &InferredStrategy) -> (&'static str, &'static str
     }
 }
 
-pub const fn user_override_badge(o: &UserOverride) -> (&'static str, &'static str) {
+pub fn user_override_badge(o: &UserOverride) -> (&'static str, &'static str) {
     match o {
-        UserOverride::Pivot => ("pivot", "pivot"),
-        UserOverride::Jsonb => ("jsonb", "jsonb"),
-        UserOverride::Skip  => ("skip",  "skip"),
+        UserOverride::Columns                      => ("columns",   "columns"),
+        UserOverride::Pivot                        => ("pivot",     "pivot"),
+        UserOverride::Jsonb                        => ("jsonb",     "jsonb"),
+        UserOverride::Skip                         => ("skip",      "skip"),
+        UserOverride::JsonbFlatten                 => ("jsonb",     "jsonb flatten"),
+        UserOverride::Flatten { .. }               => ("flatten",   "flatten"),
+        UserOverride::NormalizeDynamicKeys { .. }  => ("normalize", "normalize"),
     }
 }
 
