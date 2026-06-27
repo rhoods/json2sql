@@ -174,7 +174,6 @@ pub struct Pass2Progress {
     pub constraints_done: usize,
     pub constraints_complete: bool,
     /// True when the import was run with `skip_constraints = true` — Phase D shows "Skipped".
-    #[allow(dead_code)] // read in import.rs Phase D rendering (task 7)
     pub constraints_skipped: bool,
 }
 

@@ -34,7 +34,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         }
         state.write().import.pass2_progress = crate::state::Pass2Progress::default();
 
-        let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, pg_schema, pass2_parallel, import_limit, verbose_logs, hint_format) = {
+        let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, pg_schema, pass2_parallel, import_limit, verbose_logs, hint_format, skip_constraints_flag) = {
             let source_file_opt = state.read().project.source_file.clone();
             let Some(path) = source_file_opt else {
                 state.write().cancel();
@@ -58,6 +58,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 s.project.import_limit,
                 s.project.verbose_logs,
                 s.schema.detected_format.clone(),
+                s.project.skip_constraints,
             )
         };
 
@@ -88,7 +89,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 ram_low_watermark: None,
                 verbose: verbose_logs,
                 hint_format,
-                skip_constraints: false,
+                skip_constraints: skip_constraints_flag,
             };
             json2sql::pass2::runner::run(&source_file, &schemas, &client, &pg_url, &cfg, Some(tx))
             .await
@@ -135,6 +136,10 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             state.write().import.pass2_progress.push_log(format!("Import error: {e}"));
         }
 
+        if skip_constraints_flag {
+            state.write().import.pass2_progress.constraints_skipped = true;
+        }
+
         state.write().abort_handle = None;
     });
 
@@ -174,12 +179,14 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     let pct_b: u32 = if progress.copy_complete || done { 100 } else { progress_pct(tables_done, tables_total) };
 
     // Phase D — constraints (PK + FK applied)
-    let pct_d: u32 = if progress.constraints_complete {
+    let pct_d: u32 = if progress.constraints_complete || progress.constraints_skipped {
         100
     } else {
         progress_pct(progress.constraints_done as u64, progress.constraints_total.max(1) as u64)
     };
-    let label_d = if progress.constraints_complete {
+    let label_d = if progress.constraints_skipped {
+        "Skipped".to_string()
+    } else if progress.constraints_complete {
         "done".to_string()
     } else if progress.constraints_total == 0 {
         "Waiting…".to_string()
