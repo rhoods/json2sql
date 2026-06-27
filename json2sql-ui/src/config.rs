@@ -35,6 +35,9 @@ pub struct ProjectConfig {
     pub disabled_strategies: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_limit: Option<u64>,
+    /// Skip the constraint phase at the end of Pass 2. Persisted for workflows that always skip.
+    #[serde(default)]
+    pub skip_constraints: bool,
 }
 
 impl Default for ProjectConfig {
@@ -55,6 +58,7 @@ impl Default for ProjectConfig {
                 .min(8),
             disabled_strategies: Vec::new(),
             import_limit: None,
+            skip_constraints: false,
         }
     }
 }
@@ -75,6 +79,7 @@ impl ProjectConfig {
             pass2_parallel: p.pass2_parallel,
             disabled_strategies: p.disabled_strategies.iter().map(|s| s.as_str().to_string()).collect(),
             import_limit: p.import_limit,
+            skip_constraints: p.skip_constraints,
         }
     }
 
@@ -96,6 +101,7 @@ impl ProjectConfig {
             .filter_map(|s| StrategyName::try_from(s.as_str()).ok())
             .collect::<HashSet<_>>();
         p.import_limit = self.import_limit;
+        p.skip_constraints = self.skip_constraints;
     }
 }
 
@@ -194,6 +200,7 @@ mod tests {
             pass2_parallel: 3,
             disabled_strategies: Vec::new(),
             import_limit: None,
+            skip_constraints: false,
         };
         let mut p = ProjectState::default();
         p.pg.password = "original_password".to_string();
@@ -242,6 +249,7 @@ mod tests {
             pass2_parallel: 5,
             disabled_strategies: Vec::new(),
             import_limit: None,
+            skip_constraints: true,
         };
 
         let toml_str = toml::to_string(&cfg).expect("serialize");
@@ -257,6 +265,25 @@ mod tests {
         assert_eq!(parsed.anomaly_dir, cfg.anomaly_dir);
         assert_eq!(parsed.workers, cfg.workers);
         assert_eq!(parsed.pass2_parallel, cfg.pass2_parallel);
+        assert_eq!(parsed.skip_constraints, cfg.skip_constraints);
+    }
+
+    #[test]
+    fn skip_constraints_round_trips_toml() {
+        let mut p = ProjectState::default();
+        p.skip_constraints = true;
+        let cfg = ProjectConfig::from_project(&p);
+        let toml_str = toml::to_string(&cfg).expect("serialize");
+        let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
+        assert!(parsed.skip_constraints, "skip_constraints=true must survive TOML round-trip");
+    }
+
+    #[test]
+    fn skip_constraints_defaults_to_false_when_absent_from_toml() {
+        // Simulates loading an old TOML file that doesn't have skip_constraints
+        let toml_str = "pg_host = \"localhost\"\npg_port = 5432\npg_database = \"\"\npg_username = \"\"\npg_schema = \"public\"\ndrop_existing = false\nworkers = 1\npass2_parallel = 4\n";
+        let parsed: ProjectConfig = toml::from_str(toml_str).expect("deserialize");
+        assert!(!parsed.skip_constraints, "skip_constraints must default to false for backward compat");
     }
 
     #[test]
