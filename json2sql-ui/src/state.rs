@@ -173,6 +173,8 @@ pub struct Pass2Progress {
     pub constraints_total: usize,
     pub constraints_done: usize,
     pub constraints_complete: bool,
+    /// True when the import was run with `skip_constraints = true` — Phase D shows "Skipped".
+    pub constraints_skipped: bool,
 }
 
 impl Pass2Progress {
@@ -216,6 +218,8 @@ pub struct ProjectState {
     pub import_limit: Option<u64>,
     /// Emit verbose pass 2 logs (RAM tick every second, DISPATCH every 10k rows). Default false.
     pub verbose_logs: bool,
+    /// Skip the constraint phase (PK + FK) at the end of Pass 2. Default false.
+    pub skip_constraints: bool,
 }
 
 impl Default for ProjectState {
@@ -237,6 +241,7 @@ impl Default for ProjectState {
             disabled_strategies: HashSet::new(),
             import_limit: None,
             verbose_logs: false,
+            skip_constraints: false,
         }
     }
 }
@@ -490,6 +495,9 @@ impl AppState {
                 self.import.pass2_progress.total_anomalies = anomaly_count;
                 self.import.pass2_progress.constraint_warning_count = constraint_warning_count;
                 self.import.pass2_progress.done = true;
+                if self.import.pass2_progress.constraints_skipped {
+                    self.import.pass2_progress.constraints_complete = true;
+                }
                 self.import.pass2_progress.push_log(format!(
                     "Import complete: {total_rows} rows, {anomaly_count} anomalies, {constraint_warning_count} FK warnings"
                 ));
@@ -808,6 +816,7 @@ mod tests {
             stats: vec![],
             strategy_overrides: HashMap::new(),
             overflow_warnings: vec![],
+            detected_format: None,
         });
 
         s.clear_snapshot();
@@ -833,6 +842,7 @@ mod tests {
             column_collisions: vec![],
             stats: vec![],
             overflow_warnings: vec![],
+            detected_format: None,
             strategy_overrides: {
                 let mut m = HashMap::new();
                 m.insert("t".to_string(), UserOverride::Jsonb);
@@ -866,6 +876,7 @@ mod tests {
             column_collisions: vec![],
             stats: vec![],
             overflow_warnings: vec![],
+            detected_format: None,
             strategy_overrides: HashMap::new(),
         };
         let mut s = AppState::default();
@@ -1164,5 +1175,43 @@ mod tests {
             s.import.pass2_progress.log_lines.iter().any(|l| l.contains("Import complete")),
             "residual log event must appear after flush"
         );
+    }
+
+    #[test]
+    fn pass2_progress_constraints_skipped_default_false() {
+        let p = Pass2Progress::default();
+        assert!(!p.constraints_skipped, "constraints_skipped must default to false");
+    }
+
+    #[test]
+    fn project_state_skip_constraints_default_false() {
+        let p = ProjectState::default();
+        assert!(!p.skip_constraints, "skip_constraints must default to false");
+    }
+
+    #[test]
+    fn pass2_done_with_constraints_skipped_forces_constraints_complete() {
+        let mut s = AppState::default();
+        s.import.pass2_progress.constraints_skipped = true;
+        s.apply_progress_event(ProgressEvent::Pass2Done {
+            total_rows: 100,
+            anomaly_count: 0,
+            constraint_warning_count: 0,
+        });
+        assert!(s.import.pass2_progress.constraints_complete,
+            "constraints_complete must be forced true when constraints_skipped");
+    }
+
+    #[test]
+    fn pass2_done_without_constraints_skipped_leaves_constraints_incomplete() {
+        let mut s = AppState::default();
+        s.import.pass2_progress.constraints_skipped = false;
+        s.apply_progress_event(ProgressEvent::Pass2Done {
+            total_rows: 100,
+            anomaly_count: 0,
+            constraint_warning_count: 0,
+        });
+        assert!(!s.import.pass2_progress.constraints_complete,
+            "constraints_complete must not be forced when constraints_skipped is false");
     }
 }

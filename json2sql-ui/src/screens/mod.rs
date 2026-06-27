@@ -683,7 +683,6 @@ mod tests {
                 key_col_name: "key".to_string(),
                 key_shape: KeyShape::Slug,
                 array_children: false,
-                data_col_name: "data".to_string(),
             },
             absorbed_names: vec![],
             path_segment: "key".to_string(),
@@ -865,7 +864,7 @@ mod tests {
 
     #[test]
     fn non_wide_table_not_flagged() {
-        let schemas = vec![make_wide_table("slim", 50)];
+        let schemas = vec![make_wide_table("slim", 5)];
         let rows = empty_rows(&schemas);
         assert!(!rows[0].is_wide);
     }

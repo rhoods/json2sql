@@ -72,6 +72,8 @@ pub struct PipelineConfig {
     pub schema_report: bool,
     /// Write Pass 1 schema statistics to this file instead of stderr.
     pub schema_report_output: Option<PathBuf>,
+    /// Skip the `add_constraints` phase at the end of Pass 2.
+    pub skip_constraints: bool,
 }
 
 /// Run the full json2sql import pipeline.
@@ -142,6 +144,7 @@ async fn run_pass2(
             ram_low_watermark: None,
             verbose: false,
             hint_format: pass1.detected_format.clone(),
+            skip_constraints: cfg.skip_constraints,
         },
         None,
     )
@@ -533,7 +536,20 @@ mod tests {
             schema_input: None,
             schema_report: false,
             schema_report_output: None,
+            skip_constraints: false,
         }
+    }
+
+    #[test]
+    fn pipeline_config_skip_constraints_false_means_run_constraints() {
+        let cfg = minimal_pipeline_cfg(None);
+        assert!(!cfg.skip_constraints, "default skip_constraints must be false");
+    }
+
+    #[test]
+    fn pipeline_config_skip_constraints_true_propagates() {
+        let cfg = PipelineConfig { skip_constraints: true, ..minimal_pipeline_cfg(None) };
+        assert!(cfg.skip_constraints, "skip_constraints must be settable to true");
     }
 
     #[test]

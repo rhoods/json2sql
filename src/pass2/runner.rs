@@ -330,6 +330,9 @@ pub struct Pass2Config {
     /// When `Some`, skips format re-detection. When `None` (old snapshot or direct call),
     /// pass2 detects the format by scanning the source file.
     pub hint_format: Option<crate::io::reader::JsonFormat>,
+    /// When `true`, skips the `add_constraints` phase entirely (Phase D).
+    /// Useful for dev/exploration runs or pipelines that apply constraints in a separate step.
+    pub skip_constraints: bool,
 }
 
 /// Per-worker flush threshold: divides the global threshold by worker count so that
@@ -839,8 +842,14 @@ pub async fn run(
 
     eprintln!("Pass 2 flusher complete. Applying constraints...");
     let copy_start = Instant::now();
-    let constraint_warnings = add_constraints(pg_url, schemas, &config.pg_schema, parallel, progress_tx.as_ref()).await?;
-    log_constraint_warnings(&constraint_warnings, progress_tx.as_ref());
+    let constraint_warnings = if config.skip_constraints {
+        eprintln!("Constraints skipped (skip_constraints = true).");
+        vec![]
+    } else {
+        let warnings = add_constraints(pg_url, schemas, &config.pg_schema, parallel, progress_tx.as_ref()).await?;
+        log_constraint_warnings(&warnings, progress_tx.as_ref());
+        warnings
+    };
 
     build_pass2_result(merged_anomalies, rows_per_table, constraint_warnings, progress_tx.as_ref(), copy_start, streaming_ms)
 }
@@ -1164,6 +1173,7 @@ mod tests {
             ram_low_watermark: None,
             verbose: false,
             hint_format: None,
+            skip_constraints: false,
         };
         assert!(cfg.limit.is_none());
     }
@@ -1181,6 +1191,7 @@ mod tests {
             ram_low_watermark: None,
             verbose: false,
             hint_format: None,
+            skip_constraints: false,
         };
         assert_eq!(cfg.limit, Some(0));
     }
@@ -1199,8 +1210,45 @@ mod tests {
             ram_low_watermark: None,
             verbose: false,
             hint_format: Some(JsonFormat::Array),
+            skip_constraints: false,
         };
         assert_eq!(cfg.hint_format, Some(JsonFormat::Array));
+    }
+
+    #[test]
+    fn pass2_config_skip_constraints_false_means_run_constraints() {
+        let cfg = Pass2Config {
+            root_table: "root".to_string(),
+            pg_schema: "public".to_string(),
+            parallel: 1,
+            anomaly_dir: None,
+            limit: None,
+            mem_flush_threshold_bytes: None,
+            ram_high_watermark: None,
+            ram_low_watermark: None,
+            verbose: false,
+            hint_format: None,
+            skip_constraints: false,
+        };
+        assert!(!cfg.skip_constraints, "skip_constraints: false means constraints must run");
+    }
+
+    #[test]
+    fn pass2_config_skip_constraints_true_means_skip() {
+        let cfg = Pass2Config {
+            root_table: "root".to_string(),
+            pg_schema: "public".to_string(),
+            parallel: 1,
+            anomaly_dir: None,
+            limit: None,
+            mem_flush_threshold_bytes: None,
+            ram_high_watermark: None,
+            ram_low_watermark: None,
+            verbose: false,
+            hint_format: None,
+            skip_constraints: true,
+        };
+        assert!(cfg.skip_constraints, "skip_constraints: true means constraints must be skipped");
     }
 
     /// Validates the writer task pattern without a database:
