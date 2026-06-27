@@ -62,6 +62,10 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             )
         };
 
+        if skip_constraints_flag {
+            state.write().import.pass2_progress.constraints_skipped = true;
+        }
+
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
 
         let handle = tokio::spawn(async move {
@@ -134,10 +138,6 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
 
         if let Ok(Err(e)) = handle.await {
             state.write().import.pass2_progress.push_log(format!("Import error: {e}"));
-        }
-
-        if skip_constraints_flag {
-            state.write().import.pass2_progress.constraints_skipped = true;
         }
 
         state.write().abort_handle = None;

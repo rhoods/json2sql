@@ -495,6 +495,9 @@ impl AppState {
                 self.import.pass2_progress.total_anomalies = anomaly_count;
                 self.import.pass2_progress.constraint_warning_count = constraint_warning_count;
                 self.import.pass2_progress.done = true;
+                if self.import.pass2_progress.constraints_skipped {
+                    self.import.pass2_progress.constraints_complete = true;
+                }
                 self.import.pass2_progress.push_log(format!(
                     "Import complete: {total_rows} rows, {anomaly_count} anomalies, {constraint_warning_count} FK warnings"
                 ));
@@ -1184,5 +1187,31 @@ mod tests {
     fn project_state_skip_constraints_default_false() {
         let p = ProjectState::default();
         assert!(!p.skip_constraints, "skip_constraints must default to false");
+    }
+
+    #[test]
+    fn pass2_done_with_constraints_skipped_forces_constraints_complete() {
+        let mut s = AppState::default();
+        s.import.pass2_progress.constraints_skipped = true;
+        s.apply_progress_event(ProgressEvent::Pass2Done {
+            total_rows: 100,
+            anomaly_count: 0,
+            constraint_warning_count: 0,
+        });
+        assert!(s.import.pass2_progress.constraints_complete,
+            "constraints_complete must be forced true when constraints_skipped");
+    }
+
+    #[test]
+    fn pass2_done_without_constraints_skipped_leaves_constraints_incomplete() {
+        let mut s = AppState::default();
+        s.import.pass2_progress.constraints_skipped = false;
+        s.apply_progress_event(ProgressEvent::Pass2Done {
+            total_rows: 100,
+            anomaly_count: 0,
+            constraint_warning_count: 0,
+        });
+        assert!(!s.import.pass2_progress.constraints_complete,
+            "constraints_complete must not be forced when constraints_skipped is false");
     }
 }
