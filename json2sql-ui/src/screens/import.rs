@@ -226,8 +226,12 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         .map(|(k, v)| (k.clone(), *v))
         .collect();
     table_rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+    // Totaux calculés sur le jeu complet avant le cap — le success banner et label_b
+    // doivent refléter le total réel, pas seulement les 100 premières tables.
     let total_rows: u64   = table_rows.iter().map(|(_, n)| n).sum();
     let table_count       = table_rows.len();
+    let hidden_tables     = table_count.saturating_sub(100);
+    table_rows.truncate(100);
     let anomaly_dir_label = state.read().project.anomaly_dir
         .as_ref()
         .map(|p| p.display().to_string());
@@ -362,6 +366,13 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                                             }
                                             td { style: "font-family:'JetBrains Mono',monospace;font-size:var(--fs-xs);color:var(--acc);font-weight:600;white-space:nowrap;text-align:right;",
                                                 "{count}"
+                                            }
+                                        }
+                                    }
+                                    if hidden_tables > 0 {
+                                        tr {
+                                            td { colspan: "2", style: "font-size:var(--fs-xs);color:var(--fg-4);padding:4px 0;",
+                                                "+ {hidden_tables} autres tables…"
                                             }
                                         }
                                     }
