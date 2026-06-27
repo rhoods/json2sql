@@ -315,7 +315,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                         div {
                             class: "log",
                             style: "border:none;border-radius:0;padding:10px 14px;height:100%;overflow-y:auto;line-height:1.5;",
-                            for line in progress.log_lines.iter() {
+                            for line in progress.log_lines.iter().skip(progress.log_lines.len().saturating_sub(50)) {
                                 {
                                     let is_err  = line.to_lowercase().contains("error");
                                     let is_warn = !is_err && (line.contains("Anomaly") || line.contains("WARNING") || line.contains("Warning") || line.contains('⚠'));
