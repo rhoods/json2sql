@@ -30,8 +30,8 @@ pub struct MergeResult {
     pub parent_name: String,
     /// `SiblingCollapse` or `SiblingCollapseMulti` to store in `strategy_overrides[parent_name]`.
     pub strategy: InferredStrategy,
-    /// Sibling tables that are absorbed — caller should set
-    /// `strategy_overrides[name] = InferredStrategy::Ignore` for each.
+    /// Sibling tables that are absorbed — caller should remove them from schemas
+    /// (via `exclude_absorbed_children`) after applying the merge result.
     pub absorbed_names: Vec<String>,
 }
 

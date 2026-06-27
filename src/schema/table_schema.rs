@@ -649,8 +649,8 @@ impl InferredStrategy {
     /// Returns the names of child tables explicitly absorbed by this strategy.
     ///
     /// Only `SiblingCollapseMulti` carries an explicit absorbed-names list (one per `SiblingGroup`).
-    /// For `SiblingCollapse`, the absorbed sibling tables are tracked separately in the schema list
-    /// (each sibling receives `InferredStrategy::Ignore` during finalization) — returns empty here.
+    /// For `SiblingCollapse`, absorbed siblings are removed from schemas via `exclude_absorbed_children`
+    /// — returns empty here.
     #[must_use]
     pub fn absorbed_names(&self) -> Vec<&str> {
         match self {
