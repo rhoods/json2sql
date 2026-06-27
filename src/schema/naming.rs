@@ -170,8 +170,9 @@ impl NamingRegistry {
     #[must_use]
     pub fn table_name_lookup(&self, path: &[String]) -> String {
         let key = path.join(&PATH_SEP.to_string());
+        debug_assert!(self.cache.contains_key(&key),
+            "table_name_lookup called for unregistered path — pre-registration phase incomplete");
         self.cache.get(&key).cloned().unwrap_or_else(|| {
-            // Fallback: should never happen after pre-registration, but be safe.
             sanitize_identifier(&path.join("_"))
         })
     }
@@ -180,6 +181,8 @@ impl NamingRegistry {
     /// Use in the parallel schema-building phase where the key is already available.
     #[must_use]
     pub fn table_name_lookup_from_dot_key(&self, dot_key: &str) -> String {
+        debug_assert!(self.cache.contains_key(dot_key),
+            "table_name_lookup_from_dot_key called for unregistered key — pre-registration phase incomplete");
         self.cache.get(dot_key).cloned().unwrap_or_else(|| {
             sanitize_identifier(&dot_key.replace(PATH_SEP, "_"))
         })
@@ -208,27 +211,52 @@ impl NamingRegistry {
 
         if let Some(existing) = self.reverse.get(&truncated) {
             if existing == original_key {
-                return truncated; // idempotent — same key already registered
+                // Idempotent: this key is the sentinel owner of `truncated`.
+                // Return from cache in case it was already promoted to a hash suffix.
+                return self.cache.get(original_key).cloned().unwrap_or(truncated);
             }
-            // Name collision (two different paths produce the same sanitized name).
-            // Append a numeric counter until we find a free slot.
-            // Use `truncated` (the human-readable Phase-1 result) as base, not `sanitized`
-            // (the long pre-truncation form). Recompute base_len each iteration so the
-            // candidate never exceeds PG_TABLE_MAX_IDENT even when counter reaches 100+.
-            let mut counter = 2usize;
-            loop {
-                let suffix = format!("_{counter}");
-                let base = floor_char_boundary(&truncated, PG_TABLE_MAX_IDENT - suffix.len());
-                let candidate = format!("{base}{suffix}");
-                if !self.reverse.contains_key(candidate.as_str()) {
-                    self.reverse.insert(candidate.clone(), original_key.to_string());
-                    return candidate;
-                }
-                counter += 1;
+            // Collision: two different paths produce the same truncated name.
+            // Both get a hash suffix derived from their canonical key — deterministic
+            // regardless of registration order.
+            let existing_key = existing.clone();
+
+            // Promote the existing key to its hash suffix if it still holds the plain name.
+            if self.cache.get(&existing_key).map(|n| n == &truncated).unwrap_or(false) {
+                let promoted = self.hash_suffixed_name(&truncated, &existing_key);
+                self.cache.insert(existing_key.clone(), promoted.clone());
+                self.reverse.insert(promoted, existing_key);
+                // `reverse[truncated]` is kept as a sentinel so future collisions are detected.
             }
+
+            let candidate = self.hash_suffixed_name(&truncated, original_key);
+            self.reverse.insert(candidate.clone(), original_key.to_string());
+            return candidate;
         }
         self.reverse.insert(truncated.clone(), original_key.to_string());
         truncated
+    }
+
+    /// Build a hash-suffixed name from `base` using `original_key` as entropy source.
+    /// Falls back to a counter if the hash itself collides in the registry (extremely rare).
+    fn hash_suffixed_name(&self, base: &str, original_key: &str) -> String {
+        let hash = short_hash(original_key);
+        let prefix = floor_char_boundary(base, PG_TABLE_MAX_IDENT - HASH_SUFFIX_LEN);
+        let candidate = format!("{prefix}_{hash}");
+
+        if !self.reverse.contains_key(candidate.as_str()) {
+            return candidate;
+        }
+        // Hash collision fallback: append counter until a free slot is found.
+        let mut counter = 2usize;
+        loop {
+            let suffix = format!("_{counter}");
+            let base_part = floor_char_boundary(&candidate, PG_TABLE_MAX_IDENT - suffix.len());
+            let candidate2 = format!("{base_part}{suffix}");
+            if !self.reverse.contains_key(candidate2.as_str()) {
+                return candidate2;
+            }
+            counter += 1;
+        }
     }
 
     /// Returns all table names that were truncated to fit the 63-byte `PostgreSQL` limit.
@@ -507,25 +535,96 @@ mod tests {
     }
 
     #[test]
-    fn truncate_table_collision_post_trim_resolved_by_counter() {
+    fn truncate_table_collision_post_trim_produces_deterministic_names() {
         // Two paths that both Phase-1 trim to the same name ("shared_suffix") → collision.
-        // NamingRegistry must resolve to distinct names, both within PG_TABLE_MAX_IDENT.
+        // Both get a hash suffix derived from their canonical key — base is the trimmed name,
+        // not the long pre-truncation form.
         let long_prefix_a = "a".repeat(40); // 40 chars → full name 54 chars > 53
         let long_prefix_b = "b".repeat(40); // 40 chars → full name 54 chars > 53
+        let path_a = vec![long_prefix_a, "shared_suffix".to_string()];
+        let path_b = vec![long_prefix_b, "shared_suffix".to_string()];
+        let key_a = path_a.join(&PATH_SEP.to_string());
+        let key_b = path_b.join(&PATH_SEP.to_string());
         let mut reg = NamingRegistry::new();
-        let name1 = reg.table_name(&[long_prefix_a, "shared_suffix".to_string()]);
-        let name2 = reg.table_name(&[long_prefix_b, "shared_suffix".to_string()]);
-        // Both trimmed via Phase 1 to "shared_suffix" — ensure_unique resolves the collision
-        assert_ne!(name1, name2, "colliding trimmed names must be deduplicated");
-        assert!(name1.len() <= PG_TABLE_MAX_IDENT, "name1 '{}' too long", name1);
-        assert!(name2.len() <= PG_TABLE_MAX_IDENT, "name2 '{}' too long", name2);
-        // The first registered keeps the clean trimmed name
-        assert_eq!(name1, "shared_suffix");
-        // The collision suffix must use the truncated (short, human-readable) name as base.
-        // Before fix: name2 = "aaaa...bbbb_shared_suf_2" (from the long sanitized form).
-        // After fix:  name2 = "shared_suffix_2".
-        assert_eq!(name2, "shared_suffix_2",
-            "collision base must come from truncated name, not sanitized; got: {name2}");
+        reg.table_name(&path_a);
+        reg.table_name(&path_b);
+        // Read via lookup to get the final (post-promotion) names — mirrors finalizer pattern.
+        let name_a = reg.table_name_lookup_from_dot_key(&key_a);
+        let name_b = reg.table_name_lookup_from_dot_key(&key_b);
+        assert_ne!(name_a, name_b, "colliding trimmed names must be deduplicated");
+        assert!(name_a.len() <= PG_TABLE_MAX_IDENT, "name_a '{}' too long", name_a);
+        assert!(name_b.len() <= PG_TABLE_MAX_IDENT, "name_b '{}' too long", name_b);
+        // Both must start with the trimmed base — not the long pre-truncation sanitized form.
+        assert!(name_a.starts_with("shared_suffix"), "name_a '{name_a}' must start with shared_suffix");
+        assert!(name_b.starts_with("shared_suffix"), "name_b '{name_b}' must start with shared_suffix");
+    }
+
+    #[test]
+    fn ensure_unique_collision_is_deterministic() {
+        // Two paths that both Phase-1 trim to "shared_suffix" must get the SAME names
+        // regardless of registration order — verifies hash-based (not counter-based) collision.
+        //
+        // Mirrors the finalizer pattern: register all paths first (return values discarded),
+        // then read via lookup — which returns the final (post-promotion) names.
+        let long_prefix_a = "a".repeat(40);
+        let long_prefix_b = "b".repeat(40);
+        let path_a = vec![long_prefix_a.clone(), "shared_suffix".to_string()];
+        let path_b = vec![long_prefix_b.clone(), "shared_suffix".to_string()];
+        let key_a = path_a.join(&PATH_SEP.to_string());
+        let key_b = path_b.join(&PATH_SEP.to_string());
+
+        // Order 1: register A then B, then lookup both
+        let mut reg1 = NamingRegistry::new();
+        reg1.table_name(&path_a);
+        reg1.table_name(&path_b);
+        let name_a1 = reg1.table_name_lookup_from_dot_key(&key_a);
+        let name_b1 = reg1.table_name_lookup_from_dot_key(&key_b);
+
+        // Order 2: register B then A, then lookup both
+        let mut reg2 = NamingRegistry::new();
+        reg2.table_name(&path_b);
+        reg2.table_name(&path_a);
+        let name_a2 = reg2.table_name_lookup_from_dot_key(&key_a);
+        let name_b2 = reg2.table_name_lookup_from_dot_key(&key_b);
+
+        assert_eq!(name_a1, name_a2, "path A must get same name regardless of insertion order");
+        assert_eq!(name_b1, name_b2, "path B must get same name regardless of insertion order");
+        assert_ne!(name_a1, name_b1, "paths must produce distinct names");
+        assert!(name_a1.len() <= PG_TABLE_MAX_IDENT, "name_a '{}' too long", name_a1);
+        assert!(name_b1.len() <= PG_TABLE_MAX_IDENT, "name_b '{}' too long", name_b1);
+    }
+
+    #[test]
+    fn direct_sanitization_collision_produces_distinct_deterministic_names() {
+        // Two short paths that sanitize to the same name WITHOUT truncation — exercises the
+        // collision path in ensure_unique where truncated == sanitized (no Phase-1 strip).
+        // "foo_bar" and "foo-bar" both sanitize to "foo_bar"; "users.id" and "users_id" → "users_id".
+        let path_a = vec!["foo_bar".to_string()];
+        let path_b = vec!["foo-bar".to_string()]; // hyphen → underscore → same sanitized name
+        let key_a = path_a.join(&PATH_SEP.to_string());
+        let key_b = path_b.join(&PATH_SEP.to_string());
+
+        // Order 1: A then B
+        let mut reg1 = NamingRegistry::new();
+        reg1.table_name(&path_a);
+        reg1.table_name(&path_b);
+        let name_a1 = reg1.table_name_lookup_from_dot_key(&key_a);
+        let name_b1 = reg1.table_name_lookup_from_dot_key(&key_b);
+
+        // Order 2: B then A
+        let mut reg2 = NamingRegistry::new();
+        reg2.table_name(&path_b);
+        reg2.table_name(&path_a);
+        let name_a2 = reg2.table_name_lookup_from_dot_key(&key_a);
+        let name_b2 = reg2.table_name_lookup_from_dot_key(&key_b);
+
+        assert_ne!(name_a1, name_b1, "colliding sanitized names must be distinct");
+        assert_eq!(name_a1, name_a2, "path A must get same name regardless of order");
+        assert_eq!(name_b1, name_b2, "path B must get same name regardless of order");
+        assert!(name_a1.starts_with("foo_bar"), "name_a '{name_a1}' must start with foo_bar");
+        assert!(name_b1.starts_with("foo_bar"), "name_b '{name_b1}' must start with foo_bar");
+        assert!(name_a1.len() <= PG_TABLE_MAX_IDENT);
+        assert!(name_b1.len() <= PG_TABLE_MAX_IDENT);
     }
 
     #[test]
