@@ -173,6 +173,8 @@ pub struct Pass2Progress {
     pub constraints_total: usize,
     pub constraints_done: usize,
     pub constraints_complete: bool,
+    /// True when the import was run with `skip_constraints = true` — Phase D shows "Skipped".
+    pub constraints_skipped: bool,
 }
 
 impl Pass2Progress {
@@ -216,6 +218,8 @@ pub struct ProjectState {
     pub import_limit: Option<u64>,
     /// Emit verbose pass 2 logs (RAM tick every second, DISPATCH every 10k rows). Default false.
     pub verbose_logs: bool,
+    /// Skip the constraint phase (PK + FK) at the end of Pass 2. Default false.
+    pub skip_constraints: bool,
 }
 
 impl Default for ProjectState {
@@ -237,6 +241,7 @@ impl Default for ProjectState {
             disabled_strategies: HashSet::new(),
             import_limit: None,
             verbose_logs: false,
+            skip_constraints: false,
         }
     }
 }
@@ -808,6 +813,7 @@ mod tests {
             stats: vec![],
             strategy_overrides: HashMap::new(),
             overflow_warnings: vec![],
+            detected_format: None,
         });
 
         s.clear_snapshot();
@@ -833,6 +839,7 @@ mod tests {
             column_collisions: vec![],
             stats: vec![],
             overflow_warnings: vec![],
+            detected_format: None,
             strategy_overrides: {
                 let mut m = HashMap::new();
                 m.insert("t".to_string(), UserOverride::Jsonb);
@@ -866,6 +873,7 @@ mod tests {
             column_collisions: vec![],
             stats: vec![],
             overflow_warnings: vec![],
+            detected_format: None,
             strategy_overrides: HashMap::new(),
         };
         let mut s = AppState::default();
@@ -1164,5 +1172,17 @@ mod tests {
             s.import.pass2_progress.log_lines.iter().any(|l| l.contains("Import complete")),
             "residual log event must appear after flush"
         );
+    }
+
+    #[test]
+    fn pass2_progress_constraints_skipped_default_false() {
+        let p = Pass2Progress::default();
+        assert!(!p.constraints_skipped, "constraints_skipped must default to false");
+    }
+
+    #[test]
+    fn project_state_skip_constraints_default_false() {
+        let p = ProjectState::default();
+        assert!(!p.skip_constraints, "skip_constraints must default to false");
     }
 }

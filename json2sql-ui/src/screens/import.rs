@@ -88,6 +88,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 ram_low_watermark: None,
                 verbose: verbose_logs,
                 hint_format,
+                skip_constraints: false,
             };
             json2sql::pass2::runner::run(&source_file, &schemas, &client, &pg_url, &cfg, Some(tx))
             .await
