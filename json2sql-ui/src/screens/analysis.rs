@@ -70,14 +70,16 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         let handle = tokio::task::spawn_blocking(move || {
             let config = json2sql::pass1::runner::Pass1Config {
                 root_table,
-                text_threshold: PASS1_TEXT_THRESHOLD,
-                array_as_pg_array: false,
-                wide_column_threshold: PASS1_WIDE_COLUMN_THRESHOLD,
-                sibling_threshold: PASS1_SIBLING_THRESHOLD,
-                sibling_jaccard: PASS1_SIBLING_JACCARD,
-                stable_threshold: PASS1_STABLE_THRESHOLD,
-                rare_threshold: PASS1_RARE_THRESHOLD,
-                disabled_strategies,
+                registry: json2sql::schema::registry::RegistryConfig {
+                    text_threshold: PASS1_TEXT_THRESHOLD,
+                    array_as_pg_array: false,
+                    wide_column_threshold: PASS1_WIDE_COLUMN_THRESHOLD,
+                    sibling_threshold: PASS1_SIBLING_THRESHOLD,
+                    sibling_jaccard: PASS1_SIBLING_JACCARD,
+                    stable_threshold: PASS1_STABLE_THRESHOLD,
+                    rare_threshold: PASS1_RARE_THRESHOLD,
+                    disabled_strategies,
+                },
                 num_workers: Some(workers),
             };
             if workers > 1 {

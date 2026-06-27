@@ -10,7 +10,6 @@
 //! The resulting [`Pass1Result::schemas`] are sorted topologically (parents before children)
 //! and are ready to be serialized or handed directly to Pass 2.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use crossbeam_channel;
@@ -23,9 +22,8 @@ use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonFormat, JsonReader};
 use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::finalizer::OverflowWarning;
-use crate::schema::registry::SchemaRegistry;
+use crate::schema::registry::{RegistryConfig, SchemaRegistry};
 use crate::schema::stats::ColumnStats;
-use crate::schema::strategies::StrategyName;
 use crate::schema::table_schema::TableSchema;
 
 const PROGRESS_INTERVAL: u64 = 1_000;
@@ -43,14 +41,7 @@ fn emit_root_wrapper_warning(format: &JsonFormat, progress_tx: Option<&ProgressT
 /// All parameters controlling a Pass 1 run.
 pub struct Pass1Config {
     pub root_table: String,
-    pub text_threshold: u32,
-    pub array_as_pg_array: bool,
-    pub wide_column_threshold: usize,
-    pub sibling_threshold: usize,
-    pub sibling_jaccard: f64,
-    pub stable_threshold: f64,
-    pub rare_threshold: f64,
-    pub disabled_strategies: HashSet<StrategyName>,
+    pub registry: RegistryConfig,
     /// Used by `run_parallel` only; ignored by run and `run_inspect`.
     pub num_workers: Option<usize>,
 }
@@ -89,16 +80,7 @@ pub fn run(
     } else {
         None
     };
-    let mut registry = SchemaRegistry::new(
-        config.text_threshold,
-        config.array_as_pg_array,
-        config.wide_column_threshold,
-        config.sibling_threshold,
-        config.sibling_jaccard,
-        config.stable_threshold,
-        config.rare_threshold,
-        config.disabled_strategies.clone(),
-    );
+    let mut registry = SchemaRegistry::new(config.registry.clone());
     if let Some(ref tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Pass1Log("Detecting JSON format…".to_string()));
     }
@@ -226,16 +208,18 @@ pub fn run_inspect(
 }
 
 fn build_inspect_registry(config: &Pass1Config) -> SchemaRegistry {
-    SchemaRegistry::new(
-        config.text_threshold,
-        false,        // array_as_pg_array: always false in inspect mode
-        usize::MAX,   // wide_column_threshold: disable wide detection
-        usize::MAX,   // sibling_threshold: disable sibling merging
-        1.0,          // sibling_jaccard
-        0.0,          // stable_threshold
-        0.0,          // rare_threshold
-        HashSet::from([StrategyName::Sibling]),
-    )
+    use std::collections::HashSet;
+    use crate::schema::strategies::StrategyName;
+    SchemaRegistry::new(RegistryConfig {
+        text_threshold: config.registry.text_threshold,
+        array_as_pg_array: false,
+        wide_column_threshold: usize::MAX,
+        sibling_threshold: usize::MAX,
+        sibling_jaccard: 1.0,
+        stable_threshold: 0.0,
+        rare_threshold: 0.0,
+        disabled_strategies: HashSet::from([StrategyName::Sibling]),
+    })
 }
 
 fn scan_objects_with_limit(
@@ -338,19 +322,14 @@ fn spawn_worker_threads(
     num_workers: usize,
 ) -> Vec<std::thread::JoinHandle<crate::error::Result<SchemaRegistry>>> {
     let fallback_root = config.root_table.clone();
-    let disabled = config.disabled_strategies.clone();
-    let (tt, apga, wct, st, sj, stable, rare) = (
-        config.text_threshold, config.array_as_pg_array, config.wide_column_threshold,
-        config.sibling_threshold, config.sibling_jaccard, config.stable_threshold,
-        config.rare_threshold,
-    );
+    let registry_cfg = config.registry.clone();
 
     let handles = (0..num_workers)
         .map(|_| {
             let rx = rx.clone();
             let fallback_root = fallback_root.clone();
-            let disabled = disabled.clone();
-            let mut reg = SchemaRegistry::new(tt, apga, wct, st, sj, stable, rare, disabled);
+            let registry_cfg = registry_cfg.clone();
+            let mut reg = SchemaRegistry::new(registry_cfg);
             std::thread::spawn(move || {
                 while let Ok((key, mut bytes)) = rx.recv() {
                     let root = key.as_deref().unwrap_or(&fallback_root);
@@ -432,11 +411,7 @@ fn join_and_merge_workers(
 ) -> (SchemaRegistry, Option<crate::error::J2sError>) {
     let join_results: Vec<_> = handles.into_iter().map(std::thread::JoinHandle::join).collect();
 
-    let mut merged = SchemaRegistry::new(
-        config.text_threshold, config.array_as_pg_array, config.wide_column_threshold,
-        config.sibling_threshold, config.sibling_jaccard, config.stable_threshold,
-        config.rare_threshold, config.disabled_strategies.clone(),
-    );
+    let mut merged = SchemaRegistry::new(config.registry.clone());
     let mut worker_errors: Vec<String> = Vec::new();
     for result in join_results {
         match result.map_err(|_| crate::error::J2sError::Schema(
@@ -463,6 +438,7 @@ fn join_and_merge_workers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::path::Path;
 
     fn fixture(name: &str) -> std::path::PathBuf {
@@ -472,14 +448,16 @@ mod tests {
     fn inspect_config(root: &str) -> Pass1Config {
         Pass1Config {
             root_table: root.to_string(),
-            text_threshold: 256,
-            array_as_pg_array: false,
-            wide_column_threshold: usize::MAX,
-            sibling_threshold: usize::MAX,
-            sibling_jaccard: 1.0,
-            stable_threshold: 0.0,
-            rare_threshold: 0.0,
-            disabled_strategies: HashSet::new(),
+            registry: RegistryConfig {
+                text_threshold: 256,
+                array_as_pg_array: false,
+                wide_column_threshold: usize::MAX,
+                sibling_threshold: usize::MAX,
+                sibling_jaccard: 1.0,
+                stable_threshold: 0.0,
+                rare_threshold: 0.0,
+                disabled_strategies: HashSet::new(),
+            },
             num_workers: None,
         }
     }
@@ -557,14 +535,16 @@ mod tests {
             path,
             &Pass1Config {
                 root_table: "users".to_string(),
-                text_threshold: 256,
-                array_as_pg_array: false,
-                wide_column_threshold: usize::MAX,
-                sibling_threshold: usize::MAX,
-                sibling_jaccard: 1.0,
-                stable_threshold: 0.0,
-                rare_threshold: 0.0,
-                disabled_strategies: HashSet::new(),
+                registry: RegistryConfig {
+                    text_threshold: 256,
+                    array_as_pg_array: false,
+                    wide_column_threshold: usize::MAX,
+                    sibling_threshold: usize::MAX,
+                    sibling_jaccard: 1.0,
+                    stable_threshold: 0.0,
+                    rare_threshold: 0.0,
+                    disabled_strategies: HashSet::new(),
+                },
                 num_workers: Some(workers),
             },
             None,
@@ -612,14 +592,16 @@ mod tests {
             f.path(),
             &Pass1Config {
                 root_table: "root".to_string(),
-                text_threshold: 256,
-                array_as_pg_array: false,
-                wide_column_threshold: usize::MAX,
-                sibling_threshold: usize::MAX,
-                sibling_jaccard: 1.0,
-                stable_threshold: 0.0,
-                rare_threshold: 0.0,
-                disabled_strategies: HashSet::new(),
+                registry: RegistryConfig {
+                    text_threshold: 256,
+                    array_as_pg_array: false,
+                    wide_column_threshold: usize::MAX,
+                    sibling_threshold: usize::MAX,
+                    sibling_jaccard: 1.0,
+                    stable_threshold: 0.0,
+                    rare_threshold: 0.0,
+                    disabled_strategies: HashSet::new(),
+                },
                 num_workers: Some(8),
             },
             None,
@@ -640,14 +622,16 @@ mod tests {
             f.path(),
             &Pass1Config {
                 root_table: "root".to_string(),
-                text_threshold: 256,
-                array_as_pg_array: false,
-                wide_column_threshold: usize::MAX,
-                sibling_threshold: usize::MAX,
-                sibling_jaccard: 1.0,
-                stable_threshold: 0.0,
-                rare_threshold: 0.0,
-                disabled_strategies: HashSet::new(),
+                registry: RegistryConfig {
+                    text_threshold: 256,
+                    array_as_pg_array: false,
+                    wide_column_threshold: usize::MAX,
+                    sibling_threshold: usize::MAX,
+                    sibling_jaccard: 1.0,
+                    stable_threshold: 0.0,
+                    rare_threshold: 0.0,
+                    disabled_strategies: HashSet::new(),
+                },
                 num_workers: Some(4),
             },
             None,
@@ -674,14 +658,16 @@ mod tests {
             f.path(),
             &Pass1Config {
                 root_table: "root".to_string(),
-                text_threshold: 256,
-                array_as_pg_array: false,
-                wide_column_threshold: usize::MAX,
-                sibling_threshold: usize::MAX,
-                sibling_jaccard: 1.0,
-                stable_threshold: 0.0,
-                rare_threshold: 0.0,
-                disabled_strategies: HashSet::new(),
+                registry: RegistryConfig {
+                    text_threshold: 256,
+                    array_as_pg_array: false,
+                    wide_column_threshold: usize::MAX,
+                    sibling_threshold: usize::MAX,
+                    sibling_jaccard: 1.0,
+                    stable_threshold: 0.0,
+                    rare_threshold: 0.0,
+                    disabled_strategies: HashSet::new(),
+                },
                 num_workers: Some(1),
             },
             None,
@@ -704,14 +690,16 @@ mod tests {
             f.path(),
             &Pass1Config {
                 root_table: "root".to_string(),
-                text_threshold: 256,
-                array_as_pg_array: false,
-                wide_column_threshold: usize::MAX,
-                sibling_threshold: usize::MAX,
-                sibling_jaccard: 1.0,
-                stable_threshold: 0.0,
-                rare_threshold: 0.0,
-                disabled_strategies: HashSet::new(),
+                registry: RegistryConfig {
+                    text_threshold: 256,
+                    array_as_pg_array: false,
+                    wide_column_threshold: usize::MAX,
+                    sibling_threshold: usize::MAX,
+                    sibling_jaccard: 1.0,
+                    stable_threshold: 0.0,
+                    rare_threshold: 0.0,
+                    disabled_strategies: HashSet::new(),
+                },
                 num_workers: Some(1),
             },
             None,
@@ -757,14 +745,16 @@ mod tests {
     fn wrapper_config(root: &str) -> Pass1Config {
         Pass1Config {
             root_table: root.to_string(),
-            text_threshold: 256,
-            array_as_pg_array: false,
-            wide_column_threshold: usize::MAX,
-            sibling_threshold: usize::MAX,
-            sibling_jaccard: 1.0,
-            stable_threshold: 0.0,
-            rare_threshold: 0.0,
-            disabled_strategies: HashSet::new(),
+            registry: RegistryConfig {
+                text_threshold: 256,
+                array_as_pg_array: false,
+                wide_column_threshold: usize::MAX,
+                sibling_threshold: usize::MAX,
+                sibling_jaccard: 1.0,
+                stable_threshold: 0.0,
+                rare_threshold: 0.0,
+                disabled_strategies: HashSet::new(),
+            },
             num_workers: None,
         }
     }
@@ -817,14 +807,16 @@ mod tests {
             &path,
             &Pass1Config {
                 root_table: "wrong_name".to_string(),
-                text_threshold: 256,
-                array_as_pg_array: false,
-                wide_column_threshold: usize::MAX,
-                sibling_threshold: usize::MAX,
-                sibling_jaccard: 1.0,
-                stable_threshold: 0.0,
-                rare_threshold: 0.0,
-                disabled_strategies: HashSet::new(),
+                registry: RegistryConfig {
+                    text_threshold: 256,
+                    array_as_pg_array: false,
+                    wide_column_threshold: usize::MAX,
+                    sibling_threshold: usize::MAX,
+                    sibling_jaccard: 1.0,
+                    stable_threshold: 0.0,
+                    rare_threshold: 0.0,
+                    disabled_strategies: HashSet::new(),
+                },
                 num_workers: Some(1),
             },
             None,
@@ -869,14 +861,16 @@ mod tests {
             &path,
             &Pass1Config {
                 root_table: "foods".to_string(),
-                text_threshold: 256,
-                array_as_pg_array: false,
-                wide_column_threshold: usize::MAX,
-                sibling_threshold: usize::MAX,
-                sibling_jaccard: 1.0,
-                stable_threshold: 0.0,
-                rare_threshold: 0.0,
-                disabled_strategies: HashSet::new(),
+                registry: RegistryConfig {
+                    text_threshold: 256,
+                    array_as_pg_array: false,
+                    wide_column_threshold: usize::MAX,
+                    sibling_threshold: usize::MAX,
+                    sibling_jaccard: 1.0,
+                    stable_threshold: 0.0,
+                    rare_threshold: 0.0,
+                    disabled_strategies: HashSet::new(),
+                },
                 num_workers: Some(2),
             },
             None,
