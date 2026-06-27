@@ -101,9 +101,9 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
 
         state.write().abort_handle = Some(handle.abort_handle());
 
-        // Throttle UI updates to ~10 Hz — prevents GTK event loop starvation on high-frequency
-        // progress events (1 per 1 000 rows), which causes "broken pipe" on display flush.
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        // Throttle UI updates to ~5 Hz — halves DOM patch frequency vs previous 100ms.
+        // Critical on large files (240+ tables): reduces IPC pipe pressure during user interaction.
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending: Vec<ProgressEvent> = Vec::new();
         let mut finished = false;
@@ -226,8 +226,12 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         .map(|(k, v)| (k.clone(), *v))
         .collect();
     table_rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+    // Totaux calculés sur le jeu complet avant le cap — le success banner et label_b
+    // doivent refléter le total réel, pas seulement les 100 premières tables.
     let total_rows: u64   = table_rows.iter().map(|(_, n)| n).sum();
     let table_count       = table_rows.len();
+    let hidden_tables     = table_count.saturating_sub(100);
+    table_rows.truncate(100);
     let anomaly_dir_label = state.read().project.anomaly_dir
         .as_ref()
         .map(|p| p.display().to_string());
@@ -315,7 +319,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                         div {
                             class: "log",
                             style: "border:none;border-radius:0;padding:10px 14px;height:100%;overflow-y:auto;line-height:1.5;",
-                            for line in progress.log_lines.iter() {
+                            for line in progress.log_lines.iter().skip(progress.log_lines.len().saturating_sub(50)) {
                                 {
                                     let is_err  = line.to_lowercase().contains("error");
                                     let is_warn = !is_err && (line.contains("Anomaly") || line.contains("WARNING") || line.contains("Warning") || line.contains('⚠'));
@@ -362,6 +366,13 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                                             }
                                             td { style: "font-family:'JetBrains Mono',monospace;font-size:var(--fs-xs);color:var(--acc);font-weight:600;white-space:nowrap;text-align:right;",
                                                 "{count}"
+                                            }
+                                        }
+                                    }
+                                    if hidden_tables > 0 {
+                                        tr {
+                                            td { colspan: "2", style: "font-size:var(--fs-xs);color:var(--fg-4);padding:4px 0;",
+                                                "+ {hidden_tables} autres tables…"
                                             }
                                         }
                                     }
