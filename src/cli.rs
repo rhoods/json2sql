@@ -181,6 +181,12 @@ pub struct Cli {
     /// 0 = create tables with no rows. Default: no limit (full import).
     #[arg(long, value_name = "N")]
     pub limit: Option<u64>,
+
+    /// Skip the constraint phase (PRIMARY KEY + FOREIGN KEY) at the end of Pass 2.
+    /// Useful for dev/exploration runs or pipelines that apply constraints in a separate step.
+    /// No-op when combined with --dry-run (which exits before Pass 2).
+    #[arg(long, default_value_t = false)]
+    pub no_constraints: bool,
 }
 
 /// Re-exported from [`crate::anomaly::reporter`] so callers can use it via `cli::AnomalyFormat`.
@@ -287,5 +293,25 @@ mod tests {
         ]).unwrap();
         assert_eq!(cli.disable_strategy, vec!["sibling"]);
         assert_eq!(cli.limit, Some(100));
+    }
+
+    #[test]
+    fn test_no_constraints_default_false() {
+        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
+        assert!(!cli.no_constraints, "--no-constraints must default to false");
+    }
+
+    #[test]
+    fn test_no_constraints_flag_parses() {
+        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--no-constraints"]).unwrap();
+        assert!(cli.no_constraints, "--no-constraints flag must set field to true");
+    }
+
+    #[test]
+    fn test_no_constraints_composable_with_dry_run() {
+        // --dry-run exits before pass2, so --no-constraints is a silent no-op — but it must parse
+        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--dry-run", "--no-constraints"]).unwrap();
+        assert!(cli.dry_run);
+        assert!(cli.no_constraints);
     }
 }

@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
                 schema_input: cli.schema_input,
                 schema_report: cli.schema_report,
                 schema_report_output: cli.schema_report_output,
-                skip_constraints: false,
+                skip_constraints: cli.no_constraints,
             };
             pipeline::run_pipeline(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))
         }
