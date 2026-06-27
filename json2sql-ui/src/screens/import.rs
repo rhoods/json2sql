@@ -101,9 +101,9 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
 
         state.write().abort_handle = Some(handle.abort_handle());
 
-        // Throttle UI updates to ~10 Hz — prevents GTK event loop starvation on high-frequency
-        // progress events (1 per 1 000 rows), which causes "broken pipe" on display flush.
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        // Throttle UI updates to ~5 Hz — halves DOM patch frequency vs previous 100ms.
+        // Critical on large files (240+ tables): reduces IPC pipe pressure during user interaction.
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending: Vec<ProgressEvent> = Vec::new();
         let mut finished = false;
