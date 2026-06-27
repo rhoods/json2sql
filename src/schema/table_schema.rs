@@ -403,6 +403,8 @@ pub enum InferredStrategy {
 /// Converts to [`InferredStrategy`] via `From<&UserOverride>` for use in Pass 2.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UserOverride {
+    /// Force standard column layout — equivalent to [`InferredStrategy::Columns`].
+    Columns,
     /// Force EAV pivot layout — equivalent to [`InferredStrategy::Pivot`].
     Pivot,
     /// Force JSONB storage — equivalent to [`InferredStrategy::Jsonb`].
@@ -429,7 +431,8 @@ pub enum UserOverride {
 impl From<&UserOverride> for InferredStrategy {
     fn from(ov: &UserOverride) -> Self {
         match ov {
-            UserOverride::Pivot                              => InferredStrategy::Pivot,
+            UserOverride::Columns                           => InferredStrategy::Columns,
+            UserOverride::Pivot                             => InferredStrategy::Pivot,
             UserOverride::Jsonb                             => InferredStrategy::Jsonb,
             UserOverride::Skip                              => InferredStrategy::Ignore,
             UserOverride::JsonbFlatten                      => InferredStrategy::JsonbFlatten,
