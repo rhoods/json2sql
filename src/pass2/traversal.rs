@@ -115,7 +115,8 @@ fn dispatch_child_object<S: RowSink>(
     child_id: Uuid,
 ) -> Result<()> {
     let Value::Object(nested) = child_value else { return Ok(()); };
-    match &child_schema.inferred_strategy {
+    let eff = child_schema.effective_strategy();
+    match &*eff {
         InferredStrategy::Pivot => insert_pivot_object(sinks, anomalies, child_schema, nested, child_id)?,
         InferredStrategy::Jsonb => insert_jsonb_object(path_map, sinks, anomalies, child_schema, child_value, child_id)?,
         InferredStrategy::StructuredPivot(suffix_schema) => {
@@ -269,7 +270,8 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
         let Some(child_schema) = path_map.values().find(|s| s.name == *child_table_name) else { continue };
         match sub_value {
             Value::Object(nested) => {
-                match &child_schema.inferred_strategy {
+                let eff = child_schema.effective_strategy();
+                match &*eff {
                     InferredStrategy::SiblingCollapse(ss) => {
                         let ss = ss.clone();
                         insert_sibling_collapse_object(path_map, sinks, anomalies, child_schema, nested, row_id, &ss)?;
@@ -470,7 +472,8 @@ fn route_independent_child<S: RowSink>(
     let Some(child_schema) = path_map.get(child_path_key) else { return Ok(false) };
     if child_schema.parent_table.as_deref() != Some(schema_name) { return Ok(false); }
     if let Value::Object(nested) = value {
-        match &child_schema.inferred_strategy {
+        let eff = child_schema.effective_strategy();
+        match &*eff {
             InferredStrategy::SiblingCollapse(ss) => insert_sibling_collapse_object(path_map, sinks, anomalies, child_schema, nested, routing_id, ss)?,
             InferredStrategy::SiblingCollapseMulti(cg) => insert_sibling_collapse_multi(path_map, sinks, anomalies, child_schema, nested, routing_id, cg)?,
             _ => {

@@ -400,10 +400,11 @@ pub enum InferredStrategy {
 /// User-facing override for a table's materialization strategy.
 ///
 /// Applied by `apply_user_overrides` between Pass 1 and Pass 2.
-/// Only three choices are exposed to the user in the IHM — the full inferred strategy set
-/// is not directly editable.
+/// Converts to [`InferredStrategy`] via `From<&UserOverride>` for use in Pass 2.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UserOverride {
+    /// Force standard column layout — equivalent to [`InferredStrategy::Columns`].
+    Columns,
     /// Force EAV pivot layout — equivalent to [`InferredStrategy::Pivot`].
     Pivot,
     /// Force JSONB storage — equivalent to [`InferredStrategy::Jsonb`].
@@ -414,6 +415,36 @@ pub enum UserOverride {
     /// variant was renamed.
     #[serde(alias = "Ignore")]
     Skip,
+    /// Inline child as a JSONB column on the parent — IHM override only.
+    JsonbFlatten,
+    /// Inline child's scalar fields as prefixed columns on the parent.
+    Flatten {
+        prefix: String,
+        max_depth: u8,
+    },
+    /// Normalize dynamic keys: each JSON key becomes a row with the key as a typed ID column.
+    NormalizeDynamicKeys {
+        id_column: String,
+    },
+}
+
+impl From<&UserOverride> for InferredStrategy {
+    fn from(ov: &UserOverride) -> Self {
+        match ov {
+            UserOverride::Columns                           => InferredStrategy::Columns,
+            UserOverride::Pivot                             => InferredStrategy::Pivot,
+            UserOverride::Jsonb                             => InferredStrategy::Jsonb,
+            UserOverride::Skip                              => InferredStrategy::Ignore,
+            UserOverride::JsonbFlatten                      => InferredStrategy::JsonbFlatten,
+            UserOverride::Flatten { prefix, max_depth }     => InferredStrategy::Flatten {
+                prefix: prefix.clone(),
+                max_depth: *max_depth,
+            },
+            UserOverride::NormalizeDynamicKeys { id_column } => InferredStrategy::NormalizeDynamicKeys {
+                id_column: id_column.clone(),
+            },
+        }
+    }
 }
 
 /// A column in a finalized table schema.
@@ -496,9 +527,15 @@ pub struct TableSchema {
     pub child_kind: Option<ChildKind>,
     /// Depth in the hierarchy (root = 0)
     pub depth: usize,
-    /// How wide-table keys are materialized — set by `finalize()`, optionally mutated by `apply_user_overrides`.
+    /// How wide-table keys are materialized — set by `finalize()`. Never mutated after that.
     #[serde(alias = "wide_strategy", default)]
     pub inferred_strategy: InferredStrategy,
+    /// Strategy override from config.toml — takes precedence over `inferred_strategy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toml_override: Option<UserOverride>,
+    /// Strategy override from the IHM — takes precedence over `toml_override` and `inferred_strategy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_override: Option<UserOverride>,
     /// Maps prefixed column name → source JSON field for columns inlined via Flatten strategy.
     /// e.g. `nutrients_calories` → `nutrients` means: look up `obj["nutrients"]["calories"]`.
     /// Empty for tables that have no flattened children.
@@ -529,15 +566,35 @@ impl TableSchema {
             child_kind: None,
             depth,
             inferred_strategy: InferredStrategy::default(),
+            toml_override: None,
+            ui_override: None,
             flatten_sources: HashMap::new(),
             child_routes: HashMap::new(),
             row_count: 0,
         }
     }
 
+    /// Returns the effective strategy applying priority: ui_override > toml_override > inferred_strategy.
+    #[must_use]
+    pub fn effective_strategy(&self) -> std::borrow::Cow<InferredStrategy> {
+        if let Some(ov) = &self.ui_override {
+            return std::borrow::Cow::Owned(InferredStrategy::from(ov));
+        }
+        if let Some(ov) = &self.toml_override {
+            return std::borrow::Cow::Owned(InferredStrategy::from(ov));
+        }
+        std::borrow::Cow::Borrowed(&self.inferred_strategy)
+    }
+
     #[must_use]
     pub const fn is_root(&self) -> bool {
         self.parent_table.is_none()
+    }
+
+    /// Returns true if this table absorbs its children, considering all override levels.
+    #[must_use]
+    pub fn absorbs_children(&self) -> bool {
+        self.effective_strategy().absorbs_children()
     }
 
     /// Returns true if this is a junction table for a scalar array child.
@@ -592,8 +649,8 @@ impl InferredStrategy {
     /// Returns the names of child tables explicitly absorbed by this strategy.
     ///
     /// Only `SiblingCollapseMulti` carries an explicit absorbed-names list (one per `SiblingGroup`).
-    /// For `SiblingCollapse`, the absorbed sibling tables are tracked separately in the schema list
-    /// (each sibling receives `InferredStrategy::Ignore` during finalization) — returns empty here.
+    /// For `SiblingCollapse`, absorbed siblings are removed from schemas via `exclude_absorbed_children`
+    /// — returns empty here.
     #[must_use]
     pub fn absorbed_names(&self) -> Vec<&str> {
         match self {
@@ -706,11 +763,137 @@ mod tests {
 
     #[test]
     fn user_override_round_trip() {
-        for v in [UserOverride::Pivot, UserOverride::Jsonb, UserOverride::Skip] {
+        let variants = [
+            UserOverride::Pivot,
+            UserOverride::Jsonb,
+            UserOverride::Skip,
+            UserOverride::JsonbFlatten,
+            UserOverride::Flatten { prefix: "p_".to_string(), max_depth: 1 },
+            UserOverride::NormalizeDynamicKeys { id_column: "key_id".to_string() },
+        ];
+        for v in variants {
             let json = serde_json::to_string(&v).unwrap();
             let back: UserOverride = serde_json::from_str(&json).unwrap();
             assert_eq!(back, v);
         }
+    }
+
+    #[test]
+    fn from_user_override_pivot() {
+        assert_eq!(InferredStrategy::from(&UserOverride::Pivot), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn from_user_override_jsonb() {
+        assert_eq!(InferredStrategy::from(&UserOverride::Jsonb), InferredStrategy::Jsonb);
+    }
+
+    #[test]
+    fn from_user_override_skip_becomes_ignore() {
+        assert_eq!(InferredStrategy::from(&UserOverride::Skip), InferredStrategy::Ignore);
+    }
+
+    #[test]
+    fn from_user_override_jsonb_flatten() {
+        assert_eq!(InferredStrategy::from(&UserOverride::JsonbFlatten), InferredStrategy::JsonbFlatten);
+    }
+
+    #[test]
+    fn from_user_override_flatten() {
+        let ov = UserOverride::Flatten { prefix: "img_".to_string(), max_depth: 2 };
+        assert_eq!(
+            InferredStrategy::from(&ov),
+            InferredStrategy::Flatten { prefix: "img_".to_string(), max_depth: 2 }
+        );
+    }
+
+    #[test]
+    fn from_user_override_normalize_dynamic_keys() {
+        let ov = UserOverride::NormalizeDynamicKeys { id_column: "image_id".to_string() };
+        assert_eq!(
+            InferredStrategy::from(&ov),
+            InferredStrategy::NormalizeDynamicKeys { id_column: "image_id".to_string() }
+        );
+    }
+
+    #[test]
+    fn effective_strategy_returns_inferred_when_no_override() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Pivot;
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn effective_strategy_toml_overrides_inferred() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.toml_override = Some(UserOverride::Jsonb);
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Jsonb);
+    }
+
+    #[test]
+    fn effective_strategy_ui_overrides_toml_and_inferred() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.toml_override = Some(UserOverride::Jsonb);
+        s.ui_override = Some(UserOverride::Pivot);
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn effective_strategy_ui_overrides_inferred_without_toml() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.ui_override = Some(UserOverride::JsonbFlatten);
+        assert_eq!(*s.effective_strategy(), InferredStrategy::JsonbFlatten);
+    }
+
+    #[test]
+    fn table_schema_new_override_fields_absent_in_json() {
+        let s = make_schema("t");
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("toml_override"), "toml_override should be absent when None");
+        assert!(!json.contains("ui_override"), "ui_override should be absent when None");
+    }
+
+    #[test]
+    fn table_schema_override_fields_roundtrip() {
+        let mut s = make_schema("t");
+        s.toml_override = Some(UserOverride::Jsonb);
+        s.ui_override = Some(UserOverride::Pivot);
+        let json = serde_json::to_string(&s).unwrap();
+        let back: TableSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.toml_override, Some(UserOverride::Jsonb));
+        assert_eq!(back.ui_override, Some(UserOverride::Pivot));
+    }
+
+    #[test]
+    fn table_schema_old_json_without_overrides_deserialises_as_none() {
+        let json = r#"{"name":"root","path":["root"],"columns":[],"depth":0,"inferred_strategy":"Columns","flatten_sources":{}}"#;
+        let s: TableSchema = serde_json::from_str(json).unwrap();
+        assert_eq!(s.toml_override, None);
+        assert_eq!(s.ui_override, None);
+    }
+
+    #[test]
+    fn table_schema_absorbs_children_via_inferred_strategy() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Flatten { prefix: "p_".to_string(), max_depth: 1 };
+        assert!(s.absorbs_children(), "Flatten (inferred) must absorb children");
+    }
+
+    #[test]
+    fn table_schema_absorbs_children_via_ui_override_jsonb_flatten() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.ui_override = Some(UserOverride::JsonbFlatten);
+        assert!(s.absorbs_children(), "JsonbFlatten ui_override must absorb children");
+    }
+
+    #[test]
+    fn table_schema_does_not_absorb_children_without_override() {
+        let s = make_schema("t"); // Columns, no override
+        assert!(!s.absorbs_children());
     }
 
     #[test]

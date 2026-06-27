@@ -115,7 +115,7 @@ pub fn save_with_overrides(
 /// Load a Pass 1 result from a previously saved JSON snapshot.
 pub fn load(path: &Path) -> Result<SchemaSnapshot> {
     let data = std::fs::read(path).map_err(J2sError::Io)?;
-    let snapshot: SchemaSnapshot = serde_json::from_slice(&data)
+    let mut snapshot: SchemaSnapshot = serde_json::from_slice(&data)
         .map_err(|e| J2sError::InvalidInput(format!("Schema deserialization failed: {e}")))?;
     if snapshot.version != SCHEMA_FORMAT_VERSION {
         if snapshot.version == 1 {
@@ -129,6 +129,17 @@ pub fn load(path: &Path) -> Result<SchemaSnapshot> {
             "Schema snapshot version {} is not supported (expected {})",
             snapshot.version, SCHEMA_FORMAT_VERSION
         )));
+    }
+    // Migrate legacy root-level strategy_overrides → ui_override per TableSchema.
+    // ui_override already set on a schema (newer snapshots) takes precedence.
+    if !snapshot.strategy_overrides.is_empty() {
+        for (table_name, ov) in &snapshot.strategy_overrides {
+            if let Some(s) = snapshot.schemas.iter_mut().find(|s| &s.name == table_name) {
+                if s.ui_override.is_none() {
+                    s.ui_override = Some(ov.clone());
+                }
+            }
+        }
     }
     Ok(snapshot)
 }
@@ -211,6 +222,56 @@ mod tests {
     fn strategy_overrides_default_empty_on_new_snapshot() {
         let s = empty_snapshot();
         assert!(s.strategy_overrides.is_empty());
+    }
+
+    #[test]
+    fn load_migrates_strategy_overrides_to_ui_override() {
+        use crate::schema::table_schema::{InferredStrategy, UserOverride};
+        // Old snapshot with strategy_overrides at root level, no ui_override on schemas
+        let json = r#"{
+            "version": 2,
+            "total_rows": 0,
+            "schemas": [
+                {"name":"products","path":["products"],"columns":[],"depth":0,"inferred_strategy":"Columns","flatten_sources":{}}
+            ],
+            "truncated_names": [],
+            "column_collisions": [],
+            "stats": [],
+            "strategy_overrides": {"products": "Skip"}
+        }"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        let products = loaded.schemas.iter().find(|s| s.name == "products").unwrap();
+        assert_eq!(products.ui_override, Some(UserOverride::Skip),
+            "strategy_overrides from root must be migrated into ui_override");
+        assert_eq!(products.inferred_strategy, InferredStrategy::Columns,
+            "inferred_strategy must not be mutated during migration");
+    }
+
+    #[test]
+    fn load_does_not_overwrite_existing_ui_override_with_strategy_overrides() {
+        use crate::schema::table_schema::UserOverride;
+        // New snapshot with ui_override already on the table AND strategy_overrides at root
+        // ui_override wins (was set explicitly)
+        let json = r#"{
+            "version": 2,
+            "total_rows": 0,
+            "schemas": [
+                {"name":"products","path":["products"],"columns":[],"depth":0,
+                 "inferred_strategy":"Columns","flatten_sources":{},"ui_override":"Pivot"}
+            ],
+            "truncated_names": [],
+            "column_collisions": [],
+            "stats": [],
+            "strategy_overrides": {"products": "Jsonb"}
+        }"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        let products = loaded.schemas.iter().find(|s| s.name == "products").unwrap();
+        assert_eq!(products.ui_override, Some(UserOverride::Pivot),
+            "existing ui_override on schema must not be overwritten by strategy_overrides migration");
     }
 
     #[test]

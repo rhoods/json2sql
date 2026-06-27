@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 use crate::error::{J2sError, Result};
 use super::finalizer::exclude_absorbed_children;
 use super::observer::TableEntry;
-use super::table_schema::{ChildKind, ColumnSchema, KeyShape, SuffixSchema, TableSchema, InferredStrategy};
+use super::table_schema::{ChildKind, ColumnSchema, KeyShape, SuffixSchema, TableSchema, InferredStrategy, UserOverride};
 use super::type_tracker::{widen_pg_types, PgType};
 
 /// Fraction of keys that must be numeric (or ISO-language codes) to classify a key shape as
@@ -353,9 +353,9 @@ pub fn apply_flatten(
 pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &str) -> Result<()> {
     let (_, parent_name, field_name) = resolve_child_info(schemas, child_table_name, "apply_jsonb_flatten")?;
 
-    // Mark child as JsonbFlatten so absorbs_children() returns true for its descendants
+    // Mark child as JsonbFlatten (via ui_override) so absorbs_children() excludes its descendants
     if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
-        child.inferred_strategy = InferredStrategy::JsonbFlatten;
+        child.ui_override = Some(UserOverride::JsonbFlatten);
     }
 
     // Remove any nested children of the child table
@@ -380,7 +380,7 @@ pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &st
     }
 
     // Remove the child table and its absorbed descendants
-    schemas.retain(|s| !matches!(s.inferred_strategy, InferredStrategy::JsonbFlatten));
+    schemas.retain(|s| !matches!(*s.effective_strategy(), InferredStrategy::JsonbFlatten));
     Ok(())
 }
 
@@ -403,6 +403,40 @@ mod tests {
             pg_type: PgType::Text, not_null: false,
             is_generated: false, is_parent_fk: false,
         }
+    }
+
+    fn make_parent_child(parent_name: &str, child_name: &str) -> (TableSchema, TableSchema) {
+        use crate::schema::table_schema::ChildKind;
+        let parent = TableSchema::new(parent_name.to_string(), vec![parent_name.to_string()], 0);
+        let mut child = TableSchema::new(
+            child_name.to_string(),
+            vec![parent_name.to_string(), child_name.to_string()],
+            1,
+        );
+        child.parent_table = Some(parent_name.to_string());
+        child.child_kind = Some(ChildKind::Object);
+        (parent, child)
+    }
+
+    #[test]
+    fn apply_jsonb_flatten_sets_ui_override_not_inferred_strategy() {
+        let (parent, child) = make_parent_child("products", "products_tags");
+        let mut schemas = vec![parent, child];
+        apply_jsonb_flatten(&mut schemas, "products_tags").unwrap();
+        // child must be removed; only parent survives
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0].name, "products");
+        // inferred_strategy on child was not mutated (child is gone, but we test via parent)
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns, "parent inferred unchanged");
+    }
+
+    #[test]
+    fn apply_jsonb_flatten_adds_jsonb_column_to_parent() {
+        let (mut parent, child) = make_parent_child("products", "products_tags");
+        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::BigInt));
+        let mut schemas = vec![parent, child];
+        apply_jsonb_flatten(&mut schemas, "products_tags").unwrap();
+        assert!(schemas[0].columns.iter().any(|c| c.name == "products_tags" && c.pg_type == PgType::Jsonb));
     }
 
     #[test]

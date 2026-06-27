@@ -122,7 +122,12 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) ->
     }
 
     for op in deferred_normalize {
-        apply_normalize_dynamic_keys(schemas, &op.table_name, op.id_column)?;
+        let original = schemas.iter().find(|s| s.name == op.table_name).map(|s| s.inferred_strategy.clone());
+        apply_normalize_dynamic_keys(schemas, &op.table_name, op.id_column.clone())?;
+        if let Some(s) = schemas.iter_mut().find(|s| s.name == op.table_name) {
+            if let Some(orig) = original { s.inferred_strategy = orig; }
+            s.toml_override = Some(UserOverride::NormalizeDynamicKeys { id_column: op.id_column });
+        }
     }
     for op in deferred_flatten {
         apply_flatten(schemas, &op.table_name, &op.prefix, op.max_depth)?;
@@ -145,22 +150,25 @@ fn apply_strategy_override(
     let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") else { return vec![] };
     match strategy_str.to_lowercase().as_str() {
         "pivot" => {
-            if schema.inferred_strategy != InferredStrategy::Pivot {
-                eprintln!("  Override strategy: {table_name} → Pivot");
-                apply_wide_strategy_columns(schema, InferredStrategy::Pivot);
-            }
+            let original = schema.inferred_strategy.clone();
+            eprintln!("  Override strategy: {table_name} → Pivot");
+            apply_wide_strategy_columns(schema, InferredStrategy::Pivot);
+            schema.inferred_strategy = original;
+            schema.toml_override = Some(UserOverride::Pivot);
         }
         "jsonb" => {
-            if schema.inferred_strategy != InferredStrategy::Jsonb {
-                eprintln!("  Override strategy: {table_name} → Jsonb");
-                apply_wide_strategy_columns(schema, InferredStrategy::Jsonb);
-            }
+            let original = schema.inferred_strategy.clone();
+            eprintln!("  Override strategy: {table_name} → Jsonb");
+            apply_wide_strategy_columns(schema, InferredStrategy::Jsonb);
+            schema.inferred_strategy = original;
+            schema.toml_override = Some(UserOverride::Jsonb);
         }
         "columns" => {
-            if schema.inferred_strategy != InferredStrategy::Columns {
-                eprintln!("  Override strategy: {table_name} → Columns");
-                apply_wide_strategy_columns(schema, InferredStrategy::Columns);
-            }
+            let original = schema.inferred_strategy.clone();
+            eprintln!("  Override strategy: {table_name} → Columns");
+            apply_wide_strategy_columns(schema, InferredStrategy::Columns);
+            schema.inferred_strategy = original;
+            schema.toml_override = Some(UserOverride::Columns);
         }
         "structured_pivot" => {} // handled via suffix_columns below
         "normalize_dynamic_keys" => {
@@ -372,7 +380,11 @@ pub fn apply_user_overrides(
             match ov {
                 UserOverride::Pivot => apply_wide_strategy_columns(s, InferredStrategy::Pivot),
                 UserOverride::Jsonb => apply_wide_strategy_columns(s, InferredStrategy::Jsonb),
-                UserOverride::Skip  => {}
+                UserOverride::Columns
+                | UserOverride::Skip
+                | UserOverride::JsonbFlatten
+                | UserOverride::Flatten { .. }
+                | UserOverride::NormalizeDynamicKeys { .. } => {}
             }
         }
     }
@@ -640,6 +652,68 @@ mod tests {
 
         let col = schemas[0].columns.iter().find(|c| c.name == "age").unwrap();
         assert_eq!(col.pg_type, PgType::Integer);
+    }
+
+    fn toml_strategy(strategy: &str) -> HashMap<String, toml::Value> {
+        let mut m = HashMap::new();
+        m.insert("strategy".to_string(), toml::Value::String(strategy.to_string()));
+        m
+    }
+
+    #[test]
+    fn toml_pivot_sets_toml_override_and_preserves_inferred() {
+        let mut schemas = vec![simple_table("tags")];
+        schemas[0].inferred_strategy = InferredStrategy::Columns;
+        let mut tables = HashMap::new();
+        tables.insert("tags".to_string(), toml_strategy("pivot"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        apply_overrides(&mut schemas, &config).unwrap();
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must not be mutated");
+        assert_eq!(schemas[0].toml_override, Some(UserOverride::Pivot));
+        assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn toml_jsonb_sets_toml_override_and_preserves_inferred() {
+        let mut schemas = vec![simple_table("blob")];
+        schemas[0].inferred_strategy = InferredStrategy::Columns;
+        let mut tables = HashMap::new();
+        tables.insert("blob".to_string(), toml_strategy("jsonb"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        apply_overrides(&mut schemas, &config).unwrap();
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must not be mutated");
+        assert_eq!(schemas[0].toml_override, Some(UserOverride::Jsonb));
+        assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Jsonb);
+    }
+
+    #[test]
+    fn toml_normalize_dynamic_keys_sets_toml_override_and_preserves_inferred() {
+        use crate::schema::table_schema::{ChildKind, ColumnSchema};
+        let mut parent = simple_table("images");
+        parent.inferred_strategy = InferredStrategy::Columns;
+        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::BigInt));
+        // NormalizeDynamicKeys requires at least one Object child
+        let mut child = TableSchema::new("images_12584".to_string(), vec!["images".to_string(), "12584".to_string()], 1);
+        child.parent_table = Some("images".to_string());
+        child.child_kind = Some(ChildKind::Object);
+        let mut schemas = vec![parent, child];
+        let mut cols = HashMap::new();
+        cols.insert("strategy".to_string(), toml::Value::String("normalize_dynamic_keys".to_string()));
+        cols.insert("id_column".to_string(), toml::Value::String("image_id".to_string()));
+        let mut tables = HashMap::new();
+        tables.insert("images".to_string(), cols);
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        apply_overrides(&mut schemas, &config).unwrap();
+        let images = schemas.iter().find(|s| s.name == "images").unwrap();
+        assert_eq!(images.inferred_strategy, InferredStrategy::Columns, "inferred_strategy must not be mutated");
+        assert_eq!(
+            images.toml_override,
+            Some(UserOverride::NormalizeDynamicKeys { id_column: "image_id".to_string() })
+        );
+        assert_eq!(
+            *images.effective_strategy(),
+            InferredStrategy::NormalizeDynamicKeys { id_column: "image_id".to_string() }
+        );
     }
 
     fn simple_table(name: &str) -> TableSchema {
