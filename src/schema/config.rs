@@ -372,7 +372,10 @@ pub fn apply_user_overrides(
             match ov {
                 UserOverride::Pivot => apply_wide_strategy_columns(s, InferredStrategy::Pivot),
                 UserOverride::Jsonb => apply_wide_strategy_columns(s, InferredStrategy::Jsonb),
-                UserOverride::Skip  => {}
+                UserOverride::Skip
+                | UserOverride::JsonbFlatten
+                | UserOverride::Flatten { .. }
+                | UserOverride::NormalizeDynamicKeys { .. } => {}
             }
         }
     }

@@ -400,8 +400,7 @@ pub enum InferredStrategy {
 /// User-facing override for a table's materialization strategy.
 ///
 /// Applied by `apply_user_overrides` between Pass 1 and Pass 2.
-/// Only three choices are exposed to the user in the IHM — the full inferred strategy set
-/// is not directly editable.
+/// Converts to [`InferredStrategy`] via `From<&UserOverride>` for use in Pass 2.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UserOverride {
     /// Force EAV pivot layout — equivalent to [`InferredStrategy::Pivot`].
@@ -414,6 +413,35 @@ pub enum UserOverride {
     /// variant was renamed.
     #[serde(alias = "Ignore")]
     Skip,
+    /// Inline child as a JSONB column on the parent — IHM override only.
+    JsonbFlatten,
+    /// Inline child's scalar fields as prefixed columns on the parent.
+    Flatten {
+        prefix: String,
+        max_depth: u8,
+    },
+    /// Normalize dynamic keys: each JSON key becomes a row with the key as a typed ID column.
+    NormalizeDynamicKeys {
+        id_column: String,
+    },
+}
+
+impl From<&UserOverride> for InferredStrategy {
+    fn from(ov: &UserOverride) -> Self {
+        match ov {
+            UserOverride::Pivot                              => InferredStrategy::Pivot,
+            UserOverride::Jsonb                             => InferredStrategy::Jsonb,
+            UserOverride::Skip                              => InferredStrategy::Ignore,
+            UserOverride::JsonbFlatten                      => InferredStrategy::JsonbFlatten,
+            UserOverride::Flatten { prefix, max_depth }     => InferredStrategy::Flatten {
+                prefix: prefix.clone(),
+                max_depth: *max_depth,
+            },
+            UserOverride::NormalizeDynamicKeys { id_column } => InferredStrategy::NormalizeDynamicKeys {
+                id_column: id_column.clone(),
+            },
+        }
+    }
 }
 
 /// A column in a finalized table schema.
@@ -706,11 +734,57 @@ mod tests {
 
     #[test]
     fn user_override_round_trip() {
-        for v in [UserOverride::Pivot, UserOverride::Jsonb, UserOverride::Skip] {
+        let variants = [
+            UserOverride::Pivot,
+            UserOverride::Jsonb,
+            UserOverride::Skip,
+            UserOverride::JsonbFlatten,
+            UserOverride::Flatten { prefix: "p_".to_string(), max_depth: 1 },
+            UserOverride::NormalizeDynamicKeys { id_column: "key_id".to_string() },
+        ];
+        for v in variants {
             let json = serde_json::to_string(&v).unwrap();
             let back: UserOverride = serde_json::from_str(&json).unwrap();
             assert_eq!(back, v);
         }
+    }
+
+    #[test]
+    fn from_user_override_pivot() {
+        assert_eq!(InferredStrategy::from(&UserOverride::Pivot), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn from_user_override_jsonb() {
+        assert_eq!(InferredStrategy::from(&UserOverride::Jsonb), InferredStrategy::Jsonb);
+    }
+
+    #[test]
+    fn from_user_override_skip_becomes_ignore() {
+        assert_eq!(InferredStrategy::from(&UserOverride::Skip), InferredStrategy::Ignore);
+    }
+
+    #[test]
+    fn from_user_override_jsonb_flatten() {
+        assert_eq!(InferredStrategy::from(&UserOverride::JsonbFlatten), InferredStrategy::JsonbFlatten);
+    }
+
+    #[test]
+    fn from_user_override_flatten() {
+        let ov = UserOverride::Flatten { prefix: "img_".to_string(), max_depth: 2 };
+        assert_eq!(
+            InferredStrategy::from(&ov),
+            InferredStrategy::Flatten { prefix: "img_".to_string(), max_depth: 2 }
+        );
+    }
+
+    #[test]
+    fn from_user_override_normalize_dynamic_keys() {
+        let ov = UserOverride::NormalizeDynamicKeys { id_column: "image_id".to_string() };
+        assert_eq!(
+            InferredStrategy::from(&ov),
+            InferredStrategy::NormalizeDynamicKeys { id_column: "image_id".to_string() }
+        );
     }
 
     #[test]
