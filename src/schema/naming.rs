@@ -595,6 +595,39 @@ mod tests {
     }
 
     #[test]
+    fn direct_sanitization_collision_produces_distinct_deterministic_names() {
+        // Two short paths that sanitize to the same name WITHOUT truncation — exercises the
+        // collision path in ensure_unique where truncated == sanitized (no Phase-1 strip).
+        // "foo_bar" and "foo-bar" both sanitize to "foo_bar"; "users.id" and "users_id" → "users_id".
+        let path_a = vec!["foo_bar".to_string()];
+        let path_b = vec!["foo-bar".to_string()]; // hyphen → underscore → same sanitized name
+        let key_a = path_a.join(&PATH_SEP.to_string());
+        let key_b = path_b.join(&PATH_SEP.to_string());
+
+        // Order 1: A then B
+        let mut reg1 = NamingRegistry::new();
+        reg1.table_name(&path_a);
+        reg1.table_name(&path_b);
+        let name_a1 = reg1.table_name_lookup_from_dot_key(&key_a);
+        let name_b1 = reg1.table_name_lookup_from_dot_key(&key_b);
+
+        // Order 2: B then A
+        let mut reg2 = NamingRegistry::new();
+        reg2.table_name(&path_b);
+        reg2.table_name(&path_a);
+        let name_a2 = reg2.table_name_lookup_from_dot_key(&key_a);
+        let name_b2 = reg2.table_name_lookup_from_dot_key(&key_b);
+
+        assert_ne!(name_a1, name_b1, "colliding sanitized names must be distinct");
+        assert_eq!(name_a1, name_a2, "path A must get same name regardless of order");
+        assert_eq!(name_b1, name_b2, "path B must get same name regardless of order");
+        assert!(name_a1.starts_with("foo_bar"), "name_a '{name_a1}' must start with foo_bar");
+        assert!(name_b1.starts_with("foo_bar"), "name_b '{name_b1}' must start with foo_bar");
+        assert!(name_a1.len() <= PG_TABLE_MAX_IDENT);
+        assert!(name_b1.len() <= PG_TABLE_MAX_IDENT);
+    }
+
+    #[test]
     fn ensure_unique_counter_no_overflow_at_100() {
         // Shared suffix of 51 chars → truncated = 51 chars → base_len = 50 with old static formula.
         // At counter=100: base(50) + "_100"(4) = 54 > PG_TABLE_MAX_IDENT(53) before fix.
