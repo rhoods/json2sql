@@ -543,7 +543,7 @@ fn collect_surviving_route_targets<'a>(
 
 pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
     let absorbers: std::collections::HashSet<&str> = schemas
-        .iter().filter(|s| s.inferred_strategy.absorbs_children()).map(|s| s.name.as_str()).collect();
+        .iter().filter(|s| s.absorbs_children()).map(|s| s.name.as_str()).collect();
     let partial_absorbed: std::collections::HashSet<&str> = schemas
         .iter().flat_map(|s| s.inferred_strategy.absorbed_names()).collect();
     if absorbers.is_empty() && partial_absorbed.is_empty() { return; }

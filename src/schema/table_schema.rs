@@ -591,6 +591,12 @@ impl TableSchema {
         self.parent_table.is_none()
     }
 
+    /// Returns true if this table absorbs its children, considering all override levels.
+    #[must_use]
+    pub fn absorbs_children(&self) -> bool {
+        self.effective_strategy().absorbs_children()
+    }
+
     /// Returns true if this is a junction table for a scalar array child.
     ///
     /// Junction tables have the schema `(j2s_parent_id, value <type>, j2s_order INT)` — there
@@ -867,6 +873,27 @@ mod tests {
         let s: TableSchema = serde_json::from_str(json).unwrap();
         assert_eq!(s.toml_override, None);
         assert_eq!(s.ui_override, None);
+    }
+
+    #[test]
+    fn table_schema_absorbs_children_via_inferred_strategy() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Flatten { prefix: "p_".to_string(), max_depth: 1 };
+        assert!(s.absorbs_children(), "Flatten (inferred) must absorb children");
+    }
+
+    #[test]
+    fn table_schema_absorbs_children_via_ui_override_jsonb_flatten() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.ui_override = Some(UserOverride::JsonbFlatten);
+        assert!(s.absorbs_children(), "JsonbFlatten ui_override must absorb children");
+    }
+
+    #[test]
+    fn table_schema_does_not_absorb_children_without_override() {
+        let s = make_schema("t"); // Columns, no override
+        assert!(!s.absorbs_children());
     }
 
     #[test]
