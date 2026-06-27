@@ -170,8 +170,9 @@ impl NamingRegistry {
     #[must_use]
     pub fn table_name_lookup(&self, path: &[String]) -> String {
         let key = path.join(&PATH_SEP.to_string());
+        debug_assert!(self.cache.contains_key(&key),
+            "table_name_lookup called for unregistered path — pre-registration phase incomplete");
         self.cache.get(&key).cloned().unwrap_or_else(|| {
-            // Fallback: should never happen after pre-registration, but be safe.
             sanitize_identifier(&path.join("_"))
         })
     }
@@ -180,6 +181,8 @@ impl NamingRegistry {
     /// Use in the parallel schema-building phase where the key is already available.
     #[must_use]
     pub fn table_name_lookup_from_dot_key(&self, dot_key: &str) -> String {
+        debug_assert!(self.cache.contains_key(dot_key),
+            "table_name_lookup_from_dot_key called for unregistered key — pre-registration phase incomplete");
         self.cache.get(dot_key).cloned().unwrap_or_else(|| {
             sanitize_identifier(&dot_key.replace(PATH_SEP, "_"))
         })
