@@ -142,6 +142,7 @@ async fn run_pass2(
             ram_low_watermark: None,
             verbose: false,
             hint_format: pass1.detected_format.clone(),
+            skip_constraints: false,
         },
         None,
     )
