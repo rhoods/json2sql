@@ -97,7 +97,7 @@ pub fn insert_object<S: RowSink, A: AnomalyCollect>(
 ) -> Result<()> {
     // Special case: root table with Jsonb strategy — write the full object as a JSONB blob,
     // then still recurse into child tables so they receive their data.
-    if matches!(schema.inferred_strategy, InferredStrategy::Jsonb) && parent_id.is_none() {
+    if matches!(*schema.effective_strategy(), InferredStrategy::Jsonb) && parent_id.is_none() {
         return write_root_jsonb(path_map, ctx, schema, obj, row_id);
     }
 
@@ -200,7 +200,8 @@ fn insert_child_object<S: RowSink, A: AnomalyCollect>(
     value: &Value,
     parent_id: Uuid,
 ) -> Result<()> {
-    match &child_schema.inferred_strategy {
+    let eff = child_schema.effective_strategy();
+    match &*eff {
         InferredStrategy::Pivot => {
             insert_pivot_object(ctx.sinks, ctx.anomalies, child_schema, nested, parent_id)?;
         }
@@ -270,7 +271,8 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     obj: &serde_json::Map<String, Value>,
     row_id: Uuid,
 ) -> Result<()> {
-    let InferredStrategy::AutoSplit { medium_keys, wide_table_name, .. } = &schema.inferred_strategy else {
+    let eff = schema.effective_strategy();
+    let InferredStrategy::AutoSplit { medium_keys, wide_table_name, .. } = &*eff else {
         return Ok(());
     };
     let wide_value_type = path_map
@@ -400,5 +402,35 @@ mod tests {
         let v: Value = serde_json::from_str(json_part).expect("JSONB blob must be valid JSON");
         assert_eq!(v["name"], "Widget");
         assert_eq!(v["count"], 3);
+    }
+
+    #[test]
+    fn write_root_jsonb_via_ui_override_routes_correctly() {
+        use crate::schema::table_schema::UserOverride;
+        // Schema has inferred_strategy=Columns but ui_override=Jsonb — effective_strategy() returns Jsonb.
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        schema.inferred_strategy = InferredStrategy::Columns;
+        schema.ui_override = Some(UserOverride::Jsonb);
+        schema.columns.push(ColumnSchema {
+            name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
+            pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: false,
+        });
+        schema.columns.push(ColumnSchema {
+            name: "data".to_string(), original_name: "data".to_string(),
+            pg_type: PgType::Jsonb, not_null: false, is_generated: false, is_parent_fk: false,
+        });
+        let path_map: HashMap<String, TableSchema> = HashMap::new();
+        let mut anomalies = AnomalyCollector::new(None);
+        let mut sinks: HashMap<String, CaptureSink> = HashMap::new();
+        sinks.insert("t".to_string(), CaptureSink(Vec::new()));
+        let obj: serde_json::Map<String, Value> =
+            serde_json::from_str(r#"{"x":1}"#).unwrap();
+        insert_object(
+            &path_map,
+            &mut InsertCtx { sinks: &mut sinks, anomalies: &mut anomalies },
+            &schema, &obj, Uuid::nil(), None, None,
+        ).unwrap();
+        // Root Jsonb path writes exactly 1 row with a JSONB blob
+        assert_eq!(sinks["t"].0.len(), 1, "ui_override=Jsonb on root must produce one JSONB row");
     }
 }
