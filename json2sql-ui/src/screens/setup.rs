@@ -79,6 +79,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
 
     let import_limit = state.read().project.import_limit;
     let verbose_logs = state.read().project.verbose_logs;
+    let skip_constraints = state.read().project.skip_constraints;
 
     let step1_done = source_file.is_some();
     let step2_done = true; // optional — always OK
@@ -709,6 +710,24 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                     span { "Verbose logs " }
                                     span { style: "color:var(--fg-3);font-size:var(--fs-xs);",
                                         "(RAM tick / sec, DISPATCH every 10k rows)"
+                                    }
+                                }
+
+                                div { class: "divider" }
+
+                                h4 { style: "font-size:var(--fs-sm);margin:0 0 8px;color:var(--fg);", "Constraints" }
+                                label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: skip_constraints,
+                                        onchange: move |e| {
+                                            state.write().project.skip_constraints = e.value() == "true";
+                                            crate::config::try_save(&state.read().project);
+                                        },
+                                    }
+                                    span { "Skip constraints " }
+                                    span { style: "color:var(--fg-3);font-size:var(--fs-xs);",
+                                        "(omit PRIMARY KEY + FOREIGN KEY phase — faster for dev/exploration runs)"
                                     }
                                 }
                             }
