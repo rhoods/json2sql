@@ -135,6 +135,16 @@ pub struct AnomalySummary {
     pub examples: Vec<AnomalyExample>,
 }
 
+struct AnomalyEntry<'a> {
+    table: &'a str,
+    column: &'a str,
+    row_id: &'a str,
+    expected_type: &'a str,
+    truncated_value: &'a str,
+    char_len: usize,
+    actual_type: &'a str,
+}
+
 /// Collects anomaly statistics during Pass 2 and optionally streams each
 /// rejected row to a per-table NDJSON file for post-import investigation.
 ///
@@ -256,7 +266,15 @@ impl AnomalyCollector {
             }
 
             if want_file {
-                self.stream_to_file(table, column, row_id, expected_type, &truncated, char_len, actual_type)?;
+                self.stream_to_file(&AnomalyEntry {
+                    table,
+                    column,
+                    row_id,
+                    expected_type,
+                    truncated_value: &truncated,
+                    char_len,
+                    actual_type,
+                })?;
             }
         }
         self.total_count += 1;
@@ -264,36 +282,26 @@ impl AnomalyCollector {
     }
 
     /// Append one NDJSON line to the per-table anomaly file, creating it if necessary.
-    #[allow(clippy::too_many_arguments)] // T5: candidate for AnomalyEntry struct
-    fn stream_to_file(
-        &mut self,
-        table: &str,
-        column: &str,
-        row_id: &str,
-        expected_type: &str,
-        truncated: &str,
-        char_len: usize,
-        actual_type: &str,
-    ) -> Result<()> {
+    fn stream_to_file(&mut self, entry: &AnomalyEntry<'_>) -> Result<()> {
         let dir = self.anomaly_dir.as_ref().expect("called only when anomaly_dir is Some");
-        if !self.writers.contains_key(table) {
-            let safe_name = sanitize_table_name(table);
+        if !self.writers.contains_key(entry.table) {
+            let safe_name = sanitize_table_name(entry.table);
             let path = dir.join(format!("{safe_name}_anomalies.ndjson"));
             let file = File::create(&path).map_err(J2sError::Io)?;
-            self.writers.insert(table.to_string(), BufWriter::new(file));
-            self.written_files.insert(table.to_string(), path);
+            self.writers.insert(entry.table.to_string(), BufWriter::new(file));
+            self.written_files.insert(entry.table.to_string(), path);
         }
-        let writer = self.writers.get_mut(table)
+        let writer = self.writers.get_mut(entry.table)
             .expect("writer was inserted above in this same block");
         // serde_json::Map is infallible — avoids json! macro's internal unwrap.
         let mut obj = serde_json::Map::new();
-        obj.insert("table".into(),           table.into());
-        obj.insert("column".into(),          column.into());
-        obj.insert("row_id".into(),          row_id.into());
-        obj.insert("expected_type".into(),   expected_type.into());
-        obj.insert("actual_value".into(),    truncated.into());
-        obj.insert("actual_value_len".into(), char_len.into());
-        obj.insert("actual_type".into(),     actual_type.into());
+        obj.insert("table".into(),            entry.table.into());
+        obj.insert("column".into(),           entry.column.into());
+        obj.insert("row_id".into(),           entry.row_id.into());
+        obj.insert("expected_type".into(),    entry.expected_type.into());
+        obj.insert("actual_value".into(),     entry.truncated_value.into());
+        obj.insert("actual_value_len".into(), entry.char_len.into());
+        obj.insert("actual_type".into(),      entry.actual_type.into());
         writeln!(writer, "{}", serde_json::Value::Object(obj)).map_err(J2sError::Io)
     }
 
@@ -588,5 +596,23 @@ mod tests {
         let mut proxy = AnomalyProxy::new(tx);
         let result = proxy.record("t", "c", "r", "int4", "bad", "string");
         assert!(result.is_err(), "send on closed channel must return Err");
+    }
+
+    #[test]
+    fn streaming_writes_all_ndjson_fields() {
+        let dir = TempDir::new().unwrap();
+        let mut c = AnomalyCollector::new(Some(dir.path().to_path_buf()));
+        c.record("t1", "col_a", "row42", "integer", "hello!", "string").unwrap();
+        c.finish().unwrap();
+        let files = c.written_paths();
+        let content = std::fs::read_to_string(&files["t1"]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(v["table"], "t1");
+        assert_eq!(v["column"], "col_a");
+        assert_eq!(v["row_id"], "row42");
+        assert_eq!(v["expected_type"], "integer");
+        assert_eq!(v["actual_value"], "hello!");
+        assert_eq!(v["actual_value_len"], 6);
+        assert_eq!(v["actual_type"], "string");
     }
 }
