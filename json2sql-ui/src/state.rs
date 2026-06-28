@@ -457,6 +457,30 @@ impl AppState {
         self.screen = AppScreen::Setup;
     }
 
+    /// Apply a `WorkerResult` read from the result file after an unexpected EOF.
+    ///
+    /// If status is `"success"`, synthesises a `Pass2Done` event so the UI shows the
+    /// success banner. Otherwise, pushes an error log line.
+    pub fn apply_worker_result(&mut self, result: json2sql::ipc::WorkerResult) {
+        match result.status.as_str() {
+            "success" => {
+                self.apply_progress_event(ProgressEvent::Pass2Done {
+                    total_rows: result.total_rows,
+                    anomaly_count: result.anomaly_count,
+                    constraint_warning_count: result.constraint_warning_count,
+                });
+            }
+            _ => {
+                let msg = result
+                    .message
+                    .unwrap_or_else(|| format!("status: {}", result.status));
+                self.import
+                    .pass2_progress
+                    .push_log(format!("Import terminé (hors-connexion) : {msg}"));
+            }
+        }
+    }
+
     /// Apply a `ProgressEvent` coming from a Pass 1 / Pass 2 runner.
     #[allow(clippy::too_many_lines)]
     pub fn apply_progress_event(&mut self, event: ProgressEvent) {

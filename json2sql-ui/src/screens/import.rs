@@ -41,10 +41,11 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         // Resume mode: connect to an existing worker socket found at startup.
         let resume_path = state.read().resume_socket.clone();
 
-        let (mut reader, mut write_half_opt) = if let Some(path) = resume_path {
+        let (mut reader, mut write_half_opt, result_file) = if let Some(ref path) = resume_path {
+            let result_file = path.with_extension("json");
             // Reconnect to the already-running worker.
             let stream =
-                match connect_with_retry(&path, 3, std::time::Duration::from_millis(100)).await {
+                match connect_with_retry(path, 3, std::time::Duration::from_millis(100)).await {
                     Ok(s) => s,
                     Err(e) => {
                         state.write().import.pass2_progress.push_log(
@@ -54,7 +55,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                     }
                 };
             let (rh, wh) = stream.into_split();
-            (SocketEventReader::new(rh), Some(wh))
+            (SocketEventReader::new(rh), Some(wh), result_file)
         } else {
             // Normal mode: spawn a new worker subprocess.
 
@@ -135,7 +136,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 hint_format,
                 skip_constraints: skip_constraints_flag,
                 socket_path,
-                result_file,
+                result_file: result_file.clone(),
             };
 
             let handle = match spawn_worker(&worker_bin, &worker_cfg, &pg_password).await {
@@ -151,7 +152,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             };
 
             state.write().worker_kill = WorkerKillHandle::new(handle.child);
-            (SocketEventReader::new(handle.read_half), Some(handle.write_half))
+            (SocketEventReader::new(handle.read_half), Some(handle.write_half), result_file)
         };
 
         // Throttle UI updates to ~5 Hz — reduces DOM patch frequency on large files.
@@ -198,6 +199,26 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         if !pending.is_empty() {
             let mut s = state.write();
             for e in pending { s.apply_progress_event(e); }
+        }
+
+        // If the socket closed without Pass2Done, read the result file to get the
+        // final status (worker may have finished while not connected, or died mid-import).
+        if !finished {
+            match std::fs::read_to_string(&result_file)
+                .ok()
+                .and_then(|s| serde_json::from_str::<json2sql::ipc::WorkerResult>(&s).ok())
+            {
+                Some(result) => {
+                    state.write().apply_worker_result(result);
+                }
+                None => {
+                    state
+                        .write()
+                        .import
+                        .pass2_progress
+                        .push_log("Worker disparu avant la fin de l'import".to_string());
+                }
+            }
         }
 
         state.write().worker_kill = WorkerKillHandle::default();
