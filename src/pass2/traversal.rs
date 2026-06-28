@@ -1111,6 +1111,56 @@ mod tests {
         assert_eq!(sinks["pivot_grp1"].0.len(), 1, "'bar' → grp1 via absorbed_path_segments");
     }
 
+    // ---------------------------------------------------------------------------
+    // find_group_for_key tests
+    // ---------------------------------------------------------------------------
+
+    fn group(key_is_numeric: bool, absorbed: &[&str]) -> SiblingGroup {
+        make_group(if key_is_numeric { "num" } else { "key" }, key_is_numeric, absorbed, "k")
+    }
+
+    #[test]
+    fn find_group_exact_match_absorbed_path_segments() {
+        let groups = vec![group(false, &["foo", "bar"]), group(true, &["42"])];
+        assert_eq!(super::find_group_for_key(&groups, "foo"), Some(0));
+        assert_eq!(super::find_group_for_key(&groups, "bar"), Some(0));
+        assert_eq!(super::find_group_for_key(&groups, "42"), Some(1));
+    }
+
+    #[test]
+    fn find_group_fallback_numeric_key() {
+        let groups = vec![group(false, &[]), group(true, &[])];
+        assert_eq!(super::find_group_for_key(&groups, "123"), Some(1), "all-digit key → numeric group");
+    }
+
+    #[test]
+    fn find_group_fallback_non_numeric_key() {
+        let groups = vec![group(false, &[]), group(true, &[])];
+        assert_eq!(super::find_group_for_key(&groups, "abc"), Some(0), "non-digit key → non-numeric group");
+    }
+
+    #[test]
+    fn find_group_key_absent_returns_none() {
+        let groups = vec![group(true, &["42"])]; // only numeric group
+        assert_eq!(super::find_group_for_key(&groups, "foo"), None, "no matching group → None");
+    }
+
+    #[test]
+    fn find_group_ambiguous_two_non_numeric_no_segments_returns_first() {
+        let groups = vec![
+            make_group("grp0", false, &[], "k"),
+            make_group("grp1", false, &[], "k"),
+        ];
+        assert_eq!(super::find_group_for_key(&groups, "foo"), Some(0), "tie-break → first group wins");
+    }
+
+    #[test]
+    fn find_group_absorbed_segments_take_priority_over_key_is_numeric() {
+        // Key "123" is all-digits, but group 0 has it in absorbed_path_segments → should win over group 1 (numeric)
+        let groups = vec![group(false, &["123"]), group(true, &[])];
+        assert_eq!(super::find_group_for_key(&groups, "123"), Some(0), "exact match wins over key_is_numeric heuristic");
+    }
+
     // Smoke tests for fakes
     // ---------------------------------------------------------------------------
 
