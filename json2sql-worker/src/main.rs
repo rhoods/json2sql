@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::sync::Arc;
 
 mod cancel;
+mod serve;
 mod summary;
 
-use json2sql::ipc::{WorkerConfig, WorkerResult, lockfile_path, new_socket_path};
+use json2sql::ipc::{WorkerConfig, WorkerResult, lockfile_path};
 
 // ---------------------------------------------------------------------------
 // Lockfile guard
@@ -104,16 +105,39 @@ async fn main() {
     };
 
     eprintln!("json2sql-worker: started, socket={}", cfg.socket_path.display());
-    let _listener = match bind_socket(&cfg.socket_path) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("json2sql-worker: failed to bind socket {}: {e}", cfg.socket_path.display());
-            std::process::exit(2);
-        }
-    };
-    eprintln!("json2sql-worker: socket ready, waiting for connections");
-    // TODO: accept connections, run pipeline, stream events
-    std::process::exit(0);
+
+    #[cfg(unix)]
+    {
+        let listener = match bind_socket(&cfg.socket_path) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "json2sql-worker: failed to bind socket {}: {e}",
+                    cfg.socket_path.display()
+                );
+                std::process::exit(2);
+            }
+        };
+        eprintln!("json2sql-worker: socket ready, accepting connections");
+
+        let summary = Arc::new(tokio::sync::Mutex::new(summary::ImportSummary::new()));
+        let cancel = cancel::CancelToken::new();
+
+        let serve_handle = tokio::spawn(serve::serve_connections(
+            listener,
+            Arc::clone(&summary),
+            cancel.clone(),
+        ));
+
+        // TODO(next-task): run DDL + pass2 pipeline, push events into summary, write result
+        cancel.cancelled().await;
+        serve_handle.await.ok();
+    }
+    #[cfg(not(unix))]
+    {
+        eprintln!("json2sql-worker: requires Unix (Linux/macOS)");
+        std::process::exit(2);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -123,9 +147,10 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use json2sql::ipc::new_socket_path;
 
     fn minimal_config(socket_path: PathBuf, result_file: PathBuf) -> WorkerConfig {
-        use json2sql::schema::table_schema::TableSchema;
         WorkerConfig {
             source_file: PathBuf::from("/tmp/data.json"),
             root_table: "root".to_string(),
