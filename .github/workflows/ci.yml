@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Unit tests (no Docker required) ─────────────────────────────────────────
+  unit:
+    name: Unit tests — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cargo check
+        run: cargo check
+
+      - name: Unit tests
+        run: cargo test --lib --bins
+
+  # ── Integration tests — Linux + Windows (testcontainers via Docker) ──────────
+  integration-docker:
+    name: Integration tests (Docker) — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Integration tests (testcontainers)
+        run: cargo test --features integration-tests --test tc_flat_table --test tc_nested_fk --test tc_sibling_collapse --test tc_wide_table -- --nocapture
+        env:
+          # Windows: explicit Docker host for testcontainers
+          DOCKER_HOST: ${{ runner.os == 'Windows' && 'npipe:////./pipe/docker_engine' || '' }}
+
+  # ── Integration tests — macOS (GitHub Actions native postgres service) ───────
+  integration-macos:
+    name: Integration tests (native PG) — macos-latest
+    runs-on: macos-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Integration tests (TEST_DATABASE_URL)
+        run: cargo test --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
