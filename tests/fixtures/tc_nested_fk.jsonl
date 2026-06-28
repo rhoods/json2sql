@@ -1,0 +1,3 @@
+{"id": 1, "ref": "ORD-001", "customer": "Alice", "total": 109.97, "items": [{"sku": "A1", "qty": 2, "unit_price": 9.99}, {"sku": "B2", "qty": 1, "unit_price": 89.99}]}
+{"id": 2, "ref": "ORD-002", "customer": "Bob", "total": 24.99, "items": [{"sku": "C3", "qty": 1, "unit_price": 24.99}]}
+{"id": 3, "ref": "ORD-003", "customer": "Carol", "total": 44.97, "items": [{"sku": "A1", "qty": 3, "unit_price": 9.99}, {"sku": "D4", "qty": 2, "unit_price": 7.50}]}

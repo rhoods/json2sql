@@ -61,3 +61,10 @@ futures-util = "0.3"
 # TOML config for type overrides
 toml = "0.8"
 sysinfo = "0.39.2"
+
+[dev-dependencies]
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
+
+[features]
+integration-tests = []
