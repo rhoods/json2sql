@@ -1,0 +1,20 @@
+[package]
+name = "json2sql-worker"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "json2sql-worker"
+path = "src/main.rs"
+
+[dependencies]
+json2sql = { path = ".." }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "io-util", "fs"] }
+
+uuid = { version = "1", features = ["v7"] }
+
+fs2 = "0.4"
