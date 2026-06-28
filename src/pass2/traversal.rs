@@ -666,6 +666,15 @@ mod tests {
     fn dummy_parent_id() -> Uuid { Uuid::nil() }
 
     // ---------------------------------------------------------------------------
+    // Row parsing helper
+    // ---------------------------------------------------------------------------
+
+    fn parse_fields(row: &[u8]) -> Vec<&str> {
+        let row = row.strip_suffix(b"\n").unwrap_or(row);
+        row.split(|&b| b == b'\t').map(|f| std::str::from_utf8(f).unwrap()).collect()
+    }
+
+    // ---------------------------------------------------------------------------
     // Helpers smoke test
     // ---------------------------------------------------------------------------
 
@@ -688,6 +697,99 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // insert_pivot_object tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn pivot_nominal_two_keys_emit_two_rows() {
+        let schema = make_pivot_schema("attrs", "root");
+        let mut sinks = make_sinks(&["attrs"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"a": "hello", "b": "world"}"#).unwrap();
+
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+
+        let rows = &sinks["attrs"].0;
+        assert_eq!(rows.len(), 2, "two key-value pairs → two rows");
+        assert_eq!(anomalies.totals.get("attrs").copied().unwrap_or(0), 2);
+        assert!(anomalies.records.is_empty(), "no type anomalies expected");
+        for row in rows {
+            let fields = parse_fields(row);
+            assert_eq!(fields.len(), 4);
+            assert_ne!(fields[2], r"\N", "key should not be null");
+            assert_ne!(fields[3], r"\N", "value should not be null");
+        }
+    }
+
+    #[test]
+    fn pivot_null_value_pushes_null_no_anomaly() {
+        let schema = make_pivot_schema("attrs", "root");
+        let mut sinks = make_sinks(&["attrs"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k": null}"#).unwrap();
+
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+
+        let rows = &sinks["attrs"].0;
+        assert_eq!(rows.len(), 1);
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields[3], r"\N", "null JSON value → \\N in COPY");
+        assert!(anomalies.records.is_empty(), "null is not an anomaly");
+    }
+
+    #[test]
+    fn pivot_type_mismatch_records_anomaly_and_pushes_null() {
+        let mut schema = make_pivot_schema("attrs", "root");
+        schema.columns[3].pg_type = crate::schema::type_tracker::PgType::Integer;
+        let mut sinks = make_sinks(&["attrs"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k": true}"#).unwrap();
+
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+
+        let rows = &sinks["attrs"].0;
+        assert_eq!(rows.len(), 1);
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields[3], r"\N", "anomalous value → \\N");
+        assert_eq!(anomalies.records.len(), 1, "one anomaly recorded");
+        assert_eq!(anomalies.records[0].0, "attrs");
+    }
+
+    #[test]
+    fn pivot_null_byte_in_key_pushes_null_for_key() {
+        let schema = make_pivot_schema("attrs", "root");
+        let mut sinks = make_sinks(&["attrs"]);
+        let mut anomalies = CountingAnomaly::default();
+        let mut obj = serde_json::Map::new();
+        obj.insert("ke\0y".to_string(), serde_json::Value::String("val".to_string()));
+
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+
+        let rows = &sinks["attrs"].0;
+        assert_eq!(rows.len(), 1);
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields[2], r"\N", "null byte in key → \\N for key field");
+        assert!(anomalies.records.is_empty(), "null byte in key is not a type anomaly");
+    }
+
+    #[test]
+    fn pivot_sink_absent_inc_total_still_called_no_row_written() {
+        let schema = make_pivot_schema("attrs", "root");
+        let mut sinks: HashMap<String, CaptureSink> = HashMap::new();
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k": "v"}"#).unwrap();
+
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+
+        assert_eq!(sinks.len(), 0);
+        assert_eq!(anomalies.totals.get("attrs").copied().unwrap_or(0), 1, "inc_total called even without sink");
+    }
+
     // Smoke tests for fakes
     // ---------------------------------------------------------------------------
 
