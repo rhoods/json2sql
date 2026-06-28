@@ -583,3 +583,602 @@ pub(super) fn insert_array<S: RowSink>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(dead_code)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::anomaly::collector::AnomalyCollect;
+    use crate::error::Result;
+    use crate::pass2::sink::RowSink;
+
+    // ---------------------------------------------------------------------------
+    // Test fakes
+    // ---------------------------------------------------------------------------
+
+    #[derive(Default)]
+    pub(super) struct CountingAnomaly {
+        pub records: Vec<(String, String)>, // (table, column)
+        pub totals: HashMap<String, u64>,
+    }
+
+    impl AnomalyCollect for CountingAnomaly {
+        fn record(
+            &mut self,
+            table: &str,
+            column: &str,
+            _row_id: &str,
+            _expected_type: &str,
+            _actual_value: &str,
+            _actual_type: &str,
+        ) -> Result<()> {
+            self.records.push((table.to_string(), column.to_string()));
+            Ok(())
+        }
+
+        fn inc_total(&mut self, table: &str) {
+            *self.totals.entry(table.to_string()).or_default() += 1;
+        }
+    }
+
+    use uuid::Uuid;
+
+    use crate::schema::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
+    use crate::schema::type_tracker::PgType;
+
+    // ---------------------------------------------------------------------------
+    // Schema construction helpers
+    // ---------------------------------------------------------------------------
+
+    fn col(name: &str, pg_type: PgType) -> ColumnSchema {
+        ColumnSchema { name: name.to_string(), original_name: name.to_string(), pg_type, not_null: false, is_generated: false, is_parent_fk: false }
+    }
+
+    fn generated_id() -> ColumnSchema {
+        ColumnSchema { name: "j2s_id".to_string(), original_name: "j2s_id".to_string(), pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: false }
+    }
+
+    fn parent_fk(parent: &str) -> ColumnSchema {
+        ColumnSchema { name: format!("j2s_{parent}_id"), original_name: format!("j2s_{parent}_id"), pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: true }
+    }
+
+    /// Pivot schema: j2s_id, j2s_{parent}_id, key TEXT, value TEXT
+    fn make_pivot_schema(name: &str, parent: &str) -> TableSchema {
+        let mut s = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
+        s.inferred_strategy = InferredStrategy::Pivot;
+        s.columns = vec![generated_id(), parent_fk(parent), col("key", PgType::Text), col("value", PgType::Text)];
+        s
+    }
+
+    /// Jsonb schema: j2s_id, j2s_{parent}_id, data TEXT (JSONB stored as text in COPY)
+    fn make_jsonb_schema(name: &str, parent: &str) -> TableSchema {
+        let mut s = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
+        s.inferred_strategy = InferredStrategy::Jsonb;
+        s.columns = vec![generated_id(), parent_fk(parent), col("data", PgType::Text)];
+        s
+    }
+
+    fn make_sinks(names: &[&str]) -> HashMap<String, CaptureSink> {
+        names.iter().map(|n| ((*n).to_string(), CaptureSink(vec![]))).collect()
+    }
+
+    fn dummy_parent_id() -> Uuid { Uuid::nil() }
+
+    // ---------------------------------------------------------------------------
+    // Row parsing helper
+    // ---------------------------------------------------------------------------
+
+    fn parse_fields(row: &[u8]) -> Vec<&str> {
+        let row = row.strip_suffix(b"\n").unwrap_or(row);
+        row.split(|&b| b == b'\t').map(|f| std::str::from_utf8(f).unwrap()).collect()
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helpers smoke test
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn make_pivot_schema_has_expected_columns() {
+        let s = make_pivot_schema("attrs", "root");
+        assert_eq!(s.columns.len(), 4);
+        assert!(s.columns[0].is_generated && !s.columns[0].is_parent_fk);
+        assert!(s.columns[1].is_generated && s.columns[1].is_parent_fk);
+        assert_eq!(s.columns[3].original_name, "value");
+    }
+
+    pub(super) struct CaptureSink(pub Vec<Vec<u8>>);
+
+    impl RowSink for CaptureSink {
+        fn write_row(&mut self, row: &[u8]) -> Result<()> {
+            self.0.push(row.to_vec());
+            Ok(())
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // insert_pivot_object tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn pivot_nominal_two_keys_emit_two_rows() {
+        let schema = make_pivot_schema("attrs", "root");
+        let mut sinks = make_sinks(&["attrs"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"a": "hello", "b": "world"}"#).unwrap();
+
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+
+        let rows = &sinks["attrs"].0;
+        assert_eq!(rows.len(), 2, "two key-value pairs → two rows");
+        assert_eq!(anomalies.totals.get("attrs").copied().unwrap_or(0), 2);
+        assert!(anomalies.records.is_empty(), "no type anomalies expected");
+        for row in rows {
+            let fields = parse_fields(row);
+            assert_eq!(fields.len(), 4);
+            assert_ne!(fields[2], r"\N", "key should not be null");
+            assert_ne!(fields[3], r"\N", "value should not be null");
+        }
+    }
+
+    #[test]
+    fn pivot_null_value_pushes_null_no_anomaly() {
+        let schema = make_pivot_schema("attrs", "root");
+        let mut sinks = make_sinks(&["attrs"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k": null}"#).unwrap();
+
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+
+        let rows = &sinks["attrs"].0;
+        assert_eq!(rows.len(), 1);
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields[3], r"\N", "null JSON value → \\N in COPY");
+        assert!(anomalies.records.is_empty(), "null is not an anomaly");
+    }
+
+    #[test]
+    fn pivot_type_mismatch_records_anomaly_and_pushes_null() {
+        let mut schema = make_pivot_schema("attrs", "root");
+        schema.columns[3].pg_type = crate::schema::type_tracker::PgType::Integer;
+        let mut sinks = make_sinks(&["attrs"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k": true}"#).unwrap();
+
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+
+        let rows = &sinks["attrs"].0;
+        assert_eq!(rows.len(), 1);
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields[3], r"\N", "anomalous value → \\N");
+        assert_eq!(anomalies.records.len(), 1, "one anomaly recorded");
+        assert_eq!(anomalies.records[0].0, "attrs");
+    }
+
+    #[test]
+    fn pivot_null_byte_in_key_pushes_null_for_key() {
+        let schema = make_pivot_schema("attrs", "root");
+        let mut sinks = make_sinks(&["attrs"]);
+        let mut anomalies = CountingAnomaly::default();
+        let mut obj = serde_json::Map::new();
+        obj.insert("ke\0y".to_string(), serde_json::Value::String("val".to_string()));
+
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+
+        let rows = &sinks["attrs"].0;
+        assert_eq!(rows.len(), 1);
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields[2], r"\N", "null byte in key → \\N for key field");
+        assert!(anomalies.records.is_empty(), "null byte in key is not a type anomaly");
+    }
+
+    #[test]
+    fn pivot_sink_absent_inc_total_still_called_no_row_written() {
+        let schema = make_pivot_schema("attrs", "root");
+        let mut sinks: HashMap<String, CaptureSink> = HashMap::new();
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k": "v"}"#).unwrap();
+
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+
+        assert_eq!(sinks.len(), 0);
+        assert_eq!(anomalies.totals.get("attrs").copied().unwrap_or(0), 1, "inc_total called even without sink");
+    }
+
+    // ---------------------------------------------------------------------------
+    // insert_jsonb_object tests
+    // ---------------------------------------------------------------------------
+
+    fn make_jsonb_path_key(path: &[&str]) -> String {
+        path.join("\x00")
+    }
+
+    #[test]
+    fn jsonb_nominal_emits_one_row_with_serialized_json() {
+        let schema = make_jsonb_schema("evts", "root");
+        let mut sinks = make_sinks(&["evts"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let value = serde_json::json!({"x": 1, "y": "hello"});
+
+        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id()).unwrap();
+
+        let rows = &sinks["evts"].0;
+        assert_eq!(rows.len(), 1, "one JSONB row emitted");
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields.len(), 3, "uuid, parent_uuid, json_data");
+        // third field must be valid JSON containing x and y
+        let parsed: serde_json::Value = serde_json::from_str(fields[2]).unwrap();
+        assert_eq!(parsed["x"], 1);
+        assert_eq!(parsed["y"], "hello");
+    }
+
+    #[test]
+    fn jsonb_with_populated_path_map_recurses_into_child() {
+        // Parent: "evts" with path ["evts"], strategy Jsonb
+        let mut schema = make_jsonb_schema("evts", "root");
+        schema.path = vec!["evts".to_string()];
+
+        // Child Pivot for field "tags" → path_map key "evts\x00tags"
+        let mut child_schema = make_pivot_schema("evts_tags", "evts");
+        child_schema.path = vec!["evts".to_string(), "tags".to_string()];
+        let child_key = make_jsonb_path_key(&["evts", "tags"]);
+
+        let mut path_map = HashMap::new();
+        path_map.insert(child_key, child_schema);
+
+        let mut sinks = make_sinks(&["evts", "evts_tags"]);
+        let mut anomalies = CountingAnomaly::default();
+        let value = serde_json::json!({"tags": {"a": "v1", "b": "v2"}});
+
+        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id()).unwrap();
+
+        assert_eq!(sinks["evts"].0.len(), 1, "one JSONB row for parent");
+        assert_eq!(sinks["evts_tags"].0.len(), 2, "two pivot rows for child tags");
+    }
+
+    #[test]
+    fn jsonb_empty_path_map_no_recursion() {
+        let mut schema = make_jsonb_schema("evts", "root");
+        schema.path = vec!["evts".to_string()];
+        let mut sinks = make_sinks(&["evts"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map: HashMap<String, crate::schema::table_schema::TableSchema> = HashMap::new();
+        let value = serde_json::json!({"nested": {"x": 1}});
+
+        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id()).unwrap();
+
+        assert_eq!(sinks["evts"].0.len(), 1, "one row — no child dispatch without path_map");
+    }
+
+    // ---------------------------------------------------------------------------
+    // insert_structured_pivot_object tests
+    // ---------------------------------------------------------------------------
+
+    use crate::schema::table_schema::{SuffixColumn, SuffixSchema};
+
+    fn make_structured_pivot_schema(name: &str, parent: &str, suffix_schema: &SuffixSchema) -> crate::schema::table_schema::TableSchema {
+        use crate::schema::table_schema::InferredStrategy;
+        let mut s = crate::schema::table_schema::TableSchema::new(name.to_string(), vec![name.to_string()], 1);
+        s.inferred_strategy = InferredStrategy::StructuredPivot(suffix_schema.clone());
+        let mut cols = vec![
+            generated_id(),
+            parent_fk(parent),
+            col("name", PgType::Text),
+            col("value", PgType::Text),
+        ];
+        for sc in &suffix_schema.suffix_cols {
+            cols.push(ColumnSchema {
+                name: sc.col_name.clone(),
+                original_name: sc.suffix.clone(), // suffix string is the lookup key in write_structured_pivot_row
+                pg_type: sc.pg_type.clone(),
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
+            });
+        }
+        s.columns = cols;
+        s
+    }
+
+    fn make_suffix_schema(suffixes: &[&str]) -> SuffixSchema {
+        SuffixSchema {
+            suffix_cols: suffixes.iter().map(|s| SuffixColumn {
+                suffix: s.to_string(),
+                col_name: format!("c{}", s.replace('_', "")),
+                pg_type: PgType::Text,
+            }).collect(),
+            value_type: PgType::Text,
+        }
+    }
+
+    #[test]
+    fn structured_pivot_two_keys_same_base_emit_one_row() {
+        let ss = make_suffix_schema(&["_eur", "_usd"]);
+        let schema = make_structured_pivot_schema("prices", "root", &ss);
+        let mut sinks = make_sinks(&["prices"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"price_eur": "1.5", "price_usd": "2.0"}"#).unwrap();
+
+        super::insert_structured_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        let rows = &sinks["prices"].0;
+        assert_eq!(rows.len(), 1, "two keys with same base → one row");
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields[2], "price", "base key in 'name' column");
+        assert_ne!(fields[4], r"\N", "_eur suffix value present");
+        assert_ne!(fields[5], r"\N", "_usd suffix value present");
+    }
+
+    #[test]
+    fn structured_pivot_key_without_suffix_goes_to_value_column() {
+        let ss = make_suffix_schema(&["_eur"]);
+        let schema = make_structured_pivot_schema("prices", "root", &ss);
+        let mut sinks = make_sinks(&["prices"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"standalone": "val"}"#).unwrap();
+
+        super::insert_structured_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        let rows = &sinks["prices"].0;
+        assert_eq!(rows.len(), 1);
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields[2], "standalone", "key with no suffix → 'name' column");
+        assert_eq!(fields[3], "val", "value goes to 'value' column (suffix \"\")");
+        assert_eq!(fields[4], r"\N", "suffix column absent → \\N");
+    }
+
+    #[test]
+    fn structured_pivot_multiple_bases_emit_multiple_rows() {
+        let ss = make_suffix_schema(&["_eur"]);
+        let schema = make_structured_pivot_schema("prices", "root", &ss);
+        let mut sinks = make_sinks(&["prices"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"cost_eur": "1", "price_eur": "2"}"#).unwrap();
+
+        super::insert_structured_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        assert_eq!(sinks["prices"].0.len(), 2, "two distinct bases → two rows");
+    }
+
+    // ---------------------------------------------------------------------------
+    // insert_sibling_collapse_object tests
+    // ---------------------------------------------------------------------------
+
+    use crate::schema::table_schema::{KeyShape, SiblingSchema};
+
+    fn make_sibling_collapse_schema(name: &str, parent: &str, key_col: &str, data_cols: &[&str]) -> (crate::schema::table_schema::TableSchema, SiblingSchema) {
+        use crate::schema::table_schema::InferredStrategy;
+        let ss = SiblingSchema { key_col_name: key_col.to_string(), key_shape: KeyShape::Mixed, array_children: false };
+        let mut s = crate::schema::table_schema::TableSchema::new(name.to_string(), vec![name.to_string()], 1);
+        s.inferred_strategy = InferredStrategy::SiblingCollapse(ss.clone());
+        let mut cols = vec![generated_id(), parent_fk(parent), col(key_col, PgType::Text)];
+        for dc in data_cols { cols.push(col(dc, PgType::Text)); }
+        s.columns = cols;
+        (s, ss)
+    }
+
+    #[test]
+    fn sibling_collapse_non_object_value_silently_skipped_zero_rows() {
+        let (schema, ss) = make_sibling_collapse_schema("items", "root", "key", &["a"]);
+        let mut sinks = make_sinks(&["items"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k": "scalar_not_object"}"#).unwrap();
+
+        super::insert_sibling_collapse_object(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        assert_eq!(sinks["items"].0.len(), 0, "scalar value → silently skipped, zero rows");
+        assert_eq!(anomalies.totals.get("items").copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn sibling_collapse_nominal_one_object_emits_one_row() {
+        let (schema, ss) = make_sibling_collapse_schema("items", "root", "key", &["a", "b"]);
+        let mut sinks = make_sinks(&["items"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"mykey": {"a": "v1", "b": "v2"}}"#).unwrap();
+
+        super::insert_sibling_collapse_object(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        let rows = &sinks["items"].0;
+        assert_eq!(rows.len(), 1);
+        let fields = parse_fields(&rows[0]);
+        // fields: j2s_id, j2s_parent_id, key, a, b
+        assert_eq!(fields.len(), 5);
+        assert_eq!(fields[2], "mykey", "sibling key in key column");
+        assert_eq!(fields[3], "v1");
+        assert_eq!(fields[4], "v2");
+    }
+
+    #[test]
+    fn sibling_collapse_multiple_keys_emit_multiple_rows() {
+        let (schema, ss) = make_sibling_collapse_schema("items", "root", "key", &["val"]);
+        let mut sinks = make_sinks(&["items"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k1": {"val": "a"}, "k2": {"val": "b"}}"#).unwrap();
+
+        super::insert_sibling_collapse_object(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        assert_eq!(sinks["items"].0.len(), 2, "two sibling keys → two rows");
+    }
+
+    // ---------------------------------------------------------------------------
+    // insert_sibling_collapse_multi tests
+    // ---------------------------------------------------------------------------
+
+    use crate::schema::table_schema::SiblingGroup;
+
+    fn make_routing_schema(name: &str, parent: &str, path: &[&str]) -> crate::schema::table_schema::TableSchema {
+        let mut s = crate::schema::table_schema::TableSchema::new(
+            name.to_string(), path.iter().map(|p| p.to_string()).collect(), 1
+        );
+        s.columns = vec![generated_id(), parent_fk(parent)];
+        s
+    }
+
+    fn make_group(path_segment: &str, key_is_numeric: bool, absorbed: &[&str], key_col: &str) -> SiblingGroup {
+        SiblingGroup {
+            pivot_table: format!("pivot_{path_segment}"),
+            key_is_numeric,
+            sibling_schema: SiblingSchema { key_col_name: key_col.to_string(), key_shape: KeyShape::Mixed, array_children: false },
+            absorbed_names: vec![],
+            path_segment: path_segment.to_string(),
+            absorbed_path_segments: absorbed.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn multi_empty_groups_emits_only_routing_row() {
+        let schema = make_routing_schema("multi", "root", &["multi"]);
+        let mut sinks = make_sinks(&["multi"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k": {"a": 1}}"#).unwrap();
+
+        super::insert_sibling_collapse_multi(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &[]).unwrap();
+
+        assert_eq!(sinks["multi"].0.len(), 1, "one routing row emitted even with no groups");
+    }
+
+    #[test]
+    fn multi_routes_by_key_is_numeric() {
+        let schema = make_routing_schema("multi", "root", &["multi"]);
+        let groups = vec![
+            make_group("key", false, &[], "k"),
+            make_group("num", true, &[], "k"),
+        ];
+
+        let (pivot_key_schema, pivot_key_ss) = make_sibling_collapse_schema("pivot_key", "multi", "k", &["val"]);
+        let (pivot_num_schema, pivot_num_ss) = make_sibling_collapse_schema("pivot_num", "multi", "k", &["val"]);
+        // Override sibling_schema from groups (not used directly — pivot schemas get their own)
+        let _ = (pivot_key_ss, pivot_num_ss);
+
+        let mut path_map = HashMap::new();
+        path_map.insert("multi\x00key".to_string(), pivot_key_schema);
+        path_map.insert("multi\x00num".to_string(), pivot_num_schema);
+
+        let mut sinks = make_sinks(&["multi", "pivot_key", "pivot_num"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"foo": {"val": "x"}, "42": {"val": "y"}}"#).unwrap();
+
+        super::insert_sibling_collapse_multi(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &groups).unwrap();
+
+        assert_eq!(sinks["multi"].0.len(), 1, "routing row");
+        assert_eq!(sinks["pivot_key"].0.len(), 1, "non-numeric key 'foo' → pivot_key");
+        assert_eq!(sinks["pivot_num"].0.len(), 1, "numeric key '42' → pivot_num");
+    }
+
+    #[test]
+    fn multi_absorbed_path_segments_match_takes_priority_over_key_is_numeric() {
+        let schema = make_routing_schema("multi", "root", &["multi"]);
+        // Both groups non-numeric — disambiguation via absorbed_path_segments
+        let groups = vec![
+            make_group("grp0", false, &["foo"], "k"),
+            make_group("grp1", false, &["bar"], "k"),
+        ];
+
+        let (pivot_grp0_schema, _) = make_sibling_collapse_schema("pivot_grp0", "multi", "k", &["val"]);
+        let (pivot_grp1_schema, _) = make_sibling_collapse_schema("pivot_grp1", "multi", "k", &["val"]);
+
+        let mut path_map = HashMap::new();
+        path_map.insert("multi\x00grp0".to_string(), pivot_grp0_schema);
+        path_map.insert("multi\x00grp1".to_string(), pivot_grp1_schema);
+
+        let mut sinks = make_sinks(&["multi", "pivot_grp0", "pivot_grp1"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"foo": {"val": "f"}, "bar": {"val": "b"}}"#).unwrap();
+
+        super::insert_sibling_collapse_multi(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &groups).unwrap();
+
+        assert_eq!(sinks["pivot_grp0"].0.len(), 1, "'foo' → grp0 via absorbed_path_segments");
+        assert_eq!(sinks["pivot_grp1"].0.len(), 1, "'bar' → grp1 via absorbed_path_segments");
+    }
+
+    // ---------------------------------------------------------------------------
+    // find_group_for_key tests
+    // ---------------------------------------------------------------------------
+
+    fn group(key_is_numeric: bool, absorbed: &[&str]) -> SiblingGroup {
+        make_group(if key_is_numeric { "num" } else { "key" }, key_is_numeric, absorbed, "k")
+    }
+
+    #[test]
+    fn find_group_exact_match_absorbed_path_segments() {
+        let groups = vec![group(false, &["foo", "bar"]), group(true, &["42"])];
+        assert_eq!(super::find_group_for_key(&groups, "foo"), Some(0));
+        assert_eq!(super::find_group_for_key(&groups, "bar"), Some(0));
+        assert_eq!(super::find_group_for_key(&groups, "42"), Some(1));
+    }
+
+    #[test]
+    fn find_group_fallback_numeric_key() {
+        let groups = vec![group(false, &[]), group(true, &[])];
+        assert_eq!(super::find_group_for_key(&groups, "123"), Some(1), "all-digit key → numeric group");
+    }
+
+    #[test]
+    fn find_group_fallback_non_numeric_key() {
+        let groups = vec![group(false, &[]), group(true, &[])];
+        assert_eq!(super::find_group_for_key(&groups, "abc"), Some(0), "non-digit key → non-numeric group");
+    }
+
+    #[test]
+    fn find_group_key_absent_returns_none() {
+        let groups = vec![group(true, &["42"])]; // only numeric group
+        assert_eq!(super::find_group_for_key(&groups, "foo"), None, "no matching group → None");
+    }
+
+    #[test]
+    fn find_group_ambiguous_two_non_numeric_no_segments_returns_first() {
+        let groups = vec![
+            make_group("grp0", false, &[], "k"),
+            make_group("grp1", false, &[], "k"),
+        ];
+        assert_eq!(super::find_group_for_key(&groups, "foo"), Some(0), "tie-break → first group wins");
+    }
+
+    #[test]
+    fn find_group_absorbed_segments_take_priority_over_key_is_numeric() {
+        // Key "123" is all-digits, but group 0 has it in absorbed_path_segments → should win over group 1 (numeric)
+        let groups = vec![group(false, &["123"]), group(true, &[])];
+        assert_eq!(super::find_group_for_key(&groups, "123"), Some(0), "exact match wins over key_is_numeric heuristic");
+    }
+
+    // Smoke tests for fakes
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn capture_sink_accumulates_rows() {
+        let mut s = CaptureSink(vec![]);
+        s.write_row(b"row1\n").unwrap();
+        s.write_row(b"row2\n").unwrap();
+        assert_eq!(s.0.len(), 2);
+        assert_eq!(s.0[0], b"row1\n");
+    }
+
+    #[test]
+    fn counting_anomaly_record_returns_ok_and_counts() {
+        let mut a = CountingAnomaly::default();
+        a.record("t", "col", "id", "int4", "bad", "string").unwrap();
+        a.inc_total("t");
+        assert_eq!(a.records, vec![("t".to_string(), "col".to_string())]);
+        assert_eq!(a.totals["t"], 1);
+    }
+}
