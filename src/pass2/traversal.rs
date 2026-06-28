@@ -1016,6 +1016,101 @@ mod tests {
         assert_eq!(sinks["items"].0.len(), 2, "two sibling keys → two rows");
     }
 
+    // ---------------------------------------------------------------------------
+    // insert_sibling_collapse_multi tests
+    // ---------------------------------------------------------------------------
+
+    use crate::schema::table_schema::SiblingGroup;
+
+    fn make_routing_schema(name: &str, parent: &str, path: &[&str]) -> crate::schema::table_schema::TableSchema {
+        let mut s = crate::schema::table_schema::TableSchema::new(
+            name.to_string(), path.iter().map(|p| p.to_string()).collect(), 1
+        );
+        s.columns = vec![generated_id(), parent_fk(parent)];
+        s
+    }
+
+    fn make_group(path_segment: &str, key_is_numeric: bool, absorbed: &[&str], key_col: &str) -> SiblingGroup {
+        SiblingGroup {
+            pivot_table: format!("pivot_{path_segment}"),
+            key_is_numeric,
+            sibling_schema: SiblingSchema { key_col_name: key_col.to_string(), key_shape: KeyShape::Mixed, array_children: false },
+            absorbed_names: vec![],
+            path_segment: path_segment.to_string(),
+            absorbed_path_segments: absorbed.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn multi_empty_groups_emits_only_routing_row() {
+        let schema = make_routing_schema("multi", "root", &["multi"]);
+        let mut sinks = make_sinks(&["multi"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k": {"a": 1}}"#).unwrap();
+
+        super::insert_sibling_collapse_multi(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &[]).unwrap();
+
+        assert_eq!(sinks["multi"].0.len(), 1, "one routing row emitted even with no groups");
+    }
+
+    #[test]
+    fn multi_routes_by_key_is_numeric() {
+        let schema = make_routing_schema("multi", "root", &["multi"]);
+        let groups = vec![
+            make_group("key", false, &[], "k"),
+            make_group("num", true, &[], "k"),
+        ];
+
+        let (pivot_key_schema, pivot_key_ss) = make_sibling_collapse_schema("pivot_key", "multi", "k", &["val"]);
+        let (pivot_num_schema, pivot_num_ss) = make_sibling_collapse_schema("pivot_num", "multi", "k", &["val"]);
+        // Override sibling_schema from groups (not used directly — pivot schemas get their own)
+        let _ = (pivot_key_ss, pivot_num_ss);
+
+        let mut path_map = HashMap::new();
+        path_map.insert("multi\x00key".to_string(), pivot_key_schema);
+        path_map.insert("multi\x00num".to_string(), pivot_num_schema);
+
+        let mut sinks = make_sinks(&["multi", "pivot_key", "pivot_num"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"foo": {"val": "x"}, "42": {"val": "y"}}"#).unwrap();
+
+        super::insert_sibling_collapse_multi(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &groups).unwrap();
+
+        assert_eq!(sinks["multi"].0.len(), 1, "routing row");
+        assert_eq!(sinks["pivot_key"].0.len(), 1, "non-numeric key 'foo' → pivot_key");
+        assert_eq!(sinks["pivot_num"].0.len(), 1, "numeric key '42' → pivot_num");
+    }
+
+    #[test]
+    fn multi_absorbed_path_segments_match_takes_priority_over_key_is_numeric() {
+        let schema = make_routing_schema("multi", "root", &["multi"]);
+        // Both groups non-numeric — disambiguation via absorbed_path_segments
+        let groups = vec![
+            make_group("grp0", false, &["foo"], "k"),
+            make_group("grp1", false, &["bar"], "k"),
+        ];
+
+        let (pivot_grp0_schema, _) = make_sibling_collapse_schema("pivot_grp0", "multi", "k", &["val"]);
+        let (pivot_grp1_schema, _) = make_sibling_collapse_schema("pivot_grp1", "multi", "k", &["val"]);
+
+        let mut path_map = HashMap::new();
+        path_map.insert("multi\x00grp0".to_string(), pivot_grp0_schema);
+        path_map.insert("multi\x00grp1".to_string(), pivot_grp1_schema);
+
+        let mut sinks = make_sinks(&["multi", "pivot_grp0", "pivot_grp1"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"foo": {"val": "f"}, "bar": {"val": "b"}}"#).unwrap();
+
+        super::insert_sibling_collapse_multi(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &groups).unwrap();
+
+        assert_eq!(sinks["pivot_grp0"].0.len(), 1, "'foo' → grp0 via absorbed_path_segments");
+        assert_eq!(sinks["pivot_grp1"].0.len(), 1, "'bar' → grp1 via absorbed_path_segments");
+    }
+
     // Smoke tests for fakes
     // ---------------------------------------------------------------------------
 
