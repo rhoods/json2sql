@@ -583,3 +583,54 @@ pub(super) fn insert_array<S: RowSink>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::anomaly::collector::AnomalyCollect;
+    use crate::error::Result;
+    use crate::pass2::sink::RowSink;
+
+    // ---------------------------------------------------------------------------
+    // Test fakes
+    // ---------------------------------------------------------------------------
+
+    #[derive(Default)]
+    pub(super) struct CountingAnomaly {
+        pub records: Vec<(String, String)>, // (table, column)
+        pub totals: HashMap<String, u64>,
+    }
+
+    impl AnomalyCollect for CountingAnomaly {
+        fn record(
+            &mut self,
+            table: &str,
+            column: &str,
+            _row_id: &str,
+            _expected_type: &str,
+            _actual_value: &str,
+            _actual_type: &str,
+        ) -> Result<()> {
+            self.records.push((table.to_string(), column.to_string()));
+            Ok(())
+        }
+
+        fn inc_total(&mut self, table: &str) {
+            *self.totals.entry(table.to_string()).or_default() += 1;
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // CountingAnomaly smoke test
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn counting_anomaly_record_returns_ok_and_counts() {
+        let mut a = CountingAnomaly::default();
+        a.record("t", "col", "id", "int4", "bad", "string").unwrap();
+        a.inc_total("t");
+        assert_eq!(a.records, vec![("t".to_string(), "col".to_string())]);
+        assert_eq!(a.totals["t"], 1);
+    }
+}
