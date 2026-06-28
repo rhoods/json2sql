@@ -3061,6 +3061,8 @@ dependencies = [
  "json2sql",
  "serde",
  "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
  "tokio",
  "tokio-postgres",
  "urlencoding",
