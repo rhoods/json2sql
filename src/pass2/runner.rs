@@ -447,16 +447,7 @@ async fn process_worker_item_diskless(
     Ok(())
 }
 
-/// Diskless worker: local MemSink accumulation, sends batches to `run_flusher` via channel.
-/// Checks `error_flag` each iteration (flusher fatal error) and yields on `pause_flag`
-/// (flusher buffer pressure). Workers spin without draining — flusher controls when to resume.
-/// For wrapper-format files, `key` carries the raw wrapper key and the worker resolves the
-/// correct root schema via `path_map`; for regular formats `key` is `None` and `root_schema`
-/// is used directly.
-#[allow(clippy::too_many_arguments)]
-async fn run_worker_diskless(
-    mut rx: tokio::sync::mpsc::Receiver<(Option<String>, Vec<u8>)>,
-    mut sinks: HashMap<String, crate::db::copy_sink::MemSink>,
+struct WorkerDisklessConfig {
     anomaly_tx: tokio::sync::mpsc::UnboundedSender<AnomalyEvent>,
     path_map: Arc<HashMap<String, TableSchema>>,
     root_schema: Arc<TableSchema>,
@@ -465,8 +456,21 @@ async fn run_worker_diskless(
     pause_flag: Arc<std::sync::atomic::AtomicBool>,
     error_flag: Arc<std::sync::atomic::AtomicBool>,
     mem_flush_threshold: u64,
+}
+
+/// Diskless worker: local MemSink accumulation, sends batches to `run_flusher` via channel.
+/// Checks `error_flag` each iteration (flusher fatal error) and yields on `pause_flag`
+/// (flusher buffer pressure). Workers spin without draining — flusher controls when to resume.
+/// For wrapper-format files, `key` carries the raw wrapper key and the worker resolves the
+/// correct root schema via `path_map`; for regular formats `key` is `None` and `root_schema`
+/// is used directly.
+async fn run_worker_diskless(
+    mut rx: tokio::sync::mpsc::Receiver<(Option<String>, Vec<u8>)>,
+    mut sinks: HashMap<String, crate::db::copy_sink::MemSink>,
+    config: WorkerDisklessConfig,
 ) -> Result<()> {
     use std::sync::atomic::Ordering;
+    let WorkerDisklessConfig { anomaly_tx, path_map, root_schema, cancel, flush_tx, pause_flag, error_flag, mem_flush_threshold } = config;
     let mut proxy = AnomalyProxy::new(anomaly_tx);
     loop {
         if error_flag.load(Ordering::Acquire) {
@@ -773,14 +777,16 @@ pub async fn run(
         worker_handles.push(tokio::task::spawn(run_worker_diskless(
             rx,
             worker_sinks,
-            anomaly_tx.clone(),
-            path_map_arc.clone(),
-            root_schema_arc.clone(),
-            cancel.clone(),
-            flush_tx.clone(),
-            Arc::clone(&pause_flag),
-            Arc::clone(&error_flag),
-            effective_worker_threshold(mem_flush_threshold, parallel),
+            WorkerDisklessConfig {
+                anomaly_tx: anomaly_tx.clone(),
+                path_map: path_map_arc.clone(),
+                root_schema: root_schema_arc.clone(),
+                cancel: cancel.clone(),
+                flush_tx: flush_tx.clone(),
+                pause_flag: Arc::clone(&pause_flag),
+                error_flag: Arc::clone(&error_flag),
+                mem_flush_threshold: effective_worker_threshold(mem_flush_threshold, parallel),
+            },
         )));
     }
     drop(flush_tx);  // workers now hold all flush_tx clones
@@ -1010,8 +1016,18 @@ mod tests {
 
         let ef = Arc::clone(&error_flag);
         let worker_handle = tokio::spawn(super::run_worker_diskless(
-            item_rx, HashMap::new(), anomaly_tx, path_map, root_schema,
-            cancel, flush_tx, pause_flag, Arc::clone(&error_flag), 64 * 1024 * 1024,
+            item_rx,
+            HashMap::new(),
+            super::WorkerDisklessConfig {
+                anomaly_tx,
+                path_map,
+                root_schema,
+                cancel,
+                flush_tx,
+                pause_flag,
+                error_flag: Arc::clone(&error_flag),
+                mem_flush_threshold: 64 * 1024 * 1024,
+            },
         ));
         // Give the worker enough time to enter the pause spin loop.
         tokio::task::yield_now().await;
@@ -1048,8 +1064,18 @@ mod tests {
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(100),
             super::run_worker_diskless(
-                item_rx, HashMap::new(), anomaly_tx, path_map, root_schema,
-                cancel, flush_tx, pause_flag, error_flag, 64 * 1024 * 1024,
+                item_rx,
+                HashMap::new(),
+                super::WorkerDisklessConfig {
+                    anomaly_tx,
+                    path_map,
+                    root_schema,
+                    cancel,
+                    flush_tx,
+                    pause_flag,
+                    error_flag,
+                    mem_flush_threshold: 64 * 1024 * 1024,
+                },
             ),
         ).await;
         assert!(result.is_ok(), "worker must not hang");

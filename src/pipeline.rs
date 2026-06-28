@@ -238,14 +238,16 @@ fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Res
     eprintln!("Pass 1: inferring schema from '{}'...", input_path.display());
     let base_cfg = Pass1Config {
         root_table: cfg.root_table.clone(),
-        text_threshold: cfg.text_threshold,
-        array_as_pg_array: cfg.array_as_pg_array,
-        wide_column_threshold: cfg.wide_column_threshold,
-        sibling_threshold: cfg.sibling_threshold,
-        sibling_jaccard: cfg.sibling_jaccard,
-        stable_threshold: cfg.stable_threshold,
-        rare_threshold: cfg.rare_threshold,
-        disabled_strategies: cfg.disabled_strategies.clone(),
+        registry: crate::schema::registry::RegistryConfig {
+            text_threshold: cfg.text_threshold,
+            array_as_pg_array: cfg.array_as_pg_array,
+            wide_column_threshold: cfg.wide_column_threshold,
+            sibling_threshold: cfg.sibling_threshold,
+            sibling_jaccard: cfg.sibling_jaccard,
+            stable_threshold: cfg.stable_threshold,
+            rare_threshold: cfg.rare_threshold,
+            disabled_strategies: cfg.disabled_strategies.clone(),
+        },
         num_workers: None,
     };
     if cfg.num_workers > 1 {

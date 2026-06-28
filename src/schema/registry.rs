@@ -18,6 +18,34 @@ use super::stats::ColumnStats;
 use super::strategies::StrategyName;
 use super::type_tracker::TypeTracker;
 
+/// Configuration for `SchemaRegistry::new()`.
+#[derive(Clone)]
+pub struct RegistryConfig {
+    pub text_threshold: u32,
+    pub array_as_pg_array: bool,
+    pub wide_column_threshold: usize,
+    pub sibling_threshold: usize,
+    pub sibling_jaccard: f64,
+    pub stable_threshold: f64,
+    pub rare_threshold: f64,
+    pub disabled_strategies: HashSet<StrategyName>,
+}
+
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        Self {
+            text_threshold: 256,
+            array_as_pg_array: false,
+            wide_column_threshold: usize::MAX,
+            sibling_threshold: 3,
+            sibling_jaccard: 0.5,
+            stable_threshold: 0.10,
+            rare_threshold: 0.001,
+            disabled_strategies: HashSet::new(),
+        }
+    }
+}
+
 /// Façade: ties together `SchemaObserver` (observation) and `SchemaFinalizer` (finalization).
 /// Keeps the existing public API intact for callers that use `SchemaRegistry` directly.
 pub struct SchemaRegistry {
@@ -33,27 +61,17 @@ pub struct SchemaRegistry {
 }
 
 impl SchemaRegistry {
-    #[allow(clippy::too_many_arguments)] // T5: candidate for RegistryConfig struct
     #[must_use]
-    pub fn new(
-        text_threshold: u32,
-        array_as_pg_array: bool,
-        wide_column_threshold: usize,
-        sibling_threshold: usize,
-        sibling_jaccard: f64,
-        stable_threshold: f64,
-        rare_threshold: f64,
-        disabled_strategies: HashSet<StrategyName>,
-    ) -> Self {
+    pub fn new(config: RegistryConfig) -> Self {
         Self {
-            observer: SchemaObserver::new(text_threshold, array_as_pg_array),
+            observer: SchemaObserver::new(config.text_threshold, config.array_as_pg_array),
             naming: NamingRegistry::new(),
-            wide_column_threshold,
-            sibling_threshold,
-            sibling_jaccard,
-            stable_threshold,
-            rare_threshold,
-            disabled_strategies,
+            wide_column_threshold: config.wide_column_threshold,
+            sibling_threshold: config.sibling_threshold,
+            sibling_jaccard: config.sibling_jaccard,
+            stable_threshold: config.stable_threshold,
+            rare_threshold: config.rare_threshold,
+            disabled_strategies: config.disabled_strategies,
             column_collisions: Vec::new(),
         }
     }
@@ -141,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_flat_object() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
         let obj = json!({"name": "Alice", "age": 30});
         reg.observe_root("users", make_root(&obj));
         let schemas = reg.finalize();
@@ -154,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_nested_object_creates_child_table() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
         let obj = json!({"name": "Alice", "address": {"city": "Paris"}});
         reg.observe_root("users", make_root(&obj));
         let schemas = reg.finalize();
@@ -166,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_scalar_array_creates_junction_table() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
         let obj = json!({"id": 1, "tags": ["rust", "sql"]});
         reg.observe_root("users", make_root(&obj));
         let schemas = reg.finalize();
@@ -178,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_array_of_objects() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
         let obj = json!({"id": 1, "orders": [{"amount": 100}, {"amount": 200}]});
         reg.observe_root("users", make_root(&obj));
         let schemas = reg.finalize();
@@ -190,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_topological_order() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
         let obj = json!({"a": {"b": {"c": 1}}});
         reg.observe_root("root", make_root(&obj));
         let schemas = reg.finalize();
@@ -203,7 +221,7 @@ mod tests {
     #[test]
     fn test_wide_object_pivot_homogeneous() {
         // 3 numeric keys → threshold=2 → should get InferredStrategy::Pivot
-        let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
         let obj = json!({
             "id": 1,
             "nutrients": {
@@ -229,7 +247,7 @@ mod tests {
     #[test]
     fn test_wide_object_jsonb_heterogeneous() {
         // Mixed types (string + numeric) → should get InferredStrategy::Jsonb
-        let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
         let obj = json!({
             "id": 1,
             "meta": {
@@ -253,7 +271,7 @@ mod tests {
     #[test]
     fn test_wide_children_excluded() {
         // Sub-tables of a pivot table must be filtered out
-        let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
         // nutrients has 3 numeric keys → pivot
         // each nutrient value is a nested object → would create child tables, but should be dropped
         let obj = json!({
@@ -283,7 +301,7 @@ mod tests {
     /// With O(N²) pairwise this would be ~50M iterations (~2s in debug) — must finish <500ms.
     #[test]
     fn test_jaccard_large_pure_containers_fast() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_jaccard: 0.0, ..Default::default() });
 
         // Build a single JSON root where "genomes" contains 10 000 pure-container children.
         // Each genome child has one contig sub-object (making the genome a pure container).
@@ -328,7 +346,7 @@ mod tests {
     /// 500 homogeneous siblings (identical schemas) → all similar → collapsed into SiblingCollapse.
     #[test]
     fn test_jaccard_large_homogeneous_collapses() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.0, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_jaccard: 0.0, ..Default::default() });
 
         let mut langs = serde_json::Map::new();
         for i in 0..500usize {
@@ -354,7 +372,7 @@ mod tests {
     /// Large group where one sibling has a completely different schema → must NOT collapse.
     #[test]
     fn test_jaccard_outlier_in_large_group_rejected() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
 
         let mut items = serde_json::Map::new();
         // 299 siblings with {a, b, c}
@@ -431,7 +449,7 @@ mod tests {
     /// breaking topological sort and Pass 2 flush order.
     #[test]
     fn test_dotted_field_name_correct_depth() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
         // "v1.0" is a direct child of root — should produce depth 1
         let obj = json!({ "v1.0": { "count": 42 } });
         reg.observe_root("root", make_root(&obj));
@@ -453,7 +471,7 @@ mod tests {
     /// ObjectArray field with '.' in name must also produce correct depth.
     #[test]
     fn test_dotted_field_name_array_correct_depth() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
         let obj = json!({ "v1.0": [{"x": 1}, {"x": 2}] });
         reg.observe_root("root", make_root(&obj));
         let schemas = reg.finalize();
@@ -479,13 +497,13 @@ mod tests {
         ];
 
         // Single registry
-        let mut single = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut single = SchemaRegistry::new(RegistryConfig::default());
         for row in &rows { single.observe_root("users", make_root(row)); }
         let schemas_single = single.finalize();
 
         // Split across two registries, then merge
-        let mut reg_a = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
-        let mut reg_b = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg_a = SchemaRegistry::new(RegistryConfig::default());
+        let mut reg_b = SchemaRegistry::new(RegistryConfig::default());
         for row in &rows[..2] { reg_a.observe_root("users", make_root(row)); }
         for row in &rows[2..] { reg_b.observe_root("users", make_root(row)); }
         reg_a.merge(reg_b);
@@ -512,12 +530,12 @@ mod tests {
             json!({"id": 3, "address": {"city": "Nice", "zip": "06000", "country": "FR"}}),
         ];
 
-        let mut single = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut single = SchemaRegistry::new(RegistryConfig::default());
         for row in &rows { single.observe_root("users", make_root(row)); }
         let schemas_single = single.finalize();
 
-        let mut reg_a = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
-        let mut reg_b = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg_a = SchemaRegistry::new(RegistryConfig::default());
+        let mut reg_b = SchemaRegistry::new(RegistryConfig::default());
         for row in &rows[..2] { reg_a.observe_root("users", make_root(row)); }
         for row in &rows[2..] { reg_b.observe_root("users", make_root(row)); }
         reg_a.merge(reg_b);
@@ -914,7 +932,7 @@ mod tests {
     /// Both are scalar columns → they should be two distinct columns in root.
     #[test]
     fn dot_in_scalar_field_distinct_from_underscore() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
         reg.observe_root("root", make_root(&json!({"foo.bar": 1, "foo_bar": 2})));
         let schemas = reg.finalize();
         let root = schemas.iter().find(|s| s.name == "root").unwrap();
@@ -933,7 +951,7 @@ mod tests {
     /// tables, not one merged table.
     #[test]
     fn dot_in_object_field_creates_distinct_child_table() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
         reg.observe_root("root", make_root(&json!({"foo.bar": {"baz": 1}})));
         reg.observe_root("root", make_root(&json!({"foo_bar": {"baz": 2}})));
         let schemas = reg.finalize();
@@ -957,7 +975,7 @@ mod tests {
 
         let run = |order: &[&str]| -> Vec<String> {
             // threshold=3 so 5 siblings triggers detection (≥ 3)
-            let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+            let mut reg = SchemaRegistry::new(RegistryConfig::default());
             for field in order {
                 reg.observe_root(
                     "root",
@@ -977,7 +995,7 @@ mod tests {
     /// With threshold=2, a pair of 2 identical siblings must be auto-merged into a SiblingCollapse.
     #[test]
     fn test_sibling_threshold_two_detects_pair() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
         let obj = json!({ "nutriscore": {
             "2021": { "grade": "b", "score": 45 },
             "2023": { "grade": "b", "score": 45 }
@@ -995,7 +1013,7 @@ mod tests {
     /// With threshold=3, a pair of only 2 siblings must NOT be auto-merged.
     #[test]
     fn test_sibling_threshold_three_does_not_detect_pair() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
         let obj = json!({ "nutriscore": {
             "2021": { "grade": "b", "score": 45 },
             "2023": { "grade": "b", "score": 45 }
@@ -1015,7 +1033,7 @@ mod tests {
     fn test_schema_clustering_non_mixed_two_groups() {
         // threshold=2, min_jaccard=0.5
         // "front_*" siblings have {imgid, rev}, "ingr_*" have {angle, x} → disjoint
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
         let obj = json!({
             "dict": {
                 "front_fr": { "imgid": "1", "rev": "3" },
@@ -1040,7 +1058,7 @@ mod tests {
     /// Mixed group: numeric ok + non-numeric heterogeneous → numeric merged + clusters for non-numeric.
     #[test]
     fn test_schema_clustering_mixed_numeric_plus_clusters() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
         let obj = json!({
             "images": {
                 "1": { "uploader": "u1", "uploaded_t": 123 },
@@ -1075,7 +1093,7 @@ mod tests {
     /// Post-pass: those 3 Columns children of the SiblingCollapse → merged into root_selected_key.
     #[test]
     fn test_keyed_pivot_orphan_children_merged_by_post_pass() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
         let obj = json!({
             "selected": {
                 "front": {
@@ -1131,7 +1149,7 @@ mod tests {
     #[test]
     fn test_keyed_pivot_orphan_children_not_merged_below_threshold() {
         // threshold = 3, but only 2 lang codes → 2 T tables → no sub-pivot
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
         let obj = json!({
             "selected": {
                 "front":     { "fr": { "imgid": "1", "rev": "2" }, "en": { "imgid": "3", "rev": "4" } },
@@ -1155,7 +1173,7 @@ mod tests {
     /// Concrete case: nova_groups_markers {"2": [...], "3": [...], "4": [...]} → parent becomes SiblingCollapse.
     #[test]
     fn test_scalar_array_siblings_merged_keyed_pivot() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
         let obj = json!({
             "markers": {
                 "2": [1, 2],
@@ -1180,7 +1198,7 @@ mod tests {
     /// A single ScalarArray child (below threshold=2) must NOT trigger a merge.
     #[test]
     fn test_scalar_array_single_child_not_merged() {
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
         let obj = json!({
             "markers": {
                 "2": [1, 2, 3]
@@ -1206,15 +1224,14 @@ mod tests {
             "de": { "name": "baz", "val": 3 }
         }});
 
-        let mut reg_normal = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg_normal = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
         reg_normal.observe_root("root", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
         let langs_normal = schemas_normal.iter().find(|s| s.name == "root_langs").unwrap();
         assert!(matches!(langs_normal.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
             "sibling enabled → SiblingCollapse expected");
 
-        let mut reg_disabled = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001,
-            HashSet::from([StrategyName::Sibling]));
+        let mut reg_disabled = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, disabled_strategies: HashSet::from([StrategyName::Sibling]), ..Default::default() });
         reg_disabled.observe_root("root", make_root(&obj));
         let schemas_disabled = reg_disabled.finalize();
         let langs_disabled = schemas_disabled.iter().find(|s| s.name == "root_langs").unwrap();
@@ -1226,15 +1243,14 @@ mod tests {
     fn test_disable_pivot_gives_jsonb() {
         let obj = json!({ "nutrients": { "vit_c": 10.5, "iron": 2.3, "calcium": 50.0 } });
 
-        let mut reg_normal = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg_normal = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
         reg_normal.observe_root("item", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
         let nutrients_normal = schemas_normal.iter().find(|s| s.name == "item_nutrients").unwrap();
         assert_eq!(nutrients_normal.inferred_strategy, InferredStrategy::Pivot,
             "pivot enabled → Pivot expected");
 
-        let mut reg_disabled = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001,
-            HashSet::from([StrategyName::Pivot]));
+        let mut reg_disabled = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, disabled_strategies: HashSet::from([StrategyName::Pivot]), ..Default::default() });
         reg_disabled.observe_root("item", make_root(&obj));
         let schemas_disabled = reg_disabled.finalize();
         let nutrients_disabled = schemas_disabled.iter().find(|s| s.name == "item_nutrients").unwrap();
@@ -1257,7 +1273,7 @@ mod tests {
                 "cluster_2": { "sizes": { "0": {"w":150,"h":250}, "1": {"w":350,"h":450}, "num": {"w":550,"h":650} } }
             }
         });
-        let mut reg = SchemaRegistry::new(256, false, usize::MAX, 2, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
         for _ in 0..4 {
             reg.observe_root("root", make_root(&obj));
         }
@@ -1272,7 +1288,7 @@ mod tests {
     #[test]
     fn test_no_disabled_strategies_no_regression() {
         let obj = json!({ "nutrients": { "vit_c": 10.5, "iron": 2.3, "calcium": 50.0 } });
-        let mut reg = SchemaRegistry::new(256, false, 2, 3, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
         reg.observe_root("item", make_root(&obj));
         let schemas = reg.finalize();
         let nutrients = schemas.iter().find(|s| s.name == "item_nutrients").unwrap();
@@ -1291,7 +1307,7 @@ mod tests {
         });
 
         // Default: StructuredPivot expected
-        let mut reg_normal = SchemaRegistry::new(256, false, 3, usize::MAX, 0.5, 0.10, 0.001, HashSet::new());
+        let mut reg_normal = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 3, sibling_threshold: usize::MAX, ..Default::default() });
         reg_normal.observe_root("products", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
         let nutrients_normal = schemas_normal.iter().find(|s| s.name == "products_nutrients").unwrap();
@@ -1299,8 +1315,7 @@ mod tests {
             "structured_pivot enabled → StructuredPivot expected, got: {:?}", nutrients_normal.inferred_strategy);
 
         // With structured_pivot disabled: fall through to Pivot or Jsonb
-        let mut reg_disabled = SchemaRegistry::new(256, false, 3, usize::MAX, 0.5, 0.10, 0.001,
-            HashSet::from([StrategyName::StructuredPivot]));
+        let mut reg_disabled = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 3, sibling_threshold: usize::MAX, disabled_strategies: HashSet::from([StrategyName::StructuredPivot]), ..Default::default() });
         reg_disabled.observe_root("products", make_root(&obj));
         let schemas_disabled = reg_disabled.finalize();
         let nutrients_disabled = schemas_disabled.iter().find(|s| s.name == "products_nutrients").unwrap();
