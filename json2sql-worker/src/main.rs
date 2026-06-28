@@ -120,6 +120,29 @@ impl LockfileGuard {
 }
 
 // ---------------------------------------------------------------------------
+// Socket binding
+// ---------------------------------------------------------------------------
+
+/// Bind a `UnixListener` at `path`, removing any stale socket file first.
+/// Returns the bound listener ready to accept connections.
+#[cfg(unix)]
+pub fn bind_socket(path: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {
+    // Remove stale socket file so bind doesn't fail with AddrInUse.
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    tokio::net::UnixListener::bind(path)
+}
+
+#[cfg(not(unix))]
+pub fn bind_socket(_path: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "json2sql-worker requires Unix sockets (Linux/macOS only)",
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -149,7 +172,15 @@ async fn main() {
     };
 
     eprintln!("json2sql-worker: started, socket={}", cfg.socket_path.display());
-    // TODO (tâche 3): bind socket, run pipeline, stream events
+    let _listener = match bind_socket(&cfg.socket_path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("json2sql-worker: failed to bind socket {}: {e}", cfg.socket_path.display());
+            std::process::exit(2);
+        }
+    };
+    eprintln!("json2sql-worker: socket ready, waiting for connections");
+    // TODO (tâche 3): accept connections, run pipeline, stream events
     std::process::exit(0);
 }
 
@@ -260,6 +291,37 @@ mod tests {
         let guard2 = LockfileGuard::try_acquire_at(&path).expect("no IO error");
         assert!(guard2.is_none(), "must fail to acquire when already held");
         drop(guard1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_socket_creates_socket_file() {
+        let path = std::env::temp_dir().join(format!("json2sql-test-{}.sock", uuid::Uuid::now_v7()));
+        let _listener = bind_socket(&path).expect("bind must succeed");
+        assert!(path.exists(), "socket file must exist after bind");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_socket_removes_stale_socket() {
+        let path = std::env::temp_dir().join(format!("json2sql-test-stale-{}.sock", uuid::Uuid::now_v7()));
+        // Create a stale socket file
+        std::fs::write(&path, b"stale").expect("write stale file");
+        let _listener = bind_socket(&path).expect("bind must succeed even with stale file");
+        assert!(path.exists(), "socket file must exist after bind");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_socket_accepts_connection() {
+        use tokio::net::UnixStream;
+        let path = std::env::temp_dir().join(format!("json2sql-test-conn-{}.sock", uuid::Uuid::now_v7()));
+        let _listener = bind_socket(&path).expect("bind must succeed");
+        // Client can connect
+        UnixStream::connect(&path).await.expect("client connect must succeed");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
