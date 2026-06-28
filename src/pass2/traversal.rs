@@ -790,6 +790,72 @@ mod tests {
         assert_eq!(anomalies.totals.get("attrs").copied().unwrap_or(0), 1, "inc_total called even without sink");
     }
 
+    // ---------------------------------------------------------------------------
+    // insert_jsonb_object tests
+    // ---------------------------------------------------------------------------
+
+    fn make_jsonb_path_key(path: &[&str]) -> String {
+        path.join("\x00")
+    }
+
+    #[test]
+    fn jsonb_nominal_emits_one_row_with_serialized_json() {
+        let schema = make_jsonb_schema("evts", "root");
+        let mut sinks = make_sinks(&["evts"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let value = serde_json::json!({"x": 1, "y": "hello"});
+
+        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id()).unwrap();
+
+        let rows = &sinks["evts"].0;
+        assert_eq!(rows.len(), 1, "one JSONB row emitted");
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields.len(), 3, "uuid, parent_uuid, json_data");
+        // third field must be valid JSON containing x and y
+        let parsed: serde_json::Value = serde_json::from_str(fields[2]).unwrap();
+        assert_eq!(parsed["x"], 1);
+        assert_eq!(parsed["y"], "hello");
+    }
+
+    #[test]
+    fn jsonb_with_populated_path_map_recurses_into_child() {
+        // Parent: "evts" with path ["evts"], strategy Jsonb
+        let mut schema = make_jsonb_schema("evts", "root");
+        schema.path = vec!["evts".to_string()];
+
+        // Child Pivot for field "tags" → path_map key "evts\x00tags"
+        let mut child_schema = make_pivot_schema("evts_tags", "evts");
+        child_schema.path = vec!["evts".to_string(), "tags".to_string()];
+        let child_key = make_jsonb_path_key(&["evts", "tags"]);
+
+        let mut path_map = HashMap::new();
+        path_map.insert(child_key, child_schema);
+
+        let mut sinks = make_sinks(&["evts", "evts_tags"]);
+        let mut anomalies = CountingAnomaly::default();
+        let value = serde_json::json!({"tags": {"a": "v1", "b": "v2"}});
+
+        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id()).unwrap();
+
+        assert_eq!(sinks["evts"].0.len(), 1, "one JSONB row for parent");
+        assert_eq!(sinks["evts_tags"].0.len(), 2, "two pivot rows for child tags");
+    }
+
+    #[test]
+    fn jsonb_empty_path_map_no_recursion() {
+        let mut schema = make_jsonb_schema("evts", "root");
+        schema.path = vec!["evts".to_string()];
+        let mut sinks = make_sinks(&["evts"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map: HashMap<String, crate::schema::table_schema::TableSchema> = HashMap::new();
+        let value = serde_json::json!({"nested": {"x": 1}});
+
+        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id()).unwrap();
+
+        assert_eq!(sinks["evts"].0.len(), 1, "one row — no child dispatch without path_map");
+    }
+
     // Smoke tests for fakes
     // ---------------------------------------------------------------------------
 
