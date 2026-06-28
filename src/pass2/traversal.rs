@@ -621,9 +621,27 @@ mod tests {
         }
     }
 
+    pub(super) struct CaptureSink(pub Vec<Vec<u8>>);
+
+    impl RowSink for CaptureSink {
+        fn write_row(&mut self, row: &[u8]) -> Result<()> {
+            self.0.push(row.to_vec());
+            Ok(())
+        }
+    }
+
     // ---------------------------------------------------------------------------
-    // CountingAnomaly smoke test
+    // Smoke tests for fakes
     // ---------------------------------------------------------------------------
+
+    #[test]
+    fn capture_sink_accumulates_rows() {
+        let mut s = CaptureSink(vec![]);
+        s.write_row(b"row1\n").unwrap();
+        s.write_row(b"row2\n").unwrap();
+        assert_eq!(s.0.len(), 2);
+        assert_eq!(s.0[0], b"row1\n");
+    }
 
     #[test]
     fn counting_anomaly_record_returns_ok_and_counts() {
