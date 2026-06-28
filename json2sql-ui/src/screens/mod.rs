@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod strategy;
 pub mod preview;
 pub mod import;
+pub mod resume;
 pub mod table_list;
 
 

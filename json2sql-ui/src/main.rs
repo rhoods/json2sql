@@ -17,6 +17,7 @@ use screens::{
     analysis::AnalysisScreen,
     import::ImportScreen,
     preview::PreviewScreen,
+    resume::ResumeScreen,
     setup::SetupScreen,
     strategy::StrategyScreen,
 };
@@ -93,12 +94,22 @@ document.addEventListener('DOMContentLoaded', function () {{\n\
 fn App() -> Element {
     // Global state — one Signal shared across all screens via props.
     // Load persisted config from ~/.config/json2sql/last_project.toml on first mount.
-    let state: Signal<AppState> = use_signal(|| {
+    let mut state: Signal<AppState> = use_signal(|| {
         let mut s = AppState::default();
         if let Some(cfg) = crate::config::load() {
             cfg.apply_to(&mut s.project);
         }
         s
+    });
+
+    // Detect any active worker socket left over from a previous session.
+    // If found, navigate to the Resume screen; orphan socket files are deleted.
+    use_coroutine(move |_: UnboundedReceiver<()>| async move {
+        if let Some(path) = crate::worker_client::find_active_socket().await {
+            let mut s = state.write();
+            s.resume_socket = Some(path);
+            s.screen = AppScreen::Resume;
+        }
     });
 
     let screen = state.read().screen.clone();
@@ -111,6 +122,7 @@ fn App() -> Element {
                 AppScreen::Strategy => rsx! { StrategyScreen { state } },
                 AppScreen::Preview  => rsx! { PreviewScreen  { state } },
                 AppScreen::Import   => rsx! { ImportScreen   { state } },
+                AppScreen::Resume   => rsx! { ResumeScreen   { state } },
             }
         }
     }

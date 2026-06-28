@@ -25,6 +25,8 @@ pub enum AppScreen {
     Strategy,
     Preview,
     Import,
+    /// Active worker subprocess detected at startup — show "reprendre ?" screen.
+    Resume,
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +401,8 @@ pub struct AppState {
     /// Handle to the running worker subprocess (Pass 2 import).
     /// Replaces the old in-process abort path for the import coroutine.
     pub worker_kill: WorkerKillHandle,
+    /// Socket path of an existing worker found at startup (Resume screen).
+    pub resume_socket: Option<PathBuf>,
 }
 
 impl AppState {
@@ -442,6 +446,7 @@ impl AppState {
         // Kill subprocess worker if one is active (Pass 2 / import)
         self.worker_kill.kill();
         self.worker_kill = WorkerKillHandle::default();
+        self.resume_socket = None;
         self.schema.clear();
         self.import.pass2_progress = Pass2Progress::default();
         self.project.pg_testing = false;

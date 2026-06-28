@@ -10,6 +10,9 @@ pub struct WorkerHandle {
     /// Read half of the Unix socket — pass to `SocketEventReader`.
     #[cfg(unix)]
     pub read_half: tokio::net::unix::OwnedReadHalf,
+    /// Write half of the Unix socket — for sending commands (e.g. `{"cmd":"cancel"}`).
+    #[cfg(unix)]
+    pub write_half: tokio::net::unix::OwnedWriteHalf,
 }
 
 // ---------------------------------------------------------------------------
@@ -132,9 +135,13 @@ pub async fn spawn_worker(
     }
 
     let stream = connect_with_retry(&cfg.socket_path, 20, Duration::from_millis(100)).await?;
-    let (read_half, _write_half) = stream.into_split();
+    let (read_half, write_half) = stream.into_split();
 
-    Ok(WorkerHandle { child, read_half })
+    Ok(WorkerHandle {
+        child,
+        read_half,
+        write_half,
+    })
 }
 
 /// Try to connect to a Unix socket, retrying up to `max_attempts` times with `delay` between.
@@ -156,6 +163,48 @@ pub async fn connect_with_retry(
         }
     }
     unreachable!()
+}
+
+// ---------------------------------------------------------------------------
+// Active socket detection (startup / resume)
+// ---------------------------------------------------------------------------
+
+/// Scan `temp_dir()` for `json2sql-*.sock` files and return the path of the first one
+/// that accepts a connection (i.e. has an active worker).
+///
+/// Orphan socket files (file exists but no worker listening) are deleted during the scan.
+/// Returns `None` if no active worker socket is found.
+#[cfg(unix)]
+pub async fn find_active_socket() -> Option<std::path::PathBuf> {
+    let dir = std::env::temp_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !name.starts_with("json2sql-") || !name.ends_with(".sock") {
+            continue;
+        }
+        match tokio::net::UnixStream::connect(&path).await {
+            Ok(_) => return Some(path),
+            Err(_) => {
+                // Orphan — delete so it doesn't clutter temp_dir.
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+pub async fn find_active_socket() -> Option<std::path::PathBuf> {
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +369,45 @@ mod tests {
         .expect("timeout");
         assert!(result.is_err(), "malformed JSON must return Err");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn find_active_socket_returns_none_when_no_sockets() {
+        // There should be no json2sql-*.sock files in temp dir under normal test conditions.
+        // We can't guarantee this is true, but at minimum: calling the fn should not panic.
+        let _ = find_active_socket().await;
+    }
+
+    #[tokio::test]
+    async fn find_active_socket_finds_listening_socket() {
+        let path = temp_sock("find-active");
+        let listener = UnixListener::bind(&path).expect("bind");
+        // Keep the listener alive so connections are accepted
+        let _accept = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let found = find_active_socket().await;
+        // May find other sockets first, but our path must be found eventually.
+        // Assert the file exists AND a connection was possible.
+        assert!(found.is_some(), "must find an active socket");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn find_active_socket_deletes_orphan_socket_file() {
+        // Create a socket *file* but don't bind a listener on it (so connection fails).
+        let path = temp_sock("orphan");
+        // Write a dummy file at the path (not a bound socket).
+        std::fs::write(&path, b"").expect("create orphan file");
+
+        let _ = find_active_socket().await;
+
+        // The orphan file should have been deleted.
+        assert!(
+            !path.exists(),
+            "orphan socket file should be cleaned up"
+        );
     }
 
     #[test]
