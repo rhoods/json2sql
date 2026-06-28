@@ -13,7 +13,11 @@ json2sql = { path = ".." }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "io-util", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "io-util", "fs", "time"] }
+
+tokio-postgres = { version = "0.7", default-features = false }
+
+urlencoding = "2"
 
 uuid = { version = "1", features = ["v7"] }
 

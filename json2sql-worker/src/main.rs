@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 mod cancel;
+mod pipeline;
 mod serve;
 mod summary;
 
@@ -129,8 +130,13 @@ async fn main() {
             cancel.clone(),
         ));
 
-        // TODO(next-task): run DDL + pass2 pipeline, push events into summary, write result
-        cancel.cancelled().await;
+        let result = pipeline::run_pipeline(&cfg, Arc::clone(&summary), cancel.clone()).await;
+
+        if let Err(e) = write_result(&cfg.result_file, &result) {
+            eprintln!("json2sql-worker: failed to write result file: {e}");
+        }
+
+        cancel.cancel(); // stop serve loop (and any remaining connection handlers)
         serve_handle.await.ok();
     }
     #[cfg(not(unix))]
