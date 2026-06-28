@@ -11,6 +11,8 @@ use json2sql::schema::strategies::StrategyName;
 use json2sql::schema::config::ConfigWarning;
 use json2sql::schema::table_schema::{TableSchema, UserOverride};
 
+use crate::worker_client::WorkerKillHandle;
+
 // ---------------------------------------------------------------------------
 // Screen navigation
 // ---------------------------------------------------------------------------
@@ -392,8 +394,11 @@ pub struct AppState {
     pub import: ImportState,
     #[allow(dead_code)]
     pub ui: UiState,
-    /// Handle to the currently running Pass 1 or Pass 2 task.
+    /// Handle to the currently running Pass 1 (analysis) task.
     pub abort_handle: Option<tokio::task::AbortHandle>,
+    /// Handle to the running worker subprocess (Pass 2 import).
+    /// Replaces the old in-process abort path for the import coroutine.
+    pub worker_kill: WorkerKillHandle,
 }
 
 impl AppState {
@@ -434,6 +439,9 @@ impl AppState {
         if let Some(handle) = self.abort_handle.take() {
             handle.abort();
         }
+        // Kill subprocess worker if one is active (Pass 2 / import)
+        self.worker_kill.kill();
+        self.worker_kill = WorkerKillHandle::default();
         self.schema.clear();
         self.import.pass2_progress = Pass2Progress::default();
         self.project.pg_testing = false;

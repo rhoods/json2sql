@@ -8,11 +8,12 @@
 
 use dioxus::prelude::*;
 
-use json2sql::db::ddl;
 use json2sql::io::progress_event::ProgressEvent;
+use json2sql::ipc::{new_socket_path, WorkerConfig};
 
 use crate::screens::{progress_pct, ProgressBar};
 use crate::state::{format_bytes, AppScreen, AppState};
+use crate::worker_client::{spawn_worker, SocketEventReader, WorkerKillHandle};
 
 // ---------------------------------------------------------------------------
 // Component
@@ -24,17 +25,21 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     // ── Elapsed timer ─────────────────────────────────────────────────────
     let elapsed_secs = crate::screens::use_elapsed_timer(move || state.read().import.pass2_progress.done);
 
-    // ── Pass 2 runner ────────────────────────────────────────────────────
+    // ── Pass 2 runner — subprocess worker ────────────────────────────────
     let mut once = use_signal(|| false);
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
         if *once.peek() { return; }
         once.set(true);
-        if state.read().abort_handle.is_some() {
-            return;
+        if state.read().worker_kill.is_some() {
+            return; // already running
         }
         state.write().import.pass2_progress = crate::state::Pass2Progress::default();
 
-        let (source_file, root_table, pg_url, schemas, drop_existing, anomaly_dir, pg_schema, pass2_parallel, import_limit, verbose_logs, hint_format, skip_constraints_flag) = {
+        // Extract all fields needed to build WorkerConfig (one locked read).
+        let (source_file, root_table, pg_password, pg_host, pg_port, pg_database, pg_user,
+             schemas, drop_existing, anomaly_dir, pg_schema, pass2_parallel, import_limit,
+             verbose_logs, hint_format, skip_constraints_flag) =
+        {
             let source_file_opt = state.read().project.source_file.clone();
             let Some(path) = source_file_opt else {
                 state.write().cancel();
@@ -49,7 +54,11 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             (
                 path,
                 root,
-                s.project.pg.to_url(),
+                s.project.pg.password.clone(),
+                s.project.pg.host.clone(),
+                s.project.pg.port,
+                s.project.pg.database.clone(),
+                s.project.pg.username.clone(),
                 crate::screens::build_effective_schemas(&s.schema.schemas, &s.schema.strategy_overrides),
                 s.project.drop_existing,
                 s.project.anomaly_dir.clone(),
@@ -66,43 +75,60 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             state.write().import.pass2_progress.constraints_skipped = true;
         }
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
+        // Locate the worker binary (colocated with the UI executable).
+        let worker_bin = match std::env::current_exe() {
+            Ok(exe) => exe
+                .parent()
+                .map(|d| d.join("json2sql-worker"))
+                .unwrap_or_else(|| std::path::PathBuf::from("json2sql-worker")),
+            Err(e) => {
+                state.write().import.pass2_progress.push_log(
+                    format!("Cannot locate worker binary: {e}")
+                );
+                return;
+            }
+        };
 
-        let handle = tokio::spawn(async move {
-            let (client, connection) = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                tokio_postgres::connect(&pg_url, tokio_postgres::NoTls),
-            )
-            .await
-            .map_err(|_| std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "PostgreSQL connection timed out (10s)",
-            ))??;
-            tokio::spawn(async move { let _ = connection.await; });
+        // Build the WorkerConfig (password excluded — passed as env var).
+        let socket_path = new_socket_path();
+        let result_file = socket_path.with_extension("json");
+        let worker_cfg = WorkerConfig {
+            source_file,
+            root_table,
+            pg_host,
+            pg_port,
+            pg_database,
+            pg_user,
+            pg_schema,
+            schemas,
+            drop_existing,
+            anomaly_dir,
+            pass2_parallel,
+            import_limit,
+            verbose_logs,
+            hint_format,
+            skip_constraints: skip_constraints_flag,
+            socket_path,
+            result_file,
+        };
 
-            ddl::create_tables_no_constraints(&client, &schemas, &pg_schema, drop_existing, Some(&tx)).await?;
+        // Spawn the worker subprocess and connect to its socket.
+        let handle = match spawn_worker(&worker_bin, &worker_cfg, &pg_password).await {
+            Ok(h) => h,
+            Err(e) => {
+                state
+                    .write()
+                    .import
+                    .pass2_progress
+                    .push_log(format!("Failed to start worker: {e}"));
+                return;
+            }
+        };
 
-            let cfg = json2sql::pass2::Pass2Config {
-                root_table,
-                pg_schema,
-                parallel: pass2_parallel,
-                anomaly_dir,
-                limit: import_limit,
-                mem_flush_threshold_bytes: None,
-                ram_high_watermark: None,
-                ram_low_watermark: None,
-                verbose: verbose_logs,
-                hint_format,
-                skip_constraints: skip_constraints_flag,
-            };
-            json2sql::pass2::runner::run(&source_file, &schemas, &client, &pg_url, &cfg, Some(tx))
-            .await
-        });
+        state.write().worker_kill = WorkerKillHandle::new(handle.child);
+        let mut reader = SocketEventReader::new(handle.read_half);
 
-        state.write().abort_handle = Some(handle.abort_handle());
-
-        // Throttle UI updates to ~5 Hz — halves DOM patch frequency vs previous 100ms.
-        // Critical on large files (240+ tables): reduces IPC pipe pressure during user interaction.
+        // Throttle UI updates to ~5 Hz — reduces DOM patch frequency on large files.
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending: Vec<ProgressEvent> = Vec::new();
@@ -111,14 +137,15 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         loop {
             tokio::select! {
                 biased;
-                maybe = rx.recv() => match maybe {
-                    Some(event) => {
+                result = reader.next_event() => match result {
+                    Ok(Some(event)) => {
                         if matches!(event, ProgressEvent::Pass2Done { .. }) {
                             finished = true;
                         }
                         pending.push(event);
                     }
-                    None => break,
+                    // EOF (worker done / killed) or socket error → stop reading.
+                    Ok(None) | Err(_) => break,
                 },
                 _ = interval.tick() => {
                     if !pending.is_empty() {
@@ -130,17 +157,13 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 }
             }
         }
-        // Flush residual events buffered between the last tick and channel close.
+        // Flush residual events buffered between the last tick and socket close.
         if !pending.is_empty() {
             let mut s = state.write();
             for e in pending { s.apply_progress_event(e); }
         }
 
-        if let Ok(Err(e)) = handle.await {
-            state.write().import.pass2_progress.push_log(format!("Import error: {e}"));
-        }
-
-        state.write().abort_handle = None;
+        state.write().worker_kill = WorkerKillHandle::default();
     });
 
     // ── Derived values ────────────────────────────────────────────────────

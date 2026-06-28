@@ -112,7 +112,24 @@ async fn handle_connection(
 
         tokio::select! {
             _ = notified => {}
-            _ = cancel.cancelled() => break,
+            _ = cancel.cancelled() => {
+                // Final drain: emit any events (including Pass2Done) pushed before the
+                // cancel signal arrived — prevents the client from missing the last batch
+                // when cancel fires simultaneously with a notification.
+                let drain: Vec<String> = {
+                    let s = summary.lock().await;
+                    s.snapshot()[cursor..]
+                        .iter()
+                        .filter_map(|e| serde_json::to_string(e).ok())
+                        .collect()
+                };
+                for line in &drain {
+                    if write_line(&mut writer, line).await.is_err() {
+                        return;
+                    }
+                }
+                break;
+            }
         }
     }
 }
