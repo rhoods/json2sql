@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use json2sql::io::reader::JsonFormat;
+
+mod summary;
 use json2sql::pass2::Pass2Config;
 use json2sql::schema::table_schema::TableSchema;
 
