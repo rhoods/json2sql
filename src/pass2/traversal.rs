@@ -585,6 +585,7 @@ pub(super) fn insert_array<S: RowSink>(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use std::collections::HashMap;
 
@@ -619,6 +620,62 @@ mod tests {
         fn inc_total(&mut self, table: &str) {
             *self.totals.entry(table.to_string()).or_default() += 1;
         }
+    }
+
+    use uuid::Uuid;
+
+    use crate::schema::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
+    use crate::schema::type_tracker::PgType;
+
+    // ---------------------------------------------------------------------------
+    // Schema construction helpers
+    // ---------------------------------------------------------------------------
+
+    fn col(name: &str, pg_type: PgType) -> ColumnSchema {
+        ColumnSchema { name: name.to_string(), original_name: name.to_string(), pg_type, not_null: false, is_generated: false, is_parent_fk: false }
+    }
+
+    fn generated_id() -> ColumnSchema {
+        ColumnSchema { name: "j2s_id".to_string(), original_name: "j2s_id".to_string(), pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: false }
+    }
+
+    fn parent_fk(parent: &str) -> ColumnSchema {
+        ColumnSchema { name: format!("j2s_{parent}_id"), original_name: format!("j2s_{parent}_id"), pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: true }
+    }
+
+    /// Pivot schema: j2s_id, j2s_{parent}_id, key TEXT, value TEXT
+    fn make_pivot_schema(name: &str, parent: &str) -> TableSchema {
+        let mut s = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
+        s.inferred_strategy = InferredStrategy::Pivot;
+        s.columns = vec![generated_id(), parent_fk(parent), col("key", PgType::Text), col("value", PgType::Text)];
+        s
+    }
+
+    /// Jsonb schema: j2s_id, j2s_{parent}_id, data TEXT (JSONB stored as text in COPY)
+    fn make_jsonb_schema(name: &str, parent: &str) -> TableSchema {
+        let mut s = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
+        s.inferred_strategy = InferredStrategy::Jsonb;
+        s.columns = vec![generated_id(), parent_fk(parent), col("data", PgType::Text)];
+        s
+    }
+
+    fn make_sinks(names: &[&str]) -> HashMap<String, CaptureSink> {
+        names.iter().map(|n| ((*n).to_string(), CaptureSink(vec![]))).collect()
+    }
+
+    fn dummy_parent_id() -> Uuid { Uuid::nil() }
+
+    // ---------------------------------------------------------------------------
+    // Helpers smoke test
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn make_pivot_schema_has_expected_columns() {
+        let s = make_pivot_schema("attrs", "root");
+        assert_eq!(s.columns.len(), 4);
+        assert!(s.columns[0].is_generated && !s.columns[0].is_parent_fk);
+        assert!(s.columns[1].is_generated && s.columns[1].is_parent_fk);
+        assert_eq!(s.columns[3].original_name, "value");
     }
 
     pub(super) struct CaptureSink(pub Vec<Vec<u8>>);
