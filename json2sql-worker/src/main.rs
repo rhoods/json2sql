@@ -145,6 +145,20 @@ pub fn bind_socket(_path: &std::path::Path) -> std::io::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Result file
+// ---------------------------------------------------------------------------
+
+/// Write `result` atomically to `dest` using a sibling temp file + rename.
+/// Prevents the UI from reading a partial file if the worker is killed mid-write.
+pub fn write_result(dest: &std::path::Path, result: &WorkerResult) -> std::io::Result<()> {
+    let tmp = dest.with_extension("tmp");
+    let json = serde_json::to_vec(result)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&tmp, &json)?;
+    std::fs::rename(&tmp, dest)
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -293,6 +307,64 @@ mod tests {
         let guard2 = LockfileGuard::try_acquire_at(&path).expect("no IO error");
         assert!(guard2.is_none(), "must fail to acquire when already held");
         drop(guard1);
+    }
+
+    #[test]
+    fn write_result_creates_file_with_correct_content() {
+        let dir = std::env::temp_dir();
+        let dest = dir.join(format!("json2sql-result-{}.json", uuid::Uuid::now_v7()));
+        let result = WorkerResult {
+            status: "success".to_string(),
+            total_rows: 42,
+            anomaly_count: 1,
+            constraint_warning_count: 0,
+            message: None,
+        };
+        write_result(&dest, &result).expect("write must succeed");
+        assert!(dest.exists(), "result file must exist");
+        let content = std::fs::read_to_string(&dest).expect("read back");
+        let back: WorkerResult = serde_json::from_str(&content).expect("deserialize");
+        assert_eq!(back.status, "success");
+        assert_eq!(back.total_rows, 42);
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn write_result_is_atomic_no_tmp_left_on_success() {
+        let dir = std::env::temp_dir();
+        let dest = dir.join(format!("json2sql-result-atomic-{}.json", uuid::Uuid::now_v7()));
+        let tmp = dest.with_extension("tmp");
+        let result = WorkerResult {
+            status: "error".to_string(),
+            total_rows: 0,
+            anomaly_count: 0,
+            constraint_warning_count: 0,
+            message: Some("pg error".to_string()),
+        };
+        write_result(&dest, &result).expect("write must succeed");
+        assert!(dest.exists(), "final result file must exist");
+        assert!(!tmp.exists(), "tmp file must be renamed away");
+        let content = std::fs::read_to_string(&dest).expect("read back");
+        let back: WorkerResult = serde_json::from_str(&content).expect("deserialize");
+        assert_eq!(back.message.as_deref(), Some("pg error"));
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn write_result_overwrites_existing_file() {
+        let dir = std::env::temp_dir();
+        let dest = dir.join(format!("json2sql-result-overwrite-{}.json", uuid::Uuid::now_v7()));
+        // Write a first result
+        let r1 = WorkerResult { status: "error".to_string(), total_rows: 0, anomaly_count: 0, constraint_warning_count: 0, message: None };
+        write_result(&dest, &r1).expect("first write");
+        // Overwrite with a second result
+        let r2 = WorkerResult { status: "success".to_string(), total_rows: 99, anomaly_count: 0, constraint_warning_count: 0, message: None };
+        write_result(&dest, &r2).expect("second write");
+        let content = std::fs::read_to_string(&dest).expect("read back");
+        let back: WorkerResult = serde_json::from_str(&content).expect("deserialize");
+        assert_eq!(back.status, "success");
+        assert_eq!(back.total_rows, 99);
+        let _ = std::fs::remove_file(&dest);
     }
 
     #[cfg(unix)]
