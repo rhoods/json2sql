@@ -949,6 +949,73 @@ mod tests {
         assert_eq!(sinks["prices"].0.len(), 2, "two distinct bases → two rows");
     }
 
+    // ---------------------------------------------------------------------------
+    // insert_sibling_collapse_object tests
+    // ---------------------------------------------------------------------------
+
+    use crate::schema::table_schema::{KeyShape, SiblingSchema};
+
+    fn make_sibling_collapse_schema(name: &str, parent: &str, key_col: &str, data_cols: &[&str]) -> (crate::schema::table_schema::TableSchema, SiblingSchema) {
+        use crate::schema::table_schema::InferredStrategy;
+        let ss = SiblingSchema { key_col_name: key_col.to_string(), key_shape: KeyShape::Mixed, array_children: false };
+        let mut s = crate::schema::table_schema::TableSchema::new(name.to_string(), vec![name.to_string()], 1);
+        s.inferred_strategy = InferredStrategy::SiblingCollapse(ss.clone());
+        let mut cols = vec![generated_id(), parent_fk(parent), col(key_col, PgType::Text)];
+        for dc in data_cols { cols.push(col(dc, PgType::Text)); }
+        s.columns = cols;
+        (s, ss)
+    }
+
+    #[test]
+    fn sibling_collapse_non_object_value_silently_skipped_zero_rows() {
+        let (schema, ss) = make_sibling_collapse_schema("items", "root", "key", &["a"]);
+        let mut sinks = make_sinks(&["items"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k": "scalar_not_object"}"#).unwrap();
+
+        super::insert_sibling_collapse_object(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        assert_eq!(sinks["items"].0.len(), 0, "scalar value → silently skipped, zero rows");
+        assert_eq!(anomalies.totals.get("items").copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn sibling_collapse_nominal_one_object_emits_one_row() {
+        let (schema, ss) = make_sibling_collapse_schema("items", "root", "key", &["a", "b"]);
+        let mut sinks = make_sinks(&["items"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"mykey": {"a": "v1", "b": "v2"}}"#).unwrap();
+
+        super::insert_sibling_collapse_object(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        let rows = &sinks["items"].0;
+        assert_eq!(rows.len(), 1);
+        let fields = parse_fields(&rows[0]);
+        // fields: j2s_id, j2s_parent_id, key, a, b
+        assert_eq!(fields.len(), 5);
+        assert_eq!(fields[2], "mykey", "sibling key in key column");
+        assert_eq!(fields[3], "v1");
+        assert_eq!(fields[4], "v2");
+    }
+
+    #[test]
+    fn sibling_collapse_multiple_keys_emit_multiple_rows() {
+        let (schema, ss) = make_sibling_collapse_schema("items", "root", "key", &["val"]);
+        let mut sinks = make_sinks(&["items"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"k1": {"val": "a"}, "k2": {"val": "b"}}"#).unwrap();
+
+        super::insert_sibling_collapse_object(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        assert_eq!(sinks["items"].0.len(), 2, "two sibling keys → two rows");
+    }
+
     // Smoke tests for fakes
     // ---------------------------------------------------------------------------
 
