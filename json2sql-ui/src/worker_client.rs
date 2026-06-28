@@ -166,6 +166,36 @@ pub async fn connect_with_retry(
 }
 
 // ---------------------------------------------------------------------------
+// Single-worker guard — lockfile check
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if no other worker process currently holds the global lockfile.
+///
+/// This is an advisory check — the worker itself enforces exclusivity via `flock`.
+/// Call before spawning to provide a clear "already running" message instead of
+/// a confusing connection-refused error.
+pub fn is_lockfile_free() -> bool {
+    use fs2::FileExt as _;
+    let path = json2sql::ipc::lockfile_path();
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(_) => return true, // cannot open → assume free (soft check)
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = file.unlock();
+            true
+        }
+        Err(_) => false, // WouldBlock → another process holds the lock
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Active socket detection (startup / resume)
 // ---------------------------------------------------------------------------
 
@@ -182,6 +212,10 @@ pub async fn find_active_socket() -> Option<std::path::PathBuf> {
         Err(_) => return None,
     };
 
+    // Scan ALL matching files: delete every orphan, return the first active socket.
+    // Scanning all (rather than returning early) ensures orphan cleanup is complete
+    // even when an active socket is found first.
+    let mut active: Option<std::path::PathBuf> = None;
     for entry in entries.flatten() {
         let path = entry.path();
         let name = path
@@ -192,14 +226,18 @@ pub async fn find_active_socket() -> Option<std::path::PathBuf> {
             continue;
         }
         match tokio::net::UnixStream::connect(&path).await {
-            Ok(_) => return Some(path),
+            Ok(_) => {
+                if active.is_none() {
+                    active = Some(path);
+                }
+            }
             Err(_) => {
-                // Orphan — delete so it doesn't clutter temp_dir.
+                // Orphan — delete so it doesn't accumulate in temp_dir.
                 let _ = std::fs::remove_file(&path);
             }
         }
     }
-    None
+    active
 }
 
 #[cfg(not(unix))]

@@ -139,6 +139,19 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 result_file: result_file.clone(),
             };
 
+            // Lockfile check: refuse to spawn if another worker is already running
+            // (e.g. a second UI instance). The worker enforces this too, but checking
+            // here gives a clear error message rather than a connection-refused failure.
+            if !crate::worker_client::is_lockfile_free() {
+                state
+                    .write()
+                    .import
+                    .pass2_progress
+                    .push_log("Un import est déjà en cours dans une autre instance".to_string());
+                state.write().worker_kill = WorkerKillHandle::default();
+                return;
+            }
+
             let handle = match spawn_worker(&worker_bin, &worker_cfg, &pg_password).await {
                 Ok(h) => h,
                 Err(e) => {
