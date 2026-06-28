@@ -3049,6 +3049,7 @@ dependencies = [
  "tokio-postgres",
  "toml",
  "urlencoding",
+ "uuid",
  "zeroize",
 ]
 

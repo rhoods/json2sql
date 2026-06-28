@@ -8,6 +8,7 @@ mod config;
 mod screens;
 mod state;
 mod theme;
+mod worker_client;
 
 use dioxus::prelude::*;
 

@@ -1,94 +1,9 @@
 use std::path::PathBuf;
 
-use json2sql::io::reader::JsonFormat;
-
 mod cancel;
 mod summary;
-use json2sql::pass2::Pass2Config;
-use json2sql::schema::table_schema::TableSchema;
 
-// ---------------------------------------------------------------------------
-// IPC types — exchanged between UI and worker over stdin / socket
-// ---------------------------------------------------------------------------
-
-/// Configuration sent by the UI to the worker via stdin (JSON).
-/// PostgreSQL password is NOT included here — passed via J2S_PG_PASSWORD env var.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct WorkerConfig {
-    pub source_file: PathBuf,
-    pub root_table: String,
-    pub pg_host: String,
-    pub pg_port: u16,
-    pub pg_database: String,
-    pub pg_user: String,
-    pub pg_schema: String,
-    pub schemas: Vec<TableSchema>,
-    pub drop_existing: bool,
-    pub anomaly_dir: Option<PathBuf>,
-    pub pass2_parallel: usize,
-    pub import_limit: Option<u64>,
-    pub verbose_logs: bool,
-    pub hint_format: Option<JsonFormat>,
-    pub skip_constraints: bool,
-    /// Full path to the Unix socket the worker will bind.
-    pub socket_path: PathBuf,
-    /// Full path where the worker writes the JSON result file.
-    pub result_file: PathBuf,
-}
-
-impl WorkerConfig {
-    /// Build a `Pass2Config` from this config (password resolved separately).
-    #[must_use]
-    pub fn into_pass2_config(self) -> Pass2Config {
-        Pass2Config {
-            root_table: self.root_table,
-            pg_schema: self.pg_schema,
-            parallel: self.pass2_parallel,
-            anomaly_dir: self.anomaly_dir,
-            limit: self.import_limit,
-            mem_flush_threshold_bytes: None,
-            ram_high_watermark: None,
-            ram_low_watermark: None,
-            verbose: self.verbose_logs,
-            hint_format: self.hint_format,
-            skip_constraints: self.skip_constraints,
-        }
-    }
-}
-
-/// Command sent by the UI to the worker on the socket (one JSON line).
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct WorkerCommand {
-    pub cmd: String,
-}
-
-/// Final result written atomically to `result_file` before the socket is closed.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct WorkerResult {
-    /// "success", "error", or "cancelled"
-    pub status: String,
-    pub total_rows: u64,
-    pub anomaly_count: u64,
-    pub constraint_warning_count: u64,
-    pub message: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Socket path helpers
-// ---------------------------------------------------------------------------
-
-/// Generate a fresh socket path under `temp_dir()` using a UUID v7 session ID.
-#[must_use]
-pub fn new_socket_path() -> PathBuf {
-    let id = uuid::Uuid::now_v7();
-    std::env::temp_dir().join(format!("json2sql-{id}.sock"))
-}
-
-/// Path to the exclusive lockfile preventing concurrent workers.
-#[must_use]
-pub fn lockfile_path() -> PathBuf {
-    std::env::temp_dir().join("json2sql-worker.lock")
-}
+use json2sql::ipc::{WorkerConfig, WorkerResult, lockfile_path, new_socket_path};
 
 // ---------------------------------------------------------------------------
 // Lockfile guard
@@ -197,7 +112,7 @@ async fn main() {
         }
     };
     eprintln!("json2sql-worker: socket ready, waiting for connections");
-    // TODO (tâche 3): accept connections, run pipeline, stream events
+    // TODO: accept connections, run pipeline, stream events
     std::process::exit(0);
 }
 
@@ -210,6 +125,7 @@ mod tests {
     use super::*;
 
     fn minimal_config(socket_path: PathBuf, result_file: PathBuf) -> WorkerConfig {
+        use json2sql::schema::table_schema::TableSchema;
         WorkerConfig {
             source_file: PathBuf::from("/tmp/data.json"),
             root_table: "root".to_string(),
@@ -232,56 +148,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_config_serde_round_trip() {
-        let socket = new_socket_path();
-        let result = std::env::temp_dir().join("result.json");
-        let cfg = minimal_config(socket.clone(), result.clone());
-
-        let json = serde_json::to_string(&cfg).expect("serialize");
-        let back: WorkerConfig = serde_json::from_str(&json).expect("deserialize");
-
-        assert_eq!(back.root_table, "root");
-        assert_eq!(back.pg_host, "localhost");
-        assert_eq!(back.pg_port, 5432);
-        assert_eq!(back.socket_path, socket);
-        assert_eq!(back.result_file, result);
-        assert!(!back.skip_constraints);
-    }
-
-    #[test]
-    fn worker_result_serde_round_trip() {
-        let r = WorkerResult {
-            status: "success".to_string(),
-            total_rows: 12345,
-            anomaly_count: 2,
-            constraint_warning_count: 0,
-            message: None,
-        };
-        let json = serde_json::to_string(&r).expect("serialize");
-        let back: WorkerResult = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.status, "success");
-        assert_eq!(back.total_rows, 12345);
-        assert!(back.message.is_none());
-    }
-
-    #[test]
-    fn worker_command_serde_round_trip() {
-        let cmd = WorkerCommand { cmd: "cancel".to_string() };
-        let json = serde_json::to_string(&cmd).expect("serialize");
-        let back: WorkerCommand = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.cmd, "cancel");
-    }
-
-    #[test]
-    fn new_socket_path_uses_temp_dir_and_has_uuid() {
-        let p = new_socket_path();
-        assert!(p.starts_with(std::env::temp_dir()));
-        let name = p.file_name().unwrap().to_string_lossy();
-        assert!(name.starts_with("json2sql-"), "must start with json2sql-");
-        assert!(name.ends_with(".sock"), "must end with .sock");
-    }
-
-    #[test]
     fn lockfile_path_uses_temp_dir() {
         let p = lockfile_path();
         assert!(p.starts_with(std::env::temp_dir()));
@@ -294,7 +160,6 @@ mod tests {
         let guard = LockfileGuard::try_acquire_at(&path).expect("no IO error");
         assert!(guard.is_some(), "must acquire lock when not held");
         drop(guard);
-        // After release, can acquire again
         let guard2 = LockfileGuard::try_acquire_at(&path).expect("no IO error");
         assert!(guard2.is_some(), "must re-acquire after release");
     }
@@ -355,10 +220,8 @@ mod tests {
     fn write_result_overwrites_existing_file() {
         let dir = std::env::temp_dir();
         let dest = dir.join(format!("json2sql-result-overwrite-{}.json", uuid::Uuid::now_v7()));
-        // Write a first result
         let r1 = WorkerResult { status: "error".to_string(), total_rows: 0, anomaly_count: 0, constraint_warning_count: 0, message: None };
         write_result(&dest, &r1).expect("first write");
-        // Overwrite with a second result
         let r2 = WorkerResult { status: "success".to_string(), total_rows: 99, anomaly_count: 0, constraint_warning_count: 0, message: None };
         write_result(&dest, &r2).expect("second write");
         let content = std::fs::read_to_string(&dest).expect("read back");
@@ -381,7 +244,6 @@ mod tests {
     #[tokio::test]
     async fn bind_socket_removes_stale_socket() {
         let path = std::env::temp_dir().join(format!("json2sql-test-stale-{}.sock", uuid::Uuid::now_v7()));
-        // Create a stale socket file
         std::fs::write(&path, b"stale").expect("write stale file");
         let _listener = bind_socket(&path).expect("bind must succeed even with stale file");
         assert!(path.exists(), "socket file must exist after bind");
@@ -394,7 +256,6 @@ mod tests {
         use tokio::net::UnixStream;
         let path = std::env::temp_dir().join(format!("json2sql-test-conn-{}.sock", uuid::Uuid::now_v7()));
         let _listener = bind_socket(&path).expect("bind must succeed");
-        // Client can connect
         UnixStream::connect(&path).await.expect("client connect must succeed");
         let _ = std::fs::remove_file(&path);
     }
