@@ -856,6 +856,99 @@ mod tests {
         assert_eq!(sinks["evts"].0.len(), 1, "one row — no child dispatch without path_map");
     }
 
+    // ---------------------------------------------------------------------------
+    // insert_structured_pivot_object tests
+    // ---------------------------------------------------------------------------
+
+    use crate::schema::table_schema::{SuffixColumn, SuffixSchema};
+
+    fn make_structured_pivot_schema(name: &str, parent: &str, suffix_schema: &SuffixSchema) -> crate::schema::table_schema::TableSchema {
+        use crate::schema::table_schema::InferredStrategy;
+        let mut s = crate::schema::table_schema::TableSchema::new(name.to_string(), vec![name.to_string()], 1);
+        s.inferred_strategy = InferredStrategy::StructuredPivot(suffix_schema.clone());
+        let mut cols = vec![
+            generated_id(),
+            parent_fk(parent),
+            col("name", PgType::Text),
+            col("value", PgType::Text),
+        ];
+        for sc in &suffix_schema.suffix_cols {
+            cols.push(ColumnSchema {
+                name: sc.col_name.clone(),
+                original_name: sc.suffix.clone(), // suffix string is the lookup key in write_structured_pivot_row
+                pg_type: sc.pg_type.clone(),
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
+            });
+        }
+        s.columns = cols;
+        s
+    }
+
+    fn make_suffix_schema(suffixes: &[&str]) -> SuffixSchema {
+        SuffixSchema {
+            suffix_cols: suffixes.iter().map(|s| SuffixColumn {
+                suffix: s.to_string(),
+                col_name: format!("c{}", s.replace('_', "")),
+                pg_type: PgType::Text,
+            }).collect(),
+            value_type: PgType::Text,
+        }
+    }
+
+    #[test]
+    fn structured_pivot_two_keys_same_base_emit_one_row() {
+        let ss = make_suffix_schema(&["_eur", "_usd"]);
+        let schema = make_structured_pivot_schema("prices", "root", &ss);
+        let mut sinks = make_sinks(&["prices"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"price_eur": "1.5", "price_usd": "2.0"}"#).unwrap();
+
+        super::insert_structured_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        let rows = &sinks["prices"].0;
+        assert_eq!(rows.len(), 1, "two keys with same base → one row");
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields[2], "price", "base key in 'name' column");
+        assert_ne!(fields[4], r"\N", "_eur suffix value present");
+        assert_ne!(fields[5], r"\N", "_usd suffix value present");
+    }
+
+    #[test]
+    fn structured_pivot_key_without_suffix_goes_to_value_column() {
+        let ss = make_suffix_schema(&["_eur"]);
+        let schema = make_structured_pivot_schema("prices", "root", &ss);
+        let mut sinks = make_sinks(&["prices"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"standalone": "val"}"#).unwrap();
+
+        super::insert_structured_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        let rows = &sinks["prices"].0;
+        assert_eq!(rows.len(), 1);
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields[2], "standalone", "key with no suffix → 'name' column");
+        assert_eq!(fields[3], "val", "value goes to 'value' column (suffix \"\")");
+        assert_eq!(fields[4], r"\N", "suffix column absent → \\N");
+    }
+
+    #[test]
+    fn structured_pivot_multiple_bases_emit_multiple_rows() {
+        let ss = make_suffix_schema(&["_eur"]);
+        let schema = make_structured_pivot_schema("prices", "root", &ss);
+        let mut sinks = make_sinks(&["prices"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"cost_eur": "1", "price_eur": "2"}"#).unwrap();
+
+        super::insert_structured_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+
+        assert_eq!(sinks["prices"].0.len(), 2, "two distinct bases → two rows");
+    }
+
     // Smoke tests for fakes
     // ---------------------------------------------------------------------------
 
