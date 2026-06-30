@@ -115,7 +115,7 @@ async fn test_limit_composable_with_disable_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let mut p1_cfg = common::pass1_config("users");
-        p1_cfg.disabled_strategies = [StrategyName::Sibling].into_iter().collect::<HashSet<_>>();
+        p1_cfg.registry.disabled_strategies = [StrategyName::Sibling].into_iter().collect::<HashSet<_>>();
         let p1 = pass1::runner::run(&path, &p1_cfg, None).unwrap();
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
         let cfg = pass2::Pass2Config {
