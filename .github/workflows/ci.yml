@@ -65,11 +65,16 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Integration tests (testcontainers)
+      # matrix: ubuntu-latest + windows-latest only — macOS uses integration-macos job
+      - name: Integration tests (testcontainers) — Linux
+        if: runner.os != 'Windows'
+        run: cargo test --features integration-tests --test tc_flat_table --test tc_nested_fk --test tc_sibling_collapse --test tc_wide_table -- --nocapture
+
+      - name: Integration tests (testcontainers) — Windows
+        if: runner.os == 'Windows'
         run: cargo test --features integration-tests --test tc_flat_table --test tc_nested_fk --test tc_sibling_collapse --test tc_wide_table -- --nocapture
         env:
-          # Windows: explicit Docker host for testcontainers
-          DOCKER_HOST: ${{ runner.os == 'Windows' && 'npipe:////./pipe/docker_engine' || '' }}
+          DOCKER_HOST: npipe:////./pipe/docker_engine
 
   # ── Integration tests — macOS (GitHub Actions native postgres service) ───────
   integration-macos:
