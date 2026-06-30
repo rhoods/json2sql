@@ -592,6 +592,7 @@ mod tests {
     use crate::anomaly::collector::AnomalyCollect;
     use crate::error::Result;
     use crate::pass2::sink::RowSink;
+    use crate::pass2::test_utils::CaptureSink;
 
     // ---------------------------------------------------------------------------
     // Test fakes
@@ -685,15 +686,6 @@ mod tests {
         assert!(s.columns[0].is_generated && !s.columns[0].is_parent_fk);
         assert!(s.columns[1].is_generated && s.columns[1].is_parent_fk);
         assert_eq!(s.columns[3].original_name, "value");
-    }
-
-    pub(super) struct CaptureSink(pub Vec<Vec<u8>>);
-
-    impl RowSink for CaptureSink {
-        fn write_row(&mut self, row: &[u8]) -> Result<()> {
-            self.0.push(row.to_vec());
-            Ok(())
-        }
     }
 
     // ---------------------------------------------------------------------------
