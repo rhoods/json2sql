@@ -64,6 +64,39 @@ jobs:
       - name: Integration tests (testcontainers)
         run: cargo test --features integration-tests --test tc_flat_table --test tc_nested_fk --test tc_sibling_collapse --test tc_wide_table -- --nocapture
 
+  # ── Integration tests — Ubuntu native PG (action-setup-postgres) ─────────────
+  integration-ubuntu:
+    name: Integration tests (native PG) — ubuntu-latest
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ubuntu-native-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Setup PostgreSQL
+        uses: ikalnytskyi/action-setup-postgres@v7
+        with:
+          username: postgres
+          password: postgres
+          database: postgres
+          port: 5432
+
+      - name: Integration tests (TEST_DATABASE_URL)
+        run: cargo test --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+
   # ── Integration tests — Windows (action-setup-postgres) ──────────────────────
   integration-windows:
     name: Integration tests (native PG) — windows-latest
