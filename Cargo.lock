@@ -3049,7 +3049,24 @@ dependencies = [
  "tokio-postgres",
  "toml",
  "urlencoding",
+ "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "json2sql-worker"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "json2sql",
+ "serde",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tokio-postgres",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]

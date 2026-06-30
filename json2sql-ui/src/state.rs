@@ -11,6 +11,8 @@ use json2sql::schema::strategies::StrategyName;
 use json2sql::schema::config::ConfigWarning;
 use json2sql::schema::table_schema::{TableSchema, UserOverride};
 
+use crate::worker_client::WorkerKillHandle;
+
 // ---------------------------------------------------------------------------
 // Screen navigation
 // ---------------------------------------------------------------------------
@@ -23,6 +25,8 @@ pub enum AppScreen {
     Strategy,
     Preview,
     Import,
+    /// Active worker subprocess detected at startup — show "reprendre ?" screen.
+    Resume,
 }
 
 // ---------------------------------------------------------------------------
@@ -392,8 +396,13 @@ pub struct AppState {
     pub import: ImportState,
     #[allow(dead_code)]
     pub ui: UiState,
-    /// Handle to the currently running Pass 1 or Pass 2 task.
+    /// Handle to the currently running Pass 1 (analysis) task.
     pub abort_handle: Option<tokio::task::AbortHandle>,
+    /// Handle to the running worker subprocess (Pass 2 import).
+    /// Replaces the old in-process abort path for the import coroutine.
+    pub worker_kill: WorkerKillHandle,
+    /// Socket path of an existing worker found at startup (Resume screen).
+    pub resume_socket: Option<PathBuf>,
 }
 
 impl AppState {
@@ -434,6 +443,10 @@ impl AppState {
         if let Some(handle) = self.abort_handle.take() {
             handle.abort();
         }
+        // Kill subprocess worker if one is active (Pass 2 / import)
+        self.worker_kill.kill();
+        self.worker_kill = WorkerKillHandle::default();
+        self.resume_socket = None;
         self.schema.clear();
         self.import.pass2_progress = Pass2Progress::default();
         self.project.pg_testing = false;
@@ -442,6 +455,30 @@ impl AppState {
         // drop_existing is reset intentionally — it is destructive and must be re-enabled explicitly.
         self.project.drop_existing = false;
         self.screen = AppScreen::Setup;
+    }
+
+    /// Apply a `WorkerResult` read from the result file after an unexpected EOF.
+    ///
+    /// If status is `"success"`, synthesises a `Pass2Done` event so the UI shows the
+    /// success banner. Otherwise, pushes an error log line.
+    pub fn apply_worker_result(&mut self, result: json2sql::ipc::WorkerResult) {
+        match result.status.as_str() {
+            "success" => {
+                self.apply_progress_event(ProgressEvent::Pass2Done {
+                    total_rows: result.total_rows,
+                    anomaly_count: result.anomaly_count,
+                    constraint_warning_count: result.constraint_warning_count,
+                });
+            }
+            _ => {
+                let msg = result
+                    .message
+                    .unwrap_or_else(|| format!("status: {}", result.status));
+                self.import
+                    .pass2_progress
+                    .push_log(format!("Import terminé (hors-connexion) : {msg}"));
+            }
+        }
     }
 
     /// Apply a `ProgressEvent` coming from a Pass 1 / Pass 2 runner.

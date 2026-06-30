@@ -8,7 +8,7 @@
 /// The sender is optional — when None the runners emit nothing (CLI / batch mode).
 /// The IHM creates the channel, passes the sender to the runners, and consumes events
 /// in a Dioxus coroutine to update the UI.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
 pub enum ProgressEvent {
     // ── Pass 1 ───────────────────────────────────────────────────────────────
@@ -121,5 +121,21 @@ mod tests {
         let debug = format!("{cloned:?}");
         assert!(debug.contains("orders"));
         assert!(debug.contains("duplicate key"));
+    }
+
+    #[test]
+    fn progress_event_serde_round_trip() {
+        let events = vec![
+            ProgressEvent::Pass2Done { total_rows: 42, anomaly_count: 1, constraint_warning_count: 0 },
+            ProgressEvent::Pass2Flush { table_name: "orders".to_string(), rows_flushed: 100 },
+            ProgressEvent::DdlStart { table_count: 5 },
+            ProgressEvent::Pass1Log("hello".to_string()),
+            ProgressEvent::ConstraintsStart { table_count: 3 },
+        ];
+        for e in events {
+            let json = serde_json::to_string(&e).expect("serialize");
+            let back: ProgressEvent = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(format!("{e:?}"), format!("{back:?}"));
+        }
     }
 }

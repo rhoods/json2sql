@@ -16,7 +16,7 @@ dioxus = { version = "0.6", features = ["desktop"] }
 rfd = { version = "0.14", default-features = false, features = ["tokio", "xdg-portal"] }
 
 # Async runtime (needed for spawn + channels alongside Dioxus)
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "process"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -35,3 +35,6 @@ toml = "0.8"
 
 # Disk free-space probe (cross-platform: statvfs on Unix, GetDiskFreeSpaceEx on Windows)
 fs2 = "0.4"
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v7"] }

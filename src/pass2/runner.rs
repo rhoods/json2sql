@@ -308,6 +308,7 @@ pub(crate) async fn run_flusher(
 }
 
 /// All parameters controlling a Pass 2 run.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Pass2Config {
     pub root_table: String,
     pub pg_schema: String,
@@ -1633,6 +1634,30 @@ mod tests {
             }
             other => panic!("unexpected event variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn pass2_config_serde_round_trip() {
+        let cfg = Pass2Config {
+            root_table: "root".to_string(),
+            pg_schema: "public".to_string(),
+            parallel: 4,
+            anomaly_dir: None,
+            limit: Some(1000),
+            mem_flush_threshold_bytes: None,
+            ram_high_watermark: None,
+            ram_low_watermark: None,
+            verbose: false,
+            hint_format: None,
+            skip_constraints: true,
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize Pass2Config");
+        let back: Pass2Config = serde_json::from_str(&json).expect("deserialize Pass2Config");
+        assert_eq!(back.root_table, "root");
+        assert_eq!(back.pg_schema, "public");
+        assert_eq!(back.parallel, 4);
+        assert_eq!(back.limit, Some(1000));
+        assert!(back.skip_constraints);
     }
 
 }
