@@ -21,19 +21,13 @@ use uuid::Uuid;
 use json2sql::db::connection;
 use json2sql::pass1::runner::Pass1Config;
 use json2sql::pass2::Pass2Config;
+use json2sql::schema::registry::RegistryConfig;
 
 /// Default Pass1Config for integration tests — all strategies enabled, standard thresholds.
 pub fn pass1_config(root_table: &str) -> Pass1Config {
     Pass1Config {
         root_table: root_table.to_string(),
-        text_threshold: 256,
-        array_as_pg_array: false,
-        wide_column_threshold: usize::MAX,
-        sibling_threshold: 3,
-        sibling_jaccard: 0.5,
-        stable_threshold: 0.10,
-        rare_threshold: 0.001,
-        disabled_strategies: std::collections::HashSet::new(),
+        registry: RegistryConfig::default(),
         num_workers: None,
     }
 }
@@ -51,6 +45,7 @@ pub fn pass2_config(root_table: &str, pg_schema: &str) -> Pass2Config {
         ram_low_watermark: None,
         verbose: false,
         hint_format: None,
+        skip_constraints: false,
     }
 }
 
