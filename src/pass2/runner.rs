@@ -69,6 +69,24 @@ fn find_all_nonempty_buffers(buffers: &HashMap<String, bytes::BytesMut>) -> Vec<
         .collect()
 }
 
+/// Returns the keys of `buffers` in `topo_order` (parents first), followed by any
+/// remaining keys not covered by the topo order. Empty buffers are excluded.
+/// Used in the drain phase so FK constraints already in the DB are not violated
+/// when flushing child tables before their parents.
+fn topological_drain_order(topo_order: &[String], buffers: &HashMap<String, bytes::BytesMut>) -> Vec<String> {
+    let mut result: Vec<String> = topo_order.iter()
+        .filter(|t| buffers.get(*t).map_or(false, |b| !b.is_empty()))
+        .cloned()
+        .collect();
+    let in_topo: std::collections::HashSet<&str> = topo_order.iter().map(|s| s.as_str()).collect();
+    for (k, b) in buffers {
+        if !b.is_empty() && !in_topo.contains(k.as_str()) {
+            result.push(k.clone());
+        }
+    }
+    result
+}
+
 /// RAM usage ratio in [0.0, 1.0]. Returns 0.0 when total memory is zero.
 fn ram_used_ratio(available: u64, total: u64) -> f64 {
     if total == 0 { return 0.0; }
@@ -172,6 +190,7 @@ pub(crate) async fn run_flusher(
     ram_high_watermark: f64,
     ram_low_watermark: f64,
     verbose: bool,
+    topo_order: Vec<String>,
 ) -> Result<HashMap<String, u64>> {
     use std::sync::atomic::Ordering;
 
@@ -292,8 +311,10 @@ pub(crate) async fn run_flusher(
         }
     }
 
-    // Drain all remaining buffers once all workers finish (channel closed)
-    for table_id in buffers.keys().cloned().collect::<Vec<_>>() {
+    // Drain all remaining buffers once all workers finish (channel closed).
+    // Flush in topological order (parents before children) so FK constraints already
+    // in the DB (from a previous import run) are not violated.
+    for table_id in topological_drain_order(&topo_order, &buffers) {
         if let Err(e) = flush_table_to_pg(
             &table_id, &mut buffers, &mut pending_rows, &mut total_rows,
             &copy_sql_map, &conn, progress_tx.as_ref(), &error_flag,
@@ -679,6 +700,32 @@ fn find_root_schema(schemas: &[TableSchema], root_table: &str, sep: &str) -> Res
 }
 
 /// Build the per-table COPY SQL map used by `run_flusher` to open COPY FROM STDIN sessions.
+/// Returns schema names in topological order (parents before children), using BFS from roots.
+/// Tables absent from the schemas list but present in buffers are appended after in arbitrary order.
+fn schema_topo_order(schemas: &[TableSchema]) -> Vec<String> {
+    let mut children_of: HashMap<String, Vec<String>> = HashMap::new();
+    let mut roots: Vec<String> = vec![];
+    for s in schemas {
+        match &s.parent_table {
+            None => roots.push(s.name.clone()),
+            Some(parent) if parent == &s.name => roots.push(s.name.clone()),
+            Some(parent) => children_of.entry(parent.clone()).or_default().push(s.name.clone()),
+        }
+    }
+    let mut result = Vec::with_capacity(schemas.len());
+    let mut queue = std::collections::VecDeque::from(roots);
+    let mut seen = std::collections::HashSet::new();
+    while let Some(name) = queue.pop_front() {
+        if seen.insert(name.clone()) {
+            result.push(name.clone());
+            if let Some(children) = children_of.get(&name) {
+                for child in children { queue.push_back(child.clone()); }
+            }
+        }
+    }
+    result
+}
+
 fn build_copy_sql_map(schemas: &[TableSchema], pg_schema: &str) -> HashMap<String, String> {
     schemas.iter()
         .map(|s| {
@@ -747,6 +794,7 @@ pub async fn run(
     let _cancel_guard = cancel.clone().drop_guard();
 
     let copy_sql_map = build_copy_sql_map(schemas, &config.pg_schema);
+    let topo_order = schema_topo_order(schemas);
     let (flush_tx, flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(256);
     let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let error_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -761,6 +809,7 @@ pub async fn run(
         ram_high,
         ram_low,
         verbose,
+        topo_order,
     ));
 
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
