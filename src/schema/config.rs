@@ -402,8 +402,14 @@ pub fn apply_user_overrides(
                         s.ui_override = Some(ov.clone());
                     }
                 }
-                UserOverride::Columns
-                | UserOverride::Skip
+                UserOverride::Columns => {
+                    if matches!(s.inferred_strategy, InferredStrategy::Columns)
+                        && s.ui_override.is_none()
+                    {
+                        s.ui_override = Some(UserOverride::Columns);
+                    }
+                }
+                UserOverride::Skip
                 | UserOverride::JsonbFlatten
                 | UserOverride::Flatten { .. }
                 | UserOverride::NormalizeDynamicKeys { .. } => {}
@@ -965,6 +971,41 @@ mod tests {
         apply_user_overrides(&mut schemas, &overrides);
         // Guard: ui_override.is_none() — existing Jsonb override must be preserved
         assert_eq!(schemas[0].ui_override, Some(UserOverride::Jsonb), "existing ui_override must not be overwritten");
+    }
+
+    #[test]
+    fn apply_user_overrides_columns_on_columns_table_sets_ui_override() {
+        let mut schemas = vec![simple_table("flat")];
+        // simple_table infers Columns by default
+        let mut overrides = HashMap::new();
+        overrides.insert("flat".to_string(), UserOverride::Columns);
+        apply_user_overrides(&mut schemas, &overrides);
+        assert_eq!(schemas[0].ui_override, Some(UserOverride::Columns));
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns);
+    }
+
+    #[test]
+    fn apply_user_overrides_columns_on_pivot_table_is_no_op() {
+        use crate::schema::wide_strategies::apply_wide_strategy_columns;
+        let mut schemas = vec![simple_table("metrics")];
+        apply_wide_strategy_columns(&mut schemas[0], InferredStrategy::Pivot);
+        schemas[0].inferred_strategy = InferredStrategy::Pivot;
+        let mut overrides = HashMap::new();
+        overrides.insert("metrics".to_string(), UserOverride::Columns);
+        apply_user_overrides(&mut schemas, &overrides);
+        // No ui_override should be set — incompatible layout
+        assert_eq!(schemas[0].ui_override, None, "Columns override on Pivot must not set ui_override");
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Pivot, "inferred_strategy unchanged");
+    }
+
+    #[test]
+    fn apply_user_overrides_columns_does_not_overwrite_existing_ui_override() {
+        let mut schemas = vec![simple_table("flat")];
+        schemas[0].ui_override = Some(UserOverride::Jsonb);
+        let mut overrides = HashMap::new();
+        overrides.insert("flat".to_string(), UserOverride::Columns);
+        apply_user_overrides(&mut schemas, &overrides);
+        assert_eq!(schemas[0].ui_override, Some(UserOverride::Jsonb), "existing ui_override preserved");
     }
 
     #[test]
