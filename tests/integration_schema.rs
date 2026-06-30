@@ -3,6 +3,7 @@ mod common;
 // pass2 is used by all async tests in this file; pass1-only test_schema_inference_no_db
 // does not use it but sharing the import avoids per-test redundancy.
 use json2sql::{db, pass1, pass2};
+use json2sql::schema::registry::RegistryConfig;
 use json2sql::schema::table_schema::InferredStrategy;
 use std::io::Write;
 
@@ -549,7 +550,7 @@ fn test_schema_inference_parallel_parity() {
 async fn test_array_as_pg_array() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
-        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config { root_table: "users".to_string(), text_threshold: 256, array_as_pg_array: true, wide_column_threshold: usize::MAX, sibling_threshold: 3, sibling_jaccard: 0.5, stable_threshold: 0.10, rare_threshold: 0.001, disabled_strategies: std::collections::HashSet::new(), num_workers: None }, None).unwrap();
+        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config { root_table: "users".to_string(), registry: RegistryConfig { array_as_pg_array: true, ..Default::default() }, num_workers: None }, None).unwrap();
 
         assert_eq!(p1.schemas.len(), 4);
         let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
@@ -671,6 +672,7 @@ async fn test_parallel_copy() {
                 ram_low_watermark: None,
                 verbose: false,
                 hint_format: None,
+                skip_constraints: false,
             },
             None,
         ).await.unwrap();
@@ -739,6 +741,7 @@ async fn test_parallel_streaming_matches_sequential() {
                 ram_low_watermark: None,
                 verbose: false,
                 hint_format: None,
+                skip_constraints: false,
             },
             None,
         ).await.unwrap();
@@ -787,6 +790,7 @@ async fn test_warn_on_nonempty_root_table_before_import() {
                 ram_low_watermark: None,
                 verbose: false,
                 hint_format: None,
+                skip_constraints: false,
             },
             Some(ptx),
         ).await;
@@ -857,8 +861,8 @@ async fn test_multi_cluster_non_numeric_both_pivots_populated() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("multi_cluster_pivot.jsonl");
         let mut cfg = common::pass1_config("root");
-        cfg.sibling_threshold = 3;
-        cfg.sibling_jaccard = 0.5;
+        cfg.registry.sibling_threshold = 3;
+        cfg.registry.sibling_jaccard = 0.5;
         let p1 = pass1::runner::run(&path, &cfg, None).unwrap();
 
         // Find the SiblingCollapseMulti parent and extract both pivot table names.
