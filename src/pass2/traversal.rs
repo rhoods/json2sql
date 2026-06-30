@@ -494,16 +494,19 @@ fn route_independent_child<S: RowSink>(
 /// Keys that are all-digits go to the `_num` group; all others are routed by
 /// `absorbed_path_segments` lookup (exact match against keys seen in Pass 1), falling
 /// back to the `key_is_numeric` heuristic for backward compat with old snapshots.
-pub(super) fn insert_sibling_collapse_multi<S: RowSink>(
+/// Route each key in `obj` to its matching pivot group using `routing_id` as the parent FK.
+/// Does NOT emit a routing row — the caller is responsible for having emitted it already.
+/// Used by both `insert_sibling_collapse_multi` (after `emit_routing_row`) and `insert_object`
+/// (when the schema with `SiblingCollapseMulti` is the root entry point).
+pub(super) fn route_multi_collapse_children<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
     obj: &serde_json::Map<String, Value>,
-    parent_id: Uuid,
+    routing_id: Uuid,
     groups: &[SiblingGroup],
 ) -> Result<()> {
-    let routing_id = emit_routing_row(sinks, anomalies, schema, parent_id)?;
     let routing_path = schema.path.join(&PATH_SEP.to_string());
     let mut group_submaps: Vec<serde_json::Map<String, Value>> = vec![serde_json::Map::new(); groups.len()];
     for (key, value) in obj {
@@ -528,6 +531,19 @@ pub(super) fn insert_sibling_collapse_multi<S: RowSink>(
         }
     }
     Ok(())
+}
+
+pub(super) fn insert_sibling_collapse_multi<S: RowSink>(
+    path_map: &HashMap<String, TableSchema>,
+    sinks: &mut HashMap<String, S>,
+    anomalies: &mut impl AnomalyCollect,
+    schema: &TableSchema,
+    obj: &serde_json::Map<String, Value>,
+    parent_id: Uuid,
+    groups: &[SiblingGroup],
+) -> Result<()> {
+    let routing_id = emit_routing_row(sinks, anomalies, schema, parent_id)?;
+    route_multi_collapse_children(path_map, sinks, anomalies, schema, obj, routing_id, groups)
 }
 
 /// Route a runtime JSON key to the matching `SiblingGroup` index.
@@ -1151,6 +1167,44 @@ mod tests {
         // Key "123" is all-digits, but group 0 has it in absorbed_path_segments → should win over group 1 (numeric)
         let groups = vec![group(false, &["123"]), group(true, &[])];
         assert_eq!(super::find_group_for_key(&groups, "123"), Some(0), "exact match wins over key_is_numeric heuristic");
+    }
+
+    // ---------------------------------------------------------------------------
+    // route_multi_collapse_children tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn route_multi_collapse_children_routes_both_groups_without_routing_row() {
+        // Verifies that route_multi_collapse_children uses the supplied routing_id
+        // (no emit_routing_row) and correctly distributes keys to each pivot group.
+        let schema = make_routing_schema("root", "root", &["root"]);
+        let groups = vec![
+            make_group("a_key", false, &["a1", "a2"], "key"),
+            make_group("b_key", false, &["b1", "b2"], "key"),
+        ];
+
+        let (pivot_a_schema, _) = make_sibling_collapse_schema("pivot_a_key", "root", "key", &["color"]);
+        let (pivot_b_schema, _) = make_sibling_collapse_schema("pivot_b_key", "root", "key", &["size"]);
+
+        let sep = crate::schema::PATH_SEP.to_string();
+        let mut path_map = HashMap::new();
+        path_map.insert(format!("root{sep}a_key"), pivot_a_schema);
+        path_map.insert(format!("root{sep}b_key"), pivot_b_schema);
+
+        // sinks: root sink intentionally absent to prove no routing row is emitted
+        let mut sinks = make_sinks(&["pivot_a_key", "pivot_b_key"]);
+        let mut anomalies = CountingAnomaly::default();
+        let routing_id = uuid::Uuid::now_v7();
+
+        let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{"a1": {"color": "red"}, "a2": {"color": "blue"}, "b1": {"size": "10"}, "b2": {"size": "20"}}"#
+        ).unwrap();
+
+        super::route_multi_collapse_children(&path_map, &mut sinks, &mut anomalies, &schema, &obj, routing_id, &groups).unwrap();
+
+        assert_eq!(sinks["pivot_a_key"].0.len(), 2, "a1 + a2 → pivot_a_key");
+        assert_eq!(sinks["pivot_b_key"].0.len(), 2, "b1 + b2 → pivot_b_key");
+        // root sink is absent → no routing row emitted by route_multi_collapse_children
     }
 
     // Smoke tests for fakes

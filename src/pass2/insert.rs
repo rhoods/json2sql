@@ -25,6 +25,7 @@ use crate::schema::table_schema::{TableSchema, InferredStrategy};
 use super::traversal::{
     insert_array, insert_jsonb_object, insert_sibling_collapse_object, insert_sibling_collapse_multi,
     insert_normalize_dynamic_keys, insert_pivot_object, insert_structured_pivot_object,
+    route_multi_collapse_children,
 };
 
 /// Mutable context for the recursive insert pass.
@@ -113,6 +114,13 @@ pub fn insert_object<S: RowSink, A: AnomalyCollect>(
     ctx.anomalies.inc_total(&schema.name);
     if let Some(sink) = ctx.sinks.get_mut(&schema.name) {
         sink.write_row(&builder.finish())?;
+    }
+
+    // For SiblingCollapseMulti, the row above IS the routing row.
+    // Delegate child routing using row_id as routing_id (no second emit_routing_row).
+    if let InferredStrategy::SiblingCollapseMulti(groups) = &*schema.effective_strategy() {
+        let groups = groups.clone();
+        return route_multi_collapse_children(path_map, ctx.sinks, ctx.anomalies, schema, obj, row_id, &groups);
     }
 
     write_autosplit_rows(path_map, ctx, schema, obj, row_id)?;
