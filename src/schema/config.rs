@@ -75,6 +75,10 @@ pub enum ConfigWarning {
     UnknownStrategy { table: String, strategy: String },
     UnknownGroupStrategy { group: String, strategy: String },
     GroupMergeFailed { group: String, found: usize, expected: usize },
+    /// Override to `to_strategy` is incompatible with the table's current column layout
+    /// (inferred as `from_strategy`). Column names were lost during finalization and cannot
+    /// be reconstructed.
+    InvalidOverride { table: String, from_strategy: String, to_strategy: String },
 }
 
 impl ConfigWarning {
@@ -92,6 +96,8 @@ impl ConfigWarning {
                 format!("schema-config: unknown group strategy '{strategy}' for group '{group}', ignored"),
             Self::GroupMergeFailed { group, found, expected } =>
                 format!("group '{group}': {found}/{expected} member(s) found, merge ignored"),
+            Self::InvalidOverride { table, from_strategy, to_strategy } =>
+                format!("schema-config: cannot override '{table}' from {from_strategy} to {to_strategy} — column names are lost after finalization, ignored"),
         }
     }
 }
@@ -779,6 +785,35 @@ mod tests {
         let msg = w.to_message();
         assert!(msg.contains("magic"));
         assert!(msg.contains("g1"));
+    }
+
+    #[test]
+    fn config_warning_invalid_override_to_message() {
+        let w = ConfigWarning::InvalidOverride {
+            table: "metrics".to_string(),
+            from_strategy: "Pivot".to_string(),
+            to_strategy: "columns".to_string(),
+        };
+        let msg = w.to_message();
+        assert!(msg.contains("metrics"));
+        assert!(msg.contains("Pivot"));
+        assert!(msg.contains("columns"));
+    }
+
+    #[test]
+    fn config_warning_invalid_override_clone_and_eq() {
+        let w = ConfigWarning::InvalidOverride {
+            table: "t".to_string(),
+            from_strategy: "Jsonb".to_string(),
+            to_strategy: "columns".to_string(),
+        };
+        assert_eq!(w.clone(), w);
+        let w2 = ConfigWarning::InvalidOverride {
+            table: "other".to_string(),
+            from_strategy: "Jsonb".to_string(),
+            to_strategy: "columns".to_string(),
+        };
+        assert_ne!(w, w2);
     }
 
     // --- apply_overrides_complete (aggregates both warning sources) ---
