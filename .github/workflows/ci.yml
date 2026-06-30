@@ -64,7 +64,7 @@ jobs:
       - name: Integration tests (testcontainers)
         run: cargo test --features integration-tests --test tc_flat_table --test tc_nested_fk --test tc_sibling_collapse --test tc_wide_table -- --nocapture
 
-  # ── Integration tests — Windows (native postgres pre-installed on runner) ─────
+  # ── Integration tests — Windows (action-setup-postgres) ──────────────────────
   integration-windows:
     name: Integration tests (native PG) — windows-latest
     runs-on: windows-latest
@@ -84,20 +84,20 @@ jobs:
             target
           key: windows-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Start PostgreSQL
-        run: |
-          sc.exe config postgresql-x64-17 obj= LocalSystem
-          Start-Service postgresql-x64-17
-          Start-Sleep -Seconds 5
-          & 'C:\Program Files\PostgreSQL\17\bin\psql.exe' -U postgres -c "ALTER USER postgres PASSWORD 'postgres';"
-        shell: pwsh
+      - name: Setup PostgreSQL
+        uses: ikalnytskyi/action-setup-postgres@v7
+        with:
+          username: postgres
+          password: postgres
+          database: postgres
+          port: 5432
 
       - name: Integration tests (TEST_DATABASE_URL)
         run: cargo test --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
-  # ── Integration tests — macOS (native postgres pre-installed on runner) ───────
+  # ── Integration tests — macOS (action-setup-postgres) ────────────────────────
   integration-macos:
     name: Integration tests (native PG) — macos-latest
     runs-on: macos-latest
@@ -117,18 +117,13 @@ jobs:
             target
           key: macos-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Start PostgreSQL
-        run: |
-          PG=$(brew list --formula 2>/dev/null | grep '^postgresql@' | sort -V | tail -1)
-          if [ -z "$PG" ]; then
-            brew install postgresql@17
-            PG="postgresql@17"
-          fi
-          brew services start "$PG"
-          sleep 5
-          PG_BIN=$(brew --prefix "$PG")/bin
-          "$PG_BIN/createuser" -s postgres 2>/dev/null || true
-          "$PG_BIN/psql" postgres -c "ALTER USER postgres PASSWORD 'postgres';" || true
+      - name: Setup PostgreSQL
+        uses: ikalnytskyi/action-setup-postgres@v7
+        with:
+          username: postgres
+          password: postgres
+          database: postgres
+          port: 5432
 
       - name: Integration tests (TEST_DATABASE_URL)
         run: cargo test --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
