@@ -84,17 +84,12 @@ jobs:
             target
           key: windows-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Start PostgreSQL service
+      - name: Start PostgreSQL
         run: |
-          $svc = Get-Service -Name 'postgresql*' | Select-Object -First 1
-          if (-not $svc) { throw "PostgreSQL service not found on runner" }
-          Start-Service -Name $svc.Name
+          $pgBin  = (Get-Item "C:\Program Files\PostgreSQL\*\bin"  | Select-Object -Last 1).FullName
+          $pgData = (Get-Item "C:\Program Files\PostgreSQL\*\data" | Select-Object -Last 1).FullName
+          & "$pgBin\pg_ctl.exe" start -D "$pgData" -l "$env:TEMP\postgres.log"
           Start-Sleep -Seconds 3
-        shell: pwsh
-
-      - name: Set postgres password
-        run: |
-          $pgBin = (Get-Item "C:\Program Files\PostgreSQL\*\bin" | Select-Object -Last 1).FullName
           & "$pgBin\psql.exe" -U postgres -c "ALTER USER postgres PASSWORD 'postgres';"
         shell: pwsh
 
@@ -125,10 +120,16 @@ jobs:
 
       - name: Start PostgreSQL
         run: |
-          brew services start postgresql@14
+          PG=$(brew list --formula 2>/dev/null | grep '^postgresql@' | sort -V | tail -1)
+          if [ -z "$PG" ]; then
+            brew install postgresql@17
+            PG="postgresql@17"
+          fi
+          brew services start "$PG"
           sleep 5
-          /usr/local/opt/postgresql@14/bin/createuser -s postgres || true
-          /usr/local/opt/postgresql@14/bin/psql -U postgres -c "ALTER USER postgres PASSWORD 'postgres';" || true
+          PG_BIN=$(brew --prefix "$PG")/bin
+          "$PG_BIN/createuser" -s postgres 2>/dev/null || true
+          "$PG_BIN/psql" postgres -c "ALTER USER postgres PASSWORD 'postgres';" || true
 
       - name: Integration tests (TEST_DATABASE_URL)
         run: cargo test --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
