@@ -58,7 +58,8 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
     let idx = state.read().schema.last_selected_idx.min(schemas.len().saturating_sub(1));
     let selected_table = &schemas[idx];
-    let inferred_strategy = &selected_table.inferred_strategy;
+    let eff_strategy = selected_table.effective_strategy();
+    let inferred_strategy = &*eff_strategy;
     let current_override: Option<&UserOverride> = overrides_snap.get(&selected_table.name);
 
     let is_multi = selected_indices.len() > 1;
@@ -388,7 +389,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                             let (bc, bl) = if let Some(ov) = overrides_snap.get(&t.name) {
                                                                 user_override_badge(ov)
                                                             } else {
-                                                                strategy_badge(&t.inferred_strategy)
+                                                                strategy_badge(&*t.effective_strategy())
                                                             };
                                                             let is_indented = t.depth > 0;
                                                             rsx! {
