@@ -49,6 +49,7 @@ fn base_config(root: &str, input: &str) -> PipelineConfig {
         schema_input: None,
         schema_report: false,
         schema_report_output: None,
+        skip_constraints: false,
     }
 }
 

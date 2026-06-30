@@ -1,6 +1,7 @@
 mod common;
 
 use json2sql::{db, pass1, pass2};
+use json2sql::schema::registry::RegistryConfig;
 use json2sql::schema::wide_strategies::{apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys, apply_structured_pivot_columns, apply_wide_strategy_columns};
 use json2sql::schema::table_schema::{SiblingSchema, SuffixColumn, SuffixSchema, InferredStrategy};
 use json2sql::schema::type_tracker::PgType;
@@ -433,14 +434,7 @@ async fn test_auto_split_strategy() {
         // stable_threshold=0.80, rare_threshold=0.30
         let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
             root_table: "products".to_string(),
-            text_threshold: 256,
-            array_as_pg_array: false,
-            wide_column_threshold: 3,
-            sibling_threshold: 3,
-            sibling_jaccard: 0.5,
-            stable_threshold: 0.80,
-            rare_threshold: 0.30,
-            disabled_strategies: std::collections::HashSet::new(),
+            registry: RegistryConfig { wide_column_threshold: 3, stable_threshold: 0.80, rare_threshold: 0.30, ..Default::default() },
             num_workers: None,
         }, None).unwrap();
 
@@ -690,14 +684,7 @@ async fn test_normalize_dynamic_keys_strategy() {
         // sibling_threshold=10 : 5 tables images < 10 → pas d'auto-détection SiblingCollapse
         let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
             root_table: "products".to_string(),
-            text_threshold: 256,
-            array_as_pg_array: false,
-            wide_column_threshold: usize::MAX,
-            sibling_threshold: 10,
-            sibling_jaccard: 0.5,
-            stable_threshold: 0.10,
-            rare_threshold: 0.001,
-            disabled_strategies: std::collections::HashSet::new(),
+            registry: RegistryConfig { sibling_threshold: 10, ..Default::default() },
             num_workers: None,
         }, None).unwrap();
 
@@ -967,7 +954,7 @@ fn test_disable_sibling_no_keyed_pivot_integration() {
 
     // Avec sibling désactivé : aucun SiblingCollapse
     let config_disabled = pass1::runner::Pass1Config {
-        disabled_strategies: HashSet::from([StrategyName::Sibling]),
+        registry: RegistryConfig { disabled_strategies: HashSet::from([StrategyName::Sibling]), ..Default::default() },
         ..common::pass1_config("products")
     };
     let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
@@ -1041,7 +1028,7 @@ fn test_disable_pivot_gives_jsonb_integration() {
     let path = common::fixture("pivot_eav.jsonl");
     // Config avec wide_column_threshold=3 pour déclencher la détection wide sur nutrients
     let base_config = pass1::runner::Pass1Config {
-        wide_column_threshold: 3,
+        registry: RegistryConfig { wide_column_threshold: 3, ..Default::default() },
         ..common::pass1_config("products")
     };
 
@@ -1052,8 +1039,7 @@ fn test_disable_pivot_gives_jsonb_integration() {
 
     // Avec pivot désactivé : Jsonb à la place
     let config_disabled = pass1::runner::Pass1Config {
-        disabled_strategies: HashSet::from([StrategyName::Pivot]),
-        wide_column_threshold: 3,
+        registry: RegistryConfig { disabled_strategies: HashSet::from([StrategyName::Pivot]), wide_column_threshold: 3, ..Default::default() },
         ..common::pass1_config("products")
     };
     let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
@@ -1075,7 +1061,7 @@ fn test_disable_structured_pivot_gives_pivot_integration() {
 
     let path = common::fixture("structured_pivot.jsonl");
     let base_config = pass1::runner::Pass1Config {
-        wide_column_threshold: 4,
+        registry: RegistryConfig { wide_column_threshold: 4, ..Default::default() },
         ..common::pass1_config("products")
     };
 
@@ -1088,8 +1074,7 @@ fn test_disable_structured_pivot_gives_pivot_integration() {
 
     // structured_pivot désactivé : aucun StructuredPivot, Pivot à la place (all-numeric)
     let config_disabled = pass1::runner::Pass1Config {
-        disabled_strategies: HashSet::from([StrategyName::StructuredPivot]),
-        wide_column_threshold: 4,
+        registry: RegistryConfig { disabled_strategies: HashSet::from([StrategyName::StructuredPivot]), wide_column_threshold: 4, ..Default::default() },
         ..common::pass1_config("products")
     };
     let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
