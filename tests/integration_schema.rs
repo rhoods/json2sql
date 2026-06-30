@@ -790,7 +790,7 @@ async fn test_warn_on_nonempty_root_table_before_import() {
                 ram_low_watermark: None,
                 verbose: false,
                 hint_format: None,
-                skip_constraints: false,
+                skip_constraints: true, // constraints already added by first import
             },
             Some(ptx),
         ).await;
