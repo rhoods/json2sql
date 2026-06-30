@@ -41,14 +41,10 @@ jobs:
       - name: Unit tests
         run: cargo test --lib --bins
 
-  # ── Integration tests — Linux + Windows (testcontainers via Docker) ──────────
+  # ── Integration tests — Linux only (testcontainers via Docker) ──────────────
   integration-docker:
-    name: Integration tests (Docker) — ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    name: Integration tests (Docker) — ubuntu-latest
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -63,49 +59,54 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          key: ubuntu-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Switch Docker to Linux containers
-        if: runner.os == 'Windows'
+      - name: Integration tests (testcontainers)
+        run: cargo test --features integration-tests --test tc_flat_table --test tc_nested_fk --test tc_sibling_collapse --test tc_wide_table -- --nocapture
+
+  # ── Integration tests — Windows (native postgres pre-installed on runner) ─────
+  integration-windows:
+    name: Integration tests (native PG) — windows-latest
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            target
+          key: windows-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Start PostgreSQL service
         run: |
-          & "$Env:ProgramFiles\Docker\Docker\DockerCli.exe" -SwitchLinuxEngine
+          $svc = Get-Service -Name 'postgresql*' | Select-Object -First 1
+          if (-not $svc) { throw "PostgreSQL service not found on runner" }
+          Start-Service -Name $svc.Name
+          Start-Sleep -Seconds 3
         shell: pwsh
 
-      - name: Wait for Docker to be ready
-        if: runner.os == 'Windows'
-        run: docker info
+      - name: Set postgres password
+        run: |
+          $pgBin = (Get-Item "C:\Program Files\PostgreSQL\*\bin" | Select-Object -Last 1).FullName
+          & "$pgBin\psql.exe" -U postgres -c "ALTER USER postgres PASSWORD 'postgres';"
         shell: pwsh
 
-      # matrix: ubuntu-latest + windows-latest only — macOS uses integration-macos job
-      - name: Integration tests (testcontainers) — Linux
-        if: runner.os != 'Windows'
-        run: cargo test --features integration-tests --test tc_flat_table --test tc_nested_fk --test tc_sibling_collapse --test tc_wide_table -- --nocapture
-
-      - name: Integration tests (testcontainers) — Windows
-        if: runner.os == 'Windows'
-        run: cargo test --features integration-tests --test tc_flat_table --test tc_nested_fk --test tc_sibling_collapse --test tc_wide_table -- --nocapture
+      - name: Integration tests (TEST_DATABASE_URL)
+        run: cargo test --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
         env:
-          DOCKER_HOST: npipe:////./pipe/docker_engine
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
-  # ── Integration tests — macOS (GitHub Actions native postgres service) ───────
+  # ── Integration tests — macOS (native postgres pre-installed on runner) ───────
   integration-macos:
     name: Integration tests (native PG) — macos-latest
     runs-on: macos-latest
-
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -121,6 +122,13 @@ jobs:
             ~/.cargo/git
             target
           key: macos-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Start PostgreSQL
+        run: |
+          brew services start postgresql@14
+          sleep 5
+          /usr/local/opt/postgresql@14/bin/createuser -s postgres || true
+          /usr/local/opt/postgresql@14/bin/psql -U postgres -c "ALTER USER postgres PASSWORD 'postgres';" || true
 
       - name: Integration tests (TEST_DATABASE_URL)
         run: cargo test --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
