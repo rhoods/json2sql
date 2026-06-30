@@ -86,11 +86,10 @@ jobs:
 
       - name: Start PostgreSQL
         run: |
-          $pgBin  = (Get-Item "C:\Program Files\PostgreSQL\*\bin"  | Select-Object -Last 1).FullName
-          $pgData = (Get-Item "C:\Program Files\PostgreSQL\*\data" | Select-Object -Last 1).FullName
-          & "$pgBin\pg_ctl.exe" start -D "$pgData" -l "$env:TEMP\postgres.log"
-          Start-Sleep -Seconds 3
-          & "$pgBin\psql.exe" -U postgres -c "ALTER USER postgres PASSWORD 'postgres';"
+          sc.exe config postgresql-x64-17 obj= LocalSystem
+          Start-Service postgresql-x64-17
+          Start-Sleep -Seconds 5
+          & 'C:\Program Files\PostgreSQL\17\bin\psql.exe' -U postgres -c "ALTER USER postgres PASSWORD 'postgres';"
         shell: pwsh
 
       - name: Integration tests (TEST_DATABASE_URL)
