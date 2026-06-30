@@ -65,6 +65,17 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Switch Docker to Linux containers
+        if: runner.os == 'Windows'
+        run: |
+          & "$Env:ProgramFiles\Docker\Docker\DockerCli.exe" -SwitchLinuxEngine
+        shell: pwsh
+
+      - name: Wait for Docker to be ready
+        if: runner.os == 'Windows'
+        run: docker info
+        shell: pwsh
+
       # matrix: ubuntu-latest + windows-latest only — macOS uses integration-macos job
       - name: Integration tests (testcontainers) — Linux
         if: runner.os != 'Windows'
