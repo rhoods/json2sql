@@ -75,6 +75,10 @@ pub enum ConfigWarning {
     UnknownStrategy { table: String, strategy: String },
     UnknownGroupStrategy { group: String, strategy: String },
     GroupMergeFailed { group: String, found: usize, expected: usize },
+    /// Override to `to_strategy` is incompatible with the table's current column layout
+    /// (inferred as `from_strategy`). Column names were lost during finalization and cannot
+    /// be reconstructed.
+    InvalidOverride { table: String, from_strategy: String, to_strategy: String },
 }
 
 impl ConfigWarning {
@@ -92,6 +96,8 @@ impl ConfigWarning {
                 format!("schema-config: unknown group strategy '{strategy}' for group '{group}', ignored"),
             Self::GroupMergeFailed { group, found, expected } =>
                 format!("group '{group}': {found}/{expected} member(s) found, merge ignored"),
+            Self::InvalidOverride { table, from_strategy, to_strategy } =>
+                format!("schema-config: cannot override '{table}' from {from_strategy} to {to_strategy} — column names are lost after finalization, ignored"),
         }
     }
 }
@@ -164,10 +170,15 @@ fn apply_strategy_override(
             schema.toml_override = Some(UserOverride::Jsonb);
         }
         "columns" => {
-            let original = schema.inferred_strategy.clone();
-            eprintln!("  Override strategy: {table_name} → Columns");
-            apply_wide_strategy_columns(schema, InferredStrategy::Columns);
-            schema.inferred_strategy = original;
+            if !matches!(schema.inferred_strategy, InferredStrategy::Columns) {
+                return vec![ConfigWarning::InvalidOverride {
+                    table: table_name.to_string(),
+                    from_strategy: format!("{:?}", schema.inferred_strategy)
+                        .split('(').next().unwrap_or("Unknown").to_string(),
+                    to_strategy: "columns".to_string(),
+                }];
+            }
+            eprintln!("  Override strategy: {table_name} → Columns (no-op, already inferred)");
             schema.toml_override = Some(UserOverride::Columns);
         }
         "structured_pivot" => {} // handled via suffix_columns below
@@ -378,10 +389,27 @@ pub fn apply_user_overrides(
     for (table_name, ov) in overrides {
         if let Some(s) = schemas.iter_mut().find(|s| &s.name == table_name) {
             match ov {
-                UserOverride::Pivot => apply_wide_strategy_columns(s, InferredStrategy::Pivot),
-                UserOverride::Jsonb => apply_wide_strategy_columns(s, InferredStrategy::Jsonb),
-                UserOverride::Columns
-                | UserOverride::Skip
+                UserOverride::Pivot | UserOverride::Jsonb => {
+                    let strategy = if matches!(ov, UserOverride::Pivot) {
+                        InferredStrategy::Pivot
+                    } else {
+                        InferredStrategy::Jsonb
+                    };
+                    let original = s.inferred_strategy.clone();
+                    apply_wide_strategy_columns(s, strategy);
+                    s.inferred_strategy = original;
+                    if s.ui_override.is_none() {
+                        s.ui_override = Some(ov.clone());
+                    }
+                }
+                UserOverride::Columns => {
+                    if matches!(s.inferred_strategy, InferredStrategy::Columns)
+                        && s.ui_override.is_none()
+                    {
+                        s.ui_override = Some(UserOverride::Columns);
+                    }
+                }
+                UserOverride::Skip
                 | UserOverride::JsonbFlatten
                 | UserOverride::Flatten { .. }
                 | UserOverride::NormalizeDynamicKeys { .. } => {}
@@ -661,6 +689,49 @@ mod tests {
     }
 
     #[test]
+    fn toml_columns_on_columns_table_sets_toml_override() {
+        let mut schemas = vec![simple_table("flat")];
+        // inferred as Columns (default for simple_table)
+        let mut tables = HashMap::new();
+        tables.insert("flat".to_string(), toml_strategy("columns"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert!(warnings.is_empty(), "no warning when inferred is already Columns");
+        assert_eq!(schemas[0].toml_override, Some(UserOverride::Columns));
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns);
+    }
+
+    #[test]
+    fn toml_columns_on_pivot_table_returns_invalid_override_warning() {
+        use crate::schema::wide_strategies::apply_wide_strategy_columns;
+        let mut schemas = vec![simple_table("metrics")];
+        apply_wide_strategy_columns(&mut schemas[0], InferredStrategy::Pivot);
+        schemas[0].inferred_strategy = InferredStrategy::Pivot;
+        let mut tables = HashMap::new();
+        tables.insert("metrics".to_string(), toml_strategy("columns"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(&warnings[0], ConfigWarning::InvalidOverride { table, .. } if table == "metrics"));
+        assert_eq!(schemas[0].toml_override, None, "toml_override must not be set on invalid override");
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Pivot, "inferred_strategy must be unchanged");
+    }
+
+    #[test]
+    fn toml_columns_on_jsonb_table_returns_invalid_override_warning() {
+        use crate::schema::wide_strategies::apply_wide_strategy_columns;
+        let mut schemas = vec![simple_table("events")];
+        apply_wide_strategy_columns(&mut schemas[0], InferredStrategy::Jsonb);
+        schemas[0].inferred_strategy = InferredStrategy::Jsonb;
+        let mut tables = HashMap::new();
+        tables.insert("events".to_string(), toml_strategy("columns"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(&warnings[0], ConfigWarning::InvalidOverride { table, .. } if table == "events"));
+    }
+
+    #[test]
     fn toml_pivot_sets_toml_override_and_preserves_inferred() {
         let mut schemas = vec![simple_table("tags")];
         schemas[0].inferred_strategy = InferredStrategy::Columns;
@@ -781,6 +852,35 @@ mod tests {
         assert!(msg.contains("g1"));
     }
 
+    #[test]
+    fn config_warning_invalid_override_to_message() {
+        let w = ConfigWarning::InvalidOverride {
+            table: "metrics".to_string(),
+            from_strategy: "Pivot".to_string(),
+            to_strategy: "columns".to_string(),
+        };
+        let msg = w.to_message();
+        assert!(msg.contains("metrics"));
+        assert!(msg.contains("Pivot"));
+        assert!(msg.contains("columns"));
+    }
+
+    #[test]
+    fn config_warning_invalid_override_clone_and_eq() {
+        let w = ConfigWarning::InvalidOverride {
+            table: "t".to_string(),
+            from_strategy: "Jsonb".to_string(),
+            to_strategy: "columns".to_string(),
+        };
+        assert_eq!(w.clone(), w);
+        let w2 = ConfigWarning::InvalidOverride {
+            table: "other".to_string(),
+            from_strategy: "Jsonb".to_string(),
+            to_strategy: "columns".to_string(),
+        };
+        assert_ne!(w, w2);
+    }
+
     // --- apply_overrides_complete (aggregates both warning sources) ---
 
     #[test]
@@ -836,22 +936,76 @@ mod tests {
     }
 
     #[test]
-    fn apply_user_overrides_pivot_sets_strategy() {
+    fn apply_user_overrides_pivot_sets_ui_override_and_preserves_inferred() {
         let mut schemas = vec![simple_table("tags")];
         let mut overrides = HashMap::new();
         overrides.insert("tags".to_string(), UserOverride::Pivot);
         apply_user_overrides(&mut schemas, &overrides);
         assert_eq!(schemas.len(), 1);
-        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::Pivot));
+        assert_eq!(schemas[0].ui_override, Some(UserOverride::Pivot), "ui_override must be set");
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must not be mutated");
+        assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Pivot);
+        // Column layout must have been restructured (EAV: key + value)
+        assert!(schemas[0].columns.iter().any(|c| c.name == "key"), "Pivot layout: key column expected");
+        assert!(schemas[0].columns.iter().any(|c| c.name == "value"), "Pivot layout: value column expected");
     }
 
     #[test]
-    fn apply_user_overrides_jsonb_sets_strategy() {
+    fn apply_user_overrides_jsonb_sets_ui_override_and_preserves_inferred() {
         let mut schemas = vec![simple_table("blob")];
         let mut overrides = HashMap::new();
         overrides.insert("blob".to_string(), UserOverride::Jsonb);
         apply_user_overrides(&mut schemas, &overrides);
-        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::Jsonb));
+        assert_eq!(schemas[0].ui_override, Some(UserOverride::Jsonb), "ui_override must be set");
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must not be mutated");
+        assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Jsonb);
+        assert!(schemas[0].columns.iter().any(|c| c.name == "data"), "Jsonb layout: data column expected");
+    }
+
+    #[test]
+    fn apply_user_overrides_pivot_does_not_overwrite_existing_ui_override() {
+        let mut schemas = vec![simple_table("tags")];
+        schemas[0].ui_override = Some(UserOverride::Jsonb); // already set from snapshot
+        let mut overrides = HashMap::new();
+        overrides.insert("tags".to_string(), UserOverride::Pivot); // strategy_overrides says Pivot
+        apply_user_overrides(&mut schemas, &overrides);
+        // Guard: ui_override.is_none() — existing Jsonb override must be preserved
+        assert_eq!(schemas[0].ui_override, Some(UserOverride::Jsonb), "existing ui_override must not be overwritten");
+    }
+
+    #[test]
+    fn apply_user_overrides_columns_on_columns_table_sets_ui_override() {
+        let mut schemas = vec![simple_table("flat")];
+        // simple_table infers Columns by default
+        let mut overrides = HashMap::new();
+        overrides.insert("flat".to_string(), UserOverride::Columns);
+        apply_user_overrides(&mut schemas, &overrides);
+        assert_eq!(schemas[0].ui_override, Some(UserOverride::Columns));
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns);
+    }
+
+    #[test]
+    fn apply_user_overrides_columns_on_pivot_table_is_no_op() {
+        use crate::schema::wide_strategies::apply_wide_strategy_columns;
+        let mut schemas = vec![simple_table("metrics")];
+        apply_wide_strategy_columns(&mut schemas[0], InferredStrategy::Pivot);
+        schemas[0].inferred_strategy = InferredStrategy::Pivot;
+        let mut overrides = HashMap::new();
+        overrides.insert("metrics".to_string(), UserOverride::Columns);
+        apply_user_overrides(&mut schemas, &overrides);
+        // No ui_override should be set — incompatible layout
+        assert_eq!(schemas[0].ui_override, None, "Columns override on Pivot must not set ui_override");
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Pivot, "inferred_strategy unchanged");
+    }
+
+    #[test]
+    fn apply_user_overrides_columns_does_not_overwrite_existing_ui_override() {
+        let mut schemas = vec![simple_table("flat")];
+        schemas[0].ui_override = Some(UserOverride::Jsonb);
+        let mut overrides = HashMap::new();
+        overrides.insert("flat".to_string(), UserOverride::Columns);
+        apply_user_overrides(&mut schemas, &overrides);
+        assert_eq!(schemas[0].ui_override, Some(UserOverride::Jsonb), "existing ui_override preserved");
     }
 
     #[test]

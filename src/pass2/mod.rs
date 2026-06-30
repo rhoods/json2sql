@@ -9,3 +9,5 @@ pub mod runner;
 pub use runner::Pass2Config;
 pub mod sink;
 pub mod traversal;
+#[cfg(test)]
+pub(crate) mod test_utils;

@@ -335,18 +335,10 @@ mod tests {
     use uuid::Uuid;
     use crate::anomaly::collector::AnomalyCollector;
     use crate::error::Result;
-    use crate::pass2::sink::RowSink;
+    use crate::pass2::test_utils::CaptureSink;
     use crate::schema::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
     use crate::schema::type_tracker::PgType;
     use super::{insert_object, InsertCtx};
-
-    struct CaptureSink(Vec<Vec<u8>>);
-    impl RowSink for CaptureSink {
-        fn write_row(&mut self, row: &[u8]) -> Result<()> {
-            self.0.push(row.to_vec());
-            Ok(())
-        }
-    }
 
     fn make_jsonb_root_schema() -> TableSchema {
         let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
