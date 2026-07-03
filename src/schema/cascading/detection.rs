@@ -700,6 +700,7 @@ fn build_multi_group_entry(
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
         row_count: source_row_count,
+        cached_strategy: None,
     };
     (schema, co_siblings)
 }
@@ -948,6 +949,7 @@ fn build_co_sibling_schema(
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
         row_count: source_row_count,
+        cached_strategy: None,
     };
     (t_name, t_schema)
 }
@@ -1059,6 +1061,7 @@ fn build_sub_pivot_schema(
         flatten_sources: std::collections::HashMap::new(),
         child_routes: std::collections::HashMap::new(),
         row_count: source_row_count,
+        cached_strategy: None,
     }
 }
 

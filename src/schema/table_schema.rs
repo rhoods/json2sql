@@ -552,6 +552,12 @@ pub struct TableSchema {
     /// snapshots that predate this field, or for tables created synthetically during finalization.
     #[serde(default)]
     pub row_count: u64,
+    /// Cached result of `effective_strategy()`, recomputed at every point that mutates
+    /// `ui_override`/`toml_override` (`finalize()`, `apply_overrides_complete()`, `load()`).
+    /// Never serialized: it is a pure derived value, and a stale cache surviving a snapshot
+    /// roundtrip could silently disagree with the overrides that snapshot also carries.
+    #[serde(skip)]
+    pub cached_strategy: Option<InferredStrategy>,
 }
 
 impl TableSchema {
@@ -571,12 +577,22 @@ impl TableSchema {
             flatten_sources: HashMap::new(),
             child_routes: HashMap::new(),
             row_count: 0,
+            cached_strategy: None,
         }
     }
 
     /// Returns the effective strategy applying priority: ui_override > toml_override > inferred_strategy.
+    ///
+    /// Reads `cached_strategy` when present to avoid re-allocating `Flatten`/`NormalizeDynamicKeys`
+    /// on every call (hot path in Pass 2). Falls back to the direct computation — allocating a new
+    /// `InferredStrategy` when there's an override — if the cache hasn't been populated yet; this
+    /// guard rail guarantees a correct (if unoptimized) result even if a future call site mutates
+    /// `ui_override`/`toml_override` without recomputing the cache.
     #[must_use]
     pub fn effective_strategy(&self) -> std::borrow::Cow<InferredStrategy> {
+        if let Some(cached) = &self.cached_strategy {
+            return std::borrow::Cow::Borrowed(cached);
+        }
         if let Some(ov) = &self.ui_override {
             return std::borrow::Cow::Owned(InferredStrategy::from(ov));
         }
@@ -865,6 +881,42 @@ mod tests {
         let back: TableSchema = serde_json::from_str(&json).unwrap();
         assert_eq!(back.toml_override, Some(UserOverride::Jsonb));
         assert_eq!(back.ui_override, Some(UserOverride::Pivot));
+    }
+
+    #[test]
+    fn table_schema_new_cached_strategy_is_none() {
+        let s = make_schema("t");
+        assert!(s.cached_strategy.is_none());
+    }
+
+    #[test]
+    fn effective_strategy_reads_cache_when_present() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.ui_override = Some(UserOverride::Pivot);
+        // Cache deliberately disagrees with ui_override to prove the cache wins, not just
+        // that the fallback computation happens to produce the same answer.
+        s.cached_strategy = Some(InferredStrategy::Jsonb);
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Jsonb);
+    }
+
+    #[test]
+    fn effective_strategy_falls_back_when_cache_is_none() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.ui_override = Some(UserOverride::Pivot);
+        assert!(s.cached_strategy.is_none());
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn table_schema_cached_strategy_never_serialized() {
+        let mut s = make_schema("t");
+        s.cached_strategy = Some(InferredStrategy::Jsonb);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("cached_strategy"), "cached_strategy must be #[serde(skip)]");
+        let back: TableSchema = serde_json::from_str(&json).unwrap();
+        assert!(back.cached_strategy.is_none(), "cached_strategy must not survive a roundtrip");
     }
 
     #[test]
