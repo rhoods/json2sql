@@ -291,6 +291,12 @@ pub fn apply_overrides_complete(
 ) -> crate::error::Result<Vec<ConfigWarning>> {
     let mut warnings = apply_overrides(schemas, config)?;
     warnings.extend(apply_group_overrides(schemas, config));
+    // Must run BEFORE exclude_absorbed_children: that call reads absorbs_children() →
+    // effective_strategy(), which would otherwise see the stale pre-override cache and miss
+    // children that the overrides just applied above made absorbable (issue #22 regression risk #1).
+    for schema in schemas.iter_mut() {
+        schema.recompute_cached_strategy();
+    }
     crate::schema::finalizer::exclude_absorbed_children(schemas);
     Ok(warnings)
 }
@@ -905,6 +911,34 @@ mod tests {
         let config = SchemaConfig { tables: HashMap::new(), group: HashMap::new() };
         let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
         assert!(warnings.is_empty());
+    }
+
+    /// Regression test for issue #22 risk #1: `exclude_absorbed_children()` (called inside
+    /// `apply_overrides_complete`) reads `absorbs_children()` → `effective_strategy()`. If the
+    /// cache recompute happens too late (or not before this call), a toml_override that flips
+    /// `absorbs_children()` to true is invisible to this same function call, and the child that
+    /// should now be absorbed survives incorrectly.
+    #[test]
+    fn apply_overrides_complete_recomputes_cache_before_excluding_absorbed_children() {
+        let mut parent = simple_table("images");
+        parent.inferred_strategy = InferredStrategy::Columns;
+        // Simulate the baseline cache written by finalize() *before* any override exists.
+        parent.cached_strategy = Some(InferredStrategy::Columns);
+        let mut child = simple_table("images_items");
+        child.parent_table = Some("images".to_string());
+        child.cached_strategy = Some(InferredStrategy::Columns);
+        let mut schemas = vec![parent, child];
+
+        let mut tables = HashMap::new();
+        tables.insert("images".to_string(), toml_strategy("jsonb"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+
+        apply_overrides_complete(&mut schemas, &config).unwrap();
+
+        assert!(
+            schemas.iter().all(|s| s.name != "images_items"),
+            "images_items must be excluded once images' toml_override=Jsonb makes it absorb children"
+        );
     }
 
     #[test]
