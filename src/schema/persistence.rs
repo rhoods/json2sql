@@ -141,6 +141,13 @@ pub fn load(path: &Path) -> Result<SchemaSnapshot> {
             }
         }
     }
+    // Unconditional — not only under the legacy branch above. Modern snapshots already carry
+    // ui_override/toml_override directly on each schema (the common "resume from snapshot"
+    // path), and cached_strategy is never serialized (#[serde(skip)]), so it must always be
+    // rebuilt here regardless of which override source populated the schema.
+    for schema in &mut snapshot.schemas {
+        schema.recompute_cached_strategy();
+    }
     Ok(snapshot)
 }
 
@@ -272,6 +279,60 @@ mod tests {
         let products = loaded.schemas.iter().find(|s| s.name == "products").unwrap();
         assert_eq!(products.ui_override, Some(UserOverride::Pivot),
             "existing ui_override on schema must not be overwritten by strategy_overrides migration");
+    }
+
+    /// Regression test for issue #22 risk #2: a modern snapshot carries `ui_override` directly
+    /// on the schema (no legacy `strategy_overrides` at root) — the most common "resume from
+    /// snapshot" path. If the cache recompute were only wired into the legacy migration branch,
+    /// `cached_strategy` would stay `None` here — cache silently inert on the common path.
+    #[test]
+    fn load_populates_cached_strategy_for_modern_snapshot_without_legacy_overrides() {
+        use crate::schema::table_schema::InferredStrategy;
+        let json = r#"{
+            "version": 2,
+            "total_rows": 0,
+            "schemas": [
+                {"name":"products","path":["products"],"columns":[],"depth":0,
+                 "inferred_strategy":"Columns","flatten_sources":{},"ui_override":"Pivot"}
+            ],
+            "truncated_names": [],
+            "column_collisions": [],
+            "stats": []
+        }"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        let products = loaded.schemas.iter().find(|s| s.name == "products").unwrap();
+        assert_eq!(
+            products.cached_strategy,
+            Some(InferredStrategy::Pivot),
+            "cached_strategy must be recomputed unconditionally in load(), not only in the legacy strategy_overrides branch"
+        );
+    }
+
+    #[test]
+    fn load_populates_cached_strategy_after_legacy_migration() {
+        use crate::schema::table_schema::InferredStrategy;
+        let json = r#"{
+            "version": 2,
+            "total_rows": 0,
+            "schemas": [
+                {"name":"products","path":["products"],"columns":[],"depth":0,"inferred_strategy":"Columns","flatten_sources":{}}
+            ],
+            "truncated_names": [],
+            "column_collisions": [],
+            "stats": [],
+            "strategy_overrides": {"products": "Skip"}
+        }"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        let products = loaded.schemas.iter().find(|s| s.name == "products").unwrap();
+        assert_eq!(
+            products.cached_strategy,
+            Some(InferredStrategy::Ignore),
+            "cached_strategy must reflect the migrated ui_override (Skip -> Ignore), not the pre-migration baseline"
+        );
     }
 
     #[test]
