@@ -913,6 +913,42 @@ mod tests {
         assert!(warnings.is_empty());
     }
 
+    /// Full-pipeline regression test for issue #22 (task 7): reproduces the exact timing bug
+    /// described in discussion — `registry.finalize()` runs first and bakes a *baseline* cache
+    /// (`Columns`, before any override exists); a `toml_override` is applied only afterwards via
+    /// `apply_overrides_complete()`. If cache recompute were missing anywhere in that chain,
+    /// `effective_strategy()` would silently keep returning the stale baseline (`Columns`)
+    /// instead of the override (`Jsonb`) — wrong data, no crash.
+    #[test]
+    fn full_pipeline_toml_override_after_finalize_is_visible_in_effective_strategy() {
+        use crate::schema::registry::{RegistryConfig, SchemaRegistry};
+
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
+        let obj = serde_json::json!({"name": "Alice", "age": 30});
+        reg.observe_root("users", obj.as_object().unwrap());
+        let mut schemas = reg.finalize();
+
+        // Sanity check: finalize() baseline must be Columns (no override applied yet).
+        let baseline = schemas.iter().find(|s| s.name == "users").unwrap();
+        assert_eq!(baseline.cached_strategy, Some(InferredStrategy::Columns));
+
+        let mut tables = HashMap::new();
+        tables.insert("users".to_string(), toml_strategy("jsonb"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        apply_overrides_complete(&mut schemas, &config).unwrap();
+
+        let users = schemas.iter().find(|s| s.name == "users").unwrap();
+        assert_eq!(
+            *users.effective_strategy(),
+            InferredStrategy::Jsonb,
+            "toml_override applied after finalize() must be visible in effective_strategy() after the full pipeline"
+        );
+        assert!(
+            matches!(users.effective_strategy(), std::borrow::Cow::Borrowed(_)),
+            "effective_strategy() must serve this from the recomputed cache, not the allocation fallback"
+        );
+    }
+
     /// Regression test for issue #22 risk #1: `exclude_absorbed_children()` (called inside
     /// `apply_overrides_complete`) reads `absorbs_children()` → `effective_strategy()`. If the
     /// cache recompute happens too late (or not before this call), a toml_override that flips
