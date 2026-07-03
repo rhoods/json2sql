@@ -607,6 +607,20 @@ impl TableSchema {
         self.parent_table.is_none()
     }
 
+    /// (Re)computes `cached_strategy` from the current `ui_override`/`toml_override`/
+    /// `inferred_strategy`, applying the same priority as `effective_strategy()`.
+    ///
+    /// Must be called at every point that mutates `ui_override`/`toml_override` — `finalize()`
+    /// (baseline), `apply_overrides_complete()`, `load()` — so `effective_strategy()` never
+    /// serves a stale cache. Missing a call site is safe (falls back to the direct computation)
+    /// but forfeits the perf gain for that site.
+    pub(crate) fn recompute_cached_strategy(&mut self) {
+        self.cached_strategy = Some(match (&self.ui_override, &self.toml_override) {
+            (Some(ov), _) | (None, Some(ov)) => InferredStrategy::from(ov),
+            (None, None) => self.inferred_strategy.clone(),
+        });
+    }
+
     /// Returns true if this table absorbs its children, considering all override levels.
     #[must_use]
     pub fn absorbs_children(&self) -> bool {
@@ -907,6 +921,41 @@ mod tests {
         s.ui_override = Some(UserOverride::Pivot);
         assert!(s.cached_strategy.is_none());
         assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn recompute_cached_strategy_prefers_ui_override() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.toml_override = Some(UserOverride::Jsonb);
+        s.ui_override = Some(UserOverride::Pivot);
+        s.recompute_cached_strategy();
+        assert_eq!(s.cached_strategy, Some(InferredStrategy::Pivot));
+    }
+
+    #[test]
+    fn recompute_cached_strategy_prefers_toml_over_inferred() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.toml_override = Some(UserOverride::Jsonb);
+        s.recompute_cached_strategy();
+        assert_eq!(s.cached_strategy, Some(InferredStrategy::Jsonb));
+    }
+
+    #[test]
+    fn recompute_cached_strategy_falls_back_to_inferred() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Pivot;
+        s.recompute_cached_strategy();
+        assert_eq!(s.cached_strategy, Some(InferredStrategy::Pivot));
+    }
+
+    #[test]
+    fn recompute_cached_strategy_makes_effective_strategy_borrow() {
+        let mut s = make_schema("t");
+        s.ui_override = Some(UserOverride::NormalizeDynamicKeys { id_column: "k".to_string() });
+        s.recompute_cached_strategy();
+        assert!(matches!(s.effective_strategy(), std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]
