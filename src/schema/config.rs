@@ -427,6 +427,14 @@ pub fn apply_user_overrides(
         !matches!(overrides.get(&s.name), Some(UserOverride::Skip))
             && !wide_to_remove.contains(&s.name)
     });
+
+    // Schemas reaching this function already went through finalize() and therefore already
+    // carry a populated cached_strategy baseline. Without this recompute, effective_strategy()
+    // would keep serving that stale baseline and silently ignore the override just applied above
+    // (issue #22 task 8 — same class of bug as apply_overrides_complete, but for the TUI path).
+    for schema in schemas.iter_mut() {
+        schema.recompute_cached_strategy();
+    }
 }
 
 /// Prime a `TypeTracker` with a representative observation so `to_pg_type()` returns
@@ -1085,5 +1093,28 @@ mod tests {
         apply_user_overrides(&mut schemas, &overrides);
         assert_eq!(schemas.len(), 1);
         assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::Columns));
+    }
+
+    /// Regression test for issue #22 task 8 (TUI manual strategy selection). The TUI
+    /// (`json2sql-ui`) calls `apply_user_overrides` on schemas that already came out of Pass 1
+    /// `finalize()` — i.e. `cached_strategy` is already `Some(Columns)` baseline, unlike the
+    /// other tests above which build schemas via `simple_table()` and never populate the cache.
+    /// Without a recompute inside `apply_user_overrides`, `effective_strategy()` would keep
+    /// returning the stale baseline and silently ignore the user's manual selection.
+    #[test]
+    fn apply_user_overrides_recomputes_cache_so_effective_strategy_reflects_override() {
+        let mut schemas = vec![simple_table("blob")];
+        schemas[0].recompute_cached_strategy();
+        assert_eq!(schemas[0].cached_strategy, Some(InferredStrategy::Columns));
+
+        let mut overrides = HashMap::new();
+        overrides.insert("blob".to_string(), UserOverride::Jsonb);
+        apply_user_overrides(&mut schemas, &overrides);
+
+        assert_eq!(
+            *schemas[0].effective_strategy(),
+            InferredStrategy::Jsonb,
+            "manual TUI strategy selection must be reflected in effective_strategy(), not the stale pre-override cache"
+        );
     }
 }
