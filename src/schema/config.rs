@@ -181,7 +181,12 @@ fn apply_strategy_override(
             eprintln!("  Override strategy: {table_name} → Columns (no-op, already inferred)");
             schema.toml_override = Some(UserOverride::Columns);
         }
-        "structured_pivot" => {} // handled via suffix_columns below
+        // Intentional no-op, not a stub to fill in: the actual column/strategy work happens
+        // in apply_suffix_columns_override (below, driven by the `suffix_columns` key), which
+        // sets schema.inferred_strategy = StructuredPivot(..) directly. `toml_override` is not
+        // set here because `UserOverride` has no `StructuredPivot` variant — effective_strategy()
+        // still resolves correctly by falling through to inferred_strategy. Verified in #28.
+        "structured_pivot" => {}
         "normalize_dynamic_keys" => {
             let id_col = toml_str(col_overrides, "id_column").unwrap_or_else(|| "key_id".to_string());
             deferred_normalize.push(DeferredNormalize { table_name: table_name.to_string(), id_column: id_col });
