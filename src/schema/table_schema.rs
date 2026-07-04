@@ -607,6 +607,33 @@ impl TableSchema {
         self.parent_table.is_none()
     }
 
+    /// Current IHM-level strategy override, if any.
+    #[must_use]
+    pub const fn ui_override(&self) -> Option<&UserOverride> {
+        self.ui_override.as_ref()
+    }
+
+    /// Current config.toml-level strategy override, if any.
+    #[must_use]
+    pub const fn toml_override(&self) -> Option<&UserOverride> {
+        self.toml_override.as_ref()
+    }
+
+    /// Sets the IHM-level strategy override and immediately recomputes `cached_strategy`,
+    /// so `effective_strategy()` can never serve a stale value after this call returns.
+    pub fn set_ui_override(&mut self, ov: Option<UserOverride>) {
+        self.ui_override = ov;
+        self.recompute_cached_strategy();
+    }
+
+    /// Sets the config.toml-level strategy override and immediately recomputes
+    /// `cached_strategy`, so `effective_strategy()` can never serve a stale value after this
+    /// call returns.
+    pub fn set_toml_override(&mut self, ov: Option<UserOverride>) {
+        self.toml_override = ov;
+        self.recompute_cached_strategy();
+    }
+
     /// (Re)computes `cached_strategy` from the current `ui_override`/`toml_override`/
     /// `inferred_strategy`, applying the same priority as `effective_strategy()`.
     ///
@@ -895,6 +922,73 @@ mod tests {
         let back: TableSchema = serde_json::from_str(&json).unwrap();
         assert_eq!(back.toml_override, Some(UserOverride::Jsonb));
         assert_eq!(back.ui_override, Some(UserOverride::Pivot));
+    }
+
+    #[test]
+    fn set_ui_override_recomputes_cache_immediately() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+        s.set_ui_override(Some(UserOverride::Pivot));
+        assert_eq!(
+            s.cached_strategy,
+            Some(InferredStrategy::Pivot),
+            "set_ui_override must recompute the cache without a separate explicit call"
+        );
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn set_toml_override_recomputes_cache_immediately() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+        s.set_toml_override(Some(UserOverride::Jsonb));
+        assert_eq!(
+            s.cached_strategy,
+            Some(InferredStrategy::Jsonb),
+            "set_toml_override must recompute the cache without a separate explicit call"
+        );
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Jsonb);
+    }
+
+    #[test]
+    fn set_ui_override_none_falls_back_to_toml_override() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.set_toml_override(Some(UserOverride::Jsonb));
+        s.set_ui_override(Some(UserOverride::Pivot));
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+
+        s.set_ui_override(None);
+
+        assert_eq!(
+            s.cached_strategy,
+            Some(InferredStrategy::Jsonb),
+            "clearing ui_override via the setter must recompute, falling back to toml_override"
+        );
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Jsonb);
+    }
+
+    #[test]
+    fn set_ui_override_still_takes_priority_over_toml_override() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.set_toml_override(Some(UserOverride::Jsonb));
+        s.set_ui_override(Some(UserOverride::Pivot));
+        assert_eq!(s.cached_strategy, Some(InferredStrategy::Pivot));
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn override_getters_return_current_value() {
+        let mut s = make_schema("t");
+        assert_eq!(s.ui_override(), None);
+        assert_eq!(s.toml_override(), None);
+        s.set_toml_override(Some(UserOverride::Jsonb));
+        s.set_ui_override(Some(UserOverride::Pivot));
+        assert_eq!(s.toml_override(), Some(&UserOverride::Jsonb));
+        assert_eq!(s.ui_override(), Some(&UserOverride::Pivot));
     }
 
     #[test]

@@ -369,13 +369,12 @@ pub fn apply_flatten(
 pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &str) -> Result<()> {
     let (_, parent_name, field_name) = resolve_child_info(schemas, child_table_name, "apply_jsonb_flatten")?;
 
-    // Mark child as JsonbFlatten (via ui_override) so absorbs_children() excludes its descendants
+    // Mark child as JsonbFlatten (via ui_override) so absorbs_children() excludes its descendants.
+    // set_ui_override() recomputes cached_strategy in the same call — the retain() below (which
+    // reads effective_strategy()) never sees a stale baseline from a schema that already went
+    // through finalize().
     if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
-        child.ui_override = Some(UserOverride::JsonbFlatten);
-        // See apply_wide_strategy_columns: without this, the retain() below (which reads
-        // effective_strategy()) would keep serving a stale cached_strategy baseline and
-        // never remove this child on a schema that already went through finalize().
-        child.recompute_cached_strategy();
+        child.set_ui_override(Some(UserOverride::JsonbFlatten));
     }
 
     // Remove any nested children of the child table
