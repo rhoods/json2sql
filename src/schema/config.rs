@@ -811,6 +811,35 @@ mod tests {
         TableSchema::new(name.to_string(), vec![name.to_string()], 0)
     }
 
+    #[test]
+    fn toml_suffix_columns_survives_apply_overrides_complete_double_recompute() {
+        // Verification for issue #28 task 3: apply_suffix_columns_override -> apply_structured_pivot_columns
+        // now recomputes cached_strategy internally (task 1), and apply_overrides_complete's
+        // catch-all loop recomputes again right after — confirm the double recompute is a
+        // harmless no-op, not a source of a second staleness bug.
+        let mut schemas = vec![simple_table("nutrients")];
+        schemas[0].recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns), like a finalized schema
+        let mut cols = HashMap::new();
+        cols.insert(
+            "suffix_columns".to_string(),
+            toml::Value::Array(vec![toml::Value::String("_100g".to_string())]),
+        );
+        let mut tables = HashMap::new();
+        tables.insert("nutrients".to_string(), cols);
+        let config = SchemaConfig { tables, group: HashMap::new() };
+
+        apply_overrides_complete(&mut schemas, &config).unwrap();
+
+        let nutrients = &schemas[0];
+        assert!(matches!(nutrients.inferred_strategy, InferredStrategy::StructuredPivot(_)));
+        assert_eq!(nutrients.toml_override, None, "suffix_columns has no UserOverride variant to set");
+        assert!(
+            matches!(nutrients.cached_strategy, Some(InferredStrategy::StructuredPivot(_))),
+            "cached_strategy must reflect StructuredPivot after both recomputes, not the pre-override baseline"
+        );
+        assert!(matches!(*nutrients.effective_strategy(), InferredStrategy::StructuredPivot(_)));
+    }
+
     // --- apply_group_overrides (return Vec<ConfigWarning>) ---
 
     #[test]
