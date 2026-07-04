@@ -294,6 +294,10 @@ pub fn apply_overrides_complete(
     // Must run BEFORE exclude_absorbed_children: that call reads absorbs_children() →
     // effective_strategy(), which would otherwise see the stale pre-override cache and miss
     // children that the overrides just applied above made absorbable (issue #22 regression risk #1).
+    // NOT made redundant by the per-mutator folds added in #27 (apply_wide_strategy_columns,
+    // apply_normalize_dynamic_keys, apply_jsonb_flatten): this loop also covers overrides that
+    // set ui_override/toml_override *after* calling those mutators (e.g. "columns"/Skip branches
+    // in apply_strategy_override/apply_user_overrides), which the folds run too early to see.
     for schema in schemas.iter_mut() {
         schema.recompute_cached_strategy();
     }
@@ -432,6 +436,8 @@ pub fn apply_user_overrides(
     // carry a populated cached_strategy baseline. Without this recompute, effective_strategy()
     // would keep serving that stale baseline and silently ignore the override just applied above
     // (issue #22 task 8 — same class of bug as apply_overrides_complete, but for the TUI path).
+    // NOT made redundant by the #27 fold in apply_wide_strategy_columns: ui_override is set
+    // *after* that call (a few lines above), so this loop is still what makes the cache correct.
     for schema in schemas.iter_mut() {
         schema.recompute_cached_strategy();
     }
