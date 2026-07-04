@@ -444,6 +444,23 @@ mod tests {
     }
 
     #[test]
+    fn apply_wide_strategy_columns_recomputes_stale_cache_for_pivot() {
+        // Same regression as above, exercised through the Pivot branch (apply_pivot_columns)
+        // instead of the Jsonb branch — both mutate inferred_strategy from the same match arm site.
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 1);
+        schema.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+
+        apply_wide_strategy_columns(&mut schema, InferredStrategy::Pivot);
+
+        assert_eq!(
+            schema.cached_strategy,
+            Some(InferredStrategy::Pivot),
+            "cached_strategy must reflect Pivot without an explicit recompute call"
+        );
+        assert_eq!(*schema.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
     fn apply_jsonb_flatten_sets_ui_override_not_inferred_strategy() {
         let (parent, child) = make_parent_child("products", "products_tags");
         let mut schemas = vec![parent, child];
