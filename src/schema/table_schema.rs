@@ -590,9 +590,22 @@ impl TableSchema {
     /// `InferredStrategy` when there's an override — if the cache hasn't been populated yet; this
     /// guard rail guarantees a correct (if unoptimized) result even if a future call site mutates
     /// `ui_override`/`toml_override` without recomputing the cache.
+    ///
+    /// In debug/test builds, a served cache is checked against a fresh direct computation
+    /// (`debug_assert!`, no-op in release) — this is the regression guard for issue #29: mutating
+    /// `ui_override`/`toml_override` other than through `set_ui_override()`/`set_toml_override()`
+    /// now panics here instead of silently serving a stale strategy.
     #[must_use]
     pub fn effective_strategy(&self) -> std::borrow::Cow<InferredStrategy> {
         if let Some(cached) = &self.cached_strategy {
+            debug_assert_eq!(
+                *cached,
+                self.compute_strategy_direct(),
+                "cached_strategy diverged from a direct recompute on table `{}` — a call site \
+                 mutated ui_override/toml_override without going through set_ui_override()/\
+                 set_toml_override()",
+                self.name
+            );
             return std::borrow::Cow::Borrowed(cached);
         }
         if let Some(ov) = &self.ui_override {
@@ -602,6 +615,16 @@ impl TableSchema {
             return std::borrow::Cow::Owned(InferredStrategy::from(ov));
         }
         std::borrow::Cow::Borrowed(&self.inferred_strategy)
+    }
+
+    /// Direct computation of the effective strategy from `ui_override`/`toml_override`/
+    /// `inferred_strategy`, ignoring `cached_strategy` entirely. Shared by
+    /// `recompute_cached_strategy()` and the `debug_assert!` in `effective_strategy()`.
+    fn compute_strategy_direct(&self) -> InferredStrategy {
+        match (&self.ui_override, &self.toml_override) {
+            (Some(ov), _) | (None, Some(ov)) => InferredStrategy::from(ov),
+            (None, None) => self.inferred_strategy.clone(),
+        }
     }
 
     #[must_use]
@@ -644,10 +667,7 @@ impl TableSchema {
     /// serves a stale cache. Missing a call site is safe (falls back to the direct computation)
     /// but forfeits the perf gain for that site.
     pub fn recompute_cached_strategy(&mut self) {
-        self.cached_strategy = Some(match (&self.ui_override, &self.toml_override) {
-            (Some(ov), _) | (None, Some(ov)) => InferredStrategy::from(ov),
-            (None, None) => self.inferred_strategy.clone(),
-        });
+        self.cached_strategy = Some(self.compute_strategy_direct());
     }
 
     /// Returns true if this table absorbs its children, considering all override levels.
@@ -1000,14 +1020,25 @@ mod tests {
     }
 
     #[test]
-    fn effective_strategy_reads_cache_when_present() {
+    fn effective_strategy_reads_cache_when_consistent() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.set_ui_override(Some(UserOverride::Pivot));
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "cached_strategy")]
+    fn effective_strategy_panics_on_stale_cache_in_debug_build() {
         let mut s = make_schema("t");
         s.inferred_strategy = InferredStrategy::Columns;
         s.ui_override = Some(UserOverride::Pivot);
-        // Cache deliberately disagrees with ui_override to prove the cache wins, not just
-        // that the fallback computation happens to produce the same answer.
+        // Cache deliberately disagrees with ui_override — this can only happen if a call site
+        // bypassed set_ui_override()/set_toml_override(). The debug_assert! in
+        // effective_strategy() must catch this divergence instead of silently trusting the cache.
         s.cached_strategy = Some(InferredStrategy::Jsonb);
-        assert_eq!(*s.effective_strategy(), InferredStrategy::Jsonb);
+        let _ = s.effective_strategy();
     }
 
     #[test]
