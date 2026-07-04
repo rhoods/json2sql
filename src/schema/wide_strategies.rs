@@ -367,6 +367,10 @@ pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &st
     // Mark child as JsonbFlatten (via ui_override) so absorbs_children() excludes its descendants
     if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
         child.ui_override = Some(UserOverride::JsonbFlatten);
+        // See apply_wide_strategy_columns: without this, the retain() below (which reads
+        // effective_strategy()) would keep serving a stale cached_strategy baseline and
+        // never remove this child on a schema that already went through finalize().
+        child.recompute_cached_strategy();
     }
 
     // Remove any nested children of the child table
@@ -482,6 +486,23 @@ mod tests {
             Some(InferredStrategy::NormalizeDynamicKeys { id_column: "image_id".to_string() }),
             "cached_strategy must reflect NormalizeDynamicKeys without an explicit recompute call"
         );
+    }
+
+    #[test]
+    fn apply_jsonb_flatten_recomputes_stale_cache_so_child_gets_removed() {
+        // Same regression class as apply_wide_strategy_columns/apply_normalize_dynamic_keys:
+        // the child already has a populated cached_strategy baseline (from finalize()) when
+        // apply_jsonb_flatten() sets ui_override=JsonbFlatten on it. The retain() call at the
+        // end of apply_jsonb_flatten reads effective_strategy() to decide which tables to drop
+        // — without a recompute, it would keep seeing the stale baseline and never remove the child.
+        let (parent, mut child) = make_parent_child("products", "products_tags");
+        child.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+        let mut schemas = vec![parent, child];
+
+        apply_jsonb_flatten(&mut schemas, "products_tags").unwrap();
+
+        assert_eq!(schemas.len(), 1, "child must be removed once ui_override=JsonbFlatten is reflected in the cache");
+        assert_eq!(schemas[0].name, "products");
     }
 
     #[test]
