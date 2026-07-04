@@ -614,7 +614,7 @@ impl TableSchema {
     /// (baseline), `apply_overrides_complete()`, `load()` — so `effective_strategy()` never
     /// serves a stale cache. Missing a call site is safe (falls back to the direct computation)
     /// but forfeits the perf gain for that site.
-    pub(crate) fn recompute_cached_strategy(&mut self) {
+    pub fn recompute_cached_strategy(&mut self) {
         self.cached_strategy = Some(match (&self.ui_override, &self.toml_override) {
             (Some(ov), _) | (None, Some(ov)) => InferredStrategy::from(ov),
             (None, None) => self.inferred_strategy.clone(),

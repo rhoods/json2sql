@@ -1,10 +1,12 @@
-//! Baseline benchmark for `TableSchema::effective_strategy()` in the Pass 2 hot path.
+//! Benchmark for `TableSchema::effective_strategy()` in the Pass 2 hot path (issue #22).
 //!
 //! `effective_strategy()` is called once per JSON object during Pass 2 traversal/insert
 //! (see `src/pass2/traversal.rs`, `src/pass2/insert.rs`). For `Flatten`/`NormalizeDynamicKeys`
-//! overrides it currently allocates a new `InferredStrategy` (via `String::clone()` on
-//! `prefix`/`id_column`) on every call. This benchmark measures that baseline cost before
-//! introducing `cached_strategy` (issue #22).
+//! overrides, without a populated `cached_strategy` it allocates a new `InferredStrategy`
+//! (via `String::clone()` on `prefix`/`id_column`) on every call. Each override schema below
+//! calls `recompute_cached_strategy()` after setting its override, mirroring what the real
+//! pipeline does (`finalize()` / `apply_overrides_complete()` / `load()`) before Pass 2 starts —
+//! so this benchmark actually exercises the cached `Cow::Borrowed` path, not the fallback.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use json2sql::schema::table_schema::{InferredStrategy, TableSchema, UserOverride};
@@ -19,6 +21,7 @@ fn schema_ui_override_flatten() -> TableSchema {
         prefix: "nutrients_".to_string(),
         max_depth: 1,
     });
+    s.recompute_cached_strategy();
     s
 }
 
@@ -27,6 +30,7 @@ fn schema_ui_override_normalize_dynamic_keys() -> TableSchema {
     s.ui_override = Some(UserOverride::NormalizeDynamicKeys {
         id_column: "image_id".to_string(),
     });
+    s.recompute_cached_strategy();
     s
 }
 
@@ -35,6 +39,7 @@ fn schema_toml_override_normalize_dynamic_keys() -> TableSchema {
     s.toml_override = Some(UserOverride::NormalizeDynamicKeys {
         id_column: "image_id".to_string(),
     });
+    s.recompute_cached_strategy();
     s
 }
 
