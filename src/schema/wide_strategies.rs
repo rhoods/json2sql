@@ -121,6 +121,12 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: InferredS
             schema.columns.retain(|c| c.is_generated);
         }
     }
+    // Any branch above may have just mutated `inferred_strategy`. If this schema already
+    // went through finalize() (cached_strategy populated), effective_strategy() would keep
+    // serving that stale baseline and silently ignore the strategy just applied — the exact
+    // regression that broke CI post-#22. Recomputing here closes the gap for every caller,
+    // including ones that mutate schemas after finalize() (tests, future call sites).
+    schema.recompute_cached_strategy();
 }
 
 /// Restructure a wide table's columns for `StructuredPivot`:
@@ -416,6 +422,25 @@ mod tests {
         child.parent_table = Some(parent_name.to_string());
         child.child_kind = Some(ChildKind::Object);
         (parent, child)
+    }
+
+    #[test]
+    fn apply_wide_strategy_columns_recomputes_stale_cache() {
+        // Reproduces the CI regression: a schema that already went through finalize()
+        // (cached_strategy populated with the pre-override baseline) must not keep
+        // serving that stale cache once apply_wide_strategy_columns() forces a new strategy.
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 1);
+        schema.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+        assert_eq!(schema.cached_strategy, Some(InferredStrategy::Columns));
+
+        apply_wide_strategy_columns(&mut schema, InferredStrategy::Jsonb);
+
+        assert_eq!(
+            schema.cached_strategy,
+            Some(InferredStrategy::Jsonb),
+            "cached_strategy must reflect the forced strategy without an explicit recompute call"
+        );
+        assert_eq!(*schema.effective_strategy(), InferredStrategy::Jsonb);
     }
 
     #[test]
