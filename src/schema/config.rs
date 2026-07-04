@@ -1041,6 +1041,36 @@ mod tests {
     }
 
     #[test]
+    fn toml_conflicting_strategy_and_suffix_columns_on_non_columns_table_stacks_both_warnings() {
+        // Both guards target the same table config in one pass: guard 1 (strategy vs.
+        // suffix_columns conflict) and guard 2 (suffix_columns requires Columns) fire
+        // independently — see #31 "Questions ouvertes". Decision: no dedup, both warnings
+        // surface, and the table keeps its original (non-Columns) layout untouched.
+        use crate::schema::wide_strategies::apply_wide_strategy_columns;
+        let mut schemas = vec![simple_table("metrics")];
+        apply_wide_strategy_columns(&mut schemas[0], InferredStrategy::Pivot);
+        schemas[0].inferred_strategy = InferredStrategy::Pivot;
+        let column_names_before: Vec<String> = schemas[0].columns.iter().map(|c| c.name.clone()).collect();
+        let mut tables = HashMap::new();
+        tables.insert("metrics".to_string(), cols_with_strategy_and_suffix("pivot"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+
+        assert_eq!(warnings, vec![
+            ConfigWarning::ConflictingOverride { table: "metrics".to_string(), ignored_strategy: "pivot".to_string() },
+            ConfigWarning::InvalidOverride {
+                table: "metrics".to_string(),
+                from_strategy: "Pivot".to_string(),
+                to_strategy: "structured_pivot".to_string(),
+            },
+        ]);
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Pivot, "table keeps its original layout");
+        let column_names_after: Vec<String> = schemas[0].columns.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(column_names_after, column_names_before, "columns must be unchanged");
+    }
+
+    #[test]
     fn toml_suffix_columns_survives_apply_overrides_complete_double_recompute() {
         // Verification for issue #28 task 3: apply_suffix_columns_override -> apply_structured_pivot_columns
         // now recomputes cached_strategy internally (task 1), and apply_overrides_complete's
