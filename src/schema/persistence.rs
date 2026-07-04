@@ -135,8 +135,8 @@ pub fn load(path: &Path) -> Result<SchemaSnapshot> {
     if !snapshot.strategy_overrides.is_empty() {
         for (table_name, ov) in &snapshot.strategy_overrides {
             if let Some(s) = snapshot.schemas.iter_mut().find(|s| &s.name == table_name) {
-                if s.ui_override.is_none() {
-                    s.ui_override = Some(ov.clone());
+                if s.ui_override().is_none() {
+                    s.set_ui_override(Some(ov.clone()));
                 }
             }
         }
@@ -250,7 +250,7 @@ mod tests {
         std::fs::write(tmp.path(), json).unwrap();
         let loaded = load(tmp.path()).unwrap();
         let products = loaded.schemas.iter().find(|s| s.name == "products").unwrap();
-        assert_eq!(products.ui_override, Some(UserOverride::Skip),
+        assert_eq!(products.ui_override(), Some(&UserOverride::Skip),
             "strategy_overrides from root must be migrated into ui_override");
         assert_eq!(products.inferred_strategy, InferredStrategy::Columns,
             "inferred_strategy must not be mutated during migration");
@@ -277,7 +277,7 @@ mod tests {
         std::fs::write(tmp.path(), json).unwrap();
         let loaded = load(tmp.path()).unwrap();
         let products = loaded.schemas.iter().find(|s| s.name == "products").unwrap();
-        assert_eq!(products.ui_override, Some(UserOverride::Pivot),
+        assert_eq!(products.ui_override(), Some(&UserOverride::Pivot),
             "existing ui_override on schema must not be overwritten by strategy_overrides migration");
     }
 

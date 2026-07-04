@@ -531,11 +531,13 @@ pub struct TableSchema {
     #[serde(alias = "wide_strategy", default)]
     pub inferred_strategy: InferredStrategy,
     /// Strategy override from config.toml — takes precedence over `inferred_strategy`.
+    /// Private: mutate only via `set_toml_override()`, which keeps `cached_strategy` in sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub toml_override: Option<UserOverride>,
+    toml_override: Option<UserOverride>,
     /// Strategy override from the IHM — takes precedence over `toml_override` and `inferred_strategy`.
+    /// Private: mutate only via `set_ui_override()`, which keeps `cached_strategy` in sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ui_override: Option<UserOverride>,
+    ui_override: Option<UserOverride>,
     /// Maps prefixed column name → source JSON field for columns inlined via Flatten strategy.
     /// e.g. `nutrients_calories` → `nutrients` means: look up `obj["nutrients"]["calories"]`.
     /// Empty for tables that have no flattened children.
@@ -588,9 +590,22 @@ impl TableSchema {
     /// `InferredStrategy` when there's an override — if the cache hasn't been populated yet; this
     /// guard rail guarantees a correct (if unoptimized) result even if a future call site mutates
     /// `ui_override`/`toml_override` without recomputing the cache.
+    ///
+    /// In debug/test builds, a served cache is checked against a fresh direct computation
+    /// (`debug_assert!`, no-op in release) — this is the regression guard for issue #29: mutating
+    /// `ui_override`/`toml_override` other than through `set_ui_override()`/`set_toml_override()`
+    /// now panics here instead of silently serving a stale strategy.
     #[must_use]
     pub fn effective_strategy(&self) -> std::borrow::Cow<InferredStrategy> {
         if let Some(cached) = &self.cached_strategy {
+            debug_assert_eq!(
+                *cached,
+                self.compute_strategy_direct(),
+                "cached_strategy diverged from a direct recompute on table `{}` — a call site \
+                 mutated ui_override/toml_override without going through set_ui_override()/\
+                 set_toml_override()",
+                self.name
+            );
             return std::borrow::Cow::Borrowed(cached);
         }
         if let Some(ov) = &self.ui_override {
@@ -602,9 +617,46 @@ impl TableSchema {
         std::borrow::Cow::Borrowed(&self.inferred_strategy)
     }
 
+    /// Direct computation of the effective strategy from `ui_override`/`toml_override`/
+    /// `inferred_strategy`, ignoring `cached_strategy` entirely. Shared by
+    /// `recompute_cached_strategy()` and the `debug_assert!` in `effective_strategy()`.
+    fn compute_strategy_direct(&self) -> InferredStrategy {
+        match (&self.ui_override, &self.toml_override) {
+            (Some(ov), _) | (None, Some(ov)) => InferredStrategy::from(ov),
+            (None, None) => self.inferred_strategy.clone(),
+        }
+    }
+
     #[must_use]
     pub const fn is_root(&self) -> bool {
         self.parent_table.is_none()
+    }
+
+    /// Current IHM-level strategy override, if any.
+    #[must_use]
+    pub const fn ui_override(&self) -> Option<&UserOverride> {
+        self.ui_override.as_ref()
+    }
+
+    /// Current config.toml-level strategy override, if any.
+    #[must_use]
+    pub const fn toml_override(&self) -> Option<&UserOverride> {
+        self.toml_override.as_ref()
+    }
+
+    /// Sets the IHM-level strategy override and immediately recomputes `cached_strategy`,
+    /// so `effective_strategy()` can never serve a stale value after this call returns.
+    pub fn set_ui_override(&mut self, ov: Option<UserOverride>) {
+        self.ui_override = ov;
+        self.recompute_cached_strategy();
+    }
+
+    /// Sets the config.toml-level strategy override and immediately recomputes
+    /// `cached_strategy`, so `effective_strategy()` can never serve a stale value after this
+    /// call returns.
+    pub fn set_toml_override(&mut self, ov: Option<UserOverride>) {
+        self.toml_override = ov;
+        self.recompute_cached_strategy();
     }
 
     /// (Re)computes `cached_strategy` from the current `ui_override`/`toml_override`/
@@ -615,10 +667,7 @@ impl TableSchema {
     /// serves a stale cache. Missing a call site is safe (falls back to the direct computation)
     /// but forfeits the perf gain for that site.
     pub fn recompute_cached_strategy(&mut self) {
-        self.cached_strategy = Some(match (&self.ui_override, &self.toml_override) {
-            (Some(ov), _) | (None, Some(ov)) => InferredStrategy::from(ov),
-            (None, None) => self.inferred_strategy.clone(),
-        });
+        self.cached_strategy = Some(self.compute_strategy_direct());
     }
 
     /// Returns true if this table absorbs its children, considering all override levels.
@@ -898,20 +947,151 @@ mod tests {
     }
 
     #[test]
+    fn set_ui_override_recomputes_cache_immediately() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+        s.set_ui_override(Some(UserOverride::Pivot));
+        assert_eq!(
+            s.cached_strategy,
+            Some(InferredStrategy::Pivot),
+            "set_ui_override must recompute the cache without a separate explicit call"
+        );
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn set_toml_override_recomputes_cache_immediately() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+        s.set_toml_override(Some(UserOverride::Jsonb));
+        assert_eq!(
+            s.cached_strategy,
+            Some(InferredStrategy::Jsonb),
+            "set_toml_override must recompute the cache without a separate explicit call"
+        );
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Jsonb);
+    }
+
+    #[test]
+    fn set_ui_override_none_falls_back_to_toml_override() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.set_toml_override(Some(UserOverride::Jsonb));
+        s.set_ui_override(Some(UserOverride::Pivot));
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+
+        s.set_ui_override(None);
+
+        assert_eq!(
+            s.cached_strategy,
+            Some(InferredStrategy::Jsonb),
+            "clearing ui_override via the setter must recompute, falling back to toml_override"
+        );
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Jsonb);
+    }
+
+    #[test]
+    fn set_ui_override_still_takes_priority_over_toml_override() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.set_toml_override(Some(UserOverride::Jsonb));
+        s.set_ui_override(Some(UserOverride::Pivot));
+        assert_eq!(s.cached_strategy, Some(InferredStrategy::Pivot));
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn override_getters_return_current_value() {
+        let mut s = make_schema("t");
+        assert_eq!(s.ui_override(), None);
+        assert_eq!(s.toml_override(), None);
+        s.set_toml_override(Some(UserOverride::Jsonb));
+        s.set_ui_override(Some(UserOverride::Pivot));
+        assert_eq!(s.toml_override(), Some(&UserOverride::Jsonb));
+        assert_eq!(s.ui_override(), Some(&UserOverride::Pivot));
+    }
+
+    /// Regression test for issue #29: exhaustively walks every combination and every order of
+    /// `set_ui_override()`/`set_toml_override()` mutations (including clearing back to `None`)
+    /// and asserts `effective_strategy()` matches the documented priority after *every single*
+    /// call. Since `effective_strategy()` carries a `debug_assert!` comparing the served cache to
+    /// a fresh direct recompute, this test would panic on the first divergence — so "no panic and
+    /// correct value at every step" is the proof that the setters never leave a stale cache behind,
+    /// regardless of call order or how many times an override is set, cleared, or reset.
+    #[test]
+    fn effective_strategy_never_diverges_across_setter_sequences() {
+        let overrides = [None, Some(UserOverride::Pivot), Some(UserOverride::Jsonb), Some(UserOverride::Columns)];
+
+        for ui in &overrides {
+            for toml in &overrides {
+                // Two independent schemas to cover both mutation orders (ui-then-toml and
+                // toml-then-ui), since the setters recompute unconditionally on every call.
+                let mut ui_then_toml = make_schema("t");
+                ui_then_toml.inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column: "k".to_string() };
+                ui_then_toml.set_ui_override(ui.clone());
+                assert_expected_effective_strategy(&ui_then_toml, ui, &None);
+                ui_then_toml.set_toml_override(toml.clone());
+                assert_expected_effective_strategy(&ui_then_toml, ui, toml);
+
+                let mut toml_then_ui = make_schema("t");
+                toml_then_ui.inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column: "k".to_string() };
+                toml_then_ui.set_toml_override(toml.clone());
+                assert_expected_effective_strategy(&toml_then_ui, &None, toml);
+                toml_then_ui.set_ui_override(ui.clone());
+                assert_expected_effective_strategy(&toml_then_ui, ui, toml);
+
+                // Clearing back to None must also recompute correctly, in both orders.
+                toml_then_ui.set_ui_override(None);
+                assert_expected_effective_strategy(&toml_then_ui, &None, toml);
+                toml_then_ui.set_toml_override(None);
+                assert_expected_effective_strategy(&toml_then_ui, &None, &None);
+            }
+        }
+    }
+
+    /// Helper for `effective_strategy_never_diverges_across_setter_sequences`: computes the
+    /// expected strategy from the same ui_override > toml_override > inferred_strategy priority
+    /// documented on `effective_strategy()`, independently of `compute_strategy_direct()`.
+    fn assert_expected_effective_strategy(
+        s: &TableSchema,
+        ui: &Option<UserOverride>,
+        toml: &Option<UserOverride>,
+    ) {
+        let expected = match (ui, toml) {
+            (Some(ov), _) | (None, Some(ov)) => InferredStrategy::from(ov),
+            (None, None) => s.inferred_strategy.clone(),
+        };
+        assert_eq!(*s.effective_strategy(), expected);
+    }
+
+    #[test]
     fn table_schema_new_cached_strategy_is_none() {
         let s = make_schema("t");
         assert!(s.cached_strategy.is_none());
     }
 
     #[test]
-    fn effective_strategy_reads_cache_when_present() {
+    fn effective_strategy_reads_cache_when_consistent() {
+        let mut s = make_schema("t");
+        s.inferred_strategy = InferredStrategy::Columns;
+        s.set_ui_override(Some(UserOverride::Pivot));
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "cached_strategy")]
+    fn effective_strategy_panics_on_stale_cache_in_debug_build() {
         let mut s = make_schema("t");
         s.inferred_strategy = InferredStrategy::Columns;
         s.ui_override = Some(UserOverride::Pivot);
-        // Cache deliberately disagrees with ui_override to prove the cache wins, not just
-        // that the fallback computation happens to produce the same answer.
+        // Cache deliberately disagrees with ui_override — this can only happen if a call site
+        // bypassed set_ui_override()/set_toml_override(). The debug_assert! in
+        // effective_strategy() must catch this divergence instead of silently trusting the cache.
         s.cached_strategy = Some(InferredStrategy::Jsonb);
-        assert_eq!(*s.effective_strategy(), InferredStrategy::Jsonb);
+        let _ = s.effective_strategy();
     }
 
     #[test]

@@ -410,7 +410,7 @@ mod tests {
         // Schema has inferred_strategy=Columns but ui_override=Jsonb — effective_strategy() returns Jsonb.
         let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
         schema.inferred_strategy = InferredStrategy::Columns;
-        schema.ui_override = Some(UserOverride::Jsonb);
+        schema.set_ui_override(Some(UserOverride::Jsonb));
         schema.columns.push(ColumnSchema {
             name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
             pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: false,
