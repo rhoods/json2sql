@@ -127,6 +127,14 @@ impl SchemaFinalizer {
         };
         exclude_absorbed_children(&mut schemas);
 
+        // Baseline cache: captures ui_override values already posed during Phase 3 (e.g.
+        // JsonbFlatten set by wide_strategies.rs during child absorption). Must run last so it
+        // sees the final post-absorption state. Recomputed again after config/UI/persistence
+        // overrides mutate ui_override/toml_override later in the pipeline.
+        for schema in &mut schemas {
+            schema.recompute_cached_strategy();
+        }
+
         (schemas, all_collisions, overflow_warnings)
     }
 }

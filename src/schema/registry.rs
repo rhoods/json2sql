@@ -171,6 +171,16 @@ mod tests {
     }
 
     #[test]
+    fn finalize_populates_cached_strategy_baseline() {
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
+        let obj = json!({"name": "Alice", "age": 30});
+        reg.observe_root("users", make_root(&obj));
+        let schemas = reg.finalize();
+        let s = &schemas[0];
+        assert_eq!(s.cached_strategy, Some(s.inferred_strategy.clone()));
+    }
+
+    #[test]
     fn test_nested_object_creates_child_table() {
         let mut reg = SchemaRegistry::new(RegistryConfig::default());
         let obj = json!({"name": "Alice", "address": {"city": "Paris"}});

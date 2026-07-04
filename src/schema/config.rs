@@ -291,6 +291,12 @@ pub fn apply_overrides_complete(
 ) -> crate::error::Result<Vec<ConfigWarning>> {
     let mut warnings = apply_overrides(schemas, config)?;
     warnings.extend(apply_group_overrides(schemas, config));
+    // Must run BEFORE exclude_absorbed_children: that call reads absorbs_children() →
+    // effective_strategy(), which would otherwise see the stale pre-override cache and miss
+    // children that the overrides just applied above made absorbable (issue #22 regression risk #1).
+    for schema in schemas.iter_mut() {
+        schema.recompute_cached_strategy();
+    }
     crate::schema::finalizer::exclude_absorbed_children(schemas);
     Ok(warnings)
 }
@@ -421,6 +427,14 @@ pub fn apply_user_overrides(
         !matches!(overrides.get(&s.name), Some(UserOverride::Skip))
             && !wide_to_remove.contains(&s.name)
     });
+
+    // Schemas reaching this function already went through finalize() and therefore already
+    // carry a populated cached_strategy baseline. Without this recompute, effective_strategy()
+    // would keep serving that stale baseline and silently ignore the override just applied above
+    // (issue #22 task 8 — same class of bug as apply_overrides_complete, but for the TUI path).
+    for schema in schemas.iter_mut() {
+        schema.recompute_cached_strategy();
+    }
 }
 
 /// Prime a `TypeTracker` with a representative observation so `to_pg_type()` returns
@@ -907,6 +921,70 @@ mod tests {
         assert!(warnings.is_empty());
     }
 
+    /// Full-pipeline regression test for issue #22 (task 7): reproduces the exact timing bug
+    /// described in discussion — `registry.finalize()` runs first and bakes a *baseline* cache
+    /// (`Columns`, before any override exists); a `toml_override` is applied only afterwards via
+    /// `apply_overrides_complete()`. If cache recompute were missing anywhere in that chain,
+    /// `effective_strategy()` would silently keep returning the stale baseline (`Columns`)
+    /// instead of the override (`Jsonb`) — wrong data, no crash.
+    #[test]
+    fn full_pipeline_toml_override_after_finalize_is_visible_in_effective_strategy() {
+        use crate::schema::registry::{RegistryConfig, SchemaRegistry};
+
+        let mut reg = SchemaRegistry::new(RegistryConfig::default());
+        let obj = serde_json::json!({"name": "Alice", "age": 30});
+        reg.observe_root("users", obj.as_object().unwrap());
+        let mut schemas = reg.finalize();
+
+        // Sanity check: finalize() baseline must be Columns (no override applied yet).
+        let baseline = schemas.iter().find(|s| s.name == "users").unwrap();
+        assert_eq!(baseline.cached_strategy, Some(InferredStrategy::Columns));
+
+        let mut tables = HashMap::new();
+        tables.insert("users".to_string(), toml_strategy("jsonb"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        apply_overrides_complete(&mut schemas, &config).unwrap();
+
+        let users = schemas.iter().find(|s| s.name == "users").unwrap();
+        assert_eq!(
+            *users.effective_strategy(),
+            InferredStrategy::Jsonb,
+            "toml_override applied after finalize() must be visible in effective_strategy() after the full pipeline"
+        );
+        assert!(
+            matches!(users.effective_strategy(), std::borrow::Cow::Borrowed(_)),
+            "effective_strategy() must serve this from the recomputed cache, not the allocation fallback"
+        );
+    }
+
+    /// Regression test for issue #22 risk #1: `exclude_absorbed_children()` (called inside
+    /// `apply_overrides_complete`) reads `absorbs_children()` → `effective_strategy()`. If the
+    /// cache recompute happens too late (or not before this call), a toml_override that flips
+    /// `absorbs_children()` to true is invisible to this same function call, and the child that
+    /// should now be absorbed survives incorrectly.
+    #[test]
+    fn apply_overrides_complete_recomputes_cache_before_excluding_absorbed_children() {
+        let mut parent = simple_table("images");
+        parent.inferred_strategy = InferredStrategy::Columns;
+        // Simulate the baseline cache written by finalize() *before* any override exists.
+        parent.cached_strategy = Some(InferredStrategy::Columns);
+        let mut child = simple_table("images_items");
+        child.parent_table = Some("images".to_string());
+        child.cached_strategy = Some(InferredStrategy::Columns);
+        let mut schemas = vec![parent, child];
+
+        let mut tables = HashMap::new();
+        tables.insert("images".to_string(), toml_strategy("jsonb"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+
+        apply_overrides_complete(&mut schemas, &config).unwrap();
+
+        assert!(
+            schemas.iter().all(|s| s.name != "images_items"),
+            "images_items must be excluded once images' toml_override=Jsonb makes it absorb children"
+        );
+    }
+
     #[test]
     fn apply_user_overrides_skip_removes_table() {
         let mut schemas = vec![simple_table("a"), simple_table("b")];
@@ -1015,5 +1093,28 @@ mod tests {
         apply_user_overrides(&mut schemas, &overrides);
         assert_eq!(schemas.len(), 1);
         assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::Columns));
+    }
+
+    /// Regression test for issue #22 task 8 (TUI manual strategy selection). The TUI
+    /// (`json2sql-ui`) calls `apply_user_overrides` on schemas that already came out of Pass 1
+    /// `finalize()` — i.e. `cached_strategy` is already `Some(Columns)` baseline, unlike the
+    /// other tests above which build schemas via `simple_table()` and never populate the cache.
+    /// Without a recompute inside `apply_user_overrides`, `effective_strategy()` would keep
+    /// returning the stale baseline and silently ignore the user's manual selection.
+    #[test]
+    fn apply_user_overrides_recomputes_cache_so_effective_strategy_reflects_override() {
+        let mut schemas = vec![simple_table("blob")];
+        schemas[0].recompute_cached_strategy();
+        assert_eq!(schemas[0].cached_strategy, Some(InferredStrategy::Columns));
+
+        let mut overrides = HashMap::new();
+        overrides.insert("blob".to_string(), UserOverride::Jsonb);
+        apply_user_overrides(&mut schemas, &overrides);
+
+        assert_eq!(
+            *schemas[0].effective_strategy(),
+            InferredStrategy::Jsonb,
+            "manual TUI strategy selection must be reflected in effective_strategy(), not the stale pre-override cache"
+        );
     }
 }
