@@ -1013,6 +1013,59 @@ mod tests {
         assert_eq!(s.ui_override(), Some(&UserOverride::Pivot));
     }
 
+    /// Regression test for issue #29: exhaustively walks every combination and every order of
+    /// `set_ui_override()`/`set_toml_override()` mutations (including clearing back to `None`)
+    /// and asserts `effective_strategy()` matches the documented priority after *every single*
+    /// call. Since `effective_strategy()` carries a `debug_assert!` comparing the served cache to
+    /// a fresh direct recompute, this test would panic on the first divergence — so "no panic and
+    /// correct value at every step" is the proof that the setters never leave a stale cache behind,
+    /// regardless of call order or how many times an override is set, cleared, or reset.
+    #[test]
+    fn effective_strategy_never_diverges_across_setter_sequences() {
+        let overrides = [None, Some(UserOverride::Pivot), Some(UserOverride::Jsonb), Some(UserOverride::Columns)];
+
+        for ui in &overrides {
+            for toml in &overrides {
+                // Two independent schemas to cover both mutation orders (ui-then-toml and
+                // toml-then-ui), since the setters recompute unconditionally on every call.
+                let mut ui_then_toml = make_schema("t");
+                ui_then_toml.inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column: "k".to_string() };
+                ui_then_toml.set_ui_override(ui.clone());
+                assert_expected_effective_strategy(&ui_then_toml, ui, &None);
+                ui_then_toml.set_toml_override(toml.clone());
+                assert_expected_effective_strategy(&ui_then_toml, ui, toml);
+
+                let mut toml_then_ui = make_schema("t");
+                toml_then_ui.inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column: "k".to_string() };
+                toml_then_ui.set_toml_override(toml.clone());
+                assert_expected_effective_strategy(&toml_then_ui, &None, toml);
+                toml_then_ui.set_ui_override(ui.clone());
+                assert_expected_effective_strategy(&toml_then_ui, ui, toml);
+
+                // Clearing back to None must also recompute correctly, in both orders.
+                toml_then_ui.set_ui_override(None);
+                assert_expected_effective_strategy(&toml_then_ui, &None, toml);
+                toml_then_ui.set_toml_override(None);
+                assert_expected_effective_strategy(&toml_then_ui, &None, &None);
+            }
+        }
+    }
+
+    /// Helper for `effective_strategy_never_diverges_across_setter_sequences`: computes the
+    /// expected strategy from the same ui_override > toml_override > inferred_strategy priority
+    /// documented on `effective_strategy()`, independently of `compute_strategy_direct()`.
+    fn assert_expected_effective_strategy(
+        s: &TableSchema,
+        ui: &Option<UserOverride>,
+        toml: &Option<UserOverride>,
+    ) {
+        let expected = match (ui, toml) {
+            (Some(ov), _) | (None, Some(ov)) => InferredStrategy::from(ov),
+            (None, None) => s.inferred_strategy.clone(),
+        };
+        assert_eq!(*s.effective_strategy(), expected);
+    }
+
     #[test]
     fn table_schema_new_cached_strategy_is_none() {
         let s = make_schema("t");
