@@ -268,6 +268,11 @@ pub fn apply_normalize_dynamic_keys(
         table_name, child_indices.len(), id_column, key_shape,
     );
     schemas[target_idx].inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column };
+    // See apply_wide_strategy_columns: without this, a schema already past finalize()
+    // (cached_strategy populated) would keep serving the stale baseline, and
+    // exclude_absorbed_children() below (which reads effective_strategy()) would
+    // silently fail to exclude the children this strategy just absorbed.
+    schemas[target_idx].recompute_cached_strategy();
     exclude_absorbed_children(schemas);
     Ok(())
 }
@@ -458,6 +463,25 @@ mod tests {
             "cached_strategy must reflect Pivot without an explicit recompute call"
         );
         assert_eq!(*schema.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn apply_normalize_dynamic_keys_recomputes_stale_cache() {
+        // Same regression class as apply_wide_strategy_columns, discovered when the CI
+        // fail-fast masking (integration_strategies.rs never ran) was fixed: the parent
+        // already has a populated cached_strategy baseline (from finalize()) when
+        // apply_normalize_dynamic_keys() forces NormalizeDynamicKeys on it.
+        let (mut parent, child) = make_parent_child("products", "products_images");
+        parent.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+        let mut schemas = vec![parent, child];
+
+        apply_normalize_dynamic_keys(&mut schemas, "products", "image_id".to_string()).unwrap();
+
+        assert_eq!(
+            schemas[0].cached_strategy,
+            Some(InferredStrategy::NormalizeDynamicKeys { id_column: "image_id".to_string() }),
+            "cached_strategy must reflect NormalizeDynamicKeys without an explicit recompute call"
+        );
     }
 
     #[test]
