@@ -531,11 +531,13 @@ pub struct TableSchema {
     #[serde(alias = "wide_strategy", default)]
     pub inferred_strategy: InferredStrategy,
     /// Strategy override from config.toml — takes precedence over `inferred_strategy`.
+    /// Private: mutate only via `set_toml_override()`, which keeps `cached_strategy` in sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub toml_override: Option<UserOverride>,
+    toml_override: Option<UserOverride>,
     /// Strategy override from the IHM — takes precedence over `toml_override` and `inferred_strategy`.
+    /// Private: mutate only via `set_ui_override()`, which keeps `cached_strategy` in sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ui_override: Option<UserOverride>,
+    ui_override: Option<UserOverride>,
     /// Maps prefixed column name → source JSON field for columns inlined via Flatten strategy.
     /// e.g. `nutrients_calories` → `nutrients` means: look up `obj["nutrients"]["calories"]`.
     /// Empty for tables that have no flattened children.

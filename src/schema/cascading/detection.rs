@@ -687,21 +687,12 @@ fn build_multi_group_entry(
     for (json_key, siblings, arr) in collect_children_by_key(schemas, &absorbed_idx, obj_map, arr_map) {
         if siblings.len() >= 2 { co_siblings.push(CoSiblingGroup { synthetic_parent_name: pivot_name.clone(), json_key, sibling_indices: siblings, array_children: arr }); }
     }
-    let schema = TableSchema {
-        name: pivot_name,
-        path,
-        parent_table: Some(parent.name.to_string()),
-        depth: parent.depth + 1,
-        columns: cols,
-        child_kind: Some(ChildKind::Object),
-        inferred_strategy: InferredStrategy::SiblingCollapse(sibling_schema),
-        toml_override: None,
-        ui_override: None,
-        flatten_sources: std::collections::HashMap::new(),
-        child_routes: std::collections::HashMap::new(),
-        row_count: source_row_count,
-        cached_strategy: None,
-    };
+    let mut schema = TableSchema::new(pivot_name, path, parent.depth + 1);
+    schema.parent_table = Some(parent.name.to_string());
+    schema.columns = cols;
+    schema.child_kind = Some(ChildKind::Object);
+    schema.inferred_strategy = InferredStrategy::SiblingCollapse(sibling_schema);
+    schema.row_count = source_row_count;
     (schema, co_siblings)
 }
 
@@ -936,21 +927,12 @@ fn build_co_sibling_schema(
     cols.extend(union_cols);
     let mut t_path = parent_path;
     t_path.push(group.json_key.clone());
-    let t_schema = TableSchema {
-        name: t_name.clone(),
-        path: t_path,
-        parent_table: Some(parent_name),
-        depth: parent_depth + 1,
-        columns: cols,
-        child_kind: Some(if group.array_children { ChildKind::ObjectArray } else { ChildKind::Object }),
-        inferred_strategy: InferredStrategy::Columns,
-        toml_override: None,
-        ui_override: None,
-        flatten_sources: std::collections::HashMap::new(),
-        child_routes: std::collections::HashMap::new(),
-        row_count: source_row_count,
-        cached_strategy: None,
-    };
+    let mut t_schema = TableSchema::new(t_name.clone(), t_path, parent_depth + 1);
+    t_schema.parent_table = Some(parent_name);
+    t_schema.columns = cols;
+    t_schema.child_kind = Some(if group.array_children { ChildKind::ObjectArray } else { ChildKind::Object });
+    t_schema.inferred_strategy = InferredStrategy::Columns;
+    t_schema.row_count = source_row_count;
     (t_name, t_schema)
 }
 
@@ -1048,21 +1030,13 @@ fn build_sub_pivot_schema(
     // Sum of source children's row_count — approximation for classify_tables.
     source_row_count: u64,
 ) -> TableSchema {
-    TableSchema {
-        name: sub_pivot_name,
-        path: sub_path,
-        parent_table: Some(parent_name),
-        depth: parent_depth + 1,
-        columns: cols,
-        child_kind: Some(ChildKind::Object),
-        inferred_strategy: InferredStrategy::SiblingCollapse(sibling_schema),
-        toml_override: None,
-        ui_override: None,
-        flatten_sources: std::collections::HashMap::new(),
-        child_routes: std::collections::HashMap::new(),
-        row_count: source_row_count,
-        cached_strategy: None,
-    }
+    let mut schema = TableSchema::new(sub_pivot_name, sub_path, parent_depth + 1);
+    schema.parent_table = Some(parent_name);
+    schema.columns = cols;
+    schema.child_kind = Some(ChildKind::Object);
+    schema.inferred_strategy = InferredStrategy::SiblingCollapse(sibling_schema);
+    schema.row_count = source_row_count;
+    schema
 }
 
 fn process_keyed_pivot_work_item(
