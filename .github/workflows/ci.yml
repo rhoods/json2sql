@@ -93,7 +93,7 @@ jobs:
           port: 5432
 
       - name: Integration tests (TEST_DATABASE_URL)
-        run: cargo test --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
+        run: cargo test --no-fail-fast --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
@@ -126,7 +126,7 @@ jobs:
           port: 5432
 
       - name: Integration tests (TEST_DATABASE_URL)
-        run: cargo test --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
+        run: cargo test --no-fail-fast --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
@@ -159,6 +159,6 @@ jobs:
           port: 5432
 
       - name: Integration tests (TEST_DATABASE_URL)
-        run: cargo test --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
+        run: cargo test --no-fail-fast --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres

@@ -121,6 +121,12 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: InferredS
             schema.columns.retain(|c| c.is_generated);
         }
     }
+    // Any branch above may have just mutated `inferred_strategy`. If this schema already
+    // went through finalize() (cached_strategy populated), effective_strategy() would keep
+    // serving that stale baseline and silently ignore the strategy just applied — the exact
+    // regression that broke CI post-#22. Recomputing here closes the gap for every caller,
+    // including ones that mutate schemas after finalize() (tests, future call sites).
+    schema.recompute_cached_strategy();
 }
 
 /// Restructure a wide table's columns for `StructuredPivot`:
@@ -262,6 +268,11 @@ pub fn apply_normalize_dynamic_keys(
         table_name, child_indices.len(), id_column, key_shape,
     );
     schemas[target_idx].inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column };
+    // See apply_wide_strategy_columns: without this, a schema already past finalize()
+    // (cached_strategy populated) would keep serving the stale baseline, and
+    // exclude_absorbed_children() below (which reads effective_strategy()) would
+    // silently fail to exclude the children this strategy just absorbed.
+    schemas[target_idx].recompute_cached_strategy();
     exclude_absorbed_children(schemas);
     Ok(())
 }
@@ -356,6 +367,10 @@ pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &st
     // Mark child as JsonbFlatten (via ui_override) so absorbs_children() excludes its descendants
     if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
         child.ui_override = Some(UserOverride::JsonbFlatten);
+        // See apply_wide_strategy_columns: without this, the retain() below (which reads
+        // effective_strategy()) would keep serving a stale cached_strategy baseline and
+        // never remove this child on a schema that already went through finalize().
+        child.recompute_cached_strategy();
     }
 
     // Remove any nested children of the child table
@@ -416,6 +431,78 @@ mod tests {
         child.parent_table = Some(parent_name.to_string());
         child.child_kind = Some(ChildKind::Object);
         (parent, child)
+    }
+
+    #[test]
+    fn apply_wide_strategy_columns_recomputes_stale_cache() {
+        // Reproduces the CI regression: a schema that already went through finalize()
+        // (cached_strategy populated with the pre-override baseline) must not keep
+        // serving that stale cache once apply_wide_strategy_columns() forces a new strategy.
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 1);
+        schema.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+        assert_eq!(schema.cached_strategy, Some(InferredStrategy::Columns));
+
+        apply_wide_strategy_columns(&mut schema, InferredStrategy::Jsonb);
+
+        assert_eq!(
+            schema.cached_strategy,
+            Some(InferredStrategy::Jsonb),
+            "cached_strategy must reflect the forced strategy without an explicit recompute call"
+        );
+        assert_eq!(*schema.effective_strategy(), InferredStrategy::Jsonb);
+    }
+
+    #[test]
+    fn apply_wide_strategy_columns_recomputes_stale_cache_for_pivot() {
+        // Same regression as above, exercised through the Pivot branch (apply_pivot_columns)
+        // instead of the Jsonb branch — both mutate inferred_strategy from the same match arm site.
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 1);
+        schema.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+
+        apply_wide_strategy_columns(&mut schema, InferredStrategy::Pivot);
+
+        assert_eq!(
+            schema.cached_strategy,
+            Some(InferredStrategy::Pivot),
+            "cached_strategy must reflect Pivot without an explicit recompute call"
+        );
+        assert_eq!(*schema.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn apply_normalize_dynamic_keys_recomputes_stale_cache() {
+        // Same regression class as apply_wide_strategy_columns, discovered when the CI
+        // fail-fast masking (integration_strategies.rs never ran) was fixed: the parent
+        // already has a populated cached_strategy baseline (from finalize()) when
+        // apply_normalize_dynamic_keys() forces NormalizeDynamicKeys on it.
+        let (mut parent, child) = make_parent_child("products", "products_images");
+        parent.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+        let mut schemas = vec![parent, child];
+
+        apply_normalize_dynamic_keys(&mut schemas, "products", "image_id".to_string()).unwrap();
+
+        assert_eq!(
+            schemas[0].cached_strategy,
+            Some(InferredStrategy::NormalizeDynamicKeys { id_column: "image_id".to_string() }),
+            "cached_strategy must reflect NormalizeDynamicKeys without an explicit recompute call"
+        );
+    }
+
+    #[test]
+    fn apply_jsonb_flatten_recomputes_stale_cache_so_child_gets_removed() {
+        // Same regression class as apply_wide_strategy_columns/apply_normalize_dynamic_keys:
+        // the child already has a populated cached_strategy baseline (from finalize()) when
+        // apply_jsonb_flatten() sets ui_override=JsonbFlatten on it. The retain() call at the
+        // end of apply_jsonb_flatten reads effective_strategy() to decide which tables to drop
+        // — without a recompute, it would keep seeing the stale baseline and never remove the child.
+        let (parent, mut child) = make_parent_child("products", "products_tags");
+        child.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+        let mut schemas = vec![parent, child];
+
+        apply_jsonb_flatten(&mut schemas, "products_tags").unwrap();
+
+        assert_eq!(schemas.len(), 1, "child must be removed once ui_override=JsonbFlatten is reflected in the cache");
+        assert_eq!(schemas[0].name, "products");
     }
 
     #[test]
