@@ -136,7 +136,7 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) ->
                     }),
                     None => warnings.extend(apply_strategy_override(schema, table_name, col_overrides, &mut deferred_normalize, &mut deferred_flatten)),
                 }
-                apply_suffix_columns_override(schema, table_name, col_overrides);
+                warnings.extend(apply_suffix_columns_override(schema, table_name, col_overrides));
                 warnings.extend(apply_column_type_overrides(schema, table_name, col_overrides));
             }
         }
@@ -247,13 +247,26 @@ fn apply_suffix_columns_override(
     schema: &mut TableSchema,
     table_name: &str,
     col_overrides: &HashMap<String, toml::Value>,
-) {
-    let Some(toml::Value::Array(arr)) = col_overrides.get("suffix_columns") else { return };
+) -> Vec<ConfigWarning> {
+    let Some(toml::Value::Array(arr)) = col_overrides.get("suffix_columns") else { return vec![] };
     let suffix_list: Vec<String> = arr
         .iter()
         .filter_map(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
         .collect();
-    if suffix_list.is_empty() { return; }
+    if suffix_list.is_empty() { return vec![]; }
+
+    // Same compatibility guard as the "columns" branch of apply_strategy_override: once a
+    // table is no longer Columns (SiblingCollapse/AutoSplit/Pivot via cascade/wide-table
+    // detection), its column names are gone and suffix_columns can't be reconstructed
+    // safely — reject rather than silently overwrite (#31).
+    if !matches!(schema.inferred_strategy, InferredStrategy::Columns) {
+        return vec![ConfigWarning::InvalidOverride {
+            table: table_name.to_string(),
+            from_strategy: format!("{:?}", schema.inferred_strategy)
+                .split('(').next().unwrap_or("Unknown").to_string(),
+            to_strategy: "structured_pivot".to_string(),
+        }];
+    }
 
     // At config-apply time the schema is already finalized (columns are resolved).
     // Build a dummy TypeTracker map from existing column types so
@@ -268,6 +281,7 @@ fn apply_suffix_columns_override(
     let suffix_schema = build_suffix_schema_from_list(&suffix_list, &type_map);
     eprintln!("  Override strategy: {table_name} → StructuredPivot (suffixes: {suffix_list:?})");
     apply_structured_pivot_columns(schema, suffix_schema);
+    vec![]
 }
 
 fn apply_column_type_overrides(
@@ -975,6 +989,55 @@ mod tests {
 
     fn simple_table(name: &str) -> TableSchema {
         TableSchema::new(name.to_string(), vec![name.to_string()], 0)
+    }
+
+    // --- Guard 2: suffix_columns requires inferred_strategy == Columns (#31) ---
+
+    fn suffix_columns_only(suffix: &str) -> HashMap<String, toml::Value> {
+        let mut cols = HashMap::new();
+        cols.insert(
+            "suffix_columns".to_string(),
+            toml::Value::Array(vec![toml::Value::String(suffix.to_string())]),
+        );
+        cols
+    }
+
+    #[test]
+    fn toml_suffix_columns_on_pivot_table_returns_invalid_override_warning() {
+        use crate::schema::wide_strategies::apply_wide_strategy_columns;
+        let mut schemas = vec![simple_table("metrics")];
+        apply_wide_strategy_columns(&mut schemas[0], InferredStrategy::Pivot);
+        schemas[0].inferred_strategy = InferredStrategy::Pivot;
+        let column_names_before: Vec<String> = schemas[0].columns.iter().map(|c| c.name.clone()).collect();
+        let mut tables = HashMap::new();
+        tables.insert("metrics".to_string(), suffix_columns_only("_100g"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(&warnings[0],
+            ConfigWarning::InvalidOverride { table, from_strategy, to_strategy }
+            if table == "metrics" && from_strategy == "Pivot" && to_strategy == "structured_pivot"
+        ));
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Pivot, "strategy must be unchanged");
+        let column_names_after: Vec<String> = schemas[0].columns.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(column_names_after, column_names_before, "columns must be unchanged");
+    }
+
+    #[test]
+    fn toml_suffix_columns_on_columns_table_no_warning_non_regression() {
+        // Non-regression for #28: suffix_columns alone on a freshly-inferred Columns table
+        // must still be accepted with no warning.
+        let mut schemas = vec![simple_table("nutrients")];
+        let mut tables = HashMap::new();
+        tables.insert("nutrients".to_string(), suffix_columns_only("_100g"));
+        let config = SchemaConfig { tables, group: HashMap::new() };
+
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+
+        assert!(warnings.is_empty());
+        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::StructuredPivot(_)));
     }
 
     #[test]
