@@ -639,7 +639,11 @@ impl TableSchema {
     }
 
     /// Current config.toml-level strategy override, if any.
+    /// Only read from tests today (production code checks `ui_override()` only) — kept `pub`
+    /// for API symmetry with `set_toml_override()`/`ui_override()`. `main.rs` denies dead_code
+    /// crate-wide, and the bin target doesn't see `#[cfg(test)]` call sites, hence the `allow`.
     #[must_use]
+    #[allow(dead_code)]
     pub const fn toml_override(&self) -> Option<&UserOverride> {
         self.toml_override.as_ref()
     }
