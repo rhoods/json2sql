@@ -161,6 +161,11 @@ pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: S
         });
     }
     schema.inferred_strategy = InferredStrategy::StructuredPivot(suffix_schema);
+    // See apply_wide_strategy_columns/apply_normalize_dynamic_keys: without this, a schema
+    // already past finalize() (cached_strategy populated) would keep serving the stale
+    // baseline, and effective_strategy() would never report StructuredPivot for direct
+    // callers (config.rs's suffix_columns override, tests) — issue #28.
+    schema.recompute_cached_strategy();
 }
 
 #[must_use]
@@ -503,6 +508,35 @@ mod tests {
 
         assert_eq!(schemas.len(), 1, "child must be removed once ui_override=JsonbFlatten is reflected in the cache");
         assert_eq!(schemas[0].name, "products");
+    }
+
+    #[test]
+    fn apply_structured_pivot_columns_recomputes_stale_cache() {
+        // Same regression class as apply_wide_strategy_columns/apply_normalize_dynamic_keys:
+        // apply_structured_pivot_columns() is called directly (config.rs's suffix_columns
+        // override, tests) on schemas that already went through finalize() — cached_strategy
+        // must reflect StructuredPivot without the caller having to recompute it itself.
+        use crate::schema::table_schema::SuffixColumn;
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 1);
+        schema.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+        assert_eq!(schema.cached_strategy, Some(InferredStrategy::Columns));
+
+        let suffix_schema = SuffixSchema {
+            suffix_cols: vec![SuffixColumn {
+                suffix: "_100g".to_string(),
+                col_name: "per_100g".to_string(),
+                pg_type: PgType::Integer,
+            }],
+            value_type: PgType::Integer,
+        };
+        apply_structured_pivot_columns(&mut schema, suffix_schema.clone());
+
+        assert_eq!(
+            schema.cached_strategy,
+            Some(InferredStrategy::StructuredPivot(suffix_schema)),
+            "cached_strategy must reflect StructuredPivot without an explicit recompute call"
+        );
+        assert_eq!(*schema.effective_strategy(), schema.inferred_strategy);
     }
 
     #[test]
