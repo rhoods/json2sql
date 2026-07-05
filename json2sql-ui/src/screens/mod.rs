@@ -614,7 +614,7 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("wide".to_string(), UserOverride::Jsonb);
         let result = build_effective_schemas(&schemas, &overrides);
-        assert_eq!(result[0].ui_override, Some(UserOverride::Jsonb), "ui_override must be set");
+        assert_eq!(result[0].ui_override(), Some(&UserOverride::Jsonb), "ui_override must be set");
         assert_eq!(result[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must be preserved");
         assert_eq!(*result[0].effective_strategy(), InferredStrategy::Jsonb, "effective_strategy must reflect override");
     }
@@ -624,7 +624,7 @@ mod tests {
         use json2sql::schema::table_schema::UserOverride;
         // Table with ui_override=Pivot but inferred as Columns
         let mut t = make_table("tags", None);
-        t.ui_override = Some(UserOverride::Pivot);
+        t.set_ui_override(Some(UserOverride::Pivot));
         // strategy_badge on effective_strategy() should give Pivot badge, not Columns
         let (cls_eff, lbl_eff) = strategy_badge(&*t.effective_strategy());
         let (cls_inf, lbl_inf) = strategy_badge(&t.inferred_strategy);

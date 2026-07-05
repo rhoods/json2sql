@@ -10,6 +10,8 @@
 //! Frontière avec `finalizer.rs` : ce module génère les colonnes résultantes d'une
 //! stratégie donnée. `finalizer.rs` décide *quelle* stratégie appliquer à chaque table.
 
+use std::sync::Arc;
+
 use indexmap::IndexMap;
 
 use crate::error::{J2sError, Result};
@@ -121,12 +123,6 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: InferredS
             schema.columns.retain(|c| c.is_generated);
         }
     }
-    // Any branch above may have just mutated `inferred_strategy`. If this schema already
-    // went through finalize() (cached_strategy populated), effective_strategy() would keep
-    // serving that stale baseline and silently ignore the strategy just applied — the exact
-    // regression that broke CI post-#22. Recomputing here closes the gap for every caller,
-    // including ones that mutate schemas after finalize() (tests, future call sites).
-    schema.recompute_cached_strategy();
 }
 
 /// Restructure a wide table's columns for `StructuredPivot`:
@@ -161,11 +157,6 @@ pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: S
         });
     }
     schema.inferred_strategy = InferredStrategy::StructuredPivot(suffix_schema);
-    // See apply_wide_strategy_columns/apply_normalize_dynamic_keys: without this, a schema
-    // already past finalize() (cached_strategy populated) would keep serving the stale
-    // baseline, and effective_strategy() would never report StructuredPivot for direct
-    // callers (config.rs's suffix_columns override, tests) — issue #28.
-    schema.recompute_cached_strategy();
 }
 
 #[must_use]
@@ -272,12 +263,7 @@ pub fn apply_normalize_dynamic_keys(
         "  NormalizeDynamicKeys: {} ({} child tables → 1, id_col: {} [{}])",
         table_name, child_indices.len(), id_column, key_shape,
     );
-    schemas[target_idx].inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column };
-    // See apply_wide_strategy_columns: without this, a schema already past finalize()
-    // (cached_strategy populated) would keep serving the stale baseline, and
-    // exclude_absorbed_children() below (which reads effective_strategy()) would
-    // silently fail to exclude the children this strategy just absorbed.
-    schemas[target_idx].recompute_cached_strategy();
+    schemas[target_idx].inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column: id_column.into() };
     exclude_absorbed_children(schemas);
     Ok(())
 }
@@ -329,7 +315,7 @@ pub fn apply_flatten(
 
     // Mark child as Flatten so absorbs_children() returns true for its descendants
     if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
-        child.inferred_strategy = InferredStrategy::Flatten { prefix: prefix.to_string(), max_depth };
+        child.inferred_strategy = InferredStrategy::Flatten { prefix: Arc::from(prefix), max_depth };
     }
 
     // Remove descendants of the child (e.g. nutrients.sub_items)
@@ -370,9 +356,6 @@ pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &st
     let (_, parent_name, field_name) = resolve_child_info(schemas, child_table_name, "apply_jsonb_flatten")?;
 
     // Mark child as JsonbFlatten (via ui_override) so absorbs_children() excludes its descendants.
-    // set_ui_override() recomputes cached_strategy in the same call — the retain() below (which
-    // reads effective_strategy()) never sees a stale baseline from a schema that already went
-    // through finalize().
     if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
         child.set_ui_override(Some(UserOverride::JsonbFlatten));
     }
@@ -438,87 +421,47 @@ mod tests {
     }
 
     #[test]
-    fn apply_wide_strategy_columns_recomputes_stale_cache() {
-        // Reproduces the CI regression: a schema that already went through finalize()
-        // (cached_strategy populated with the pre-override baseline) must not keep
-        // serving that stale cache once apply_wide_strategy_columns() forces a new strategy.
+    fn apply_wide_strategy_columns_updates_effective_strategy_to_jsonb() {
         let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 1);
-        schema.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
-        assert_eq!(schema.cached_strategy, Some(InferredStrategy::Columns));
-
         apply_wide_strategy_columns(&mut schema, InferredStrategy::Jsonb);
-
-        assert_eq!(
-            schema.cached_strategy,
-            Some(InferredStrategy::Jsonb),
-            "cached_strategy must reflect the forced strategy without an explicit recompute call"
-        );
         assert_eq!(*schema.effective_strategy(), InferredStrategy::Jsonb);
     }
 
     #[test]
-    fn apply_wide_strategy_columns_recomputes_stale_cache_for_pivot() {
-        // Same regression as above, exercised through the Pivot branch (apply_pivot_columns)
-        // instead of the Jsonb branch — both mutate inferred_strategy from the same match arm site.
+    fn apply_wide_strategy_columns_updates_effective_strategy_to_pivot() {
         let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 1);
-        schema.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
-
         apply_wide_strategy_columns(&mut schema, InferredStrategy::Pivot);
-
-        assert_eq!(
-            schema.cached_strategy,
-            Some(InferredStrategy::Pivot),
-            "cached_strategy must reflect Pivot without an explicit recompute call"
-        );
         assert_eq!(*schema.effective_strategy(), InferredStrategy::Pivot);
     }
 
     #[test]
-    fn apply_normalize_dynamic_keys_recomputes_stale_cache() {
-        // Same regression class as apply_wide_strategy_columns, discovered when the CI
-        // fail-fast masking (integration_strategies.rs never ran) was fixed: the parent
-        // already has a populated cached_strategy baseline (from finalize()) when
-        // apply_normalize_dynamic_keys() forces NormalizeDynamicKeys on it.
-        let (mut parent, child) = make_parent_child("products", "products_images");
-        parent.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+    fn apply_normalize_dynamic_keys_updates_effective_strategy() {
+        let (parent, child) = make_parent_child("products", "products_images");
         let mut schemas = vec![parent, child];
 
         apply_normalize_dynamic_keys(&mut schemas, "products", "image_id".to_string()).unwrap();
 
         assert_eq!(
-            schemas[0].cached_strategy,
-            Some(InferredStrategy::NormalizeDynamicKeys { id_column: "image_id".to_string() }),
-            "cached_strategy must reflect NormalizeDynamicKeys without an explicit recompute call"
+            *schemas[0].effective_strategy(),
+            InferredStrategy::NormalizeDynamicKeys { id_column: "image_id".into() },
         );
     }
 
     #[test]
-    fn apply_jsonb_flatten_recomputes_stale_cache_so_child_gets_removed() {
-        // Same regression class as apply_wide_strategy_columns/apply_normalize_dynamic_keys:
-        // the child already has a populated cached_strategy baseline (from finalize()) when
-        // apply_jsonb_flatten() sets ui_override=JsonbFlatten on it. The retain() call at the
-        // end of apply_jsonb_flatten reads effective_strategy() to decide which tables to drop
-        // — without a recompute, it would keep seeing the stale baseline and never remove the child.
-        let (parent, mut child) = make_parent_child("products", "products_tags");
-        child.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
+    fn apply_jsonb_flatten_removes_child() {
+        let (parent, child) = make_parent_child("products", "products_tags");
         let mut schemas = vec![parent, child];
 
         apply_jsonb_flatten(&mut schemas, "products_tags").unwrap();
 
-        assert_eq!(schemas.len(), 1, "child must be removed once ui_override=JsonbFlatten is reflected in the cache");
+        assert_eq!(schemas.len(), 1, "child must be removed once ui_override=JsonbFlatten is set");
         assert_eq!(schemas[0].name, "products");
     }
 
     #[test]
-    fn apply_structured_pivot_columns_recomputes_stale_cache() {
-        // Same regression class as apply_wide_strategy_columns/apply_normalize_dynamic_keys:
-        // apply_structured_pivot_columns() is called directly (config.rs's suffix_columns
-        // override, tests) on schemas that already went through finalize() — cached_strategy
-        // must reflect StructuredPivot without the caller having to recompute it itself.
+    fn apply_structured_pivot_columns_updates_effective_strategy() {
         use crate::schema::table_schema::SuffixColumn;
         let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 1);
-        schema.recompute_cached_strategy(); // baseline: cached_strategy = Some(Columns)
-        assert_eq!(schema.cached_strategy, Some(InferredStrategy::Columns));
 
         let suffix_schema = SuffixSchema {
             suffix_cols: vec![SuffixColumn {
@@ -530,12 +473,7 @@ mod tests {
         };
         apply_structured_pivot_columns(&mut schema, suffix_schema.clone());
 
-        assert_eq!(
-            schema.cached_strategy,
-            Some(InferredStrategy::StructuredPivot(suffix_schema)),
-            "cached_strategy must reflect StructuredPivot without an explicit recompute call"
-        );
-        assert_eq!(*schema.effective_strategy(), schema.inferred_strategy);
+        assert_eq!(*schema.effective_strategy(), InferredStrategy::StructuredPivot(suffix_schema));
     }
 
     #[test]

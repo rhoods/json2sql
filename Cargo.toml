@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # JSON parsing
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 simd-json = { version = "0.13", features = ["serde_impl"] }
 
