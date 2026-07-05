@@ -103,6 +103,124 @@ fn fn_exists(content: &str, name: &str) -> bool {
     Regex::new(&pattern).is_ok_and(|re| re.is_match(content))
 }
 
+/// Finds the index of the `}` matching the `{` at `open_pos`, tracking brace depth while
+/// skipping braces that appear inside string or char literals. Lifetimes (`'a`, `'static`,
+/// `'_`) are deliberately NOT treated as char literals — only `'x'`/`'\x'`-shaped sequences are.
+fn find_matching_brace(bytes: &[u8], open_pos: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut i = open_pos;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => {
+                in_string = true;
+                i += 1;
+            }
+            b'\'' => {
+                if bytes.get(i + 1) == Some(&b'\\') && bytes.get(i + 3) == Some(&b'\'') {
+                    i += 4; // escaped char literal, e.g. '\n', '\'', '\\'
+                } else if bytes.get(i + 1).is_some() && bytes.get(i + 2) == Some(&b'\'') {
+                    i += 3; // simple char literal, e.g. '{', 'a'
+                } else {
+                    i += 1; // lifetime apostrophe ('a, 'static, '_) — not a literal
+                }
+            }
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Removes every `#[cfg(test)] mod ... { ... }` block from `content` (brace-depth aware),
+/// so downstream extraction never sees test-only functions.
+fn strip_test_modules(content: &str) -> String {
+    let mut result = content.to_string();
+    while let Some(cfg_pos) = result.find("#[cfg(test)]") {
+        let Some(mod_rel) = result[cfg_pos..].find("mod ") else {
+            break;
+        };
+        let mod_pos = cfg_pos + mod_rel;
+        let Some(brace_rel) = result[mod_pos..].find('{') else {
+            break;
+        };
+        let open_pos = mod_pos + brace_rel;
+        let Some(close_pos) = find_matching_brace(result.as_bytes(), open_pos) else {
+            break;
+        };
+        result.replace_range(cfg_pos..=close_pos, "");
+    }
+    result
+}
+
+/// Extracts every real function/method name defined in `content`: free functions as their
+/// bare name, `impl` methods as `Type::method` (an `impl Trait for Type` block yields
+/// `Type::method`, never `Trait::method`). Functions nested inside any `#[cfg(test)]` module
+/// are excluded. Not full-AST — a best-effort regex/brace-depth scan, consistent with the
+/// project's "textual, not `syn`" design decision for this check.
+fn extract_code_names(content: &str) -> HashSet<String> {
+    let stripped = strip_test_modules(content);
+    let bytes = stripped.as_bytes();
+    let mut names = HashSet::new();
+    let mut consumed = vec![false; stripped.len()];
+
+    let impl_re =
+        Regex::new(r"impl(?:<[^{]*>)?\s+(?:([A-Za-z_][A-Za-z0-9_]*)(?:<[^{]*>)?\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*)")
+            .unwrap();
+    let fn_re = Regex::new(r"fn\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap();
+
+    for cap in impl_re.captures_iter(&stripped) {
+        let whole = cap.get(0).unwrap();
+        let type_name = cap.get(2).unwrap().as_str();
+        let Some(brace_rel) = stripped[whole.end()..].find('{') else {
+            continue;
+        };
+        let open_pos = whole.end() + brace_rel;
+        let Some(close_pos) = find_matching_brace(bytes, open_pos) else {
+            continue;
+        };
+        let body = &stripped[open_pos..=close_pos];
+        for fn_cap in fn_re.captures_iter(body) {
+            names.insert(format!("{type_name}::{}", &fn_cap[1]));
+        }
+        for slot in consumed.iter_mut().take(close_pos + 1).skip(whole.start()) {
+            *slot = true;
+        }
+    }
+
+    for fn_cap in fn_re.captures_iter(&stripped) {
+        let m = fn_cap.get(0).unwrap();
+        if consumed[m.start()] {
+            continue;
+        }
+        names.insert(fn_cap[1].to_string());
+    }
+
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +354,69 @@ mod tests {
         let result = check_documented_names(content);
         assert!(result.existing.is_empty());
         assert!(result.missing.is_empty());
+    }
+
+    #[test]
+    fn extracts_free_functions_public_and_private() {
+        let content = "pub fn foo() {}\nfn bar() {}\n";
+        let names = extract_code_names(content);
+        assert!(names.contains("foo"));
+        assert!(names.contains("bar"));
+    }
+
+    #[test]
+    fn excludes_functions_inside_cfg_test_module() {
+        let content = "fn foo() {}\n\n#[cfg(test)]\nmod tests {\n    fn baz() {}\n}\n";
+        let names = extract_code_names(content);
+        assert!(names.contains("foo"));
+        assert!(!names.contains("baz"));
+    }
+
+    #[test]
+    fn qualifies_impl_methods_as_type_method() {
+        let content = "impl TableSchema {\n    fn new() -> Self { todo!() }\n    fn is_root(&self) -> bool { todo!() }\n}\n";
+        let names = extract_code_names(content);
+        assert!(names.contains("TableSchema::new"));
+        assert!(names.contains("TableSchema::is_root"));
+        assert!(!names.contains("new"));
+    }
+
+    #[test]
+    fn trait_impl_method_qualifies_as_type_method_not_trait_method() {
+        let content = "impl From<UserOverride> for InferredStrategy {\n    fn from(value: UserOverride) -> Self { todo!() }\n}\n";
+        let names = extract_code_names(content);
+        assert!(names.contains("InferredStrategy::from"));
+        assert!(!names.contains("From::from"));
+    }
+
+    #[test]
+    fn generic_impl_block_qualifies_methods_by_bare_type_name() {
+        let content = "impl<T: Clone> Foo<T> {\n    fn bar() {}\n}\n";
+        let names = extract_code_names(content);
+        assert!(names.contains("Foo::bar"));
+    }
+
+    #[test]
+    fn brace_in_char_literal_does_not_break_impl_block_matching() {
+        let content = "impl TableSchema {\n    fn new() -> Self {\n        let c = '{';\n        let d = '}';\n        todo!()\n    }\n    fn second() {}\n}\n";
+        let names = extract_code_names(content);
+        assert!(names.contains("TableSchema::new"));
+        assert!(names.contains("TableSchema::second"));
+    }
+
+    #[test]
+    fn brace_in_string_literal_does_not_break_impl_block_matching() {
+        let content = "impl TableSchema {\n    fn new() -> Self {\n        let s = \"{ not a real brace\";\n        todo!()\n    }\n    fn second() {}\n}\n";
+        let names = extract_code_names(content);
+        assert!(names.contains("TableSchema::new"));
+        assert!(names.contains("TableSchema::second"));
+    }
+
+    #[test]
+    fn lifetime_parameter_is_not_misread_as_char_literal() {
+        let content = "impl Observer {\n    fn observe_array_field<'s>(&self, x: &'s str) -> bool { todo!() }\n    fn second() {}\n}\n";
+        let names = extract_code_names(content);
+        assert!(names.contains("Observer::observe_array_field"));
+        assert!(names.contains("Observer::second"));
     }
 }
