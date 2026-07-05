@@ -3088,6 +3088,7 @@ dependencies = [
  "indexmap 2.13.0",
  "indicatif",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "simd-json",
