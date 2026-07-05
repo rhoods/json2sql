@@ -34,33 +34,42 @@
 //! - fn `JsonLinesReader::next_raw` — retourne les octets bruts du prochain objet JSON, sans parser.
 //! - fn `JsonLinesReader::next` — implémente `Iterator` (parse la ligne suivante en `Value`).
 //!
-//! `JsonArrayReader` (tableau JSON `[{...}, {...}]`) :
+//! `ByteScanner` (tokenizer bas niveau partagé par `JsonArrayReader` et `JsonRootWrapperReader`,
+//! extrait en issue #37 pour éliminer leur duplication structurelle) :
+//! - struct `ByteScanner` — accès fichier bufferisé, lecture octet par octet, collecte de valeurs JSON.
+//! - fn `ByteScanner::open` — ouvre le fichier.
+//! - fn `ByteScanner::bytes_read` — octets consommés jusqu'ici.
+//! - fn `ByteScanner::buf` — accès en lecture au buffer de collecte.
+//! - fn `ByteScanner::buf_mut` — accès en écriture au buffer de collecte.
+//! - fn `ByteScanner::read_byte` — lit exactement un octet, `None` à l'EOF.
+//! - fn `ByteScanner::skip_to_next_value` — saute espaces/virgules ; `Err` sur EOF réel (les deux
+//!   readers ci-dessous interprètent différemment cet `Err`, voir issue #37).
+//! - fn `ByteScanner::collect_value` — collecte une valeur JSON complète dans `buf`.
+//! - fn `ByteScanner::collect_container` — collecte le reste d'un conteneur `{...}`/`[...]`.
+//! - fn `ByteScanner::collect_string` — collecte le reste d'une chaîne `"..."`.
+//! - fn `ByteScanner::collect_primitive` — collecte un scalaire jusqu'au délimiteur.
+//!
+//! `JsonArrayReader` (tableau JSON `[{...}, {...}]`, délègue sa tokenisation à `ByteScanner`) :
 //! - struct `JsonArrayReader` — itérateur streaming sur un tableau JSON top-level.
-//! - fn `JsonArrayReader::open` — ouvre le fichier.
-//! - fn `JsonArrayReader::bytes_read` — octets consommés jusqu'ici.
-//! - fn `JsonArrayReader::read_byte` — lit exactement un octet.
-//! - fn `JsonArrayReader::skip_to_next_value` — saute espaces/virgules jusqu'au prochain élément.
-//! - fn `JsonArrayReader::collect_value` — collecte une valeur JSON complète dans `buf`.
-//! - fn `JsonArrayReader::collect_container` — collecte le reste d'un conteneur `{...}`/`[...]`.
-//! - fn `JsonArrayReader::collect_string` — collecte le reste d'une chaîne `"..."`.
-//! - fn `JsonArrayReader::collect_primitive` — collecte un scalaire jusqu'au délimiteur.
+//! - fn `JsonArrayReader::open` — ouvre le fichier via `ByteScanner` (consomme le `[` paresseusement,
+//!   au premier `next`/`next_raw`).
+//! - fn `JsonArrayReader::bytes_read` — délègue à `ByteScanner`.
+//! - fn `JsonArrayReader::skip_to_next_value` — délègue à `ByteScanner`, absorbe l'EOF réel en
+//!   `None` (fin de tableau silencieuse, comportement préexistant conservé).
 //! - fn `JsonArrayReader::next_raw` — retourne les octets bruts du prochain élément, sans parser.
 //! - fn `JsonArrayReader::next` — implémente `Iterator` (parse l'élément suivant en `Value`).
 //!
-//! `JsonRootWrapperReader` (objet racine `{"K": [...]}`, méthodes internes structurellement
-//! dupliquées avec `JsonArrayReader` — candidat refactor, voir issue de suivi) :
+//! `JsonRootWrapperReader` (objet racine `{"K": [...]}`, délègue sa tokenisation à `ByteScanner`) :
 //! - struct `JsonRootWrapperReader` — itérateur streaming à travers les N tableaux nommés du wrapper.
-//! - fn `JsonRootWrapperReader::open` — ouvre le fichier, consomme le `{` d'ouverture du wrapper.
+//! - fn `JsonRootWrapperReader::open` — ouvre le fichier via `ByteScanner`, consomme le `{`
+//!   d'ouverture du wrapper immédiatement (contrairement à `JsonArrayReader`, ce timing n'est pas
+//!   unifié — voir issue #37).
 //! - fn `JsonRootWrapperReader::current_key` — clé du tableau actuellement streamé, `None` si épuisé.
-//! - fn `JsonRootWrapperReader::bytes_read` — octets consommés jusqu'ici (cumulatif entre clés).
+//! - fn `JsonRootWrapperReader::bytes_read` — délègue à `ByteScanner` (cumulatif entre clés).
 //! - fn `JsonRootWrapperReader::next_raw` — retourne les octets bruts du prochain élément, toutes clés confondues.
-//! - fn `JsonRootWrapperReader::read_byte_tracked` — lit un octet en incrémentant `bytes_read`.
 //! - fn `JsonRootWrapperReader::advance_to_next_array` — avance le lecteur jusqu'au `[` de la clé suivante.
-//! - fn `JsonRootWrapperReader::skip_to_next_value` — saute espaces/virgules jusqu'au prochain élément.
-//! - fn `JsonRootWrapperReader::collect_value` — collecte une valeur JSON complète dans `buf`.
-//! - fn `JsonRootWrapperReader::collect_container` — collecte le reste d'un conteneur `{...}`/`[...]`.
-//! - fn `JsonRootWrapperReader::collect_string` — collecte le reste d'une chaîne `"..."`.
-//! - fn `JsonRootWrapperReader::collect_primitive` — collecte un scalaire jusqu'au délimiteur.
+//! - fn `JsonRootWrapperReader::skip_to_next_value` — délègue à `ByteScanner`, propage l'EOF réel en
+//!   `Err` (distinct de `JsonArrayReader`, comportement préexistant conservé).
 //! - fn `JsonRootWrapperReader::skip_string_rest` — saute le reste d'une chaîne (clé, `"` déjà consommé).
 //! - fn `JsonRootWrapperReader::next` — implémente `Iterator` (parse l'élément suivant en `Value`).
 //!
