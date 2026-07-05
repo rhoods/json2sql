@@ -6,13 +6,20 @@
 //! est alors enregistrée comme anomalie et remplacée par NULL en base.
 //!
 //! Fonctions :
-//! - `coerce` — dispatch principal selon le `PgType` cible (NULL court-circuité en amont).
-//! - `coerce_integer`, `coerce_bigint`, `coerce_float`, `coerce_bool`, `coerce_uuid`, `coerce_date`,
-//!   `coerce_timestamp`, `coerce_text` — une coercition par type PG, chacune produit `Ok`/`Anomaly`.
-//! - `coerce_pg_array` — sérialise un tableau JSON en littéral `PostgreSQL` `{e1,e2,...}`.
-//! - `coerce_pg_array_element` — représentation d'un élément dans le littéral (guillemets pour le texte).
-//! - `format_float` — formate un f64 fini en chaîne, `None` si NaN/infini.
-//! - `json_type_name` — nom du type JSON pour les messages d'anomalie.
+//! - enum `CoerceResult` — résultat d'une tentative de coercition (Ok/Null/Anomaly).
+//! - fn `coerce` — dispatch principal selon le `PgType` cible (NULL court-circuité en amont).
+//! - fn `coerce_pg_array` — sérialise un tableau JSON en littéral `PostgreSQL` `{e1,e2,...}`.
+//! - fn `coerce_pg_array_element` — représentation d'un élément dans le littéral (guillemets pour le texte).
+//! - fn `coerce_integer` — coercition vers INTEGER, produit `Ok`/`Anomaly`.
+//! - fn `coerce_bigint` — coercition vers BIGINT, produit `Ok`/`Anomaly`.
+//! - fn `coerce_float` — coercition vers DOUBLE PRECISION, produit `Ok`/`Anomaly`.
+//! - fn `coerce_bool` — coercition vers BOOLEAN, produit `Ok`/`Anomaly`.
+//! - fn `coerce_uuid` — coercition vers UUID, produit `Ok`/`Anomaly`.
+//! - fn `coerce_date` — coercition vers DATE, produit `Ok`/`Anomaly`.
+//! - fn `coerce_timestamp` — coercition vers TIMESTAMP, produit `Ok`/`Anomaly`.
+//! - fn `coerce_text` — coercition vers TEXT/VARCHAR/JSONB, produit `Ok`/`Anomaly`.
+//! - fn `format_float` — formate un f64 fini en chaîne, `None` si NaN/infini.
+//! - fn `json_type_name` — nom du type JSON pour les messages d'anomalie.
 
 use serde_json::Value;
 

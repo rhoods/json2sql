@@ -4,10 +4,10 @@
 //! pipeline. The public entry point is [`collect_stats`].
 //!
 //! Fonctions :
-//! - `collect_stats` — point d'entrée : construit les `ColumnStats` de toutes les tables, triées.
-//! - `collect_entry_stats` — stats d'une table (colonnes de données + `value` scalaire + arrays).
-//! - `make_stat` — assemble un `ColumnStats` à partir d'un `TypeTracker`.
-//! - `type_histogram` — histogramme des types JSON observés, trié par fréquence décroissante.
+//! - fn `make_stat` — assemble un `ColumnStats` à partir d'un `TypeTracker`.
+//! - fn `collect_entry_stats` — stats d'une table (colonnes de données + `value` scalaire + arrays).
+//! - fn `collect_stats` — point d'entrée : construit les `ColumnStats` de toutes les tables, triées.
+//! - fn `type_histogram` — histogramme des types JSON observés, trié par fréquence décroissante.
 
 use super::naming::{NamingRegistry};
 use super::observer::SchemaObserver;

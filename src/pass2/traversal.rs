@@ -9,26 +9,42 @@
 //! de traversal (sinks/anomalies explicites). `insert.rs` écrit une ligne complète
 //! depuis un `InsertCtx` bundlé.
 //!
-//! Fonctions (par stratégie) :
-//! - Partagé : `push_coerced` — coerce et écrit une valeur de colonne (avec anomalie si besoin).
-//! - Pivot : `insert_pivot_object` — une ligne par paire clé/valeur.
-//! - Jsonb : `insert_jsonb_object` — une ligne JSONB puis récursion enfants ;
-//!   `dispatch_child_object`, `dispatch_jsonb_children` — routent les enfants d'un objet JSONB.
-//! - StructuredPivot : `group_keys_by_base` — regroupe les clés par préfixe/suffixe ;
-//!   `write_structured_pivot_row` — écrit une ligne fusionnée ; `insert_structured_pivot_object` —
-//!   orchestre les deux.
-//! - Routing générique : `dispatch_child_routes` — route les sous-objets/arrays de
-//!   `schema.child_routes` vers leurs tables cibles (post-cascade merge).
-//! - SiblingCollapse (simple + multi) : `write_keyed_pivot_columns` — écrit les colonnes communes
-//!   d'une ligne keyed-pivot ; `insert_sibling_collapse_object` — une ligne par clé sibling ;
-//!   `insert_sibling_collapse_array_of_objects` — variante tableau d'objets (avec `j2s_order`) ;
-//!   `emit_routing_row` — ligne de routing pure FK pour SiblingCollapseMulti ;
-//!   `route_independent_child` — route une clé vers un enfant indépendant si présent ;
-//!   `route_multi_collapse_children` — dispatch chaque clé vers son groupe pivot synthétique ;
-//!   `insert_sibling_collapse_multi` — émet la ligne de routing puis route les enfants ;
-//!   `find_group_for_key` — résout le groupe cible d'une clé (match exact puis heuristique numérique).
-//! - NormalizeDynamicKeys : `insert_normalize_dynamic_keys` — une ligne par clé dynamique.
-//! - Tableaux : `insert_array` — dispatch `ObjectArray`/`ScalarArray` élément par élément.
+//! Fonctions :
+//! - fn `push_coerced` — coerce et écrit une valeur de colonne (avec anomalie si besoin).
+//!
+//! Pivot :
+//! - fn `insert_pivot_object` — une ligne par paire clé/valeur.
+//!
+//! Jsonb :
+//! - fn `insert_jsonb_object` — une ligne JSONB puis récursion enfants.
+//! - fn `dispatch_child_object` — route un enfant d'objet JSONB.
+//! - fn `dispatch_jsonb_children` — route les enfants d'un objet JSONB.
+//!
+//! `StructuredPivot` :
+//! - fn `group_keys_by_base` — regroupe les clés par préfixe/suffixe.
+//! - fn `write_structured_pivot_row` — écrit une ligne fusionnée.
+//! - fn `insert_structured_pivot_object` — orchestre les deux.
+//!
+//! Routing générique :
+//! - fn `dispatch_child_routes` — route les sous-objets/arrays de `schema.child_routes`
+//!   vers leurs tables cibles (post-cascade merge).
+//!
+//! `SiblingCollapse` (simple + multi) :
+//! - struct `SiblingCollapseRowInput` — paramètres empaquetés d'une ligne keyed-pivot à écrire.
+//! - fn `write_keyed_pivot_columns` — écrit les colonnes communes d'une ligne keyed-pivot.
+//! - fn `insert_sibling_collapse_object` — une ligne par clé sibling.
+//! - fn `insert_sibling_collapse_array_of_objects` — variante tableau d'objets (avec `j2s_order`).
+//! - fn `emit_routing_row` — ligne de routing pure FK pour `SiblingCollapseMulti`.
+//! - fn `route_independent_child` — route une clé vers un enfant indépendant si présent.
+//! - fn `route_multi_collapse_children` — dispatch chaque clé vers son groupe pivot synthétique.
+//! - fn `insert_sibling_collapse_multi` — émet la ligne de routing puis route les enfants.
+//! - fn `find_group_for_key` — résout le groupe cible d'une clé (match exact puis heuristique numérique).
+//!
+//! `NormalizeDynamicKeys` :
+//! - fn `insert_normalize_dynamic_keys` — une ligne par clé dynamique.
+//!
+//! Tableaux :
+//! - fn `insert_array` — dispatch `ObjectArray`/`ScalarArray` élément par élément.
 
 use std::collections::{BTreeMap, HashMap};
 

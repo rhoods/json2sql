@@ -6,17 +6,19 @@
 //! `TableEntry::merge` before finalization.
 //!
 //! Fonctions :
-//! - `TableEntry::new` — crée une entrée de table vide pour un chemin donné.
-//! - `TableEntry::merge` — fusionne les colonnes/compteurs d'une autre entrée (multi-worker).
-//! - `TableEntry::observe_field` — met à jour le `TypeTracker` d'un champ scalaire.
-//! - `SchemaObserver::new` — crée l'observateur (seuil texte, mode array-as-pg-array).
-//! - `SchemaObserver::observe_root` — observe un objet racine via une pile explicite (pas de
+//! - struct `TableEntry` — une entrée par table découverte pendant l'observation Pass 1.
+//! - fn `TableEntry::new` — crée une entrée de table vide pour un chemin donné.
+//! - fn `TableEntry::merge` — fusionne les colonnes/compteurs d'une autre entrée (multi-worker).
+//! - fn `TableEntry::observe_field` — met à jour le `TypeTracker` d'un champ scalaire.
+//! - struct `SchemaObserver` — accumulateur par worker des observations JSON brutes (Pass 1).
+//! - fn `SchemaObserver::new` — crée l'observateur (seuil texte, mode array-as-pg-array).
+//! - fn `SchemaObserver::observe_root` — observe un objet racine via une pile explicite (pas de
 //!   récursion, évite tout stack overflow sur imbrication profonde).
-//! - `SchemaObserver::observe_array_field` — route un champ tableau (objets → table enfant,
+//! - fn `SchemaObserver::observe_array_field` — route un champ tableau (objets → table enfant,
 //!   scalaires → colonne PG array ou table de jonction selon `array_as_pg_array`).
-//! - `SchemaObserver::merge` — fusionne un observateur d'un autre worker (Pass 1 parallèle).
-//! - `SchemaObserver::anomaly_iter` — itère les colonnes ayant des anomalies de type.
-//! - `SchemaObserver::ensure_table_key` — crée l'entrée de table si absente (idempotent).
+//! - fn `SchemaObserver::merge` — fusionne un observateur d'un autre worker (Pass 1 parallèle).
+//! - fn `SchemaObserver::anomaly_iter` — itère les colonnes ayant des anomalies de type.
+//! - fn `SchemaObserver::ensure_table_key` — crée l'entrée de table si absente (idempotent).
 
 use indexmap::IndexMap;
 use serde_json::Value;

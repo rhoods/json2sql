@@ -4,26 +4,41 @@
 //! orchestrates Pass 1 → overrides → Pass 2 and can be called directly from tests or
 //! other callers without going through the CLI.
 //!
-//! Fonctions (par section) :
-//! - Orchestration : `run_pipeline` — enchaîne stdin → Pass 1 → overrides → dry-run ou DB → Pass 2 → rapport ;
-//!   `resolve_input` — bufferise stdin dans un fichier temporaire si aucun chemin n'est fourni.
-//! - Pass 1 : `load_or_infer_schema` — lance Pass 1 ou restaure un snapshot, affiche le résumé ;
-//!   `restore_from_snapshot` — charge un `SchemaSnapshot` et ré-applique les overrides persistés ;
-//!   `run_pass1_workers` — lance Pass 1 séquentiel ou parallèle selon `num_workers` ;
-//!   `print_schema_summary` — affiche les tables inférées.
-//! - Warnings Pass 1 : `report_pass1_warnings` — dispatch vers les 4 warns ci-dessous ;
-//!   `warn_truncated_names`, `warn_column_collisions`, `warn_overflow`, `warn_depth` — affichent
-//!   chacun un avertissement spécifique (troncature de nom, collision de colonnes, dépassement
-//!   du plafond 1600 colonnes, profondeur excessive).
-//! - Post-traitement schéma : `post_process_schema` — dispatch overrides → snapshot → rapport ;
-//!   `apply_schema_config` — applique le TOML de surcharges ; `save_schema_snapshot` — sauvegarde
-//!   le snapshot si demandé ; `emit_schema_report` — écrit le rapport de stats (stderr ou fichier).
-//! - Pass 2 : `connect_and_create_tables` — connecte PG et crée les tables (DDL sans contraintes) ;
-//!   `run_pass2` — lance l'insertion des données ; `finalize_pass2` — rapport final + vérification
-//!   du taux d'anomalie max.
-//! - Dry-run & rapports : `print_dry_run_ddl` — affiche le DDL sans connexion DB ;
-//!   `aggregate_anomaly_stats` — agrège les anomalies par table (triées par nombre décroissant) ;
-//!   `report_pass2_results` — affiche le résumé d'import (lignes/anomalies par table).
+//! Fonctions :
+//! - struct `PipelineConfig` — tous les paramètres résolus d'un import complet json2sql.
+//! - fn `run_pipeline` — enchaîne stdin → Pass 1 → overrides → dry-run ou DB → Pass 2 → rapport.
+//!
+//! Pass 2 :
+//! - fn `connect_and_create_tables` — connecte PG et crée les tables (DDL sans contraintes).
+//! - fn `run_pass2` — lance l'insertion des données.
+//! - fn `finalize_pass2` — rapport final + vérification du taux d'anomalie max.
+//!
+//! Résolution d'entrée :
+//! - fn `resolve_input` — bufferise stdin dans un fichier temporaire si aucun chemin n'est fourni.
+//!
+//! Pass 1 :
+//! - fn `load_or_infer_schema` — lance Pass 1 ou restaure un snapshot, affiche le résumé.
+//! - fn `restore_from_snapshot` — charge un `SchemaSnapshot` et ré-applique les overrides persistés.
+//! - fn `run_pass1_workers` — lance Pass 1 séquentiel ou parallèle selon `num_workers`.
+//! - fn `print_schema_summary` — affiche les tables inférées.
+//!
+//! Warnings Pass 1 :
+//! - fn `report_pass1_warnings` — dispatch vers les 4 warns ci-dessous.
+//! - fn `warn_truncated_names` — avertit des noms de table tronqués.
+//! - fn `warn_column_collisions` — avertit des collisions de noms de colonnes.
+//! - fn `warn_overflow` — avertit du dépassement du plafond de 1600 colonnes.
+//! - fn `warn_depth` — avertit d'une profondeur de nesting excessive.
+//!
+//! Post-traitement schéma :
+//! - fn `post_process_schema` — dispatch overrides → snapshot → rapport.
+//! - fn `apply_schema_config` — applique le TOML de surcharges.
+//! - fn `save_schema_snapshot` — sauvegarde le snapshot si demandé.
+//! - fn `emit_schema_report` — écrit le rapport de stats (stderr ou fichier).
+//!
+//! Dry-run & rapports :
+//! - fn `print_dry_run_ddl` — affiche le DDL sans connexion DB.
+//! - fn `aggregate_anomaly_stats` — agrège les anomalies par table (triées par nombre décroissant).
+//! - fn `report_pass2_results` — affiche le résumé d'import (lignes/anomalies par table).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

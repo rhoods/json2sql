@@ -28,23 +28,37 @@
 //! See each variant's doc comment for a concrete JSON → SQL example.
 //!
 //! Fonctions :
-//! - `InferredStrategy::from(&UserOverride)` (`impl From`) — projette un override utilisateur
+//! - struct `SuffixColumn` — une colonne de suffixe dans une table `StructuredPivot`.
+//! - struct `SuffixSchema` — décomposition de suffixes détectée pour une table `StructuredPivot`.
+//! - enum `KeyShape` — forme des clés sibling (Numeric/`IsoLang`/Slug/Mixed), nomme la colonne clé.
+//! - struct `SiblingSchema` — métadonnées d'une table `SiblingCollapse`.
+//! - struct `SiblingGroup` — un sous-groupe de forme de clé au sein d'un parent `SiblingCollapseMulti`.
+//! - enum `InferredStrategy` — stratégie système de matérialisation d'une table wide.
+//! - enum `UserOverride` — override utilisateur (IHM/TOML) d'une `InferredStrategy`.
+//! - fn `InferredStrategy::from` — implémente `From<&UserOverride>`, projette un override utilisateur
 //!   vers la stratégie inférée équivalente.
-//! - `ColumnSchema::generated` — construit une colonne générée (`j2s_id`, `j2s_order`...).
-//! - `ColumnSchema::parent_fk` — construit la colonne FK vers le parent (`j2s_{parent}_id`).
-//! - `TableSchema::new` — crée un schéma vide, stratégie `Columns` par défaut.
-//! - `TableSchema::effective_strategy` — résout la priorité ui_override > toml_override > inferred.
-//! - `TableSchema::is_root`, `::is_junction`, `::has_order_column` — prédicats structurels.
-//! - `TableSchema::ui_override`, `::toml_override`, `::set_ui_override`, `::set_toml_override` —
-//!   accesseurs/mutateurs des deux niveaux d'override (mutation uniquement via les setters).
-//! - `TableSchema::absorbs_children` — délègue à `effective_strategy().absorbs_children()`.
-//! - `TableSchema::data_columns` — itère les colonnes hors `j2s_*` générées.
-//! - `TableSchema::column_names` — tous les noms de colonnes (en-tête COPY).
-//! - `TableSchema::find_by_original` — cherche une colonne par nom JSON original.
-//! - `InferredStrategy::is_wide` — vrai si différent de `Columns`.
-//! - `InferredStrategy::absorbed_names` — noms absorbés (seul `SiblingCollapseMulti` en a).
-//! - `InferredStrategy::absorbs_children` — vrai si les enfants doivent être exclus du schéma.
-//! - `KeyShape::fmt` (`impl Display`) — libellé majuscule (`NUMERIC`, `SLUG`...).
+//! - struct `ColumnSchema` — une colonne dans un schéma de table finalisé.
+//! - fn `ColumnSchema::generated` — construit une colonne générée (`j2s_id`, `j2s_order`...).
+//! - fn `ColumnSchema::parent_fk` — construit la colonne FK vers le parent (`j2s_{parent}_id`).
+//! - enum `ChildKind` — nature de la relation enfant (Object/`ObjectArray`/`ScalarArray`).
+//! - struct `TableSchema` — schéma de table pleinement résolu, prêt pour le DDL et le chargement.
+//! - fn `TableSchema::new` — crée un schéma vide, stratégie `Columns` par défaut.
+//! - fn `TableSchema::effective_strategy` — résout la priorité `ui_override` > `toml_override` > `inferred_strategy`.
+//! - fn `TableSchema::is_root` — vrai si la table n'a pas de parent.
+//! - fn `TableSchema::ui_override` — accesseur de l'override IHM courant.
+//! - fn `TableSchema::toml_override` — accesseur de l'override TOML courant.
+//! - fn `TableSchema::set_ui_override` — mutateur de l'override IHM.
+//! - fn `TableSchema::set_toml_override` — mutateur de l'override TOML.
+//! - fn `TableSchema::absorbs_children` — délègue à `effective_strategy().absorbs_children()`.
+//! - fn `TableSchema::is_junction` — vrai si table de jonction pour un enfant array scalaire.
+//! - fn `TableSchema::has_order_column` — vrai si Pass 2 doit émettre une colonne `j2s_order`.
+//! - fn `TableSchema::data_columns` — itère les colonnes hors `j2s_*` générées.
+//! - fn `TableSchema::column_names` — tous les noms de colonnes (en-tête COPY).
+//! - fn `TableSchema::find_by_original` — cherche une colonne par nom JSON original.
+//! - fn `InferredStrategy::is_wide` — vrai si différent de `Columns`.
+//! - fn `InferredStrategy::absorbed_names` — noms absorbés (seul `SiblingCollapseMulti` en a).
+//! - fn `InferredStrategy::absorbs_children` — vrai si les enfants doivent être exclus du schéma.
+//! - fn `KeyShape::fmt` — implémente `std::fmt::Display`, libellé majuscule (`NUMERIC`, `SLUG`...).
 
 use std::collections::HashMap;
 use std::sync::Arc;

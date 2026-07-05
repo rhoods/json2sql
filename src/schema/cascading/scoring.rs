@@ -5,17 +5,17 @@
 //! et des indices — pas d'effets de bord, pas d'état mutable.
 //!
 //! Fonctions :
-//! - `pairwise_jaccard_min` — Jaccard minimal entre toutes les paires (avec tri déterministe et
-//!   fast-paths conteneurs-purs / grands groupes) ; `min_jaccard_from_col_sets` — calcul brut
-//!   (pairwise ou comparaison au premier élément si N > 200).
-//! - `child_compatibility_score` — Jaccard minimal des enfants partagés entre siblings (garde-fou
+//! - fn `child_compatibility_score` — Jaccard minimal des enfants partagés entre siblings (garde-fou
 //!   avant fusion).
-//! - `greedy_schema_clusters` — clustering glouton par seuil de Jaccard (ordre déterministe).
-//! - `siblings_key_prefix` — préfixe commun le plus long des clés JSON (sans chiffres/`_` finaux).
-//! - `unique_cluster_suffix` — suffixe de nom de table garanti sans collision.
-//! - `pg_truncate_name` — tronque un nom de table pivot synthétique à 63 octets (suffixe hash).
-//! - `build_jaccard_col_sets`, `noise_filtered_col_sets` — construisent les ensembles de colonnes
-//!   par sibling, en filtrant le bruit (colonnes rares) quand tous sont data-bearing.
+//! - fn `greedy_schema_clusters` — clustering glouton par seuil de Jaccard (ordre déterministe).
+//! - fn `siblings_key_prefix` — préfixe commun le plus long des clés JSON (sans chiffres/`_` finaux).
+//! - fn `unique_cluster_suffix` — suffixe de nom de table garanti sans collision.
+//! - fn `pg_truncate_name` — tronque un nom de table pivot synthétique à 63 octets (suffixe hash).
+//! - fn `noise_filtered_col_sets` — filtre le bruit (colonnes rares) quand tous les siblings sont data-bearing.
+//! - fn `build_jaccard_col_sets` — construit les ensembles de colonnes par sibling pour le calcul Jaccard.
+//! - fn `min_jaccard_from_col_sets` — calcul brut (pairwise ou comparaison au premier élément si N > 200).
+//! - fn `pairwise_jaccard_min` — Jaccard minimal entre toutes les paires (avec tri déterministe et
+//!   fast-paths conteneurs-purs / grands groupes).
 
 use super::super::table_schema::TableSchema;
 

@@ -5,10 +5,12 @@
 //! debugging an unexpected layout or forcing a specific materialization.
 //!
 //! Fonctions :
-//! - `StrategyName::as_str` — nom TOML/CLI de la stratégie.
-//! - `StrategyName::try_from` (`impl TryFrom<&str>`) — parse une chaîne, distingue stratégie
+//! - enum `StrategyName` — stratégies optionnelles désactivables (Sibling, Pivot, `StructuredPivot`).
+//! - fn `StrategyName::as_str` — nom TOML/CLI de la stratégie.
+//! - fn `StrategyName::try_from` — implémente `TryFrom<&str>` ; parse une chaîne, distingue stratégie
 //!   inconnue vs. obligatoire (non désactivable).
-//! - `parse_disabled_strategies` — valide une liste de flags `--disable-strategy` (CLI).
+//! - enum `StrategyError` — erreur de parsing d'un nom de stratégie (Mandatory/Unknown).
+//! - fn `parse_disabled_strategies` — valide une liste de flags `--disable-strategy` (CLI).
 
 use std::collections::HashSet;
 

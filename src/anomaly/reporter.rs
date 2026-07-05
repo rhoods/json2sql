@@ -5,10 +5,12 @@
 //! written to `--anomaly-report`.
 //!
 //! Fonctions :
-//! - `write_report` — écrit le rapport (JSON ou CSV) sur disque ou stdout.
-//! - `sort_summaries` — trie les résumés par nombre d'anomalies décroissant, puis table/colonne.
-//! - `write_summary_row` — écrit une ligne CSV pour un résumé d'anomalie.
-//! - `to_json`, `to_csv` — sérialisent l'ensemble des résumés dans le format demandé.
+//! - enum `AnomalyFormat` — format de sortie du rapport (Json ou Csv).
+//! - fn `write_report` — écrit le rapport (JSON ou CSV) sur disque ou stdout.
+//! - fn `sort_summaries` — trie les résumés par nombre d'anomalies décroissant, puis table/colonne.
+//! - fn `write_summary_row` — écrit une ligne CSV pour un résumé d'anomalie.
+//! - fn `to_json` — sérialise l'ensemble des résumés en JSON.
+//! - fn `to_csv` — sérialise l'ensemble des résumés en CSV.
 
 use std::path::Path;
 

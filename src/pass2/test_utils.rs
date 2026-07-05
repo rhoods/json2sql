@@ -2,7 +2,8 @@
 //! sans passer par `MemSink`/PostgreSQL.
 //!
 //! Fonctions :
-//! - `CaptureSink::write_row` (`impl RowSink`) — pousse la ligne dans le `Vec` interne.
+//! - struct `CaptureSink` — sink de test qui capture les lignes écrites dans un `Vec` interne.
+//! - fn `CaptureSink::write_row` — implémente `RowSink`, pousse la ligne dans le `Vec` interne.
 
 use crate::error::Result;
 use crate::pass2::sink::RowSink;

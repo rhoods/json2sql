@@ -6,13 +6,13 @@
 //! base to produce a [`SuffixSchema`] that drives the structured pivot table layout.
 //!
 //! Fonctions :
-//! - `detect_suffix_schema` — détecte automatiquement la structure de suffixes (algorithme en 5 étapes).
-//! - `build_suffix_to_bases` — énumère les découpages (base, suffixe) candidats sur `_`.
-//! - `collect_base_set` — union de toutes les bases des candidats.
-//! - `filter_by_coverage` — ne garde que les suffixes couvrant assez de bases (seuil).
-//! - `build_suffix_cols_and_value_type` — construit les `SuffixColumn` + type de la colonne `value` de base.
-//! - `build_suffix_schema_from_list`, `build_suffix_column` — variante explicite (TOML `suffix_columns`),
-//!   pas de détection automatique.
+//! - fn `build_suffix_to_bases` — énumère les découpages (base, suffixe) candidats sur `_`.
+//! - fn `collect_base_set` — union de toutes les bases des candidats.
+//! - fn `filter_by_coverage` — ne garde que les suffixes couvrant assez de bases (seuil).
+//! - fn `detect_suffix_schema` — détecte automatiquement la structure de suffixes (algorithme en 5 étapes).
+//! - fn `build_suffix_cols_and_value_type` — construit les `SuffixColumn` + type de la colonne `value` de base.
+//! - fn `build_suffix_column` — construit une `SuffixColumn` (variante explicite, TOML `suffix_columns`).
+//! - fn `build_suffix_schema_from_list` — variante explicite (TOML `suffix_columns`), pas de détection automatique.
 
 use std::collections::{HashMap, HashSet};
 

@@ -5,10 +5,11 @@
 //! in Pass 2 when values can't be coerced to the inferred `PostgreSQL` type.
 //!
 //! Fonctions :
-//! - `ColumnStats::is_mixed` — vrai si plusieurs types JSON ont été observés pour la colonne.
-//! - `ColumnStats::non_null_count` — nombre de valeurs non nulles.
-//! - `write_column_line` — écrit une ligne de rapport pour une colonne (avec histogramme si mixte).
-//! - `write_text_report` — écrit le rapport texte complet (groupé par table).
+//! - struct `ColumnStats` — distribution de types pour une colonne observée pendant Pass 1.
+//! - fn `ColumnStats::is_mixed` — vrai si plusieurs types JSON ont été observés pour la colonne.
+//! - fn `ColumnStats::non_null_count` — nombre de valeurs non nulles.
+//! - fn `write_column_line` — écrit une ligne de rapport pour une colonne (avec histogramme si mixte).
+//! - fn `write_text_report` — écrit le rapport texte complet (groupé par table).
 
 use crate::schema::type_tracker::PgType;
 

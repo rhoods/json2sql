@@ -7,21 +7,33 @@
 //! [`generate_ddl_preview`] is used by the IHM to show the user what SQL will be executed
 //! before they confirm Pass 2.
 //!
-//! Fonctions (par section) :
-//! - Génération DDL (pure) : `build_col_defs` — définitions de colonnes communes ;
-//!   `generate_create_table` — CREATE TABLE avec PK inline ; `generate_create_table_no_constraints` —
-//!   CREATE TABLE colonnes seules (IF NOT EXISTS) ; `generate_add_pk_sql`, `generate_add_fk_sql` —
-//!   ALTER TABLE ADD CONSTRAINT PK/FK ; `generate_ddl_preview` — aperçu lisible pour l'IHM ;
-//!   `quote_ident` — échappe un identifiant PG entre guillemets doubles.
-//! - Création des tables : `build_batch_drop_sql`, `build_batch_create_sql` — construisent le SQL
-//!   batché ; `create_tables_no_constraints` — DROP (si demandé) + CREATE par lots, émet la progression.
-//! - Contraintes post-chargement : `add_constraints` — orchestre PK+FK niveau par niveau (parents
-//!   avant enfants), PK fatale / FK en warning ; `group_schemas_by_depth` — regroupe les schémas par
-//!   profondeur ; `apply_constraints_chunk` — applique un lot de contraintes sur une connexion dédiée ;
-//!   `try_configure_constraints_conn` — configure `maintenance_work_mem`/`synchronous_commit` (best-effort) ;
-//!   `calc_maintenance_work_mem_mb` — calcule la valeur depuis la RAM disponible ;
-//!   `constraint_progress` — émet un événement de progression ; `to_fk_warning` — convertit une erreur
-//!   FK en `ConstraintWarning` ; `emit` — envoie un `ProgressEvent` si un canal est fourni.
+//! Fonctions :
+//! - fn `emit` — envoie un `ProgressEvent` si un canal est fourni.
+//!
+//! Génération DDL (pure) :
+//! - fn `build_col_defs` — définitions de colonnes communes.
+//! - fn `generate_create_table` — CREATE TABLE avec PK inline.
+//! - fn `generate_create_table_no_constraints` — CREATE TABLE colonnes seules (IF NOT EXISTS).
+//! - fn `generate_add_pk_sql` — ALTER TABLE ADD CONSTRAINT PRIMARY KEY.
+//! - fn `generate_add_fk_sql` — ALTER TABLE ADD CONSTRAINT FOREIGN KEY (None pour une table racine).
+//! - fn `generate_ddl_preview` — aperçu lisible pour l'IHM (CREATE TABLE + FK inline, non exécuté tel quel).
+//! - fn `quote_ident` — échappe un identifiant PG entre guillemets doubles.
+//!
+//! Création des tables :
+//! - fn `build_batch_drop_sql` — construit le SQL de DROP batché.
+//! - fn `build_batch_create_sql` — construit le SQL de CREATE batché.
+//! - fn `create_tables_no_constraints` — DROP (si demandé) + CREATE par lots, émet la progression.
+//! - struct `ConstraintWarning` — contrainte n'ayant pas pu être appliquée après le chargement.
+//! - enum `ConstraintKind` — type de contrainte concernée par un `ConstraintWarning` (PK ou FK).
+//!
+//! Contraintes post-chargement :
+//! - fn `group_schemas_by_depth` — regroupe les schémas par profondeur (parents avant enfants).
+//! - fn `calc_maintenance_work_mem_mb` — calcule `maintenance_work_mem` depuis la RAM disponible.
+//! - fn `try_configure_constraints_conn` — configure `maintenance_work_mem`/`synchronous_commit` (best-effort).
+//! - fn `apply_constraints_chunk` — applique un lot de contraintes sur une connexion dédiée.
+//! - fn `add_constraints` — orchestre PK+FK niveau par niveau (parents avant enfants), PK fatale / FK en warning.
+//! - fn `constraint_progress` — émet un événement de progression.
+//! - fn `to_fk_warning` — convertit une erreur `PostgreSQL` en `ConstraintWarning`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

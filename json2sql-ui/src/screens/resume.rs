@@ -5,7 +5,7 @@
 //! abandon the import (send cancel + navigate to Setup).
 //!
 //! Fonctions :
-//! - `ResumeScreen` — composant unique : propose reconnexion ou abandon du worker détecté.
+//! - fn `ResumeScreen` — composant unique : propose reconnexion ou abandon du worker détecté
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 
 use dioxus::prelude::*;

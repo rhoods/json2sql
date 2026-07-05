@@ -7,26 +7,71 @@
 //! - `{` whose root-level values are all arrays, no second root object → [`JsonFormat::RootWrapper`]
 //! - `{` with a second root object following → [`JsonFormat::Lines`] (NDJSON)
 //!
-//! Fonctions (par section) :
-//! - Détection de format : `detect_format` — scanne le premier octet significatif ;
-//!   `fmt_detect_root_object` — distingue NDJSON / wrapper / objet unique après un `{` ;
-//!   `fmt_read_one`, `fmt_skip_ws`, `fmt_skip_ws_comma`, `fmt_read_string`, `fmt_skip_value`,
-//!   `fmt_skip_container`, `fmt_skip_string_rest`, `fmt_skip_primitive_rest` — tokenizer minimal
-//!   pour sauter les valeurs sans les parser ; `simd_err` — convertit une erreur `simd_json` ;
-//!   `file_size` — taille du fichier (barre de progression).
-//! - `scan_chunk_into` — scanne un chunk de buffer en trackant profondeur/chaîne/échappement,
+//! Fonctions :
+//! - fn `simd_err` — convertit une erreur `simd_json` en `J2sError`.
+//! - enum `JsonFormat` — format détecté du fichier d'entrée (Array, Lines, `RootWrapper`).
+//! - fn `detect_format` — scanne le premier octet significatif pour détecter le format.
+//!
+//! Détection de format (tokenizer minimal pour sauter les valeurs sans les parser) :
+//! - fn `fmt_read_one` — lit un octet, `None` à l'EOF.
+//! - fn `fmt_skip_ws` — saute les espaces, retourne le prochain octet significatif.
+//! - fn `fmt_skip_ws_comma` — saute espaces et virgules, retourne le prochain autre octet.
+//! - fn `fmt_read_string` — lit une chaîne JSON jusqu'au `"` fermant.
+//! - fn `fmt_skip_value` — saute une valeur JSON complète selon son premier octet.
+//! - fn `fmt_skip_container` — saute jusqu'au `}`/`]` correspondant, par blocs `fill_buf`/`consume`.
+//! - fn `fmt_skip_string_rest` — saute le reste d'une chaîne JSON (`"` ouvrant déjà consommé).
+//! - fn `fmt_skip_primitive_rest` — saute un scalaire (nombre/bool/null) jusqu'au délimiteur.
+//! - fn `fmt_detect_root_object` — distingue NDJSON / wrapper / objet unique après un `{`.
+//! - fn `file_size` — taille du fichier (barre de progression).
+//! - fn `scan_chunk_into` — scanne un chunk de buffer en trackant profondeur/chaîne/échappement,
 //!   partagé par les 3 lecteurs ci-dessous pour la lecture par blocs (`fill_buf`/`consume`).
-//! - `JsonLinesReader` (NDJSON) : `open`, `bytes_read`, `fill_next_line`, `next_raw`, `next` (Iterator).
-//! - `JsonArrayReader` (tableau JSON) : `open`, `bytes_read`, `read_byte`, `skip_to_next_value`,
-//!   `collect_value`, `collect_container`, `collect_string`, `collect_primitive`, `next_raw`,
-//!   `next` (Iterator).
-//! - `JsonRootWrapperReader` (objet racine `{"K": [...]}`) : `open`, `current_key`, `bytes_read`,
-//!   `next_raw`, `advance_to_next_array`, `skip_to_next_value`, `collect_value`, `collect_container`,
-//!   `collect_string`, `collect_primitive`, `skip_string_rest`, `read_byte_tracked`, `next` (Iterator).
-//!   Méthodes internes structurellement dupliquées avec `JsonArrayReader` (candidat refactor —
-//!   voir issue de suivi).
-//! - `JsonReader` (point d'entrée unifié) : `open`, `open_with_format`, `next_raw`, `current_key`,
-//!   `bytes_read`, `next` (Iterator) — dispatch vers l'une des 3 implémentations ci-dessus.
+//!
+//! `JsonLinesReader` (NDJSON) :
+//! - struct `JsonLinesReader` — itérateur streaming sur un fichier NDJSON.
+//! - fn `JsonLinesReader::open` — ouvre le fichier.
+//! - fn `JsonLinesReader::bytes_read` — octets consommés jusqu'ici.
+//! - fn `JsonLinesReader::fill_next_line` — lit la prochaine ligne non vide dans `line_buf`.
+//! - fn `JsonLinesReader::next_raw` — retourne les octets bruts du prochain objet JSON, sans parser.
+//! - fn `JsonLinesReader::next` — implémente `Iterator` (parse la ligne suivante en `Value`).
+//!
+//! `JsonArrayReader` (tableau JSON `[{...}, {...}]`) :
+//! - struct `JsonArrayReader` — itérateur streaming sur un tableau JSON top-level.
+//! - fn `JsonArrayReader::open` — ouvre le fichier.
+//! - fn `JsonArrayReader::bytes_read` — octets consommés jusqu'ici.
+//! - fn `JsonArrayReader::read_byte` — lit exactement un octet.
+//! - fn `JsonArrayReader::skip_to_next_value` — saute espaces/virgules jusqu'au prochain élément.
+//! - fn `JsonArrayReader::collect_value` — collecte une valeur JSON complète dans `buf`.
+//! - fn `JsonArrayReader::collect_container` — collecte le reste d'un conteneur `{...}`/`[...]`.
+//! - fn `JsonArrayReader::collect_string` — collecte le reste d'une chaîne `"..."`.
+//! - fn `JsonArrayReader::collect_primitive` — collecte un scalaire jusqu'au délimiteur.
+//! - fn `JsonArrayReader::next_raw` — retourne les octets bruts du prochain élément, sans parser.
+//! - fn `JsonArrayReader::next` — implémente `Iterator` (parse l'élément suivant en `Value`).
+//!
+//! `JsonRootWrapperReader` (objet racine `{"K": [...]}`, méthodes internes structurellement
+//! dupliquées avec `JsonArrayReader` — candidat refactor, voir issue de suivi) :
+//! - struct `JsonRootWrapperReader` — itérateur streaming à travers les N tableaux nommés du wrapper.
+//! - fn `JsonRootWrapperReader::open` — ouvre le fichier, consomme le `{` d'ouverture du wrapper.
+//! - fn `JsonRootWrapperReader::current_key` — clé du tableau actuellement streamé, `None` si épuisé.
+//! - fn `JsonRootWrapperReader::bytes_read` — octets consommés jusqu'ici (cumulatif entre clés).
+//! - fn `JsonRootWrapperReader::next_raw` — retourne les octets bruts du prochain élément, toutes clés confondues.
+//! - fn `JsonRootWrapperReader::read_byte_tracked` — lit un octet en incrémentant `bytes_read`.
+//! - fn `JsonRootWrapperReader::advance_to_next_array` — avance le lecteur jusqu'au `[` de la clé suivante.
+//! - fn `JsonRootWrapperReader::skip_to_next_value` — saute espaces/virgules jusqu'au prochain élément.
+//! - fn `JsonRootWrapperReader::collect_value` — collecte une valeur JSON complète dans `buf`.
+//! - fn `JsonRootWrapperReader::collect_container` — collecte le reste d'un conteneur `{...}`/`[...]`.
+//! - fn `JsonRootWrapperReader::collect_string` — collecte le reste d'une chaîne `"..."`.
+//! - fn `JsonRootWrapperReader::collect_primitive` — collecte un scalaire jusqu'au délimiteur.
+//! - fn `JsonRootWrapperReader::skip_string_rest` — saute le reste d'une chaîne (clé, `"` déjà consommé).
+//! - fn `JsonRootWrapperReader::next` — implémente `Iterator` (parse l'élément suivant en `Value`).
+//!
+//! `JsonReader` (point d'entrée unifié, dispatch vers l'une des 3 implémentations ci-dessus) :
+//! - enum `JsonReader` — enveloppe Lines/Array/RootWrapper selon le format détecté.
+//! - fn `JsonReader::next_raw` — délègue au lecteur actif, octets bruts sans parser.
+//! - fn `JsonReader::open` — détecte le format puis ouvre le lecteur correspondant.
+//! - fn `JsonReader::open_with_format` — ouvre un lecteur pour un format déjà connu (skip la détection).
+//! - fn `JsonReader::current_key` — clé wrapper active, `None` pour les formats non-wrapper.
+//! - fn `JsonReader::bytes_read` — délègue au lecteur actif.
+//! - fn `JsonReader::next` — implémente `Iterator` (délègue au lecteur actif).
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};

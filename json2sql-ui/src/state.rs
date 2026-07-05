@@ -5,21 +5,37 @@
 //! includes multi-select logic), `ImportState` (Pass 2 progress), `UiState` (reserved).
 //!
 //! Fonctions :
-//! - `PgConfig::to_url` — construit l'URL de connexion Postgres (password zeroïsé après usage).
-//! - `PgConfig::is_complete` — vérifie que les champs de connexion sont renseignés.
-//! - `format_bytes` — formate un nombre d'octets en unités SI lisibles.
-//! - `Pass1Progress::push_log`, `Pass2Progress::push_log` — ajoutent une ligne au ring-buffer de logs.
-//! - `ProjectState::is_complete` — vérifie que la source + la config PG sont prêtes pour un import.
-//! - `SchemaState::clear` — réinitialise l'état schéma (nouveau fichier / annulation).
-//! - `SchemaState::apply_shift_click`, `SchemaState::apply_click` — sélection multi-table (panneau Strategy).
-//! - `AppState::load_snapshot` — recharge un `SchemaSnapshot` sauvegardé (dédoublonne les tables).
-//! - `AppState::clear_snapshot` — retire un snapshot chargé, revient au flux Pass 1 par défaut.
-//! - `AppState::ready_to_start` — vrai si le projet est prêt à lancer un import.
-//! - `AppState::cancel` — annule la tâche en cours, tue le worker, réinitialise l'état transitoire.
-//! - `AppState::apply_worker_result` — applique le résultat lu depuis le fichier JSON du worker.
-//! - `AppState::apply_progress_event` — dispatch un `ProgressEvent` vers l'état correspondant.
-//! - `compute_jaccard_display` — calcule les infos d'affichage Jaccard pour une sélection de tables.
-//! - `select_children_visible` — indices des enfants directs d'une table visibles dans la liste.
+//! - enum `AppScreen` — écran courant de l'IHM (routing)
+//! - struct `PgConfig` — paramètres de connexion `PostgreSQL` (password zeroïsé au drop)
+//! - fn `PgConfig::drop` — zeroïse le password en mémoire à la destruction
+//! - fn `PgConfig::default` — valeurs par défaut (host localhost, port 5432)
+//! - fn `PgConfig::to_url` — construit l'URL de connexion Postgres (retour `Zeroizing<String>`)
+//! - fn `PgConfig::is_complete` — vérifie que les champs de connexion sont renseignés
+//! - fn `format_bytes` — formate un nombre d'octets en unités SI lisibles
+//! - struct `Pass1Progress` — état de progression de la Pass 1 (compteurs + logs)
+//! - fn `Pass1Progress::push_log` — ajoute une ligne au ring-buffer de logs
+//! - struct `Pass2Progress` — état de progression de la Pass 2 (compteurs, phases DDL/streaming/contraintes)
+//! - fn `Pass2Progress::push_log` — ajoute une ligne au ring-buffer de logs
+//! - struct `ProjectState` — état de l'écran Setup (source, config PG, options avancées)
+//! - fn `ProjectState::default` — valeurs par défaut (host localhost, `pass2_parallel` selon CPU)
+//! - fn `ProjectState::is_complete` — vérifie que la source + la config PG sont prêtes pour un import
+//! - struct `SchemaState` — état des écrans Analysis/Strategy/Preview (schémas, overrides, sélection)
+//! - fn `SchemaState::default` — valeurs par défaut (sélection initiale sur la table 0)
+//! - fn `SchemaState::clear` — réinitialise l'état schéma (nouveau fichier / annulation)
+//! - fn `SchemaState::apply_shift_click` — sélection multi-table par Shift+click (plage visible)
+//! - fn `SchemaState::apply_click` — sélection multi-table par click / Ctrl+click
+//! - struct `ImportState` — état de l'écran Import (progression Pass 2)
+//! - struct `UiState` — état de layout réservé (largeurs de panneaux, à venir)
+//! - struct `AppState` — état racine partagé entre tous les écrans via `Signal<AppState>`
+//! - fn `AppState::load_snapshot` — recharge un `SchemaSnapshot` sauvegardé (dédoublonne les tables)
+//! - fn `AppState::clear_snapshot` — retire un snapshot chargé, revient au flux Pass 1 par défaut
+//! - fn `AppState::ready_to_start` — vrai si le projet est prêt à lancer un import
+//! - fn `AppState::cancel` — annule la tâche en cours, tue le worker, réinitialise l'état transitoire
+//! - fn `AppState::apply_worker_result` — applique le résultat lu depuis le fichier JSON du worker
+//! - fn `AppState::apply_progress_event` — dispatch un `ProgressEvent` vers l'état correspondant
+//! - struct `JaccardDisplay` — données d'affichage de similarité Jaccard (panneau multi-sélection)
+//! - fn `compute_jaccard_display` — calcule les infos d'affichage Jaccard pour une sélection de tables
+//! - fn `select_children_visible` — indices des enfants directs d'une table visibles dans la liste
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;

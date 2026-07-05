@@ -4,11 +4,13 @@
 //! événements incrémentaux via `Notify`, évitant les races snapshot/delta d'un broadcast channel.
 //!
 //! Fonctions :
-//! - `ImportSummary::new` — crée un résumé vide.
-//! - `ImportSummary::push` — ajoute un événement, marque `done` sur `Pass2Done`, réveille les connexions.
-//! - `ImportSummary::snapshot` — tous les événements accumulés.
-//! - `ImportSummary::len`, `::is_done` — nombre d'événements, statut de complétion.
-//! - `ImportSummary::notifier` — clone du handle `Notify` pour qu'un connection handler attende.
+//! - struct `ImportSummary` — état en mémoire d'un import (historique + notification des connexions).
+//! - fn `ImportSummary::new` — crée un résumé vide.
+//! - fn `ImportSummary::push` — ajoute un événement, marque `done` sur `Pass2Done`, réveille les connexions.
+//! - fn `ImportSummary::snapshot` — tous les événements accumulés.
+//! - fn `ImportSummary::len` — nombre d'événements accumulés.
+//! - fn `ImportSummary::is_done` — statut de complétion.
+//! - fn `ImportSummary::notifier` — clone du handle `Notify` pour qu'un connection handler attende.
 
 use std::sync::Arc;
 

@@ -8,16 +8,20 @@
 //! ils n'ont pas à connaître la séparation observer/finalizer.
 //!
 //! Fonctions :
-//! - `SchemaRegistry::new` — construit observer + naming à partir de `RegistryConfig`.
-//! - `SchemaRegistry::observe_root` — délègue à `SchemaObserver::observe_root`.
-//! - `SchemaRegistry::finalize` — finalise sans le guard 1600-colonnes.
-//! - `SchemaRegistry::finalize_with_pg_guard` — finalise avec le guard (retourne les overflow warnings).
-//! - `SchemaRegistry::finalize_inner` — construit le `SchemaFinalizer` et exécute `run()`.
-//! - `SchemaRegistry::collect_stats` — délègue à `inspector::collect_stats`.
-//! - `SchemaRegistry::truncated_names`, `SchemaRegistry::column_collisions` — accesseurs.
-//! - `SchemaRegistry::merge` — fusionne un autre registre (Pass 1 parallèle) ; le naming n'est
+//! - struct `RegistryConfig` — configuration pour `SchemaRegistry::new`.
+//! - fn `RegistryConfig::default` — implémentation manuelle des valeurs par défaut.
+//! - struct `SchemaRegistry` — façade combinant `SchemaObserver` et `SchemaFinalizer`.
+//! - fn `SchemaRegistry::new` — construit observer + naming à partir de `RegistryConfig`.
+//! - fn `SchemaRegistry::observe_root` — délègue à `SchemaObserver::observe_root`.
+//! - fn `SchemaRegistry::finalize` — finalise sans le guard 1600-colonnes.
+//! - fn `SchemaRegistry::finalize_with_pg_guard` — finalise avec le guard (retourne les overflow warnings).
+//! - fn `SchemaRegistry::finalize_inner` — construit le `SchemaFinalizer` et exécute `run()`.
+//! - fn `SchemaRegistry::collect_stats` — délègue à `inspector::collect_stats`.
+//! - fn `SchemaRegistry::truncated_names` — accesseur des noms tronqués.
+//! - fn `SchemaRegistry::column_collisions` — accesseur des collisions de colonnes.
+//! - fn `SchemaRegistry::merge` — fusionne un autre registre (Pass 1 parallèle) ; le naming n'est
 //!   pas fusionné, il est recalculé par `finalize()`.
-//! - `SchemaRegistry::anomaly_iter` — délègue à `SchemaObserver::anomaly_iter`.
+//! - fn `SchemaRegistry::anomaly_iter` — délègue à `SchemaObserver::anomaly_iter`.
 
 use std::collections::HashSet;
 use serde_json::Value;

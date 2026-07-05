@@ -4,25 +4,35 @@
 //! [`AnomalyCollector`] is the central aggregator; workers communicate with it via
 //! [`AnomalyProxy`] (a channel-based handle). Per-table NDJSON anomaly files are written
 //! as events arrive — the full set is never buffered in memory, so large anomaly volumes
-//! don't cause OOM.
+//! don't cause OOM. Both types implement the `AnomalyCollect` trait (`record`/`inc_total`).
 //!
 //! Fonctions :
-//! - `AnomalyProxy::new` — crée le proxy channel-based (record/inc_total envoyés à la tâche writer).
-//! - `AnomalyCollector::new` — crée le collecteur (streaming NDJSON optionnel si `anomaly_dir` est fourni).
-//! - `AnomalyCollector::record` — enregistre une anomalie (stats en mémoire + ligne NDJSON si activé).
-//! - `AnomalyCollector::stream_to_file` — écrit une ligne NDJSON, crée le fichier per-table au premier appel.
-//! - `AnomalyCollector::inc_total` — incrémente le compteur de lignes total par table (dénominateur du taux).
-//! - `AnomalyCollector::total_anomalies` — nombre total d'anomalies (O(1)).
-//! - `AnomalyCollector::per_table_anomaly_counts` — total d'anomalies par table.
-//! - `AnomalyCollector::summaries` — résumés par (table, colonne) avec exemples plafonnés.
-//! - `AnomalyCollector::overall_anomaly_rate` — taux d'anomalie global (pour `--max-anomaly-rate`).
-//! - `AnomalyCollector::finish` — flush tous les writers NDJSON (idempotent).
-//! - `AnomalyCollector::written_paths` — chemins des fichiers NDJSON réellement écrits.
-//! - `AnomalyCollector::drop` — flush best-effort si `finish()` n'a pas été appelé explicitement.
-//! - `AnomalyProxy`/`AnomalyCollector` implémentent le trait `AnomalyCollect` (record/inc_total) —
-//!   délèguent aux méthodes ci-dessus.
-//! - `sanitize_table_name` — nom de table sûr comme composant de chemin de fichier.
-//! - `truncate_value` — tronque une valeur à N caractères (affichage/NDJSON).
+//! - enum `AnomalyEvent` — événement envoyé d'un worker vers la tâche writer (Record/IncTotal).
+//! - struct `AnomalyProxy` — poignée channel-based vers le collecteur central.
+//! - fn `AnomalyProxy::new` — crée le proxy channel-based.
+//! - fn `AnomalyProxy::record` — implémente `AnomalyCollect` en envoyant un `AnomalyEvent::Record`.
+//! - fn `AnomalyProxy::inc_total` — implémente `AnomalyCollect` en envoyant un `AnomalyEvent::IncTotal`.
+//! - struct `AnomalyExample` — une anomalie exemple conservée en mémoire pour affichage IHM.
+//! - struct `ColAnomalyStat` — statistiques par (table, colonne), tenues entièrement en RAM.
+//! - struct `AnomalySummary` — résumé sérialisable par (table, colonne) pour les rapports.
+//! - struct `AnomalyEntry` — entrée interne empaquetant les champs d'une ligne NDJSON à écrire.
+//! - struct `AnomalyCollector` — collecteur en mémoire + streaming NDJSON optionnel par table.
+//! - fn `AnomalyCollector::fmt` — implémente `std::fmt::Debug` sans exposer les writers ouverts.
+//! - fn `AnomalyCollector::drop` — flush best-effort si `finish()` n'a pas été appelé explicitement.
+//! - fn `AnomalyCollector::new` — crée le collecteur (streaming NDJSON optionnel si `anomaly_dir` est fourni).
+//! - fn `AnomalyCollector::record` — enregistre une anomalie (stats en mémoire + ligne NDJSON si activé).
+//! - fn `AnomalyCollector::stream_to_file` — écrit une ligne NDJSON, crée le fichier per-table au premier appel.
+//! - fn `AnomalyCollector::inc_total` — incrémente le compteur de lignes total par table (dénominateur du taux).
+//! - fn `AnomalyCollector::total_anomalies` — nombre total d'anomalies (O(1)).
+//! - fn `AnomalyCollector::per_table_anomaly_counts` — total d'anomalies par table.
+//! - fn `AnomalyCollector::summaries` — résumés par (table, colonne) avec exemples plafonnés.
+//! - fn `AnomalyCollector::overall_anomaly_rate` — taux d'anomalie global (pour `--max-anomaly-rate`).
+//! - fn `AnomalyCollector::finish` — flush tous les writers NDJSON (idempotent).
+//! - fn `AnomalyCollector::written_paths` — chemins des fichiers NDJSON réellement écrits.
+//! - fn `AnomalyCollector::record` — implémente `AnomalyCollect` en délégant à la méthode inhérente `record`.
+//! - fn `AnomalyCollector::inc_total` — implémente `AnomalyCollect` en délégant à la méthode inhérente `inc_total`.
+//! - fn `sanitize_table_name` — nom de table sûr comme composant de chemin de fichier.
+//! - fn `truncate_value` — tronque une valeur à N caractères (affichage/NDJSON).
 
 use std::collections::HashMap;
 use std::fs::File;

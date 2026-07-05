@@ -2,7 +2,7 @@
 //! background connection driver task.
 //!
 //! Fonctions :
-//! - `connect` — ouvre une connexion PG (`NoTls`) et spawn la tâche pilotant le protocole en arrière-plan.
+//! - fn `connect` — ouvre une connexion PG (`NoTls`) et spawn la tâche pilotant le protocole en arrière-plan.
 
 use tokio_postgres::{Client, NoTls};
 

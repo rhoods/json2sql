@@ -6,24 +6,33 @@
 //! stay within `PostgreSQL`'s 63-byte `NAMEDATALEN` limit.
 //!
 //! Fonctions :
-//! - `ColumnNameRegistry::new`, `::register`, `::build`, `::resolve`, `::collisions` — collecte les
-//!   noms de colonnes d'une table, détecte les collisions (suffixe hash) et résout le nom final.
-//! - `NamingRegistry::new` — crée le registre de noms de table.
-//! - `NamingRegistry::table_name`, `::table_name_from_dot_key` — calculent (ou lisent du cache) le
-//!   nom de table PG pour un chemin ; la variante `_from_dot_key` évite une allocation `join()`.
-//! - `NamingRegistry::table_name_lookup`, `::table_name_lookup_from_dot_key` — lecture seule après
-//!   pré-enregistrement (thread-safe, utilisée en phase parallèle).
-//! - `NamingRegistry::column_name` — nom de colonne PG sûr pour un champ JSON.
-//! - `NamingRegistry::ensure_unique` — résout les collisions de noms de table (suffixe hash déterministe).
-//! - `NamingRegistry::hash_suffixed_name` — construit un nom avec suffixe hash (repli compteur si collision).
-//! - `NamingRegistry::truncated_names` — noms tronqués à 63 octets (pour les warnings).
-//! - `sanitize_identifier` — dispatch ASCII/Unicode ; `sanitize_ascii`, `sanitize_unicode` — sanitisation
-//!   (minuscules, caractères non alphanumériques → `_`) ; `finalize_sanitized` — trim + préfixe `c_`
-//!   si commence par un chiffre.
-//! - `truncate_to_limit`, `truncate_to_pg_limit` — tronquent un identifiant avec suffixe hash.
-//! - `truncate_table_name` — tronque un nom de table en dépiautant les segments de chemin avant repli hash.
-//! - `floor_char_boundary` — tronque au dernier caractère UTF-8 valide.
-//! - `short_hash` — hash FNV-1a 64 bits, 7 caractères hex (stable entre versions).
+//! - struct `TruncatedName` — nom de table tronqué pour tenir dans la limite 63 octets `PostgreSQL`.
+//! - struct `ColumnCollision` — collision de noms de colonnes : plusieurs champs JSON → même identifiant SQL.
+//! - struct `ColumnNameRegistry` — registre par table pour la détection/résolution de collisions de colonnes.
+//! - fn `ColumnNameRegistry::new` — construit un registre vide.
+//! - fn `ColumnNameRegistry::register` — enregistre un nom de champ JSON original.
+//! - fn `ColumnNameRegistry::build` — détecte les collisions et calcule les noms résolus.
+//! - fn `ColumnNameRegistry::resolve` — retourne le nom de colonne `PostgreSQL` résolu pour un champ.
+//! - fn `ColumnNameRegistry::collisions` — retourne les collisions détectées.
+//! - struct `NamingRegistry` — génère des identifiants `PostgreSQL` sûrs, assure l'unicité par suffixe hash.
+//! - fn `NamingRegistry::new` — crée le registre de noms de table.
+//! - fn `NamingRegistry::table_name` — calcule (ou lit du cache) le nom de table PG pour un chemin.
+//! - fn `NamingRegistry::table_name_from_dot_key` — variante qui évite une allocation `join()`.
+//! - fn `NamingRegistry::table_name_lookup` — lecture seule après pré-enregistrement.
+//! - fn `NamingRegistry::table_name_lookup_from_dot_key` — lecture seule (thread-safe, phase parallèle).
+//! - fn `NamingRegistry::column_name` — nom de colonne PG sûr pour un champ JSON.
+//! - fn `NamingRegistry::ensure_unique` — résout les collisions de noms de table (suffixe hash déterministe).
+//! - fn `NamingRegistry::hash_suffixed_name` — construit un nom avec suffixe hash (repli compteur si collision).
+//! - fn `NamingRegistry::truncated_names` — noms tronqués à 63 octets (pour les warnings).
+//! - fn `sanitize_ascii` — sanitisation rapide pour entrée tout-ASCII (minuscules, `_` pour non-alphanumérique).
+//! - fn `sanitize_unicode` — sanitisation pour entrée non-ASCII (même règles, chemin Unicode).
+//! - fn `sanitize_identifier` — dispatch vers `sanitize_ascii`/`sanitize_unicode` selon le contenu.
+//! - fn `finalize_sanitized` — trim + préfixe `c_` si le résultat commence par un chiffre.
+//! - fn `truncate_to_limit` — tronque un identifiant avec suffixe hash à une limite donnée.
+//! - fn `truncate_to_pg_limit` — tronque un identifiant à la limite `PostgreSQL` (63 octets).
+//! - fn `floor_char_boundary` — tronque au dernier caractère UTF-8 valide.
+//! - fn `truncate_table_name` — tronque un nom de table en dépiautant les segments de chemin avant repli hash.
+//! - fn `short_hash` — hash FNV-1a 64 bits, 7 caractères hex (stable entre versions).
 
 use std::collections::HashMap;
 

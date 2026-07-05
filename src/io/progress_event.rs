@@ -2,6 +2,9 @@
 //!
 //! The sender ([`ProgressTx`]) is optional — runners emit nothing when `None` (CLI mode).
 //! Events are consumed in a Dioxus coroutine to drive UI state updates.
+//!
+//! Fonctions :
+//! - enum `ProgressEvent` — événements Pass 1/Pass 2/DDL/contraintes streamés vers l'IHM.
 
 /// Events streamed by Pass 1 and Pass 2 runners to the IHM via an unbounded channel.
 ///

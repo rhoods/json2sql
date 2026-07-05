@@ -2,16 +2,20 @@
 //! détection d'un worker déjà actif au démarrage (résumption).
 //!
 //! Fonctions :
-//! - `WorkerKillHandle::new`, `::is_some`, `::kill` — handle clonable (`Arc`) pour tuer le
-//!   subprocess (SIGKILL, idempotent) depuis n'importe quel clone (ex: `AppState`).
-//! - `SocketEventReader::new`, `::next_event` — lit une ligne NDJSON du socket et la désérialise
-//!   en `ProgressEvent` (`Ok(None)` sur EOF propre).
-//! - `spawn_worker` — lance `json2sql-worker`, envoie la config sur stdin (password via
-//!   `J2S_PG_PASSWORD`, jamais sérialisé), se connecte au socket.
-//! - `connect_with_retry` — tente la connexion au socket avec ré-essais espacés.
-//! - `is_lockfile_free` — vérifie (avisory) qu'aucun autre worker ne tient le lockfile global.
-//! - `find_active_socket` — scanne `temp_dir()` pour un socket `json2sql-*.sock` actif, supprime
-//!   les orphelins rencontrés (variante non-Unix retourne toujours `None`).
+//! - struct `WorkerHandle` — handle d'un worker lancé, avec le socket déjà splitté en lecture/écriture
+//! - struct `WorkerKillHandle` — handle clonable (`Arc`) pour tuer le subprocess (SIGKILL, idempotent) depuis n'importe quel clone (ex: `AppState`)
+//! - struct `WorkerKillInner` — état interne partagé de `WorkerKillHandle` (process sous mutex)
+//! - fn `WorkerKillHandle::fmt` — affiche "active"/"none" selon la présence d'un process
+//! - fn `WorkerKillHandle::new` — construit un handle actif à partir d'un `Child`
+//! - fn `WorkerKillHandle::is_some` — vrai si un process est associé au handle
+//! - fn `WorkerKillHandle::kill` — envoie SIGKILL au subprocess (idempotent)
+//! - struct `SocketEventReader` — lecteur asynchrone qui désérialise des `ProgressEvent` NDJSON depuis un socket Unix
+//! - fn `SocketEventReader::new` — construit le lecteur à partir de la moitié lecture du socket
+//! - fn `SocketEventReader::next_event` — lit et parse le prochain événement (`Ok(None)` sur EOF propre)
+//! - fn `spawn_worker` — lance `json2sql-worker`, envoie la config sur stdin (password via `J2S_PG_PASSWORD`, jamais sérialisé), se connecte au socket
+//! - fn `connect_with_retry` — tente la connexion au socket avec ré-essais espacés
+//! - fn `is_lockfile_free` — vérifie (avisory) qu'aucun autre worker ne tient le lockfile global
+//! - fn `find_active_socket` — scanne `temp_dir()` pour un socket `json2sql-*.sock` actif, supprime les orphelins rencontrés (variante non-Unix retourne toujours `None`)
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};

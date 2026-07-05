@@ -5,9 +5,9 @@
 //! les fonctions sont conservées prêtes à l'emploi.
 //!
 //! Fonctions :
-//! - `rss_bytes` — RSS (mémoire résidente) du processus courant, `None` si indisponible.
-//! - `total_memory_bytes` — RAM totale installée, `None` si zéro/indisponible.
-//! - `ram_pressure_exceeded` — vrai si le RSS dépasse un pourcentage donné de la RAM totale.
+//! - fn `rss_bytes` — RSS (mémoire résidente) du processus courant, `None` si indisponible.
+//! - fn `total_memory_bytes` — RAM totale installée, `None` si zéro/indisponible.
+//! - fn `ram_pressure_exceeded` — vrai si le RSS dépasse un pourcentage donné de la RAM totale.
 #![allow(dead_code)]
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};

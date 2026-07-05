@@ -1,10 +1,8 @@
 //! Pipeline d'import exécuté dans le process worker : connexion PG → DDL → Pass 2 → résultat.
 //!
 //! Fonctions :
-//! - `build_pg_url` — construit l'URL `postgres://` (composants percent-encodés, host IPv6 entre crochets).
-//! - `run_pipeline` — orchestre connexion (timeout 10s) → `create_tables_no_constraints` → Pass 2,
-//!   vérifie `cancel` entre chaque étape, relaie les `ProgressEvent` vers `ImportSummary` via un
-//!   channel, retourne un `WorkerResult` (jamais de panic).
+//! - fn `build_pg_url` — construit l'URL `postgres://` (composants percent-encodés, host IPv6 entre crochets).
+//! - fn `run_pipeline` — orchestre connexion (timeout 10s) → `create_tables_no_constraints` → Pass 2, vérifie `cancel` entre chaque étape, relaie les `ProgressEvent` vers `ImportSummary` via un channel, retourne un `WorkerResult` (jamais de panic).
 
 use std::sync::Arc;
 
