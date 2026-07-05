@@ -504,6 +504,31 @@ impl ByteScanner {
         }
     }
 
+    /// Skip whitespace and commas; return the next value's first byte, `Ok(None)` on `closer`,
+    /// or `Err` on real EOF encountered before `closer` was seen. Callers decide how to
+    /// interpret that `Err` (see issue #37 — `JsonArrayReader` and `JsonRootWrapperReader`
+    /// diverge on this point and must keep doing so).
+    fn skip_to_next_value(&mut self, closer: u8) -> Result<Option<u8>> {
+        loop {
+            match self.read_byte()? {
+                None => {
+                    return Err(J2sError::InvalidInput(
+                        "Unexpected EOF while scanning for next value".into(),
+                    ))
+                }
+                Some(b) => {
+                    if b == closer {
+                        return Ok(None);
+                    }
+                    match b {
+                        b' ' | b'\t' | b'\n' | b'\r' | b',' => {}
+                        other => return Ok(Some(other)),
+                    }
+                }
+            }
+        }
+    }
+
     /// Collect a complete JSON value starting with `first_byte` into `self.buf` (cleared first).
     fn collect_value(&mut self, first_byte: u8) -> Result<()> {
         self.buf.clear();
@@ -1263,6 +1288,36 @@ mod tests {
         let f = tmp_file(br#""a":1"#);
         let mut s = ByteScanner::open(f.path()).unwrap();
         assert!(s.collect_value(b'{').is_err());
+    }
+
+    // --- ByteScanner::skip_to_next_value tests (T2) ---
+
+    #[test]
+    fn test_byte_scanner_skip_to_next_value_returns_closer_as_none() {
+        let f = tmp_file(b"  ]");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert_eq!(s.skip_to_next_value(b']').unwrap(), None);
+    }
+
+    #[test]
+    fn test_byte_scanner_skip_to_next_value_skips_whitespace_and_commas() {
+        let f = tmp_file(b" , , 42]");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert_eq!(s.skip_to_next_value(b']').unwrap(), Some(b'4'));
+    }
+
+    #[test]
+    fn test_byte_scanner_skip_to_next_value_returns_value_first_byte() {
+        let f = tmp_file(br#"{"a":1}]"#);
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert_eq!(s.skip_to_next_value(b']').unwrap(), Some(b'{'));
+    }
+
+    #[test]
+    fn test_byte_scanner_skip_to_next_value_eof_before_closer_is_err() {
+        let f = tmp_file(b"   ");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert!(s.skip_to_next_value(b']').is_err());
     }
 
     /// next_raw() on a JSON array must return the same bytes that parse to the same value as next().
