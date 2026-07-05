@@ -5,7 +5,9 @@
 //! given, the default import pipeline runs.
 //!
 //! Fonctions :
-//! - `Cli::root_table_name` — dérive le nom de la table racine depuis `--table` ou le nom du fichier d'entrée.
+//! - enum `Commands` — sous-commandes optionnelles (variante `Inspect` : aperçu de schéma sans chargement).
+//! - struct `Cli` — struct racine `clap`, tous les flags et options de la commande.
+//! - fn `Cli::root_table_name` — dérive le nom de la table racine depuis `--table` ou le nom du fichier d'entrée.
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 

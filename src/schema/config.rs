@@ -5,25 +5,32 @@
 //! Unknown table or column names produce a hard error rather than silently doing nothing.
 //!
 //! Fonctions :
-//! - `SchemaConfig::from_file` — charge et parse le fichier TOML.
-//! - `ConfigWarning::to_message` — message lisible pour chaque variante de warning.
-//! - `apply_overrides` — point d'entrée par table : dispatch strategy/suffix_columns/types,
+//! - struct `GroupConfig` — définition d'un groupe de fusion (`SiblingCollapse` manuel).
+//! - struct `SchemaConfig` — config TOML complète (groupes de fusion + overrides par table).
+//! - fn `SchemaConfig::from_file` — charge et parse le fichier TOML.
+//! - enum `ConfigWarning` — warning non-fatal (table/colonne/type/stratégie/groupe inconnu).
+//! - fn `ConfigWarning::to_message` — message lisible pour chaque variante de warning.
+//! - struct `DeferredNormalize` — override `normalize_dynamic_keys` en attente (mutation globale).
+//! - struct `DeferredFlatten` — override `flatten` en attente (mutation globale).
+//! - fn `apply_overrides` — point d'entrée par table : dispatch strategy/`suffix_columns`/types,
 //!   reporte `normalize_dynamic_keys`/`flatten` en différé (nécessitent une mutation globale).
-//! - `apply_strategy_override` — applique la clé `strategy` (pivot/jsonb/columns/structured_pivot/
-//!   normalize_dynamic_keys/flatten).
-//! - `apply_suffix_columns_override` — applique `suffix_columns` (StructuredPivot explicite).
-//! - `apply_column_type_overrides` — applique les overrides de type par colonne.
-//! - `conflicting_strategy_override`, `has_nonempty_suffix_columns`, `toml_str` — helpers de
-//!   détection de conflit `strategy` vs `suffix_columns` (#31, `suffix_columns` gagne toujours).
-//! - `apply_group_overrides` — applique les groupes de fusion (`[group.*]`, stratégie `keyed_pivot`).
-//! - `apply_keyed_pivot_merge`, `build_merged_keyed_pivot_schema` — fusionnent N tables membres
-//!   en une seule `SiblingCollapse` (colonnes union + clé `key_id`).
-//! - `apply_overrides_complete` — enchaîne overrides + groupes + `exclude_absorbed_children`.
-//! - `apply_user_overrides` — applique les overrides IHM (`Pivot`/`Jsonb`/`Skip`) après chargement
+//! - fn `toml_str` — helper de lecture d'une clé TOML en `String`.
+//! - fn `has_nonempty_suffix_columns` — vrai si `suffix_columns` est un array TOML non vide.
+//! - fn `conflicting_strategy_override` — détecte un conflit `strategy` vs `suffix_columns`
+//!   (#31, `suffix_columns` gagne toujours).
+//! - fn `apply_strategy_override` — applique la clé `strategy` (`pivot`/`jsonb`/`columns`/`structured_pivot`/
+//!   `normalize_dynamic_keys`/`flatten`).
+//! - fn `apply_suffix_columns_override` — applique `suffix_columns` (`StructuredPivot` explicite).
+//! - fn `apply_column_type_overrides` — applique les overrides de type par colonne.
+//! - fn `apply_group_overrides` — applique les groupes de fusion (`[group.*]`, stratégie `keyed_pivot`).
+//! - fn `build_merged_keyed_pivot_schema` — construit le schéma fusionné (colonnes union + clé `key_id`).
+//! - fn `apply_keyed_pivot_merge` — fusionne N tables membres en une seule `SiblingCollapse`.
+//! - fn `apply_overrides_complete` — enchaîne overrides + groupes + `exclude_absorbed_children`.
+//! - fn `apply_user_overrides` — applique les overrides IHM (`Pivot`/`Jsonb`/`Skip`) après chargement
 //!   d'un snapshot ; `Skip` retire aussi la table `_wide` compagnon d'un `AutoSplit`.
-//! - `prime_tracker_from_pg_type` — reconstruit un `TypeTracker` représentatif depuis un `PgType`
+//! - fn `prime_tracker_from_pg_type` — reconstruit un `TypeTracker` représentatif depuis un `PgType`
 //!   déjà résolu (pour réutiliser `build_suffix_schema_from_list` après finalisation).
-//! - `parse_pg_type` — parse une chaîne de type SQL (avec alias) en `PgType`.
+//! - fn `parse_pg_type` — parse une chaîne de type SQL (avec alias) en `PgType`.
 
 use std::collections::HashMap;
 use std::path::Path;

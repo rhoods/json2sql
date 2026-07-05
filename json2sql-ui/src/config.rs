@@ -4,12 +4,13 @@
 //! Password is intentionally excluded — never written to disk.
 //!
 //! Fonctions :
-//! - `ProjectConfig::from_project` — projette `ProjectState` vers la struct sérialisable (sans password).
-//! - `ProjectConfig::apply_to` — réinjecte la config chargée dans `ProjectState` (password préservé,
-//!   noms de stratégie invalides ignorés silencieusement).
-//! - `config_path` — chemin `~/.config/json2sql/last_project.toml` (via `directories_next`).
-//! - `load` — charge et parse le TOML, `None` si absent/invalide.
-//! - `try_save` — sauvegarde best-effort (erreurs ignorées, ne doit jamais casser l'IHM).
+//! - struct `ProjectConfig` — config projet sérialisable en TOML (sans password)
+//! - fn `ProjectConfig::default` — valeurs par défaut (host localhost, port 5432, `pass2_parallel` selon CPU)
+//! - fn `ProjectConfig::from_project` — projette `ProjectState` vers la struct sérialisable (sans password)
+//! - fn `ProjectConfig::apply_to` — réinjecte la config chargée dans `ProjectState` (password préservé, noms de stratégie invalides ignorés silencieusement)
+//! - fn `config_path` — chemin `~/.config/json2sql/last_project.toml` (via `directories_next`)
+//! - fn `load` — charge et parse le TOML, `None` si absent/invalide
+//! - fn `try_save` — sauvegarde best-effort (erreurs ignorées, ne doit jamais casser l'IHM)
 
 use std::collections::HashSet;
 use std::path::PathBuf;

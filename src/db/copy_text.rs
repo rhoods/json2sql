@@ -5,9 +5,11 @@
 //! only via [`escape_copy_text`] or [`CopyEscaped::from_safe_ascii`].
 //!
 //! Fonctions :
-//! - `CopyEscaped::from_safe_ascii` — enveloppe une valeur déjà connue COPY-safe (debug_assert de garde).
-//! - `CopyEscaped::as_str` — accès à la chaîne échappée.
-//! - `escape_copy_text` — échappe `\t \n \r \\` ; `None` si la chaîne contient un octet nul (PG les rejette).
+//! - struct `CopyEscaped` — newtype garantissant que le contenu est COPY-safe.
+//! - fn `CopyEscaped::from_safe_ascii` — enveloppe une valeur déjà connue COPY-safe (`debug_assert` de garde).
+//! - fn `CopyEscaped::as_str` — accès à la chaîne échappée.
+//! - fn `CopyEscaped::as_ref` — implémente `AsRef<str>` pour `CopyEscaped`.
+//! - fn `escape_copy_text` — échappe `\t \n \r \\` ; `None` si la chaîne contient un octet nul (PG les rejette).
 
 /// A string guaranteed safe for `PostgreSQL` COPY text format.
 ///

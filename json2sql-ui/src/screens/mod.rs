@@ -3,18 +3,42 @@
 //! composant barre de progression, application des overrides utilisateur.
 //!
 //! Fonctions :
-//! - `use_elapsed_timer` — hook Dioxus : incrémente un compteur de secondes jusqu'à `is_done()`.
-//! - `build_table_rows`, `build_row`, `RowFlags::compute` — construisent le view-model de chaque
-//!   ligne (badge, connecteur d'arbre, visibilité selon filtre/warn-only) à partir des schémas.
-//! - `tree_display_order` — ordre d'affichage DFS (racines triées, enfants groupés, orphelins en fin).
-//! - `compute_last_child` — pour chaque position, vrai si dernier enfant de son parent (connecteur └─/├─).
-//! - `strategy_label`, `strategy_badge`, `user_override_badge` — libellés/classes CSS par stratégie.
-//! - `option_to_pick_result`, `parse_ext`, `pick_file`, `pick_folder`, `pick_save_file` — sélecteurs
-//!   de fichiers natifs (`rfd`), un seul dialogue actif à la fois (`PickerGuard::drop` libère le verrou).
-//! - `progress_pct`, `progress_bar_class`, `ProgressBar` — calcul de pourcentage, classe CSS
-//!   (animation indéterminée avant démarrage), composant barre de progression labellisée.
-//! - `build_effective_schemas` — applique les overrides utilisateur à une copie des schémas
-//!   (déduplique défensivement, retire aussi la table `_wide` compagnon si le parent est skip).
+//!
+//! Hook :
+//! - fn `use_elapsed_timer` — hook Dioxus : incrémente un compteur de secondes jusqu'à ce que `is_done()` retourne vrai
+//!
+//! View-model liste de tables :
+//! - struct `TableRowViewModel` — données d'affichage précalculées pour une ligne de la liste de tables
+//! - struct `TableRowsCtx` — contexte d'entrée partagé pour construire les lignes (overrides, filtres, sélection)
+//! - struct `RowFlags` — indicateurs internes (routing/absorbed/warn/badge) calculés pour une table
+//! - fn `RowFlags::compute` — calcule les indicateurs d'une table à partir du contexte
+//! - fn `build_row` — construit le view-model d'une ligne à partir d'une table et de sa position
+//! - fn `build_table_rows` — construit le view-model de toutes les lignes (ordre, filtre, visibilité)
+//! - fn `tree_display_order` — ordre d'affichage DFS (racines triées, enfants groupés, orphelins en fin)
+//! - fn `compute_last_child` — pour chaque position, vrai si dernier enfant de son parent (connecteur └─/├─)
+//!
+//! Sélecteurs de fichiers natifs (rfd) :
+//! - enum `PickResult` — résultat d'un appel au picker de fichier/dossier
+//! - fn `option_to_pick_result` — convertit un `Option<PathBuf>` rfd en `PickResult`
+//! - fn `parse_ext` — découpe un motif glob (`"*.json *.jsonl"`) en liste d'extensions rfd
+//! - struct `PickerGuard` — garde RAII : un seul dialogue actif à la fois, libère le verrou au drop
+//! - fn `PickerGuard::drop` — remet `PICKER_ACTIVE` à `false`
+//! - fn `pick_file` — ouvre le dialogue natif de sélection de fichier
+//! - fn `pick_folder` — ouvre le dialogue natif de sélection de dossier
+//! - fn `pick_save_file` — ouvre le dialogue natif de sauvegarde de fichier
+//!
+//! Stratégies :
+//! - fn `strategy_label` — libellé lisible d'une `InferredStrategy`
+//! - fn `strategy_badge` — classe CSS + libellé court d'une `InferredStrategy`
+//! - fn `user_override_badge` — classe CSS + libellé court d'un `UserOverride`
+//!
+//! Progress :
+//! - fn `progress_pct` — calcule un pourcentage de progression (`done`/`total`, borné à 100)
+//! - fn `progress_bar_class` — classe CSS de la barre de progression (animation indéterminée avant démarrage)
+//! - fn `ProgressBar` — composant : barre de progression labellisée (pourcentage, phase, légende)
+//!
+//! Overrides :
+//! - fn `build_effective_schemas` — applique les overrides utilisateur à une copie des schémas (déduplique défensivement, retire aussi la table `_wide` compagnon si le parent est skip)
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 pub mod setup;
 pub mod analysis;

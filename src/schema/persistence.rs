@@ -5,10 +5,11 @@
 //! backwards-incompatible way — callers must discard and regenerate old snapshots.
 //!
 //! Fonctions :
-//! - `write_snapshot` — sérialise et écrit sur disque (écriture atomique via `.tmp` + rename si demandé).
-//! - `save` — construit un `SchemaSnapshot` sans overrides et l'écrit (non atomique).
-//! - `save_with_overrides` — idem, avec les overrides de stratégie utilisateur (écriture atomique).
-//! - `load` — lit et désérialise un snapshot ; rejette les versions incompatibles (v1) ; migre
+//! - struct `SchemaSnapshot` — snapshot sérialisable d'un résultat Pass 1 (schémas, stats, overrides).
+//! - fn `write_snapshot` — sérialise et écrit sur disque (écriture atomique via `.tmp` + rename si demandé).
+//! - fn `save` — construit un `SchemaSnapshot` sans overrides et l'écrit (non atomique).
+//! - fn `save_with_overrides` — idem, avec les overrides de stratégie utilisateur (écriture atomique).
+//! - fn `load` — lit et désérialise un snapshot ; rejette les versions incompatibles (v1) ; migre
 //!   les `strategy_overrides` racine legacy vers `ui_override` par table (sans écraser l'existant).
 
 use std::path::Path;

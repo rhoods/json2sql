@@ -4,10 +4,12 @@
 //! carries progress to the UI instead.
 //!
 //! Fonctions :
-//! - `ProgressTracker::new` — crée les deux barres (bytes + rows) avec leurs templates `indicatif`.
-//! - `ProgressTracker::inc_bytes`, `ProgressTracker::set_bytes` — avancent/positionnent la barre bytes.
-//! - `ProgressTracker::inc_rows` — avance la barre rows.
-//! - `ProgressTracker::finish` — marque les deux barres comme terminées.
+//! - struct `ProgressTracker` — les deux barres `indicatif` (bytes lus, lignes traitées).
+//! - fn `ProgressTracker::new` — crée les deux barres (bytes + rows) avec leurs templates `indicatif`.
+//! - fn `ProgressTracker::inc_bytes` — avance la barre bytes d'un incrément.
+//! - fn `ProgressTracker::set_bytes` — positionne la barre bytes à une valeur absolue.
+//! - fn `ProgressTracker::inc_rows` — avance la barre rows.
+//! - fn `ProgressTracker::finish` — marque les deux barres comme terminées.
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 

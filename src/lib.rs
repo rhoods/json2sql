@@ -1,4 +1,4 @@
-//! json2sql — stream a JSON file into a normalized PostgreSQL schema.
+//! json2sql — stream a JSON file into a normalized `PostgreSQL` schema.
 //!
 //! Two-pass pipeline: Pass 1 infers a relational schema from the JSON structure;
 //! Pass 2 loads data via `COPY FROM STDIN`. The `schema` module owns the domain model;

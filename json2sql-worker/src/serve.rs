@@ -2,11 +2,9 @@
 //! chaque connexion client, et traduit la commande `{"cmd":"cancel"}` en annulation.
 //!
 //! Fonctions :
-//! - `serve_connections` — boucle d'acceptation jusqu'à `cancel` ; une tâche par connexion.
-//! - `handle_connection` — envoie le snapshot puis les deltas (attend `Notify` avant chaque
-//!   relecture) ; lit les commandes clientes en parallèle ; ferme après `Pass2Done`/annulation
-//!   (avec un drain final pour ne pas perdre le dernier batch en cas de course cancel/notify).
-//! - `write_line` — écrit une ligne NDJSON sur le socket.
+//! - fn `serve_connections` — boucle d'acceptation jusqu'à `cancel` ; une tâche par connexion.
+//! - fn `handle_connection` — envoie le snapshot puis les deltas (attend `Notify` avant chaque relecture) ; lit les commandes clientes en parallèle ; ferme après `Pass2Done`/annulation (avec un drain final pour ne pas perdre le dernier batch en cas de course cancel/notify).
+//! - fn `write_line` — écrit une ligne NDJSON sur le socket.
 
 use std::sync::Arc;
 

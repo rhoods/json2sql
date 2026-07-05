@@ -2,9 +2,12 @@
 //! config envoyée en JSON sur stdin, commandes sur socket Unix, résultat final sur disque.
 //!
 //! Fonctions :
-//! - `WorkerConfig::into_pass2_config` — projette la config IPC vers `Pass2Config` (le mot de passe PG est résolu séparément, via `J2S_PG_PASSWORD`).
-//! - `new_socket_path` — génère un chemin de socket Unix temporaire unique (UUID v7).
-//! - `lockfile_path` — chemin du lockfile empêchant plusieurs workers concurrents.
+//! - struct `WorkerConfig` — config envoyée par l'IHM au worker via stdin (JSON, sans mot de passe PG).
+//! - fn `WorkerConfig::into_pass2_config` — projette la config IPC vers `Pass2Config` (le mot de passe PG est résolu séparément, via `J2S_PG_PASSWORD`).
+//! - struct `WorkerCommand` — commande envoyée par l'IHM au worker sur le socket (une ligne JSON).
+//! - struct `WorkerResult` — résultat final écrit atomiquement dans `result_file` avant fermeture du socket.
+//! - fn `new_socket_path` — génère un chemin de socket Unix temporaire unique (UUID v7).
+//! - fn `lockfile_path` — chemin du lockfile empêchant plusieurs workers concurrents.
 
 use std::path::PathBuf;
 

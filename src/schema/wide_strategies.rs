@@ -11,19 +11,21 @@
 //! stratégie donnée. `finalizer.rs` décide *quelle* stratégie appliquer à chaque table.
 //!
 //! Fonctions :
-//! - `suggest_wide_strategy` — Pivot si les valeurs sont homogènes en type, sinon Jsonb.
-//! - `apply_wide_strategy_columns` — dispatch principal : reconstruit les colonnes selon la
-//!   stratégie (Pivot/Jsonb/StructuredPivot appliqués ici ; les autres le sont ailleurs).
-//! - `apply_pivot_columns` — colonnes `(key, value)` avec type élargi.
-//! - `apply_structured_pivot_columns` — colonnes `(name, value, <suffixes>)`.
-//! - `build_union_columns` — union des colonnes de données de plusieurs tables enfants (types élargis).
-//! - `classify_key_shape` — classe un ensemble de clés (Numeric/IsoLang/Mixed/Slug).
-//! - `apply_normalize_dynamic_keys` — fusionne les enfants Object en une table normalisée
-//!   `id_column` + colonnes union ; `find_object_child_indices`, `rebuild_normalize_columns` —
-//!   helpers (résolution des enfants, reconstruction des colonnes).
-//! - `apply_flatten` — inline les colonnes scalaires d'un enfant dans le parent (avec préfixe) ;
-//!   `resolve_child_info`, `collect_flatten_info` — résolvent enfant/parent et les colonnes à inliner.
-//! - `apply_jsonb_flatten` — inline un enfant comme colonne JSONB unique sur le parent.
+//! - fn `suggest_wide_strategy` — Pivot si les valeurs sont homogènes en type, sinon Jsonb.
+//! - fn `apply_wide_strategy_columns` — dispatch principal : reconstruit les colonnes selon la
+//!   stratégie (Pivot/Jsonb/`StructuredPivot` appliqués ici ; les autres le sont ailleurs).
+//! - fn `apply_pivot_columns` — colonnes `(key, value)` avec type élargi.
+//! - fn `apply_structured_pivot_columns` — colonnes `(name, value, <suffixes>)`.
+//! - fn `build_union_columns` — union des colonnes de données de plusieurs tables enfants (types élargis).
+//! - fn `classify_key_shape` — classe un ensemble de clés (Numeric/`IsoLang`/Mixed/Slug).
+//! - fn `find_object_child_indices` — résout les indices des enfants Object d'une table.
+//! - fn `rebuild_normalize_columns` — reconstruit les colonnes après normalisation des clés dynamiques.
+//! - fn `apply_normalize_dynamic_keys` — fusionne les enfants Object en une table normalisée
+//!   `id_column` + colonnes union.
+//! - fn `resolve_child_info` — résout enfant/parent pour `apply_flatten`.
+//! - fn `collect_flatten_info` — résout les colonnes à inliner pour `apply_flatten`.
+//! - fn `apply_flatten` — inline les colonnes scalaires d'un enfant dans le parent (avec préfixe).
+//! - fn `apply_jsonb_flatten` — inline un enfant comme colonne JSONB unique sur le parent.
 
 use std::sync::Arc;
 

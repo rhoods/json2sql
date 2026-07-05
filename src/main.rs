@@ -4,10 +4,10 @@
 //! to [`pipeline::run_pipeline`]. The `inspect` subcommand is handled inline here.
 //!
 //! Fonctions :
-//! - `main` — parse la CLI, dispatch vers `inspect` ou vers le pipeline d'import complet.
-//! - `run_inspect` — exécute Pass 1 seule (sans stratégies ni overrides) et affiche un résumé.
-//! - `write_inspect_outputs` — écrit le schéma inféré (stdout ou fichier) et le résumé d'anomalies.
-//! - `write_sample_file` — écrit les objets JSON échantillonnés en NDJSON.
+//! - fn `main` — parse la CLI, dispatch vers `inspect` ou vers le pipeline d'import complet.
+//! - fn `run_inspect` — exécute Pass 1 seule (sans stratégies ni overrides) et affiche un résumé.
+//! - fn `write_inspect_outputs` — écrit le schéma inféré (stdout ou fichier) et le résumé d'anomalies.
+//! - fn `write_sample_file` — écrit les objets JSON échantillonnés en NDJSON.
 #![forbid(unsafe_code)]
 #![deny(dead_code)]
 #![deny(clippy::all)]

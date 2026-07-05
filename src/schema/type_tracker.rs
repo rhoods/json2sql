@@ -8,23 +8,31 @@
 //! with every observed value. The resolved type is stored as [`PgType`] in a `ColumnSchema`.
 //!
 //! Fonctions :
-//! - `PgType::as_sql` — représentation SQL du type (ex: `VARCHAR(60)`, `INTEGER[]`).
-//! - `TypeTracker::new` — crée un tracker vide pour un seuil TEXT/VARCHAR donné.
-//! - `TypeTracker::observe` — enregistre une valeur JSON (hot path, appelé par ligne/champ).
-//! - `TypeTracker::merge` — fusionne les observations d'un autre tracker (Pass 1 parallèle).
-//! - `TypeTracker::dominant_type` — type non-null le plus fréquent.
-//! - `TypeTracker::anomaly_rate` — fraction de valeurs différant du type dominant.
-//! - `TypeTracker::is_not_null`, `TypeTracker::is_object_field`, `TypeTracker::is_array_field`,
-//!   `TypeTracker::has_anomalies` — prédicats dérivés des compteurs de types.
-//! - `TypeTracker::string_pg_type` — résout `VarChar`/`Text` en tenant compte de la longueur
+//! - enum `InferredType` — tous les types inférables depuis une valeur JSON (indexable, `repr(usize)`).
+//! - enum `PgType` — type `PostgreSQL` résolu pour une colonne.
+//! - fn `PgType::as_sql` — représentation SQL du type (ex: `VARCHAR(60)`, `INTEGER[]`).
+//! - struct `TypeTracker` — suit tous les types et métadonnées observés pour un champ JSON.
+//! - fn `TypeTracker::new` — crée un tracker vide pour un seuil TEXT/VARCHAR donné.
+//! - fn `TypeTracker::observe` — enregistre une valeur JSON (hot path, appelé par ligne/champ).
+//! - fn `TypeTracker::merge` — fusionne les observations d'un autre tracker (Pass 1 parallèle).
+//! - fn `TypeTracker::dominant_type` — type non-null le plus fréquent.
+//! - fn `TypeTracker::anomaly_rate` — fraction de valeurs différant du type dominant.
+//! - fn `TypeTracker::is_not_null` — vrai si aucune valeur nulle observée.
+//! - fn `TypeTracker::string_pg_type` — résout `VarChar`/`Text` en tenant compte de la longueur
 //!   des représentations numériques si le champ est mixte string+nombre.
-//! - `TypeTracker::to_pg_type` — résout le type PG final (dispatch + élargissement).
-//! - `TypeTracker::iter_types` — itère les (type, compte) non-nuls observés.
-//! - `TypeTracker::active_type_count` — nombre de types non-Null distincts observés.
-//! - `widen_pg_types` — type le plus large entre deux `PgType` (Text > `DoublePrecision` > `BigInt`).
-//! - `infer_number_type`, `infer_string_type` — classifient un nombre/une chaîne JSON en `InferredType`.
-//! - `is_uuid`, `is_timestamp`, `is_date_bytes`, `is_digit` — détecteurs de format bas niveau
-//!   pour `infer_string_type` (UUID/date/timestamp par longueur puis motif).
+//! - fn `TypeTracker::to_pg_type` — résout le type PG final (dispatch + élargissement).
+//! - fn `TypeTracker::is_object_field` — vrai si le champ ne contient que des objets.
+//! - fn `TypeTracker::is_array_field` — vrai si le champ ne contient que des tableaux.
+//! - fn `TypeTracker::has_anomalies` — vrai si plusieurs types distincts ont été observés.
+//! - fn `TypeTracker::iter_types` — itère les (type, compte) non-nuls observés.
+//! - fn `TypeTracker::active_type_count` — nombre de types non-Null distincts observés.
+//! - fn `widen_pg_types` — type le plus large entre deux `PgType` (Text > `DoublePrecision` > `BigInt`).
+//! - fn `infer_number_type` — classifie un nombre JSON en `InferredType`.
+//! - fn `infer_string_type` — classifie une chaîne JSON en `InferredType`.
+//! - fn `is_uuid` — détecteur de format UUID (longueur puis motif).
+//! - fn `is_timestamp` — détecteur de format timestamp.
+//! - fn `is_date_bytes` — détecteur de format date.
+//! - fn `is_digit` — vrai si l'octet est un chiffre ASCII.
 
 use serde_json::Value;
 

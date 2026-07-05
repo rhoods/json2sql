@@ -1,29 +1,55 @@
-//! Pass 2 — data insertion into PostgreSQL via a diskless pipeline.
+//! Pass 2 — data insertion into `PostgreSQL` via a diskless pipeline.
 //!
 //! N workers stream the JSON round-robin into local `MemSink` buffers. A concurrent
-//! flusher task drains those buffers to PostgreSQL via `COPY FROM STDIN`, eliminating
+//! flusher task drains those buffers to `PostgreSQL` via `COPY FROM STDIN`, eliminating
 //! the need for temp files. The main entry point is `run`.
 //!
-//! Fonctions (par section) :
-//! - Orchestration : `run` — pipeline complet (dispatch → workers → flusher → contraintes) ;
-//!   `build_pass2_result` — assemble le résultat final ; `find_root_schema` — résout le schéma racine ;
-//!   `schema_topo_order` — ordre topologique parents→enfants ; `build_copy_sql_map` — construit les
-//!   requêtes COPY par table ; `validate_run_params`, `validate_watermarks` — valident les paramètres
-//!   d'entrée ; `effective_worker_threshold` — répartit le seuil de flush entre workers.
-//! - Flusher (draine les buffers vers PG) : `run_flusher` — boucle principale ; `flush_table_to_pg` —
-//!   flush une table ; `find_all_nonempty_buffers`, `topological_drain_order`, `find_largest_buffer` —
-//!   sélection des buffers à drainer ; `ram_used_ratio` — ratio RAM utilisée ;
-//!   `try_set_synchronous_commit_off` — désactive synchronous_commit (best-effort) ;
-//!   `format_flusher_pause_log`, `format_flusher_resume_log`, `format_copy_start_log`,
-//!   `format_copy_done_log` — formatage des logs.
-//! - Worker (ingestion diskless) : `run_worker_diskless` — boucle d'un worker ;
-//!   `process_worker_item_diskless` — traite un item JSON ; `collect_above_threshold` — sinks prêts
-//!   à flush ; `parse_json_object` — parse un objet JSON racine.
-//! - Dispatch & progression : `dispatch_loop` — répartit le flux JSON vers les workers ;
-//!   `update_row_progress`, `finalize_dispatch` — mise à jour de la progress bar ;
-//!   `spawn_anomaly_writer` — tâche d'écriture des anomalies ; `preflight_warn_nonempty` — avertit
-//!   si des tables racines contiennent déjà des lignes ; `emit_completion_events`,
-//!   `log_constraint_warnings` — événements et logs de fin de run.
+//! Fonctions :
+//! - struct `Pass2Timing` — répartition du temps d'exécution entre streaming et phase COPY.
+//! - fn `Pass2Timing::total_ms` — somme `streaming_ms` + `copy_ms`.
+//! - struct `Pass2Result` — résumé du résultat de Pass 2 (lignes par table, anomalies, warnings, timing).
+//!
+//! Flusher (draine les buffers vers PG) :
+//! - fn `find_all_nonempty_buffers` — sélectionne tous les buffers non vides à drainer.
+//! - fn `topological_drain_order` — ordonne les buffers à drainer selon l'ordre topologique.
+//! - fn `ram_used_ratio` — ratio RAM utilisée / RAM totale.
+//! - fn `format_flusher_pause_log` — formate le log de pause du flusher (pression RAM haute).
+//! - fn `format_flusher_resume_log` — formate le log de reprise du flusher (pression RAM basse).
+//! - fn `format_copy_start_log` — formate le log de début de COPY pour une table.
+//! - fn `format_copy_done_log` — formate le log de fin de COPY pour une table.
+//! - fn `find_largest_buffer` — sélectionne le plus gros buffer non vide.
+//! - fn `flush_table_to_pg` — flush une table vers `PostgreSQL` via COPY.
+//! - fn `run_flusher` — boucle principale : draine les buffers workers vers PG selon la pression RAM.
+//!
+//! Config & validation :
+//! - struct `Pass2Config` — tous les paramètres contrôlant un run de Pass 2.
+//! - fn `effective_worker_threshold` — répartit le seuil de flush entre workers.
+//! - fn `validate_run_params` — valide les paramètres d'entrée (ex. parallel > 0).
+//! - fn `validate_watermarks` — valide les seuils RAM haut/bas et le seuil de flush.
+//! - fn `try_set_synchronous_commit_off` — désactive `synchronous_commit` (best-effort).
+//!
+//! Worker (ingestion diskless) :
+//! - fn `collect_above_threshold` — sinks prêts à flush (au-dessus du seuil par worker).
+//! - fn `process_worker_item_diskless` — traite un item JSON dans un worker.
+//! - struct `WorkerDisklessConfig` — configuration passée à `run_worker_diskless`.
+//! - fn `run_worker_diskless` — boucle d'un worker (parse, insert, flush si seuil dépassé).
+//! - fn `parse_json_object` — parse un objet JSON racine.
+//!
+//! Dispatch & progression :
+//! - fn `spawn_anomaly_writer` — tâche d'écriture des anomalies.
+//! - fn `preflight_warn_nonempty` — avertit si des tables racines contiennent déjà des lignes.
+//! - fn `finalize_dispatch` — mise à jour finale de la progress bar en fin de dispatch.
+//! - fn `emit_completion_events` — envoie les événements de fin de run.
+//! - fn `log_constraint_warnings` — logue les warnings de contraintes FK non appliquées.
+//! - fn `update_row_progress` — mise à jour périodique de la progress bar.
+//! - fn `dispatch_loop` — répartit le flux JSON vers les workers.
+//!
+//! Orchestration :
+//! - fn `find_root_schema` — résout le schéma racine.
+//! - fn `schema_topo_order` — ordre topologique parents→enfants.
+//! - fn `build_copy_sql_map` — construit les requêtes COPY par table.
+//! - fn `run` — pipeline complet (dispatch → workers → flusher → contraintes).
+//! - fn `build_pass2_result` — assemble le résultat final.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

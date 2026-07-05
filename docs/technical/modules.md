@@ -6,13 +6,28 @@ Rôle rapide de chaque fichier et dossier dans `src/`. Pour le détail des types
 
 Chaque fichier `.rs` de `src/`, `json2sql-worker/src/` et `json2sql-ui/src/` porte un header `//!` avec :
 1. La/les responsabilité(s) réelles du fichier (prose courte).
-2. Une liste `Fonctions :` couvrant **toutes** les fonctions du fichier (publiques et privées, hors `#[cfg(test)]`), une entrée par fonction avec sa responsabilité en quelques mots — plus court que le `///` existant de la fonction, pas un résumé complet.
+2. Un bloc `Fonctions :` couvrant **toutes** les fonctions, méthodes, structs et enums du fichier (publics et privés, hors `#[cfg(test)]`), au format strict tagué ci-dessous — un vérificateur CI (issue #33) s'appuie dessus, le format doit rester trivialement parsable ligne à ligne.
+
+**Format (une entrée par ligne) :**
+```
+//! Fonctions :
+//! - fn `{nom}` — description libre
+//! - fn `{Type}::{méthode}` — description libre
+//! - struct `{Nom}` — description libre
+//! - enum `{Nom}` — description libre
+```
 
 Règles :
-- Méthodes d'`impl` : préfixer par le type (`Type::method`), pas juste le nom, pour lever l'ambiguïté entre méthodes homonymes de types différents dans le même fichier.
-- Noms de fonctions en simple `` `code span` ``, jamais en lien intra-doc `` [`nom`] `` — un lien vers un item privé casse sous `cargo doc` et déclenche les lints deny du crate `json2sql-ui`. Les liens `` [`Type`] `` restent réservés aux types publics.
+- **Une ligne = une entrée.** Jamais de regroupement virgule/point-virgule, jamais deux entrées sur la même ligne.
+- Le nom qualifié est **entre backticks**, juste après le tag (`fn`/`struct`/`enum`) — sans backticks, `cargo clippy` sous `#![deny(clippy::pedantic)]` (crate `json2sql-ui`) échoue sur `doc_markdown` (identifiant en case mixte hors code span). Pas de décoration d'argument dans le nom (ex. `(&UserOverride)`) : ce détail va dans la description libre après le `—`.
+- Méthodes d'`impl` : toujours `fn `{Type}::{méthode}``, jamais juste le nom, pour lever l'ambiguïté entre méthodes homonymes de types différents. `impl Trait for Type` → `Type` est toujours le type receveur, jamais le trait (ex. `impl std::fmt::Display for KeyShape` → `` fn `KeyShape::fmt` ``). Self-type générique recopié littéralement (ex. `impl RowSink for Arc<Mutex<MemSink>>` → `` fn `Arc<Mutex<MemSink>>::write_row` ``).
+- Les libellés de section (ex. `Orchestration :`, `Flusher :` sur les gros fichiers comme `pass2/runner.rs`) restent autorisés comme lignes libres **non taguées** entre le marqueur `Fonctions :` et les entrées — le parseur n'agit que sur les lignes commençant par `- fn `/`- struct `/`- enum `, tout le reste est ignoré.
 - Fichier à un seul point d'entrée (ex. composant Dioxus avec logique en closures internes) : lister honnêtement cette unique fonction, ne pas forcer une structure absente.
+- Fonctions/structs/enums imbriqués dans le corps d'une autre fonction (helper local, type ad-hoc pour une sérialisation ponctuelle) ne sont **pas** des définitions à documenter — même règle que les closures. Une signature de méthode de `trait` sans corps (`trait X { fn y(...); }`) non plus : ce sont les `impl X for Type` qui portent l'implémentation réelle à documenter.
+- Fichier sans fonction/struct/enum à documenter (ex. `mod.rs` ne déclarant que des sous-modules) : pas de bloc `Fonctions :` du tout.
 - Un fichier est candidat à un refactor futur si sa responsabilité ne peut pas s'exprimer en un seul domaine cohérent (2+ domaines non reliés par un rapport direct de cause à effet) — voir la liste de candidats dans l'issue de suivi.
+
+**Vérification :** `cargo test --test header_consistency` (issue #33) compare chaque header au code réel dans les deux sens et échoue avec la liste complète des incohérences si le header dérive. Ce test tourne automatiquement via `make test`/`make check` — aucune configuration CI séparée n'est nécessaire.
 
 ---
 
