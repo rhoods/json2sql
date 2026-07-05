@@ -3,6 +3,15 @@
 //! `MemSink` accumulates COPY-format rows in a `BytesMut` buffer and hands them
 //! to `flush_mem_sink_to_pg` for bulk-loading via `COPY FROM STDIN`.
 //! `RowBuilder` constructs one tab-separated COPY text row field by field.
+//!
+//! Fonctions :
+//! - `RowBuilder::new` — initialise un buffer de ligne COPY vide.
+//! - `RowBuilder::push_value`, `RowBuilder::push_null`, `RowBuilder::push_uuid` — ajoutent
+//!   un champ (valeur échappée, NULL, ou UUID sans allocation) séparé par une tabulation.
+//! - `RowBuilder::finish` — termine la ligne (ajoute le saut de ligne) et retourne le buffer.
+//! - `MemSink::new` — construit le sink et pré-génère la requête `COPY ... FROM STDIN`.
+//! - `MemSink::write_row` — accumule une ligne déjà formatée dans le buffer en mémoire.
+//! - `flush_mem_sink_to_pg` — envoie le buffer à PostgreSQL via COPY, par chunks de 4 MiB.
 
 use bytes::{Bytes, BytesMut};
 use futures_util::SinkExt;

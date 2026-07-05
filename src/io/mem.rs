@@ -3,6 +3,11 @@
 //! Utilitaires prévus pour déclencher un flush anticipé des sinks quand la RAM est saturée
 //! (risque d'OOM sur les très grands fichiers). Non encore câblés dans les runners de prod —
 //! les fonctions sont conservées prêtes à l'emploi.
+//!
+//! Fonctions :
+//! - `rss_bytes` — RSS (mémoire résidente) du processus courant, `None` si indisponible.
+//! - `total_memory_bytes` — RAM totale installée, `None` si zéro/indisponible.
+//! - `ram_pressure_exceeded` — vrai si le RSS dépasse un pourcentage donné de la RAM totale.
 #![allow(dead_code)]
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};

@@ -7,6 +7,22 @@
 //! Frontière avec `traversal.rs` : `insert.rs` gère l'écriture d'une ligne complète
 //! dans un contexte `InsertCtx`. `traversal.rs` gère la navigation dans les sous-arbres
 //! JSON (pivot, keyed pivot, routing entre tables).
+//!
+//! Fonctions :
+//! - `insert_object` — point d'entrée : écrit la ligne (colonnes + générées), gère le cas racine
+//!   JSONB, délègue AutoSplit et récurse dans les enfants.
+//! - `write_root_jsonb` — cas spécial racine en stratégie Jsonb : écrit le blob JSON puis recurse.
+//! - `insert_child_object` — dispatch un objet enfant vers la fonction d'insertion selon son
+//!   `InferredStrategy` (Pivot, Jsonb, StructuredPivot, SiblingCollapse(Multi), NormalizeDynamicKeys,
+//!   ou insertion standard récursive).
+//! - `recurse_children` — parcourt les champs de l'objet, route chaque enfant (objet/array) vers
+//!   `insert_child_object`/`insert_array`.
+//! - `write_autosplit_rows` — écrit les paires clé/valeur de fréquence moyenne en lignes EAV
+//!   dans la table wide compagnon (stratégie `AutoSplit`).
+//! - `push_data_col` — résout et coerce la valeur d'une colonne de données (flatten, JSONB, coercition).
+//! - `push_generated_col_insert` — écrit une colonne générée (`j2s_id`, `j2s_parent_id`, `j2s_order`).
+//! - `push_jsonb_col` — sérialise une valeur JSON brute en colonne JSONB.
+//! - `push_wide_value` — coerce une valeur pour la colonne `value` de la table EAV wide.
 
 use std::collections::HashMap;
 

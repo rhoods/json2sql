@@ -2,6 +2,12 @@
 //!
 //! Not used when the IHM channel is active — in that mode, [`crate::io::progress_event`]
 //! carries progress to the UI instead.
+//!
+//! Fonctions :
+//! - `ProgressTracker::new` — crée les deux barres (bytes + rows) avec leurs templates `indicatif`.
+//! - `ProgressTracker::inc_bytes`, `ProgressTracker::set_bytes` — avancent/positionnent la barre bytes.
+//! - `ProgressTracker::inc_rows` — avance la barre rows.
+//! - `ProgressTracker::finish` — marque les deux barres comme terminées.
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 

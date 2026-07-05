@@ -1,3 +1,9 @@
+//! Sink `RowSink` de test — capture les lignes écrites en mémoire pour assertions,
+//! sans passer par `MemSink`/PostgreSQL.
+//!
+//! Fonctions :
+//! - `CaptureSink::write_row` (`impl RowSink`) — pousse la ligne dans le `Vec` interne.
+
 use crate::error::Result;
 use crate::pass2::sink::RowSink;
 

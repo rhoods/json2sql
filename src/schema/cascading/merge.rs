@@ -2,6 +2,14 @@
 //!
 //! Expose `build_sibling_collapse_from_siblings` : construit un `InferredStrategy::SiblingCollapse`
 //! ou `SiblingCollapseMulti` à partir d'une sélection utilisateur de tables sœurs.
+//!
+//! Fonctions :
+//! - `build_sibling_collapse_from_siblings` — point d'entrée : valide, détecte les formes de clé,
+//!   choisit SiblingCollapse (groupe unique) ou SiblingCollapseMulti (clés mixtes num/texte).
+//! - `validate_merge_inputs` — vérifie préconditions (≥2 tables, parent commun, pas de table de routing).
+//! - `build_mixed_keyed_pivot_strategy` — construit les deux `SiblingGroup` (numérique/texte) pour
+//!   le cas de clés mixtes.
+//! - `extract_key_suffixes` — dérive la clé de chaque table en retirant le préfixe commun des noms.
 
 use super::super::table_schema::{SiblingGroup, SiblingSchema, TableSchema, InferredStrategy};
 use super::super::wide_strategies::classify_key_shape;

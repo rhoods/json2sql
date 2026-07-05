@@ -4,6 +4,12 @@
 //!   left  300px (collapsible) — table list with strategy badges
 //!   center fluid              — generated DDL with syntax highlighting
 //!   right 300px (collapsible) — selected table summary + strategy diff
+//!
+//! Fonctions :
+//! - `PreviewScreen` — composant : applique les overrides, génère le DDL, affiche liste + DDL
+//!   surligné + résumé de la table sélectionnée.
+//! - `DdlLine` — composant : une ligne de DDL avec coloration syntaxique (tokens).
+//! - `tokenize_ddl` — découpe une ligne SQL en tokens (mots-clés, types, ponctuation) pour `DdlLine`.
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 
 use dioxus::prelude::*;

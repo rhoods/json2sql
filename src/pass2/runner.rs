@@ -1,8 +1,29 @@
 //! Pass 2 — data insertion into PostgreSQL via a diskless pipeline.
 //!
 //! N workers stream the JSON round-robin into local `MemSink` buffers. A concurrent
-//! `run_flusher` task drains those buffers to PostgreSQL via `COPY FROM STDIN`, eliminating
-//! the need for temp files. The main entry point is [`run`].
+//! flusher task drains those buffers to PostgreSQL via `COPY FROM STDIN`, eliminating
+//! the need for temp files. The main entry point is `run`.
+//!
+//! Fonctions (par section) :
+//! - Orchestration : `run` — pipeline complet (dispatch → workers → flusher → contraintes) ;
+//!   `build_pass2_result` — assemble le résultat final ; `find_root_schema` — résout le schéma racine ;
+//!   `schema_topo_order` — ordre topologique parents→enfants ; `build_copy_sql_map` — construit les
+//!   requêtes COPY par table ; `validate_run_params`, `validate_watermarks` — valident les paramètres
+//!   d'entrée ; `effective_worker_threshold` — répartit le seuil de flush entre workers.
+//! - Flusher (draine les buffers vers PG) : `run_flusher` — boucle principale ; `flush_table_to_pg` —
+//!   flush une table ; `find_all_nonempty_buffers`, `topological_drain_order`, `find_largest_buffer` —
+//!   sélection des buffers à drainer ; `ram_used_ratio` — ratio RAM utilisée ;
+//!   `try_set_synchronous_commit_off` — désactive synchronous_commit (best-effort) ;
+//!   `format_flusher_pause_log`, `format_flusher_resume_log`, `format_copy_start_log`,
+//!   `format_copy_done_log` — formatage des logs.
+//! - Worker (ingestion diskless) : `run_worker_diskless` — boucle d'un worker ;
+//!   `process_worker_item_diskless` — traite un item JSON ; `collect_above_threshold` — sinks prêts
+//!   à flush ; `parse_json_object` — parse un objet JSON racine.
+//! - Dispatch & progression : `dispatch_loop` — répartit le flux JSON vers les workers ;
+//!   `update_row_progress`, `finalize_dispatch` — mise à jour de la progress bar ;
+//!   `spawn_anomaly_writer` — tâche d'écriture des anomalies ; `preflight_warn_nonempty` — avertit
+//!   si des tables racines contiennent déjà des lignes ; `emit_completion_events`,
+//!   `log_constraint_warnings` — événements et logs de fin de run.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

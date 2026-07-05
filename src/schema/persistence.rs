@@ -3,6 +3,13 @@
 //! [`SchemaSnapshot`] wraps schemas, column stats, and user strategy overrides.
 //! `SCHEMA_FORMAT_VERSION` is bumped when the on-disk format changes in a
 //! backwards-incompatible way — callers must discard and regenerate old snapshots.
+//!
+//! Fonctions :
+//! - `write_snapshot` — sérialise et écrit sur disque (écriture atomique via `.tmp` + rename si demandé).
+//! - `save` — construit un `SchemaSnapshot` sans overrides et l'écrit (non atomique).
+//! - `save_with_overrides` — idem, avec les overrides de stratégie utilisateur (écriture atomique).
+//! - `load` — lit et désérialise un snapshot ; rejette les versions incompatibles (v1) ; migre
+//!   les `strategy_overrides` racine legacy vers `ui_override` par table (sans écraser l'existant).
 
 use std::path::Path;
 

@@ -3,6 +3,11 @@
 //! [`CopyEscaped`] is a newtype that guarantees its contents are safe for the COPY text
 //! protocol (no unescaped tabs, newlines, backslashes, or null bytes). Obtain instances
 //! only via [`escape_copy_text`] or [`CopyEscaped::from_safe_ascii`].
+//!
+//! Fonctions :
+//! - `CopyEscaped::from_safe_ascii` — enveloppe une valeur déjà connue COPY-safe (debug_assert de garde).
+//! - `CopyEscaped::as_str` — accès à la chaîne échappée.
+//! - `escape_copy_text` — échappe `\t \n \r \\` ; `None` si la chaîne contient un octet nul (PG les rejette).
 
 /// A string guaranteed safe for `PostgreSQL` COPY text format.
 ///

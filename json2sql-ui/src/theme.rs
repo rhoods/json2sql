@@ -1,3 +1,8 @@
+//! Design system CSS — chargement du stylesheet embarqué à la compilation.
+//!
+//! Fonctions :
+//! - `design_css` — retourne le CSS complet (`assets/styles.css`), source unique de vérité pour
+//!   tokens de design, classes de composants, primitives de layout et overrides webkit2gtk.
 
 /// Full stylesheet embedded at compile time from `assets/styles.css`.
 /// This is the single source of truth for all visual styles:

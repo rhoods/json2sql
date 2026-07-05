@@ -2,6 +2,39 @@
 //!
 //! Ce module contient : les types internes du cascade (Collapse, `SiblingDetectCtx`…),
 //! `finalize_cascading` (point d'entrée crate), et toutes les fonctions auxiliaires du BFS.
+//!
+//! Fonctions (par rôle — fichier dense, 39 fonctions privées, candidat à une décomposition
+//! en sous-modules, voir liste de candidats refactor) :
+//! - Orchestration : `finalize_cascading` — enchaîne wave 0, cascade waves 1+, wave 0-bis (tables
+//!   T créées par le cascade), et le post-pass keyed-pivot ; `run_sibling_wave` — une passe complète
+//!   (maps → work items → détection → application) ; `build_parent_child_maps` — index
+//!   `parent_name → [enfants]` (Object/ObjectArray séparés).
+//! - Détection wave 0 (par parent) : `build_work_items`, `build_sibling_ctx`, `should_skip_parent`,
+//!   `collect_sibling_collapses` — construisent le contexte et filtrent les parents éligibles ;
+//!   `detect_homogeneous_collapse`, `detect_mixed_collapse` — dispatchent selon clés homogènes
+//!   ou mixtes numérique/texte ; `filter_significant_siblings`, `filter_routing_tables`,
+//!   `effective_jaccard_for_regular` — excluent les tables de routing pures et calculent le
+//!   Jaccard effectif ; `try_unified_fallback`, `try_cluster_fallback`, `build_non_num_clusters` —
+//!   replis quand le Jaccard global est insuffisant (fallback unifié ou clustering) ;
+//!   `build_synthetic_pivot_collapse`, `build_classic_keyed_pivot_collapse`, `assemble_mixed_collapse` —
+//!   construisent la structure `Collapse` finale (Single ou Multi) ; `make_subgroup` — construit
+//!   un `SubgroupData` (nom, clé, colonnes union) pour un sous-groupe ; `pick_unique_suffix` —
+//!   suffixe de table sans collision.
+//! - Application des collapses : `apply_collapses` — dispatch Single/Multi et journalise ;
+//!   `apply_single_collapse` — transforme le parent en table pivot unique ;
+//!   `apply_multi_collapse`, `build_multi_group_entry` — créent les tables pivot synthétiques
+//!   (une par sous-groupe) ; `make_pivot_preamble` — colonnes générées communes (`j2s_id`, FK, order).
+//! - Cascade des co-siblings (waves 1+) : `collect_children_by_key` — regroupe les enfants par clé
+//!   JSON partagée ; `process_co_sibling_group` — dispatch fusion ou reparentage seul ;
+//!   `handle_single_co_sibling` — reparente un co-sibling isolé ; `merge_co_sibling_group`,
+//!   `build_co_sibling_schema`, `cascade_grandchildren_to_next_wave` — fusionnent un groupe de
+//!   co-siblings en une nouvelle table T et propagent leurs propres enfants à la vague suivante.
+//! - Post-pass keyed-pivot (orphelins `Columns` sous un parent `SiblingCollapse`) :
+//!   `run_keyed_pivot_children_wave`, `collect_keyed_pivot_work_items`,
+//!   `process_keyed_pivot_work_item` — détectent et traitent ces orphelins ;
+//!   `resolve_pivot_key_info`, `build_sub_pivot_columns`, `build_sub_pivot_schema` — construisent
+//!   le sous-pivot ; `collect_pivot_co_siblings`, `reparent_and_update_routes` — reparentent les
+//!   enfants absorbés et mettent à jour `child_routes` du parent.
 
 use super::super::wide_strategies::{build_union_columns, classify_key_shape};
 use super::super::table_schema::{ChildKind, ColumnSchema, KeyShape, SiblingSchema, TableSchema, InferredStrategy};

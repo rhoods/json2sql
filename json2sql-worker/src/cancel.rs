@@ -1,3 +1,11 @@
+//! Signal d'annulation partagé entre le handler de commande socket et la boucle d'import.
+//!
+//! Fonctions :
+//! - `CancelToken::new` — crée un token non annulé.
+//! - `CancelToken::cancel` — signale l'annulation (idempotent).
+//! - `CancelToken::is_cancelled` — lecture immédiate de l'état.
+//! - `CancelToken::cancelled` — attend l'annulation (résout immédiatement si déjà annulé).
+
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,

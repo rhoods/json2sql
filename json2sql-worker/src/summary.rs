@@ -1,3 +1,15 @@
+//! État en mémoire d'un import en cours — historique d'événements + notification des connexions.
+//!
+//! Une nouvelle connexion socket reçoit l'historique complet (snapshot) puis attend les
+//! événements incrémentaux via `Notify`, évitant les races snapshot/delta d'un broadcast channel.
+//!
+//! Fonctions :
+//! - `ImportSummary::new` — crée un résumé vide.
+//! - `ImportSummary::push` — ajoute un événement, marque `done` sur `Pass2Done`, réveille les connexions.
+//! - `ImportSummary::snapshot` — tous les événements accumulés.
+//! - `ImportSummary::len`, `::is_done` — nombre d'événements, statut de complétion.
+//! - `ImportSummary::notifier` — clone du handle `Notify` pour qu'un connection handler attende.
+
 use std::sync::Arc;
 
 use json2sql::io::progress_event::ProgressEvent;

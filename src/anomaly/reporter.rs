@@ -3,6 +3,12 @@
 //! Individual anomaly rows live in the per-table NDJSON files written by
 //! [`crate::anomaly::collector`]. This module produces the summary (table → total count)
 //! written to `--anomaly-report`.
+//!
+//! Fonctions :
+//! - `write_report` — écrit le rapport (JSON ou CSV) sur disque ou stdout.
+//! - `sort_summaries` — trie les résumés par nombre d'anomalies décroissant, puis table/colonne.
+//! - `write_summary_row` — écrit une ligne CSV pour un résumé d'anomalie.
+//! - `to_json`, `to_csv` — sérialisent l'ensemble des résumés dans le format demandé.
 
 use std::path::Path;
 

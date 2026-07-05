@@ -1,3 +1,9 @@
+//! Point d'entrée de l'IHM Dioxus desktop.
+//!
+//! Fonctions :
+//! - `main` — construit le head HTML (fonts + CSS + patches JS focus/splitter) et lance la fenêtre.
+//! - `App` — composant racine : charge la config persistée, détecte un socket worker actif
+//!   (écran Resume), route vers l'écran courant selon `AppScreen`.
 #![forbid(unsafe_code)]
 #![deny(dead_code)]
 #![deny(clippy::all)]

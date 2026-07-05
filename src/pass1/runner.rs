@@ -9,6 +9,20 @@
 //! during `finalize()` at the end of the pass — not row-by-row.
 //! The resulting [`Pass1Result::schemas`] are sorted topologically (parents before children)
 //! and are ready to be serialized or handed directly to Pass 2.
+//!
+//! Fonctions (par section) :
+//! - Séquentiel : `run` — orchestre l'ouverture, le scan, la finalisation ; `scan_json_rows` —
+//!   boucle principale (observe chaque objet racine) ; `report_progress`, `flush_final_progress` —
+//!   émettent la progression (barre CLI et/ou canal IHM) ; `build_pass1_result` — finalise le
+//!   registre et construit `Pass1Result` ; `emit_root_wrapper_warning` — log si format wrapper détecté.
+//! - Inspection (`run_inspect`, aperçu sans stratégies) : `run_inspect` — scanne les N premiers
+//!   objets sans guard ni stratégies wide ; `build_inspect_registry` — registre aux seuils désactivés ;
+//!   `scan_objects_with_limit` — boucle bornée par `limit`, conserve les objets échantillonnés.
+//! - Parallèle (`run_parallel`, N threads + merge) : `effective_workers` — plafonne au nombre de CPU
+//!   logiques ; `run_parallel` — orchestre lecteur + workers + merge ; `spawn_worker_threads` —
+//!   lance les threads consommant le channel MPMC ; `read_and_dispatch` — thread lecteur, distribue
+//!   les objets bruts round-robin ; `join_and_merge_workers` — joint tous les threads et fusionne
+//!   leurs `SchemaRegistry` (agrège les erreurs de tous les workers, n'en perd aucune).
 
 use std::path::Path;
 

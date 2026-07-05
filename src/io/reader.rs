@@ -6,6 +6,27 @@
 //! - `[` → [`JsonFormat::Array`]
 //! - `{` whose root-level values are all arrays, no second root object → [`JsonFormat::RootWrapper`]
 //! - `{` with a second root object following → [`JsonFormat::Lines`] (NDJSON)
+//!
+//! Fonctions (par section) :
+//! - Détection de format : `detect_format` — scanne le premier octet significatif ;
+//!   `fmt_detect_root_object` — distingue NDJSON / wrapper / objet unique après un `{` ;
+//!   `fmt_read_one`, `fmt_skip_ws`, `fmt_skip_ws_comma`, `fmt_read_string`, `fmt_skip_value`,
+//!   `fmt_skip_container`, `fmt_skip_string_rest`, `fmt_skip_primitive_rest` — tokenizer minimal
+//!   pour sauter les valeurs sans les parser ; `simd_err` — convertit une erreur `simd_json` ;
+//!   `file_size` — taille du fichier (barre de progression).
+//! - `scan_chunk_into` — scanne un chunk de buffer en trackant profondeur/chaîne/échappement,
+//!   partagé par les 3 lecteurs ci-dessous pour la lecture par blocs (`fill_buf`/`consume`).
+//! - `JsonLinesReader` (NDJSON) : `open`, `bytes_read`, `fill_next_line`, `next_raw`, `next` (Iterator).
+//! - `JsonArrayReader` (tableau JSON) : `open`, `bytes_read`, `read_byte`, `skip_to_next_value`,
+//!   `collect_value`, `collect_container`, `collect_string`, `collect_primitive`, `next_raw`,
+//!   `next` (Iterator).
+//! - `JsonRootWrapperReader` (objet racine `{"K": [...]}`) : `open`, `current_key`, `bytes_read`,
+//!   `next_raw`, `advance_to_next_array`, `skip_to_next_value`, `collect_value`, `collect_container`,
+//!   `collect_string`, `collect_primitive`, `skip_string_rest`, `read_byte_tracked`, `next` (Iterator).
+//!   Méthodes internes structurellement dupliquées avec `JsonArrayReader` (candidat refactor —
+//!   voir issue de suivi).
+//! - `JsonReader` (point d'entrée unifié) : `open`, `open_with_format`, `next_raw`, `current_key`,
+//!   `bytes_read`, `next` (Iterator) — dispatch vers l'une des 3 implémentations ci-dessus.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};

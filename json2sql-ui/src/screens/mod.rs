@@ -1,3 +1,20 @@
+//! Utilitaires partagés entre écrans : hook de timer, construction du view-model de la liste
+//! de tables (badges/arbre/filtre), sélecteurs de fichiers natifs, labels de stratégie,
+//! composant barre de progression, application des overrides utilisateur.
+//!
+//! Fonctions :
+//! - `use_elapsed_timer` — hook Dioxus : incrémente un compteur de secondes jusqu'à `is_done()`.
+//! - `build_table_rows`, `build_row`, `RowFlags::compute` — construisent le view-model de chaque
+//!   ligne (badge, connecteur d'arbre, visibilité selon filtre/warn-only) à partir des schémas.
+//! - `tree_display_order` — ordre d'affichage DFS (racines triées, enfants groupés, orphelins en fin).
+//! - `compute_last_child` — pour chaque position, vrai si dernier enfant de son parent (connecteur └─/├─).
+//! - `strategy_label`, `strategy_badge`, `user_override_badge` — libellés/classes CSS par stratégie.
+//! - `option_to_pick_result`, `parse_ext`, `pick_file`, `pick_folder`, `pick_save_file` — sélecteurs
+//!   de fichiers natifs (`rfd`), un seul dialogue actif à la fois (`PickerGuard::drop` libère le verrou).
+//! - `progress_pct`, `progress_bar_class`, `ProgressBar` — calcul de pourcentage, classe CSS
+//!   (animation indéterminée avant démarrage), composant barre de progression labellisée.
+//! - `build_effective_schemas` — applique les overrides utilisateur à une copie des schémas
+//!   (déduplique défensivement, retire aussi la table `_wide` compagnon si le parent est skip).
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 pub mod setup;
 pub mod analysis;

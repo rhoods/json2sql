@@ -3,6 +3,27 @@
 //! The config is optional. When present, `apply_overrides` validates each override against
 //! the finalized schema and mutates the relevant [`TableSchema`] entries in place.
 //! Unknown table or column names produce a hard error rather than silently doing nothing.
+//!
+//! Fonctions :
+//! - `SchemaConfig::from_file` — charge et parse le fichier TOML.
+//! - `ConfigWarning::to_message` — message lisible pour chaque variante de warning.
+//! - `apply_overrides` — point d'entrée par table : dispatch strategy/suffix_columns/types,
+//!   reporte `normalize_dynamic_keys`/`flatten` en différé (nécessitent une mutation globale).
+//! - `apply_strategy_override` — applique la clé `strategy` (pivot/jsonb/columns/structured_pivot/
+//!   normalize_dynamic_keys/flatten).
+//! - `apply_suffix_columns_override` — applique `suffix_columns` (StructuredPivot explicite).
+//! - `apply_column_type_overrides` — applique les overrides de type par colonne.
+//! - `conflicting_strategy_override`, `has_nonempty_suffix_columns`, `toml_str` — helpers de
+//!   détection de conflit `strategy` vs `suffix_columns` (#31, `suffix_columns` gagne toujours).
+//! - `apply_group_overrides` — applique les groupes de fusion (`[group.*]`, stratégie `keyed_pivot`).
+//! - `apply_keyed_pivot_merge`, `build_merged_keyed_pivot_schema` — fusionnent N tables membres
+//!   en une seule `SiblingCollapse` (colonnes union + clé `key_id`).
+//! - `apply_overrides_complete` — enchaîne overrides + groupes + `exclude_absorbed_children`.
+//! - `apply_user_overrides` — applique les overrides IHM (`Pivot`/`Jsonb`/`Skip`) après chargement
+//!   d'un snapshot ; `Skip` retire aussi la table `_wide` compagnon d'un `AutoSplit`.
+//! - `prime_tracker_from_pg_type` — reconstruit un `TypeTracker` représentatif depuis un `PgType`
+//!   déjà résolu (pour réutiliser `build_suffix_schema_from_list` après finalisation).
+//! - `parse_pg_type` — parse une chaîne de type SQL (avec alias) en `PgType`.
 
 use std::collections::HashMap;
 use std::path::Path;

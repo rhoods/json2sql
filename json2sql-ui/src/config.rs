@@ -1,7 +1,16 @@
-/// Project configuration persistence.
-///
-/// Saves/loads the Setup-screen form to `~/.config/json2sql/last_project.toml`.
-/// Password is intentionally excluded — never written to disk.
+//! Project configuration persistence.
+//!
+//! Saves/loads the Setup-screen form to `~/.config/json2sql/last_project.toml`.
+//! Password is intentionally excluded — never written to disk.
+//!
+//! Fonctions :
+//! - `ProjectConfig::from_project` — projette `ProjectState` vers la struct sérialisable (sans password).
+//! - `ProjectConfig::apply_to` — réinjecte la config chargée dans `ProjectState` (password préservé,
+//!   noms de stratégie invalides ignorés silencieusement).
+//! - `config_path` — chemin `~/.config/json2sql/last_project.toml` (via `directories_next`).
+//! - `load` — charge et parse le TOML, `None` si absent/invalide.
+//! - `try_save` — sauvegarde best-effort (erreurs ignorées, ne doit jamais casser l'IHM).
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 

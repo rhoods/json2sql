@@ -1,3 +1,18 @@
+//! Client du worker subprocess : spawn, connexion socket Unix, lecture des événements,
+//! détection d'un worker déjà actif au démarrage (résumption).
+//!
+//! Fonctions :
+//! - `WorkerKillHandle::new`, `::is_some`, `::kill` — handle clonable (`Arc`) pour tuer le
+//!   subprocess (SIGKILL, idempotent) depuis n'importe quel clone (ex: `AppState`).
+//! - `SocketEventReader::new`, `::next_event` — lit une ligne NDJSON du socket et la désérialise
+//!   en `ProgressEvent` (`Ok(None)` sur EOF propre).
+//! - `spawn_worker` — lance `json2sql-worker`, envoie la config sur stdin (password via
+//!   `J2S_PG_PASSWORD`, jamais sérialisé), se connecte au socket.
+//! - `connect_with_retry` — tente la connexion au socket avec ré-essais espacés.
+//! - `is_lockfile_free` — vérifie (avisory) qu'aucun autre worker ne tient le lockfile global.
+//! - `find_active_socket` — scanne `temp_dir()` pour un socket `json2sql-*.sock` actif, supprime
+//!   les orphelins rencontrés (variante non-Unix retourne toujours `None`).
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -4,6 +4,15 @@
 //! Ex : la valeur JSON `"42"` est coercée vers `Integer` si le schéma attend un entier.
 //! En cas d'échec (valeur incompatible), retourne `CoerceResult::Anomaly` — la valeur
 //! est alors enregistrée comme anomalie et remplacée par NULL en base.
+//!
+//! Fonctions :
+//! - `coerce` — dispatch principal selon le `PgType` cible (NULL court-circuité en amont).
+//! - `coerce_integer`, `coerce_bigint`, `coerce_float`, `coerce_bool`, `coerce_uuid`, `coerce_date`,
+//!   `coerce_timestamp`, `coerce_text` — une coercition par type PG, chacune produit `Ok`/`Anomaly`.
+//! - `coerce_pg_array` — sérialise un tableau JSON en littéral `PostgreSQL` `{e1,e2,...}`.
+//! - `coerce_pg_array_element` — représentation d'un élément dans le littéral (guillemets pour le texte).
+//! - `format_float` — formate un f64 fini en chaîne, `None` si NaN/infini.
+//! - `json_type_name` — nom du type JSON pour les messages d'anomalie.
 
 use serde_json::Value;
 

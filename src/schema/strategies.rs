@@ -3,6 +3,12 @@
 //! Pass 1 accepts a `HashSet<StrategyName>` of strategies to skip; the finalizer
 //! bypasses the corresponding detection step for each disabled strategy. Useful for
 //! debugging an unexpected layout or forcing a specific materialization.
+//!
+//! Fonctions :
+//! - `StrategyName::as_str` — nom TOML/CLI de la stratégie.
+//! - `StrategyName::try_from` (`impl TryFrom<&str>`) — parse une chaîne, distingue stratégie
+//!   inconnue vs. obligatoire (non désactivable).
+//! - `parse_disabled_strategies` — valide une liste de flags `--disable-strategy` (CLI).
 
 use std::collections::HashSet;
 

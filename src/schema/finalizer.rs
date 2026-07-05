@@ -8,6 +8,25 @@
 //!
 //! Frontière avec `wide_strategies.rs` : ce module *décide* quelle stratégie appliquer.
 //! `wide_strategies.rs` *génère* les colonnes résultantes de cette stratégie.
+//!
+//! Fonctions (par phase, voir `SchemaFinalizer::run`) :
+//! - `SchemaFinalizer::new` — construit le finaliseur avec ses seuils.
+//! - `SchemaFinalizer::run` — orchestre les 4 phases (base → cascade → wide strategies → guard).
+//! - Phase 1 (par table, parallèle) : `build_base_schemas` — construit les schémas de base ;
+//!   `build_entry_schema_base` — un `TableSchema` par `TableEntry` ; `build_data_columns` —
+//!   colonnes de données + détection de collisions ; `push_array_columns` — colonnes array-as-column ;
+//!   `push_generated_columns` — ajoute `j2s_id`/FK/`j2s_order`.
+//! - Phase 3 (par table, wide strategies) : `apply_wide_table_strategies` — applique la stratégie
+//!   choisie à chaque table éligible ; `apply_wide_strategy` — décide Columns/StructuredPivot/
+//!   Pivot/Jsonb/AutoSplit selon le ratio de colonnes stables ; `apply_non_autosplit_strategy` —
+//!   branche StructuredPivot ou Pivot/Jsonb ; `apply_autosplit_strategy`, `build_wide_pivot_schema` —
+//!   construisent la table EAV compagnon `_wide` ; `collect_medium_keys`, `infer_medium_value_type` —
+//!   sélectionnent les clés de fréquence moyenne et leur type de valeur commun ;
+//!   `build_finalizer_config` — assemble la config figée passée à ces fonctions.
+//! - Phase 4 (nettoyage) : `apply_column_limit_guard` — convertit en Jsonb les tables dépassant
+//!   1600 colonnes ; `exclude_absorbed_children` — retire les tables absorbées par une stratégie
+//!   parente (sauf cibles de routing survivantes) ; `collect_surviving_route_targets` — calcule
+//!   ces cibles protégées.
 
 use std::collections::HashSet;
 use indexmap::IndexMap;

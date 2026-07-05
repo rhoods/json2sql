@@ -6,6 +6,9 @@
 //! Two layout modes controlled by `show_checkboxes`:
 //!   - `true`  (Strategy screen): 4 cols — name | cols | badge | warn
 //!   - `false` (Preview screen):  2 cols — name | badge+warn
+//!
+//! Fonctions :
+//! - `TableListPanel` — composant unique : rend les lignes déjà construites (purement présentationnel).
 #![allow(clippy::disallowed_methods)]
 use dioxus::prelude::*;
 use crate::screens::TableRowViewModel;

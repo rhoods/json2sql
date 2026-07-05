@@ -2,6 +2,10 @@
 //!
 //! Decouples insert logic (`pass2/insert.rs`) from the underlying buffer so that
 //! `MemSink` can be used in both production and tests without code changes.
+//!
+//! Fonctions :
+//! - `MemSink::write_row` (`impl RowSink`) — délègue à l'implémentation inhérente de `MemSink`.
+//! - `Arc<Mutex<MemSink>>::write_row` (`impl RowSink`) — verrouille le temps de l'append (nanosecondes).
 
 use std::sync::{Arc, Mutex};
 

@@ -3,6 +3,12 @@
 //! [`ColumnStats`] records null counts and a histogram of observed JSON types for each
 //! data column. Mixed-type columns (`is_mixed() == true`) are candidates for anomalies
 //! in Pass 2 when values can't be coerced to the inferred `PostgreSQL` type.
+//!
+//! Fonctions :
+//! - `ColumnStats::is_mixed` — vrai si plusieurs types JSON ont été observés pour la colonne.
+//! - `ColumnStats::non_null_count` — nombre de valeurs non nulles.
+//! - `write_column_line` — écrit une ligne de rapport pour une colonne (avec histogramme si mixte).
+//! - `write_text_report` — écrit le rapport texte complet (groupé par table).
 
 use crate::schema::type_tracker::PgType;
 

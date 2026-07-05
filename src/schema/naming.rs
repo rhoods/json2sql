@@ -4,6 +4,26 @@
 //! resolves duplicates with a short FNV-1a hash suffix, and caps table names at 53 chars
 //! (`PG_TABLE_MAX_IDENT`) so all derived identifiers (`pk_…`, `fk_…_parent`, `j2s_…_id`)
 //! stay within `PostgreSQL`'s 63-byte `NAMEDATALEN` limit.
+//!
+//! Fonctions :
+//! - `ColumnNameRegistry::new`, `::register`, `::build`, `::resolve`, `::collisions` — collecte les
+//!   noms de colonnes d'une table, détecte les collisions (suffixe hash) et résout le nom final.
+//! - `NamingRegistry::new` — crée le registre de noms de table.
+//! - `NamingRegistry::table_name`, `::table_name_from_dot_key` — calculent (ou lisent du cache) le
+//!   nom de table PG pour un chemin ; la variante `_from_dot_key` évite une allocation `join()`.
+//! - `NamingRegistry::table_name_lookup`, `::table_name_lookup_from_dot_key` — lecture seule après
+//!   pré-enregistrement (thread-safe, utilisée en phase parallèle).
+//! - `NamingRegistry::column_name` — nom de colonne PG sûr pour un champ JSON.
+//! - `NamingRegistry::ensure_unique` — résout les collisions de noms de table (suffixe hash déterministe).
+//! - `NamingRegistry::hash_suffixed_name` — construit un nom avec suffixe hash (repli compteur si collision).
+//! - `NamingRegistry::truncated_names` — noms tronqués à 63 octets (pour les warnings).
+//! - `sanitize_identifier` — dispatch ASCII/Unicode ; `sanitize_ascii`, `sanitize_unicode` — sanitisation
+//!   (minuscules, caractères non alphanumériques → `_`) ; `finalize_sanitized` — trim + préfixe `c_`
+//!   si commence par un chiffre.
+//! - `truncate_to_limit`, `truncate_to_pg_limit` — tronquent un identifiant avec suffixe hash.
+//! - `truncate_table_name` — tronque un nom de table en dépiautant les segments de chemin avant repli hash.
+//! - `floor_char_boundary` — tronque au dernier caractère UTF-8 valide.
+//! - `short_hash` — hash FNV-1a 64 bits, 7 caractères hex (stable entre versions).
 
 use std::collections::HashMap;
 

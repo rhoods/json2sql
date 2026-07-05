@@ -26,6 +26,25 @@
 //! | `JsonbFlatten` | TOML-only | store child as JSONB on parent | child table removed |
 //!
 //! See each variant's doc comment for a concrete JSON → SQL example.
+//!
+//! Fonctions :
+//! - `InferredStrategy::from(&UserOverride)` (`impl From`) — projette un override utilisateur
+//!   vers la stratégie inférée équivalente.
+//! - `ColumnSchema::generated` — construit une colonne générée (`j2s_id`, `j2s_order`...).
+//! - `ColumnSchema::parent_fk` — construit la colonne FK vers le parent (`j2s_{parent}_id`).
+//! - `TableSchema::new` — crée un schéma vide, stratégie `Columns` par défaut.
+//! - `TableSchema::effective_strategy` — résout la priorité ui_override > toml_override > inferred.
+//! - `TableSchema::is_root`, `::is_junction`, `::has_order_column` — prédicats structurels.
+//! - `TableSchema::ui_override`, `::toml_override`, `::set_ui_override`, `::set_toml_override` —
+//!   accesseurs/mutateurs des deux niveaux d'override (mutation uniquement via les setters).
+//! - `TableSchema::absorbs_children` — délègue à `effective_strategy().absorbs_children()`.
+//! - `TableSchema::data_columns` — itère les colonnes hors `j2s_*` générées.
+//! - `TableSchema::column_names` — tous les noms de colonnes (en-tête COPY).
+//! - `TableSchema::find_by_original` — cherche une colonne par nom JSON original.
+//! - `InferredStrategy::is_wide` — vrai si différent de `Columns`.
+//! - `InferredStrategy::absorbed_names` — noms absorbés (seul `SiblingCollapseMulti` en a).
+//! - `InferredStrategy::absorbs_children` — vrai si les enfants doivent être exclus du schéma.
+//! - `KeyShape::fmt` (`impl Display`) — libellé majuscule (`NUMERIC`, `SLUG`...).
 
 use std::collections::HashMap;
 use std::sync::Arc;

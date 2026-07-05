@@ -4,6 +4,11 @@
 //!   left   — flat sortable table list with badges + filter
 //!   center — column detail (single) or selection summary (multi)
 //!   right  — strategy configurator (single) or bulk apply (multi)
+//!
+//! Fonctions :
+//! - `StrategyScreen` — composant unique : liste triable/filtrable, détail colonnes ou résumé
+//!   de sélection multiple, configurateur de stratégie (single) ou application en masse (multi),
+//!   export du schéma via `pick_save_file`.
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 
 use dioxus::prelude::*;

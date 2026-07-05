@@ -6,6 +6,11 @@
 //!   large progress card
 //!   two-column grid: schema overview | latest events log
 //!   bottom bar: Cancel · Continue →
+//!
+//! Fonctions :
+//! - `format_count` — formate un débit (rec/s) en K/M abrégé.
+//! - `AnalysisScreen` — composant : affiche la progression Pass 1 (tuiles stats, barre, aperçu
+//!   du schéma, log en direct) et navigue vers Strategy une fois terminé.
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 use dioxus::prelude::*;
 

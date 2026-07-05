@@ -1,3 +1,14 @@
+//! Point d'entrée du process worker : lit la config sur stdin, verrouille le lockfile exclusif,
+//! sert le socket Unix (`serve`) en parallèle du pipeline d'import (`pipeline`), écrit le résultat.
+//!
+//! Fonctions :
+//! - `LockfileGuard::try_acquire_at`, `::try_acquire` — verrou exclusif RAII (libéré au `Drop`).
+//! - `bind_socket` — lie un `UnixListener` (supprime un socket obsolète existant) ; variante
+//!   non-Unix retourne une erreur `Unsupported`.
+//! - `write_result` — écrit le `WorkerResult` de façon atomique (fichier temporaire + rename).
+//! - `main` — parse la config, acquiert le lock, lance `serve::serve_connections` et
+//!   `pipeline::run_pipeline` en parallèle, écrit le résultat, annule proprement à la fin.
+
 use std::sync::Arc;
 
 mod cancel;

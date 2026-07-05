@@ -3,6 +3,9 @@
 //! Built with Clap. The root struct is [`Cli`]; the optional [`Commands`] enum selects
 //! the `inspect` subcommand (schema preview without data loading). When no subcommand is
 //! given, the default import pipeline runs.
+//!
+//! Fonctions :
+//! - `Cli::root_table_name` — dérive le nom de la table racine depuis `--table` ou le nom du fichier d'entrée.
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 

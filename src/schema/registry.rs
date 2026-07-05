@@ -6,6 +6,18 @@
 //!
 //! Les callers (pass1/runner.rs, UI) n'interagissent qu'avec `SchemaRegistry` —
 //! ils n'ont pas à connaître la séparation observer/finalizer.
+//!
+//! Fonctions :
+//! - `SchemaRegistry::new` — construit observer + naming à partir de `RegistryConfig`.
+//! - `SchemaRegistry::observe_root` — délègue à `SchemaObserver::observe_root`.
+//! - `SchemaRegistry::finalize` — finalise sans le guard 1600-colonnes.
+//! - `SchemaRegistry::finalize_with_pg_guard` — finalise avec le guard (retourne les overflow warnings).
+//! - `SchemaRegistry::finalize_inner` — construit le `SchemaFinalizer` et exécute `run()`.
+//! - `SchemaRegistry::collect_stats` — délègue à `inspector::collect_stats`.
+//! - `SchemaRegistry::truncated_names`, `SchemaRegistry::column_collisions` — accesseurs.
+//! - `SchemaRegistry::merge` — fusionne un autre registre (Pass 1 parallèle) ; le naming n'est
+//!   pas fusionné, il est recalculé par `finalize()`.
+//! - `SchemaRegistry::anomaly_iter` — délègue à `SchemaObserver::anomaly_iter`.
 
 use std::collections::HashSet;
 use serde_json::Value;

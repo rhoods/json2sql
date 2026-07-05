@@ -1,4 +1,7 @@
 //! Central error type [`J2sError`] and `Result<T>` alias used throughout the crate.
+//!
+//! Fonctions :
+//! - `J2sError::from` (`impl From<serde_json::Error>`) — construit un `J2sError::Json` en capturant la position (colonne) de l'erreur de parsing.
 use thiserror::Error;
 
 #[derive(Debug, Error)]

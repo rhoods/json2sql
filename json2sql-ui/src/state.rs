@@ -1,3 +1,26 @@
+//! Application state — persisted UI state, per-pass progress, and PostgreSQL connection config.
+//!
+//! `AppState` is the root state tree threaded through every screen via `Signal<AppState>`.
+//! Sub-states: `ProjectState` (Setup + PG config), `SchemaState` (Analysis/Strategy/Preview,
+//! includes multi-select logic), `ImportState` (Pass 2 progress), `UiState` (reserved).
+//!
+//! Fonctions :
+//! - `PgConfig::to_url` — construit l'URL de connexion Postgres (password zeroïsé après usage).
+//! - `PgConfig::is_complete` — vérifie que les champs de connexion sont renseignés.
+//! - `format_bytes` — formate un nombre d'octets en unités SI lisibles.
+//! - `Pass1Progress::push_log`, `Pass2Progress::push_log` — ajoutent une ligne au ring-buffer de logs.
+//! - `ProjectState::is_complete` — vérifie que la source + la config PG sont prêtes pour un import.
+//! - `SchemaState::clear` — réinitialise l'état schéma (nouveau fichier / annulation).
+//! - `SchemaState::apply_shift_click`, `SchemaState::apply_click` — sélection multi-table (panneau Strategy).
+//! - `AppState::load_snapshot` — recharge un `SchemaSnapshot` sauvegardé (dédoublonne les tables).
+//! - `AppState::clear_snapshot` — retire un snapshot chargé, revient au flux Pass 1 par défaut.
+//! - `AppState::ready_to_start` — vrai si le projet est prêt à lancer un import.
+//! - `AppState::cancel` — annule la tâche en cours, tue le worker, réinitialise l'état transitoire.
+//! - `AppState::apply_worker_result` — applique le résultat lu depuis le fichier JSON du worker.
+//! - `AppState::apply_progress_event` — dispatch un `ProgressEvent` vers l'état correspondant.
+//! - `compute_jaccard_display` — calcule les infos d'affichage Jaccard pour une sélection de tables.
+//! - `select_children_visible` — indices des enfants directs d'une table visibles dans la liste.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 

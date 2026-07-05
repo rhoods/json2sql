@@ -3,6 +3,9 @@
 //! Displayed at startup when an active worker socket is detected.
 //! The user can either resume (reconnect to the running worker) or
 //! abandon the import (send cancel + navigate to Setup).
+//!
+//! Fonctions :
+//! - `ResumeScreen` — composant unique : propose reconnexion ou abandon du worker détecté.
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 
 use dioxus::prelude::*;

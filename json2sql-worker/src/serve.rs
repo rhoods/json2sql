@@ -1,3 +1,13 @@
+//! Serveur du socket Unix : diffuse l'historique + les événements en direct de l'import à
+//! chaque connexion client, et traduit la commande `{"cmd":"cancel"}` en annulation.
+//!
+//! Fonctions :
+//! - `serve_connections` — boucle d'acceptation jusqu'à `cancel` ; une tâche par connexion.
+//! - `handle_connection` — envoie le snapshot puis les deltas (attend `Notify` avant chaque
+//!   relecture) ; lit les commandes clientes en parallèle ; ferme après `Pass2Done`/annulation
+//!   (avec un drain final pour ne pas perdre le dernier batch en cas de course cancel/notify).
+//! - `write_line` — écrit une ligne NDJSON sur le socket.
+
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

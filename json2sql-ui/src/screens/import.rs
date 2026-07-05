@@ -4,6 +4,11 @@
 //!   subbar  — breadcrumb + pulse + elapsed
 //!   split-60-40 (left: real-time log · right: per-table row counts)
 //!   bottom  — overall progress bar + caption + action buttons
+//!
+//! Fonctions :
+//! - `ImportScreen` — composant Dioxus unique : lance/reprend le worker via socket,
+//!   applique les `ProgressEvent` reçus (throttlés ~5 Hz), calcule les 4 barres de
+//!   progression (tables/streaming/insertion/contraintes) et affiche logs + tableau par table.
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 
 use dioxus::prelude::*;

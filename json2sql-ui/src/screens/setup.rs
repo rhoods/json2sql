@@ -2,6 +2,11 @@
 //!
 //! 4 accordion step-cards: Source · Optional outputs · Target · Advanced.
 //! CSS classes come from the embedded design system (assets/styles.css).
+//!
+//! Fonctions :
+//! - `SetupScreen` — composant : les 4 accordéons (source, sorties optionnelles, cible PG,
+//!   options avancées), lance le picker de fichier et déclenche le test de connexion.
+//! - `PgConnectionForm` — composant : formulaire de connexion PostgreSQL (hôte/port/base/identifiants).
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 use dioxus::prelude::*;
 

@@ -1,4 +1,7 @@
 //! Shared error helpers for the database layer.
+//!
+//! Fonctions :
+//! - `pg_err` — convertit une `tokio_postgres::Error` en `J2sError::DbContext`, avec le code PG si disponible.
 
 use crate::error::J2sError;
 
