@@ -27,6 +27,8 @@ Règles :
 - Fichier sans fonction/struct/enum à documenter (ex. `mod.rs` ne déclarant que des sous-modules) : pas de bloc `Fonctions :` du tout.
 - Un fichier est candidat à un refactor futur si sa responsabilité ne peut pas s'exprimer en un seul domaine cohérent (2+ domaines non reliés par un rapport direct de cause à effet) — voir la liste de candidats dans l'issue de suivi.
 
+**Vérification :** `cargo test --test header_consistency` (issue #33) compare chaque header au code réel dans les deux sens et échoue avec la liste complète des incohérences si le header dérive. Ce test tourne automatiquement via `make test`/`make check` — aucune configuration CI séparée n'est nécessaire.
+
 ---
 
 ## Racine `src/`
