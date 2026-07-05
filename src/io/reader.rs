@@ -491,6 +491,11 @@ impl ByteScanner {
         &self.buf
     }
 
+    #[must_use]
+    fn buf_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.buf
+    }
+
     /// Read exactly one byte. `Ok(None)` on EOF.
     fn read_byte(&mut self) -> Result<Option<u8>> {
         let mut b = [0u8; 1];
@@ -620,145 +625,38 @@ impl ByteScanner {
 /// Streaming iterator over a top-level JSON array `[{...}, {...}]`.
 /// Reads one element at a time using a mini depth-tracking tokenizer.
 pub struct JsonArrayReader {
-    reader: BufReader<File>,
-    bytes_read: u64,
+    scanner: ByteScanner,
     opened: bool, // have we consumed the opening `[`?
     done: bool,
-    buf: Vec<u8>, // reusable scratch buffer
 }
 
 impl JsonArrayReader {
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path)?;
         Ok(Self {
-            reader: BufReader::with_capacity(512 * 1024, file),
-            bytes_read: 0,
+            scanner: ByteScanner::open(path)?,
             opened: false,
             done: false,
-            buf: Vec::with_capacity(4096),
         })
     }
 
     #[must_use]
     pub const fn bytes_read(&self) -> u64 {
-        self.bytes_read
-    }
-
-    /// Read exactly one byte. Returns None on EOF.
-    fn read_byte(&mut self) -> Option<std::io::Result<u8>> {
-        let mut b = [0u8; 1];
-        match self.reader.read_exact(&mut b) {
-            Ok(()) => {
-                self.bytes_read += 1;
-                Some(Ok(b[0]))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => None,
-            Err(e) => Some(Err(e)),
-        }
+        self.scanner.bytes_read()
     }
 
     /// Skip whitespace and commas at the top level until we find the
     /// first byte of the next value (or `]` for end-of-array).
     /// Returns the first significant byte, or None on EOF.
     fn skip_to_next_value(&mut self) -> Option<Result<u8>> {
-        loop {
-            match self.read_byte()? {
-                Err(e) => return Some(Err(J2sError::Io(e))),
-                Ok(b) => match b {
-                    b' ' | b'\t' | b'\n' | b'\r' | b',' => {}
-                    b']' => return None, // end of array
-                    other => return Some(Ok(other)),
-                },
-            }
+        match self.scanner.skip_to_next_value(b']') {
+            Ok(None) => None,
+            Ok(Some(b)) => Some(Ok(b)),
+            // Preserves pre-existing behavior: a truncated file is silently treated the
+            // same as a normal end-of-array, same as before this struct delegated to
+            // ByteScanner. See issue #37 edge-case analysis (finding #2).
+            Err(J2sError::InvalidInput(_)) => None,
+            Err(e) => Some(Err(e)),
         }
-    }
-
-    /// Collect a complete JSON value starting with `first_byte` into `self.buf`.
-    fn collect_value(&mut self, first_byte: u8) -> Result<()> {
-        self.buf.clear();
-        self.buf.push(first_byte);
-        match first_byte {
-            b'{' => self.collect_container(b'}'),
-            b'[' => self.collect_container(b']'),
-            b'"' => self.collect_string(),
-            _ => self.collect_primitive(),
-        }
-    }
-
-    /// Collect the rest of a `{...}` or `[...]` container (opener already in buf).
-    fn collect_container(&mut self, closer: u8) -> Result<()> {
-        let mut depth: u32 = 1;
-        let mut in_string = false;
-        let mut escape_next = false;
-        loop {
-            let (n, found) = {
-                let chunk = self.reader.fill_buf().map_err(J2sError::Io)?;
-                if chunk.is_empty() {
-                    return Err(J2sError::InvalidInput("Unexpected EOF inside JSON value".into()));
-                }
-                scan_chunk_into(chunk, &mut self.buf, &mut depth, &mut in_string, &mut escape_next)
-            }; // chunk borrow ends before consume
-            self.reader.consume(n);
-            self.bytes_read += n as u64;
-            if let Some(b) = found {
-                return if b == closer {
-                    Ok(())
-                } else {
-                    Err(J2sError::InvalidInput(format!(
-                        "Mismatched bracket: expected '{}', got '{}'",
-                        closer as char, b as char
-                    )))
-                };
-            }
-        }
-    }
-
-    /// Collect the rest of a `"..."` string (opening `"` already in buf).
-    fn collect_string(&mut self) -> Result<()> {
-        let mut escape_next = false;
-        loop {
-            let b = match self.read_byte() {
-                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".to_string())),
-                Some(Err(e)) => return Err(J2sError::Io(e)),
-                Some(Ok(b)) => b,
-            };
-            self.buf.push(b);
-            if escape_next {
-                escape_next = false;
-            } else {
-                match b {
-                    b'\\' => escape_next = true,
-                    b'"' => return Ok(()),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    /// Collect a primitive (number, bool, null) — read until a delimiter.
-    fn collect_primitive(&mut self) -> Result<()> {
-        loop {
-            // Peek at next byte using fill_buf
-            let next = {
-                let buf = match self.reader.fill_buf() {
-                    Ok(b) => b,
-                    Err(e) => return Err(J2sError::Io(e)),
-                };
-                if buf.is_empty() {
-                    break; // EOF — value is complete
-                }
-                buf[0]
-            };
-            match next {
-                b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r' => break,
-                b => {
-                    self.buf.push(b);
-                    self.reader.consume(1);
-                    self.bytes_read += 1;
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -769,11 +667,12 @@ impl JsonArrayReader {
 
         if !self.opened {
             loop {
-                match self.read_byte()? {
-                    Err(e) => return Some(Err(J2sError::Io(e))),
-                    Ok(b'[') => { self.opened = true; break; }
-                    Ok(b) if b.is_ascii_whitespace() => {}
-                    Ok(b) => return Some(Err(J2sError::InvalidInput(format!("Expected '[', found '{}'", b as char)))),
+                match self.scanner.read_byte() {
+                    Ok(None) => return None,
+                    Err(e) => return Some(Err(e)),
+                    Ok(Some(b'[')) => { self.opened = true; break; }
+                    Ok(Some(b)) if b.is_ascii_whitespace() => {}
+                    Ok(Some(b)) => return Some(Err(J2sError::InvalidInput(format!("Expected '[', found '{}'", b as char)))),
                 }
             }
         }
@@ -783,11 +682,11 @@ impl JsonArrayReader {
             Ok(b) => b,
         };
 
-        if let Err(e) = self.collect_value(first_byte) {
+        if let Err(e) = self.scanner.collect_value(first_byte) {
             return Some(Err(e));
         }
 
-        Some(Ok(self.buf.clone()))
+        Some(Ok(self.scanner.buf().to_vec()))
     }
 }
 
@@ -802,14 +701,15 @@ impl Iterator for JsonArrayReader {
         // On first call: skip to the opening `[`
         if !self.opened {
             loop {
-                match self.read_byte()? {
-                    Err(e) => return Some(Err(J2sError::Io(e))),
-                    Ok(b'[') => {
+                match self.scanner.read_byte() {
+                    Ok(None) => return None,
+                    Err(e) => return Some(Err(e)),
+                    Ok(Some(b'[')) => {
                         self.opened = true;
                         break;
                     }
-                    Ok(b) if b.is_ascii_whitespace() => {}
-                    Ok(b) => {
+                    Ok(Some(b)) if b.is_ascii_whitespace() => {}
+                    Ok(Some(b)) => {
                         return Some(Err(J2sError::InvalidInput(format!(
                             "Expected '[', found '{}'",
                             b as char
@@ -826,12 +726,12 @@ impl Iterator for JsonArrayReader {
         };
 
         // Collect the complete JSON value
-        if let Err(e) = self.collect_value(first_byte) {
+        if let Err(e) = self.scanner.collect_value(first_byte) {
             return Some(Err(e));
         }
 
         // Parse
-        Some(simd_json::from_slice(&mut self.buf).map_err(simd_err))
+        Some(simd_json::from_slice(self.scanner.buf_mut()).map_err(simd_err))
     }
 }
 
