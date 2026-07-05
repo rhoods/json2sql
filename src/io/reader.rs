@@ -34,33 +34,42 @@
 //! - fn `JsonLinesReader::next_raw` — retourne les octets bruts du prochain objet JSON, sans parser.
 //! - fn `JsonLinesReader::next` — implémente `Iterator` (parse la ligne suivante en `Value`).
 //!
-//! `JsonArrayReader` (tableau JSON `[{...}, {...}]`) :
+//! `ByteScanner` (tokenizer bas niveau partagé par `JsonArrayReader` et `JsonRootWrapperReader`,
+//! extrait en issue #37 pour éliminer leur duplication structurelle) :
+//! - struct `ByteScanner` — accès fichier bufferisé, lecture octet par octet, collecte de valeurs JSON.
+//! - fn `ByteScanner::open` — ouvre le fichier.
+//! - fn `ByteScanner::bytes_read` — octets consommés jusqu'ici.
+//! - fn `ByteScanner::buf` — accès en lecture au buffer de collecte.
+//! - fn `ByteScanner::buf_mut` — accès en écriture au buffer de collecte.
+//! - fn `ByteScanner::read_byte` — lit exactement un octet, `None` à l'EOF.
+//! - fn `ByteScanner::skip_to_next_value` — saute espaces/virgules ; `Err` sur EOF réel (les deux
+//!   readers ci-dessous interprètent différemment cet `Err`, voir issue #37).
+//! - fn `ByteScanner::collect_value` — collecte une valeur JSON complète dans `buf`.
+//! - fn `ByteScanner::collect_container` — collecte le reste d'un conteneur `{...}`/`[...]`.
+//! - fn `ByteScanner::collect_string` — collecte le reste d'une chaîne `"..."`.
+//! - fn `ByteScanner::collect_primitive` — collecte un scalaire jusqu'au délimiteur.
+//!
+//! `JsonArrayReader` (tableau JSON `[{...}, {...}]`, délègue sa tokenisation à `ByteScanner`) :
 //! - struct `JsonArrayReader` — itérateur streaming sur un tableau JSON top-level.
-//! - fn `JsonArrayReader::open` — ouvre le fichier.
-//! - fn `JsonArrayReader::bytes_read` — octets consommés jusqu'ici.
-//! - fn `JsonArrayReader::read_byte` — lit exactement un octet.
-//! - fn `JsonArrayReader::skip_to_next_value` — saute espaces/virgules jusqu'au prochain élément.
-//! - fn `JsonArrayReader::collect_value` — collecte une valeur JSON complète dans `buf`.
-//! - fn `JsonArrayReader::collect_container` — collecte le reste d'un conteneur `{...}`/`[...]`.
-//! - fn `JsonArrayReader::collect_string` — collecte le reste d'une chaîne `"..."`.
-//! - fn `JsonArrayReader::collect_primitive` — collecte un scalaire jusqu'au délimiteur.
+//! - fn `JsonArrayReader::open` — ouvre le fichier via `ByteScanner` (consomme le `[` paresseusement,
+//!   au premier `next`/`next_raw`).
+//! - fn `JsonArrayReader::bytes_read` — délègue à `ByteScanner`.
+//! - fn `JsonArrayReader::skip_to_next_value` — délègue à `ByteScanner`, absorbe l'EOF réel en
+//!   `None` (fin de tableau silencieuse, comportement préexistant conservé).
 //! - fn `JsonArrayReader::next_raw` — retourne les octets bruts du prochain élément, sans parser.
 //! - fn `JsonArrayReader::next` — implémente `Iterator` (parse l'élément suivant en `Value`).
 //!
-//! `JsonRootWrapperReader` (objet racine `{"K": [...]}`, méthodes internes structurellement
-//! dupliquées avec `JsonArrayReader` — candidat refactor, voir issue de suivi) :
+//! `JsonRootWrapperReader` (objet racine `{"K": [...]}`, délègue sa tokenisation à `ByteScanner`) :
 //! - struct `JsonRootWrapperReader` — itérateur streaming à travers les N tableaux nommés du wrapper.
-//! - fn `JsonRootWrapperReader::open` — ouvre le fichier, consomme le `{` d'ouverture du wrapper.
+//! - fn `JsonRootWrapperReader::open` — ouvre le fichier via `ByteScanner`, consomme le `{`
+//!   d'ouverture du wrapper immédiatement (contrairement à `JsonArrayReader`, ce timing n'est pas
+//!   unifié — voir issue #37).
 //! - fn `JsonRootWrapperReader::current_key` — clé du tableau actuellement streamé, `None` si épuisé.
-//! - fn `JsonRootWrapperReader::bytes_read` — octets consommés jusqu'ici (cumulatif entre clés).
+//! - fn `JsonRootWrapperReader::bytes_read` — délègue à `ByteScanner` (cumulatif entre clés).
 //! - fn `JsonRootWrapperReader::next_raw` — retourne les octets bruts du prochain élément, toutes clés confondues.
-//! - fn `JsonRootWrapperReader::read_byte_tracked` — lit un octet en incrémentant `bytes_read`.
 //! - fn `JsonRootWrapperReader::advance_to_next_array` — avance le lecteur jusqu'au `[` de la clé suivante.
-//! - fn `JsonRootWrapperReader::skip_to_next_value` — saute espaces/virgules jusqu'au prochain élément.
-//! - fn `JsonRootWrapperReader::collect_value` — collecte une valeur JSON complète dans `buf`.
-//! - fn `JsonRootWrapperReader::collect_container` — collecte le reste d'un conteneur `{...}`/`[...]`.
-//! - fn `JsonRootWrapperReader::collect_string` — collecte le reste d'une chaîne `"..."`.
-//! - fn `JsonRootWrapperReader::collect_primitive` — collecte un scalaire jusqu'au délimiteur.
+//! - fn `JsonRootWrapperReader::skip_to_next_value` — délègue à `ByteScanner`, propage l'EOF réel en
+//!   `Err` (distinct de `JsonArrayReader`, comportement préexistant conservé).
 //! - fn `JsonRootWrapperReader::skip_string_rest` — saute le reste d'une chaîne (clé, `"` déjà consommé).
 //! - fn `JsonRootWrapperReader::next` — implémente `Iterator` (parse l'élément suivant en `Value`).
 //!
@@ -460,66 +469,81 @@ impl Iterator for JsonLinesReader {
 }
 
 // ---------------------------------------------------------------------------
-// JSON Array iterator — streaming, no full load
+// Shared low-level byte tokenizer (used by JsonArrayReader and JsonRootWrapperReader)
 // ---------------------------------------------------------------------------
 
-/// Streaming iterator over a top-level JSON array `[{...}, {...}]`.
-/// Reads one element at a time using a mini depth-tracking tokenizer.
-pub struct JsonArrayReader {
+/// Shared byte-level tokenizer: buffered file access, one-byte reads, and JSON-value
+/// collection into a reusable scratch buffer. Not `pub` — internal to `io::reader`.
+struct ByteScanner {
     reader: BufReader<File>,
+    buf: Vec<u8>,
     bytes_read: u64,
-    opened: bool, // have we consumed the opening `[`?
-    done: bool,
-    buf: Vec<u8>, // reusable scratch buffer
 }
 
-impl JsonArrayReader {
-    pub fn open(path: &Path) -> Result<Self> {
+impl ByteScanner {
+    fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         Ok(Self {
             reader: BufReader::with_capacity(512 * 1024, file),
-            bytes_read: 0,
-            opened: false,
-            done: false,
             buf: Vec::with_capacity(4096),
+            bytes_read: 0,
         })
     }
 
     #[must_use]
-    pub const fn bytes_read(&self) -> u64 {
+    const fn bytes_read(&self) -> u64 {
         self.bytes_read
     }
 
-    /// Read exactly one byte. Returns None on EOF.
-    fn read_byte(&mut self) -> Option<std::io::Result<u8>> {
+    #[must_use]
+    fn buf(&self) -> &[u8] {
+        &self.buf
+    }
+
+    #[must_use]
+    fn buf_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.buf
+    }
+
+    /// Read exactly one byte. `Ok(None)` on EOF.
+    fn read_byte(&mut self) -> Result<Option<u8>> {
         let mut b = [0u8; 1];
         match self.reader.read_exact(&mut b) {
             Ok(()) => {
                 self.bytes_read += 1;
-                Some(Ok(b[0]))
+                Ok(Some(b[0]))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => None,
-            Err(e) => Some(Err(e)),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(e) => Err(J2sError::Io(e)),
         }
     }
 
-    /// Skip whitespace and commas at the top level until we find the
-    /// first byte of the next value (or `]` for end-of-array).
-    /// Returns the first significant byte, or None on EOF.
-    fn skip_to_next_value(&mut self) -> Option<Result<u8>> {
+    /// Skip whitespace and commas; return the next value's first byte, `Ok(None)` on `closer`,
+    /// or `Err` on real EOF encountered before `closer` was seen. Callers decide how to
+    /// interpret that `Err` (see issue #37 — `JsonArrayReader` and `JsonRootWrapperReader`
+    /// diverge on this point and must keep doing so).
+    fn skip_to_next_value(&mut self, closer: u8) -> Result<Option<u8>> {
         loop {
             match self.read_byte()? {
-                Err(e) => return Some(Err(J2sError::Io(e))),
-                Ok(b) => match b {
-                    b' ' | b'\t' | b'\n' | b'\r' | b',' => {}
-                    b']' => return None, // end of array
-                    other => return Some(Ok(other)),
-                },
+                None => {
+                    return Err(J2sError::InvalidInput(
+                        "Unexpected EOF while scanning for next value".into(),
+                    ))
+                }
+                Some(b) => {
+                    if b == closer {
+                        return Ok(None);
+                    }
+                    match b {
+                        b' ' | b'\t' | b'\n' | b'\r' | b',' => {}
+                        other => return Ok(Some(other)),
+                    }
+                }
             }
         }
     }
 
-    /// Collect a complete JSON value starting with `first_byte` into `self.buf`.
+    /// Collect a complete JSON value starting with `first_byte` into `self.buf` (cleared first).
     fn collect_value(&mut self, first_byte: u8) -> Result<()> {
         self.buf.clear();
         self.buf.push(first_byte);
@@ -563,10 +587,9 @@ impl JsonArrayReader {
     fn collect_string(&mut self) -> Result<()> {
         let mut escape_next = false;
         loop {
-            let b = match self.read_byte() {
+            let b = match self.read_byte()? {
                 None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".to_string())),
-                Some(Err(e)) => return Err(J2sError::Io(e)),
-                Some(Ok(b)) => b,
+                Some(b) => b,
             };
             self.buf.push(b);
             if escape_next {
@@ -584,12 +607,8 @@ impl JsonArrayReader {
     /// Collect a primitive (number, bool, null) — read until a delimiter.
     fn collect_primitive(&mut self) -> Result<()> {
         loop {
-            // Peek at next byte using fill_buf
             let next = {
-                let buf = match self.reader.fill_buf() {
-                    Ok(b) => b,
-                    Err(e) => return Err(J2sError::Io(e)),
-                };
+                let buf = self.reader.fill_buf().map_err(J2sError::Io)?;
                 if buf.is_empty() {
                     break; // EOF — value is complete
                 }
@@ -608,6 +627,48 @@ impl JsonArrayReader {
     }
 }
 
+// ---------------------------------------------------------------------------
+// JSON Array iterator — streaming, no full load
+// ---------------------------------------------------------------------------
+
+/// Streaming iterator over a top-level JSON array `[{...}, {...}]`.
+/// Reads one element at a time using a mini depth-tracking tokenizer.
+pub struct JsonArrayReader {
+    scanner: ByteScanner,
+    opened: bool, // have we consumed the opening `[`?
+    done: bool,
+}
+
+impl JsonArrayReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        Ok(Self {
+            scanner: ByteScanner::open(path)?,
+            opened: false,
+            done: false,
+        })
+    }
+
+    #[must_use]
+    pub const fn bytes_read(&self) -> u64 {
+        self.scanner.bytes_read()
+    }
+
+    /// Skip whitespace and commas at the top level until we find the
+    /// first byte of the next value (or `]` for end-of-array).
+    /// Returns the first significant byte, or None on EOF.
+    fn skip_to_next_value(&mut self) -> Option<Result<u8>> {
+        match self.scanner.skip_to_next_value(b']') {
+            Ok(None) => None,
+            Ok(Some(b)) => Some(Ok(b)),
+            // Preserves pre-existing behavior: a truncated file is silently treated the
+            // same as a normal end-of-array, same as before this struct delegated to
+            // ByteScanner. See issue #37 edge-case analysis (finding #2).
+            Err(J2sError::InvalidInput(_)) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
 impl JsonArrayReader {
     /// Return the raw bytes of the next JSON object without parsing.
     pub fn next_raw(&mut self) -> Option<Result<Vec<u8>>> {
@@ -615,11 +676,12 @@ impl JsonArrayReader {
 
         if !self.opened {
             loop {
-                match self.read_byte()? {
-                    Err(e) => return Some(Err(J2sError::Io(e))),
-                    Ok(b'[') => { self.opened = true; break; }
-                    Ok(b) if b.is_ascii_whitespace() => {}
-                    Ok(b) => return Some(Err(J2sError::InvalidInput(format!("Expected '[', found '{}'", b as char)))),
+                match self.scanner.read_byte() {
+                    Ok(None) => return None,
+                    Err(e) => return Some(Err(e)),
+                    Ok(Some(b'[')) => { self.opened = true; break; }
+                    Ok(Some(b)) if b.is_ascii_whitespace() => {}
+                    Ok(Some(b)) => return Some(Err(J2sError::InvalidInput(format!("Expected '[', found '{}'", b as char)))),
                 }
             }
         }
@@ -629,11 +691,11 @@ impl JsonArrayReader {
             Ok(b) => b,
         };
 
-        if let Err(e) = self.collect_value(first_byte) {
+        if let Err(e) = self.scanner.collect_value(first_byte) {
             return Some(Err(e));
         }
 
-        Some(Ok(self.buf.clone()))
+        Some(Ok(self.scanner.buf().to_vec()))
     }
 }
 
@@ -648,14 +710,15 @@ impl Iterator for JsonArrayReader {
         // On first call: skip to the opening `[`
         if !self.opened {
             loop {
-                match self.read_byte()? {
-                    Err(e) => return Some(Err(J2sError::Io(e))),
-                    Ok(b'[') => {
+                match self.scanner.read_byte() {
+                    Ok(None) => return None,
+                    Err(e) => return Some(Err(e)),
+                    Ok(Some(b'[')) => {
                         self.opened = true;
                         break;
                     }
-                    Ok(b) if b.is_ascii_whitespace() => {}
-                    Ok(b) => {
+                    Ok(Some(b)) if b.is_ascii_whitespace() => {}
+                    Ok(Some(b)) => {
                         return Some(Err(J2sError::InvalidInput(format!(
                             "Expected '[', found '{}'",
                             b as char
@@ -672,12 +735,12 @@ impl Iterator for JsonArrayReader {
         };
 
         // Collect the complete JSON value
-        if let Err(e) = self.collect_value(first_byte) {
+        if let Err(e) = self.scanner.collect_value(first_byte) {
             return Some(Err(e));
         }
 
         // Parse
-        Some(simd_json::from_slice(&mut self.buf).map_err(simd_err))
+        Some(simd_json::from_slice(self.scanner.buf_mut()).map_err(simd_err))
     }
 }
 
@@ -690,53 +753,39 @@ impl Iterator for JsonArrayReader {
 /// Each named array is streamed in order. `current_key()` identifies which key is active.
 /// `bytes_read()` is cumulative across keys (never resets between arrays).
 pub struct JsonRootWrapperReader {
-    reader: BufReader<File>,
+    scanner: ByteScanner,
     keys: Vec<String>,
     current_key_idx: usize,
-    bytes_read: u64,
     in_array: bool,
     done: bool,
-    buf: Vec<u8>,
 }
 
 impl JsonRootWrapperReader {
     /// Open `path`, consuming the opening `{` of the root wrapper object.
     /// `keys` must be the key names in file order (as returned by [`detect_format`]).
     pub fn open(path: &Path, keys: Vec<String>) -> Result<Self> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::with_capacity(512 * 1024, file);
-        let mut bytes_read = 0u64;
-        // Skip to opening '{'
+        let mut scanner = ByteScanner::open(path)?;
+        // Skip to opening '{' — consumed eagerly here, unlike JsonArrayReader's lazy '['
+        // (see issue #37 edge-case analysis, finding #3 — this timing is not unified).
         loop {
-            let mut b = [0u8; 1];
-            match reader.read_exact(&mut b) {
-                Ok(()) => {
-                    bytes_read += 1;
-                    if b[0].is_ascii_whitespace() {
-                        continue;
-                    }
-                    if b[0] != b'{' {
-                        return Err(J2sError::InvalidInput(format!(
-                            "Expected '{{' as first character, found '{}'",
-                            b[0] as char
-                        )));
-                    }
-                    break;
+            match scanner.read_byte()? {
+                None => return Err(J2sError::InvalidInput("File appears to be empty".into())),
+                Some(b) if b.is_ascii_whitespace() => {}
+                Some(b'{') => break,
+                Some(b) => {
+                    return Err(J2sError::InvalidInput(format!(
+                        "Expected '{{' as first character, found '{}'",
+                        b as char
+                    )))
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    return Err(J2sError::InvalidInput("File appears to be empty".into()));
-                }
-                Err(e) => return Err(J2sError::Io(e)),
             }
         }
         Ok(Self {
-            reader,
+            scanner,
             keys,
             current_key_idx: 0,
-            bytes_read,
             in_array: false,
             done: false,
-            buf: Vec::with_capacity(4096),
         })
     }
 
@@ -753,7 +802,7 @@ impl JsonRootWrapperReader {
     /// Total bytes consumed from the file since open (cumulative across keys).
     #[must_use]
     pub const fn bytes_read(&self) -> u64 {
-        self.bytes_read
+        self.scanner.bytes_read()
     }
 
     /// Return the raw bytes of the next JSON element across all wrapper arrays.
@@ -782,32 +831,20 @@ impl JsonRootWrapperReader {
                 Some(Err(e)) => return Some(Err(e)),
                 Some(Ok(b)) => b,
             };
-            if let Err(e) = self.collect_value(first_byte) {
+            if let Err(e) = self.scanner.collect_value(first_byte) {
                 return Some(Err(e));
             }
-            return Some(Ok(self.buf.clone()));
+            return Some(Ok(self.scanner.buf().to_vec()));
         }
     }
 
     // -- internal helpers --
 
-    fn read_byte_tracked(&mut self) -> Result<Option<u8>> {
-        let mut b = [0u8; 1];
-        match self.reader.read_exact(&mut b) {
-            Ok(()) => {
-                self.bytes_read += 1;
-                Ok(Some(b[0]))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(e) => Err(J2sError::Io(e)),
-        }
-    }
-
     /// Advance the reader to the `[` of the next wrapper key's array.
     fn advance_to_next_array(&mut self) -> Result<()> {
         // Skip whitespace/commas to '"' (key start)
         loop {
-            match self.read_byte_tracked()? {
+            match self.scanner.read_byte()? {
                 None => {
                     return Err(J2sError::InvalidInput(
                         "Unexpected EOF seeking next wrapper key".into(),
@@ -832,7 +869,7 @@ impl JsonRootWrapperReader {
         self.skip_string_rest()?;
         // Skip whitespace to ':'
         loop {
-            match self.read_byte_tracked()? {
+            match self.scanner.read_byte()? {
                 None => return Err(J2sError::InvalidInput("Unexpected EOF after wrapper key".into())),
                 Some(b) if b.is_ascii_whitespace() => {}
                 Some(b':') => break,
@@ -846,7 +883,7 @@ impl JsonRootWrapperReader {
         }
         // Skip whitespace to '['
         loop {
-            match self.read_byte_tracked()? {
+            match self.scanner.read_byte()? {
                 None => return Err(J2sError::InvalidInput("Unexpected EOF before array start".into())),
                 Some(b) if b.is_ascii_whitespace() => {}
                 Some(b'[') => return Ok(()),
@@ -860,105 +897,21 @@ impl JsonRootWrapperReader {
         }
     }
 
-    /// Skip whitespace/commas inside an array; return next value byte or `None` on `]`.
+    /// Skip whitespace/commas inside an array; return next value byte, or `None` on `]`.
+    /// Unlike `JsonArrayReader`, EOF is propagated as `Err` rather than folded into `None`
+    /// (see issue #37 edge-case analysis, finding #2 — this divergence is intentional).
     fn skip_to_next_value(&mut self) -> Option<Result<u8>> {
-        loop {
-            match self.read_byte_tracked() {
-                Err(e) => return Some(Err(e)),
-                Ok(None) => {
-                    return Some(Err(J2sError::InvalidInput(
-                        "Unexpected EOF inside wrapper array".into(),
-                    )))
-                }
-                Ok(Some(b)) => match b {
-                    b' ' | b'\t' | b'\n' | b'\r' | b',' => {}
-                    b']' => return None,
-                    other => return Some(Ok(other)),
-                },
-            }
+        match self.scanner.skip_to_next_value(b']') {
+            Ok(None) => None,
+            Ok(Some(b)) => Some(Ok(b)),
+            Err(e) => Some(Err(e)),
         }
-    }
-
-    fn collect_value(&mut self, first_byte: u8) -> Result<()> {
-        self.buf.clear();
-        self.buf.push(first_byte);
-        match first_byte {
-            b'{' => self.collect_container(b'}'),
-            b'[' => self.collect_container(b']'),
-            b'"' => self.collect_string(),
-            _ => self.collect_primitive(),
-        }
-    }
-
-    fn collect_container(&mut self, closer: u8) -> Result<()> {
-        let mut depth: u32 = 1;
-        let mut in_string = false;
-        let mut escape_next = false;
-        loop {
-            let (n, found) = {
-                let chunk = self.reader.fill_buf().map_err(J2sError::Io)?;
-                if chunk.is_empty() {
-                    return Err(J2sError::InvalidInput("Unexpected EOF inside JSON value".into()));
-                }
-                scan_chunk_into(chunk, &mut self.buf, &mut depth, &mut in_string, &mut escape_next)
-            }; // chunk borrow ends before consume
-            self.reader.consume(n);
-            self.bytes_read += n as u64;
-            if let Some(b) = found {
-                return if b == closer {
-                    Ok(())
-                } else {
-                    Err(J2sError::InvalidInput(format!(
-                        "Mismatched bracket: expected '{}', got '{}'",
-                        closer as char, b as char
-                    )))
-                };
-            }
-        }
-    }
-
-    fn collect_string(&mut self) -> Result<()> {
-        let mut escape_next = false;
-        loop {
-            let b = match self.read_byte_tracked()? {
-                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".into())),
-                Some(b) => b,
-            };
-            self.buf.push(b);
-            if escape_next {
-                escape_next = false;
-            } else {
-                match b {
-                    b'\\' => escape_next = true,
-                    b'"' => return Ok(()),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    fn collect_primitive(&mut self) -> Result<()> {
-        loop {
-            let buf = self.reader.fill_buf().map_err(J2sError::Io)?;
-            if buf.is_empty() {
-                break;
-            }
-            match buf[0] {
-                b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r' => break,
-                b => {
-                    self.buf.push(b);
-                    self.reader.consume(1);
-                    self.bytes_read += 1;
-                }
-            }
-        }
-        Ok(())
     }
 
     fn skip_string_rest(&mut self) -> Result<()> {
         let mut escape_next = false;
         loop {
-            match self.read_byte_tracked()? {
+            match self.scanner.read_byte()? {
                 None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".into())),
                 Some(b) => {
                     if escape_next {
@@ -1071,6 +1024,99 @@ mod tests {
         f.write_all(content).unwrap();
         f.flush().unwrap();
         f
+    }
+
+    // --- ByteScanner tests (T1 — extraction before JsonArrayReader/JsonRootWrapperReader delegate to it) ---
+
+    #[test]
+    fn test_byte_scanner_read_byte_reads_sequentially_then_eof() {
+        let f = tmp_file(b"ab");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert_eq!(s.read_byte().unwrap(), Some(b'a'));
+        assert_eq!(s.read_byte().unwrap(), Some(b'b'));
+        assert_eq!(s.read_byte().unwrap(), None);
+        assert_eq!(s.bytes_read(), 2);
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_object_roundtrip() {
+        // Content is the tail *after* the opening '{' (already consumed by the caller).
+        let f = tmp_file(br#""a":1,"b":{"c":2}}"#);
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        s.collect_value(b'{').unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&mut s.buf().to_vec()).unwrap();
+        assert_eq!(parsed["a"], 1);
+        assert_eq!(parsed["b"]["c"], 2);
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_string_with_escaped_quote() {
+        let f = tmp_file(b"say \\\"hello\\\"\"");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        s.collect_value(b'"').unwrap();
+        assert_eq!(s.buf(), b"\"say \\\"hello\\\"\"");
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_primitive_stops_at_delimiter() {
+        let f = tmp_file(b"2, \"next\"");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        s.collect_value(b'4').unwrap();
+        assert_eq!(s.buf(), b"42");
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_brackets_inside_string_not_counted() {
+        let f = tmp_file(br#""key": "value {nested} here", "n": 42}"#);
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        s.collect_value(b'{').unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&mut s.buf().to_vec()).unwrap();
+        assert_eq!(parsed["n"], 42);
+        assert!(parsed["key"].as_str().unwrap().contains('}'));
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_mismatched_bracket_errors() {
+        let f = tmp_file(br#""a":1]"#);
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert!(s.collect_value(b'{').is_err());
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_unexpected_eof_errors() {
+        let f = tmp_file(br#""a":1"#);
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert!(s.collect_value(b'{').is_err());
+    }
+
+    // --- ByteScanner::skip_to_next_value tests (T2) ---
+
+    #[test]
+    fn test_byte_scanner_skip_to_next_value_returns_closer_as_none() {
+        let f = tmp_file(b"  ]");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert_eq!(s.skip_to_next_value(b']').unwrap(), None);
+    }
+
+    #[test]
+    fn test_byte_scanner_skip_to_next_value_skips_whitespace_and_commas() {
+        let f = tmp_file(b" , , 42]");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert_eq!(s.skip_to_next_value(b']').unwrap(), Some(b'4'));
+    }
+
+    #[test]
+    fn test_byte_scanner_skip_to_next_value_returns_value_first_byte() {
+        let f = tmp_file(br#"{"a":1}]"#);
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert_eq!(s.skip_to_next_value(b']').unwrap(), Some(b'{'));
+    }
+
+    #[test]
+    fn test_byte_scanner_skip_to_next_value_eof_before_closer_is_err() {
+        let f = tmp_file(b"   ");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert!(s.skip_to_next_value(b']').is_err());
     }
 
     /// next_raw() on a JSON array must return the same bytes that parse to the same value as next().
