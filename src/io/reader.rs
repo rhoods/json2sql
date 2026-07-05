@@ -460,6 +460,135 @@ impl Iterator for JsonLinesReader {
 }
 
 // ---------------------------------------------------------------------------
+// Shared low-level byte tokenizer (used by JsonArrayReader and JsonRootWrapperReader)
+// ---------------------------------------------------------------------------
+
+/// Shared byte-level tokenizer: buffered file access, one-byte reads, and JSON-value
+/// collection into a reusable scratch buffer. Not `pub` — internal to `io::reader`.
+struct ByteScanner {
+    reader: BufReader<File>,
+    buf: Vec<u8>,
+    bytes_read: u64,
+}
+
+impl ByteScanner {
+    fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path)?;
+        Ok(Self {
+            reader: BufReader::with_capacity(512 * 1024, file),
+            buf: Vec::with_capacity(4096),
+            bytes_read: 0,
+        })
+    }
+
+    #[must_use]
+    const fn bytes_read(&self) -> u64 {
+        self.bytes_read
+    }
+
+    #[must_use]
+    fn buf(&self) -> &[u8] {
+        &self.buf
+    }
+
+    /// Read exactly one byte. `Ok(None)` on EOF.
+    fn read_byte(&mut self) -> Result<Option<u8>> {
+        let mut b = [0u8; 1];
+        match self.reader.read_exact(&mut b) {
+            Ok(()) => {
+                self.bytes_read += 1;
+                Ok(Some(b[0]))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(e) => Err(J2sError::Io(e)),
+        }
+    }
+
+    /// Collect a complete JSON value starting with `first_byte` into `self.buf` (cleared first).
+    fn collect_value(&mut self, first_byte: u8) -> Result<()> {
+        self.buf.clear();
+        self.buf.push(first_byte);
+        match first_byte {
+            b'{' => self.collect_container(b'}'),
+            b'[' => self.collect_container(b']'),
+            b'"' => self.collect_string(),
+            _ => self.collect_primitive(),
+        }
+    }
+
+    /// Collect the rest of a `{...}` or `[...]` container (opener already in buf).
+    fn collect_container(&mut self, closer: u8) -> Result<()> {
+        let mut depth: u32 = 1;
+        let mut in_string = false;
+        let mut escape_next = false;
+        loop {
+            let (n, found) = {
+                let chunk = self.reader.fill_buf().map_err(J2sError::Io)?;
+                if chunk.is_empty() {
+                    return Err(J2sError::InvalidInput("Unexpected EOF inside JSON value".into()));
+                }
+                scan_chunk_into(chunk, &mut self.buf, &mut depth, &mut in_string, &mut escape_next)
+            }; // chunk borrow ends before consume
+            self.reader.consume(n);
+            self.bytes_read += n as u64;
+            if let Some(b) = found {
+                return if b == closer {
+                    Ok(())
+                } else {
+                    Err(J2sError::InvalidInput(format!(
+                        "Mismatched bracket: expected '{}', got '{}'",
+                        closer as char, b as char
+                    )))
+                };
+            }
+        }
+    }
+
+    /// Collect the rest of a `"..."` string (opening `"` already in buf).
+    fn collect_string(&mut self) -> Result<()> {
+        let mut escape_next = false;
+        loop {
+            let b = match self.read_byte()? {
+                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".to_string())),
+                Some(b) => b,
+            };
+            self.buf.push(b);
+            if escape_next {
+                escape_next = false;
+            } else {
+                match b {
+                    b'\\' => escape_next = true,
+                    b'"' => return Ok(()),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Collect a primitive (number, bool, null) — read until a delimiter.
+    fn collect_primitive(&mut self) -> Result<()> {
+        loop {
+            let next = {
+                let buf = self.reader.fill_buf().map_err(J2sError::Io)?;
+                if buf.is_empty() {
+                    break; // EOF — value is complete
+                }
+                buf[0]
+            };
+            match next {
+                b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r' => break,
+                b => {
+                    self.buf.push(b);
+                    self.reader.consume(1);
+                    self.bytes_read += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // JSON Array iterator — streaming, no full load
 // ---------------------------------------------------------------------------
 
@@ -1071,6 +1200,69 @@ mod tests {
         f.write_all(content).unwrap();
         f.flush().unwrap();
         f
+    }
+
+    // --- ByteScanner tests (T1 — extraction before JsonArrayReader/JsonRootWrapperReader delegate to it) ---
+
+    #[test]
+    fn test_byte_scanner_read_byte_reads_sequentially_then_eof() {
+        let f = tmp_file(b"ab");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert_eq!(s.read_byte().unwrap(), Some(b'a'));
+        assert_eq!(s.read_byte().unwrap(), Some(b'b'));
+        assert_eq!(s.read_byte().unwrap(), None);
+        assert_eq!(s.bytes_read(), 2);
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_object_roundtrip() {
+        // Content is the tail *after* the opening '{' (already consumed by the caller).
+        let f = tmp_file(br#""a":1,"b":{"c":2}}"#);
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        s.collect_value(b'{').unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&mut s.buf().to_vec()).unwrap();
+        assert_eq!(parsed["a"], 1);
+        assert_eq!(parsed["b"]["c"], 2);
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_string_with_escaped_quote() {
+        let f = tmp_file(b"say \\\"hello\\\"\"");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        s.collect_value(b'"').unwrap();
+        assert_eq!(s.buf(), b"\"say \\\"hello\\\"\"");
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_primitive_stops_at_delimiter() {
+        let f = tmp_file(b"2, \"next\"");
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        s.collect_value(b'4').unwrap();
+        assert_eq!(s.buf(), b"42");
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_brackets_inside_string_not_counted() {
+        let f = tmp_file(br#""key": "value {nested} here", "n": 42}"#);
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        s.collect_value(b'{').unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&mut s.buf().to_vec()).unwrap();
+        assert_eq!(parsed["n"], 42);
+        assert!(parsed["key"].as_str().unwrap().contains('}'));
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_mismatched_bracket_errors() {
+        let f = tmp_file(br#""a":1]"#);
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert!(s.collect_value(b'{').is_err());
+    }
+
+    #[test]
+    fn test_byte_scanner_collect_value_unexpected_eof_errors() {
+        let f = tmp_file(br#""a":1"#);
+        let mut s = ByteScanner::open(f.path()).unwrap();
+        assert!(s.collect_value(b'{').is_err());
     }
 
     /// next_raw() on a JSON array must return the same bytes that parse to the same value as next().
