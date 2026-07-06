@@ -590,59 +590,9 @@ impl AppState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Jaccard display info (multi-select panel)
-// ---------------------------------------------------------------------------
-
-/// Display data for the Jaccard similarity section in the Strategy right panel.
-pub struct JaccardDisplay {
-    /// Minimum pairwise Jaccard score across all selected table pairs.
-    pub score: f64,
-    /// Number of data-column names present in ALL selected tables (intersection).
-    pub common: usize,
-    /// Total distinct data-column names across all selected tables (union).
-    pub union_count: usize,
-}
-
-/// Compute Jaccard display info for the given selection.
-/// Returns defaults (score=1.0, empty counts) when fewer than 2 tables are selected.
-pub fn compute_jaccard_display(schemas: &[TableSchema], indices: &[usize]) -> JaccardDisplay {
-    use json2sql::schema::cascading::scoring::pairwise_jaccard_min;
-    use std::collections::HashSet as HS;
-
-    if indices.len() < 2 {
-        return JaccardDisplay { score: 1.0, common: 0, union_count: 0 };
-    }
-
-    let tables: Vec<&TableSchema> = indices.iter().filter_map(|&i| schemas.get(i)).collect();
-
-    // Column name sets (data columns only).
-    let col_sets: Vec<HS<&str>> = tables.iter()
-        .map(|t| t.data_columns().map(|c| c.original_name.as_str()).collect())
-        .collect();
-
-    let union_cols: HS<&str> = col_sets.iter().flatten().copied().collect();
-    let union_count = union_cols.len();
-    let common = if col_sets.is_empty() { 0 } else {
-        union_cols.iter().filter(|&&c| col_sets.iter().all(|s| s.contains(c))).count()
-    };
-
-    let score = pairwise_jaccard_min(schemas, indices);
-
-    JaccardDisplay { score, common, union_count }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_schema(name: &str, parent: Option<&str>) -> json2sql::schema::table_schema::TableSchema {
-        let mut s = json2sql::schema::table_schema::TableSchema::new(
-            name.to_string(), vec![name.to_string()], if parent.is_some() { 1 } else { 0 },
-        );
-        s.parent_table = parent.map(|p| p.to_string());
-        s
-    }
 
     // --- Sub-struct defaults ---
 
@@ -898,48 +848,6 @@ mod tests {
         });
         assert_eq!(s.import.pass2_progress.rows_per_table["orders"], 120);
     }
-
-    // --- jaccard_info + apply_sibling_merge ---
-
-    fn make_schema_with_cols(name: &str, parent: Option<&str>, data_keys: &[&str]) -> json2sql::schema::table_schema::TableSchema {
-        use json2sql::schema::table_schema::ColumnSchema;
-        use json2sql::schema::type_tracker::PgType;
-        let mut s = make_schema(name, parent);
-        s.columns.push(ColumnSchema { name: "j2s_id".to_string(), original_name: "j2s_id".to_string(), pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false });
-        for &k in data_keys {
-            s.columns.push(ColumnSchema { name: k.to_string(), original_name: k.to_string(), pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false });
-        }
-        s
-    }
-
-    #[test]
-    fn jaccard_display_identical_siblings_score_one() {
-        let schemas = vec![
-            make_schema_with_cols("img_front", Some("img"), &["url", "width"]),
-            make_schema_with_cols("img_back",  Some("img"), &["url", "width"]),
-        ];
-        let d = compute_jaccard_display(&schemas, &[0, 1]);
-        assert!((d.score - 1.0).abs() < 1e-9);
-        assert_eq!(d.common, 2);
-        assert_eq!(d.union_count, 2);
-    }
-
-    #[test]
-    fn jaccard_display_partial_overlap() {
-        let schemas = vec![
-            make_schema_with_cols("p_a", Some("p"), &["x", "y", "z"]),
-            make_schema_with_cols("p_b", Some("p"), &["x", "y", "w"]),
-        ];
-        let d = compute_jaccard_display(&schemas, &[0, 1]);
-        // union_count and common are computed before noise-filtering.
-        assert_eq!(d.common, 2);      // {x,y} present in both
-        assert_eq!(d.union_count, 4); // {x,y,z,w}
-        // pairwise_jaccard_min applies noise-filtering: with n=2 schemas,
-        // min_presence = max(2, 2/20) = 2, so z and w are filtered out.
-        // Filtered sets: p_a={x,y}, p_b={x,y} → Jaccard = 1.0.
-        assert!((d.score - 1.0).abs() < 1e-9);
-    }
-
 
     #[test]
     fn pass2_flush_duplicate_emit_doubles_count() {
