@@ -172,7 +172,7 @@ IHM desktop Dioxus (5 écrans du workflow d'import).
 
 | Fichier | Rôle |
 |---|---|
-| `mod.rs` | Utilitaires partagés : view-model de la liste de tables, sélecteurs de fichiers, composant `ProgressBar`, application des overrides |
+| `mod.rs` | Réexporte les utilitaires de `common/` (voir ci-dessous) pour que `crate::screens::X` reste résoluble |
 | `setup.rs` | Écran 1 — Setup (stepper 4 accordéons) |
 | `analysis.rs` | Écran 2 — Analysis (progression Pass 1) |
 | `strategy.rs` | Écran 3 — Strategy Editor |
@@ -180,6 +180,20 @@ IHM desktop Dioxus (5 écrans du workflow d'import).
 | `import.rs` | Écran 5 — Import (Pass 2, lance/pilote le worker) |
 | `resume.rs` | Écran affiché au démarrage si un worker actif est détecté |
 | `table_list.rs` | Composant partagé : liste de tables avec badges (purement présentationnel) |
+
+#### `json2sql-ui/src/screens/common/`
+
+Utilitaires transverses consommés par plusieurs écrans (extraits de `screens/mod.rs` en #38, regroupés en #43).
+
+| Fichier | Rôle |
+|---|---|
+| `mod.rs` | Câblage : `mod`/`pub use` des 6 fichiers ci-dessous |
+| `timer.rs` | Hook `use_elapsed_timer` |
+| `file_picker.rs` | Sélecteurs de fichiers/dossiers natifs (`pick_file`, `pick_folder`, `pick_save_file`) |
+| `strategy_badges.rs` | Labels et badges de stratégie (`strategy_label`, `strategy_badge`, `user_override_badge`) |
+| `progress.rs` | Composant `ProgressBar` et calcul `progress_pct` |
+| `overrides.rs` | Application des overrides utilisateur (`build_effective_schemas`) |
+| `table_rows.rs` | View-model de la liste de tables (`TableRowViewModel`, `TableRowsCtx`, `build_table_rows`) |
 
 ---
 
