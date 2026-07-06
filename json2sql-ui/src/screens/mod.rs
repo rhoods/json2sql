@@ -18,10 +18,7 @@
 //!
 //! Sélecteurs de fichiers natifs : voir `file_picker.rs`
 //!
-//! Stratégies :
-//! - fn `strategy_label` — libellé lisible d'une `InferredStrategy`
-//! - fn `strategy_badge` — classe CSS + libellé court d'une `InferredStrategy`
-//! - fn `user_override_badge` — classe CSS + libellé court d'un `UserOverride`
+//! Stratégies : voir `strategy_badges.rs`
 //!
 //! Progress :
 //! - fn `progress_pct` — calcule un pourcentage de progression (`done`/`total`, borné à 100)
@@ -44,6 +41,9 @@ pub use timer::use_elapsed_timer;
 
 mod file_picker;
 pub use file_picker::{PickResult, pick_file, pick_folder, pick_save_file};
+
+mod strategy_badges;
+pub use strategy_badges::{strategy_label, strategy_badge, user_override_badge};
 
 use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
@@ -221,22 +221,6 @@ pub fn tree_display_order(schemas: &[TableSchema]) -> Vec<usize> {
     order
 }
 
-pub const fn strategy_label(s: &InferredStrategy) -> &'static str {
-    match s {
-        InferredStrategy::Columns                     => "DEFAULT",
-        InferredStrategy::Pivot                       => "PIVOT",
-        InferredStrategy::Jsonb                       => "JSONB SÉP.",
-        InferredStrategy::JsonbFlatten                => "JSONB INLINE",
-        InferredStrategy::StructuredPivot(_)          => "STRUCT PIVOT",
-        InferredStrategy::SiblingCollapse(_)               => "SIBLING COLLAPSE",
-        InferredStrategy::SiblingCollapseMulti(_)          => "SIBLING COLLAPSE MULTI",
-        InferredStrategy::AutoSplit { .. }            => "AUTO SPLIT",
-        InferredStrategy::Ignore                      => "SKIP",
-        InferredStrategy::NormalizeDynamicKeys { .. } => "NORMALIZE",
-        InferredStrategy::Flatten { .. }              => "FLATTEN",
-    }
-}
-
 /// For each position in `order`, returns true if that table is the last child
 /// of its parent within the display order. Used to pick └─ vs ├─ connectors.
 pub fn compute_last_child(order: &[usize], schemas: &[TableSchema]) -> Vec<bool> {
@@ -254,36 +238,6 @@ pub fn compute_last_child(order: &[usize], schemas: &[TableSchema]) -> Vec<bool>
     }
     result
 }
-
-/// Returns (`css_badge_class_suffix`, `short_label`) for the new design-system `.badge` classes.
-pub const fn strategy_badge(s: &InferredStrategy) -> (&'static str, &'static str) {
-    match s {
-        InferredStrategy::Columns                     => ("default",   "default"),
-        InferredStrategy::Jsonb                       => ("jsonb",     "jsonb"),
-        InferredStrategy::JsonbFlatten                => ("jsonbi",    "flatten"),
-        InferredStrategy::Pivot                       => ("pivot",     "pivot"),
-        InferredStrategy::NormalizeDynamicKeys { .. } => ("normalize", "normalize"),
-        InferredStrategy::Ignore                      => ("skip",      "skip"),
-        InferredStrategy::Flatten { .. }              => ("flatten",   "flatten"),
-        InferredStrategy::StructuredPivot(_)          => ("pivot",     "struct pivot"),
-        InferredStrategy::SiblingCollapse(_)               => ("pivot",     "sibling collapse"),
-        InferredStrategy::SiblingCollapseMulti(_)          => ("pivot",     "sibling collapse multi"),
-        InferredStrategy::AutoSplit { .. }            => ("normalize", "auto split"),
-    }
-}
-
-pub fn user_override_badge(o: &UserOverride) -> (&'static str, &'static str) {
-    match o {
-        UserOverride::Columns                      => ("columns",   "columns"),
-        UserOverride::Pivot                        => ("pivot",     "pivot"),
-        UserOverride::Jsonb                        => ("jsonb",     "jsonb"),
-        UserOverride::Skip                         => ("skip",      "skip"),
-        UserOverride::JsonbFlatten                 => ("jsonb",     "jsonb flatten"),
-        UserOverride::Flatten { .. }               => ("flatten",   "flatten"),
-        UserOverride::NormalizeDynamicKeys { .. }  => ("normalize", "normalize"),
-    }
-}
-
 
 /// Compute a progress percentage from `done` units out of `total`.
 /// Returns 0 if total is 0, clamps to 100 if done >= total.
@@ -514,22 +468,6 @@ mod tests {
         assert_eq!(result[0].ui_override(), Some(&UserOverride::Jsonb), "ui_override must be set");
         assert_eq!(result[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must be preserved");
         assert_eq!(*result[0].effective_strategy(), InferredStrategy::Jsonb, "effective_strategy must reflect override");
-    }
-
-    #[test]
-    fn strategy_badge_uses_effective_strategy_not_inferred() {
-        use json2sql::schema::table_schema::UserOverride;
-        // Table with ui_override=Pivot but inferred as Columns
-        let mut t = make_table("tags", None);
-        t.set_ui_override(Some(UserOverride::Pivot));
-        // strategy_badge on effective_strategy() should give Pivot badge, not Columns
-        let (cls_eff, lbl_eff) = strategy_badge(&*t.effective_strategy());
-        let (cls_inf, lbl_inf) = strategy_badge(&t.inferred_strategy);
-        assert_ne!(lbl_eff, lbl_inf, "effective badge must differ from inferred badge");
-        assert_eq!(lbl_eff, "pivot", "effective badge must be pivot");
-        assert_eq!(lbl_inf, "default", "inferred badge must still be default (Columns)");
-        assert_eq!(cls_eff, "pivot");
-        assert_eq!(cls_inf, "default");
     }
 
     #[test]
