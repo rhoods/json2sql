@@ -1,5 +1,6 @@
 //! Pass 2 — diskless worker: local `MemSink` accumulation, sends batches to `run_flusher`.
 //!
+//! Fonctions :
 //! - fn `collect_above_threshold` — sinks ready to flush (above the per-worker threshold).
 //! - fn `process_worker_item_diskless` — processes one JSON item in a worker.
 //! - struct `WorkerDisklessConfig` — configuration passed to `run_worker_diskless`.

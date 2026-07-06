@@ -3,13 +3,11 @@
 //! N workers stream the JSON round-robin into local `MemSink` buffers. A concurrent
 //! flusher task drains those buffers to `PostgreSQL` via `COPY FROM STDIN`, eliminating
 //! the need for temp files. This module holds the orchestration entry point (`run`);
-//! see the submodules for the other domains:
-//! - [`config`] — `Pass2Config` and validation.
-//! - [`flusher`] — the concurrent flusher task.
-//! - [`worker`] — the diskless worker loop.
-//! - [`dispatch`] — the dispatch loop and progress/anomaly reporting.
+//! see the submodules for the other domains: [`config`] (`Pass2Config` and validation),
+//! [`flusher`] (the concurrent flusher task), [`worker`] (the diskless worker loop),
+//! [`dispatch`] (the dispatch loop and progress/anomaly reporting).
 //!
-//! Orchestration (this file) :
+//! Fonctions :
 //! - struct `Pass2Timing` — répartition du temps d'exécution entre streaming et phase COPY.
 //! - fn `Pass2Timing::total_ms` — somme `streaming_ms` + `copy_ms`.
 //! - struct `Pass2Result` — résumé du résultat de Pass 2 (lignes par table, anomalies, warnings, timing).
@@ -43,8 +41,6 @@ use config::{DEFAULT_RAM_HIGH_WATERMARK, DEFAULT_RAM_LOW_WATERMARK};
 mod flusher;
 mod worker;
 mod dispatch;
-#[cfg(test)]
-mod test_support;
 
 /// Wall-clock breakdown of Pass 2 streaming and COPY phases.
 #[allow(dead_code)]
@@ -315,6 +311,9 @@ fn build_pass2_result(
         timing: Pass2Timing { streaming_ms, copy_ms },
     })
 }
+
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 mod tests {

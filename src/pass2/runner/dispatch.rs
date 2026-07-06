@@ -1,5 +1,6 @@
 //! Pass 2 — dispatch loop and progress/anomaly reporting.
 //!
+//! Fonctions :
 //! - fn `spawn_anomaly_writer` — spawns the anomaly-writing task.
 //! - fn `preflight_warn_nonempty` — warns if root tables already contain rows.
 //! - fn `finalize_dispatch` — final progress bar update at the end of dispatch.

@@ -1,5 +1,6 @@
 //! Pass 2 — diskless flusher: drains worker buffers to `PostgreSQL` via `COPY FROM STDIN`.
 //!
+//! Fonctions :
 //! - fn `find_all_nonempty_buffers` — selects all non-empty buffers to drain.
 //! - fn `topological_drain_order` — orders buffers to drain in topological order.
 //! - fn `ram_used_ratio` — used RAM / total RAM ratio.
@@ -139,7 +140,7 @@ async fn flush_table_to_pg(
 /// watermark during bulk imports.
 ///
 /// Returns total row count per table after draining all remaining buffers.
-pub(crate) async fn run_flusher(
+pub(super) async fn run_flusher(
     mut rx: tokio::sync::mpsc::Receiver<(String, bytes::Bytes, u64)>,
     copy_sql_map: HashMap<String, String>,
     pg_url: String,
@@ -291,11 +292,11 @@ pub(crate) async fn run_flusher(
 /// Flusher's own in-process buffer high-water mark (512 MiB).
 /// Workers are paused when the flusher's total buffered bytes exceeds this.
 /// Independent of system RAM — unaffected by PostgreSQL's buffer cache.
-pub(crate) const DEFAULT_HIGH_FLUSHER_BYTES: u64 = 512 * 1024 * 1024;
+const DEFAULT_HIGH_FLUSHER_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Flusher's own in-process buffer low-water mark (128 MiB).
 /// Workers are resumed when the flusher's total buffered bytes drops below this.
-pub(crate) const DEFAULT_LOW_FLUSHER_BYTES: u64 = 128 * 1024 * 1024;
+const DEFAULT_LOW_FLUSHER_BYTES: u64 = 128 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests {

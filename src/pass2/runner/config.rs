@@ -1,5 +1,6 @@
 //! Pass 2 configuration — parameters, validation and per-worker threshold derivation.
 //!
+//! Fonctions :
 //! - struct `Pass2Config` — all parameters controlling a Pass 2 run.
 //! - fn `effective_worker_threshold` — splits the flush threshold across workers.
 //! - fn `validate_run_params` — validates input parameters (e.g. parallel > 0).
@@ -50,10 +51,10 @@ pub(super) fn effective_worker_threshold(mem_flush_threshold: u64, parallel: usi
 
 /// Default RAM high-watermark: log a warning when system RAM exceeds this ratio.
 /// Used for observability only — the actual pause trigger is `DEFAULT_HIGH_FLUSHER_BYTES`.
-pub(crate) const DEFAULT_RAM_HIGH_WATERMARK: f64 = 0.70;
+pub(super) const DEFAULT_RAM_HIGH_WATERMARK: f64 = 0.70;
 
 /// Default RAM low-watermark: kept for config validation and backward compatibility.
-pub(crate) const DEFAULT_RAM_LOW_WATERMARK: f64 = 0.50;
+pub(super) const DEFAULT_RAM_LOW_WATERMARK: f64 = 0.50;
 
 pub(super) fn validate_run_params(parallel: usize) -> Result<()> {
     if parallel == 0 {
