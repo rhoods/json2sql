@@ -2,15 +2,15 @@
 //! de tables (badges/arbre/filtre), sélecteurs de fichiers natifs, labels de stratégie,
 //! composant barre de progression, application des overrides utilisateur.
 //!
-//! Chaque domaine vit dans son propre fichier, réexporté à plat ici pour que
+//! Chaque domaine vit dans son propre fichier sous `common/`, réexporté ici pour que
 //! `crate::screens::X` continue de résoudre sans changement côté écrans appelants :
 //!
-//! - Hook : voir `timer.rs`
-//! - View-model liste de tables : voir `table_rows.rs`
-//! - Sélecteurs de fichiers natifs : voir `file_picker.rs`
-//! - Stratégies : voir `strategy_badges.rs`
-//! - Progress : voir `progress.rs`
-//! - Overrides : voir `overrides.rs`
+//! - Hook : voir `common/timer.rs`
+//! - View-model liste de tables : voir `common/table_rows.rs`
+//! - Sélecteurs de fichiers natifs : voir `common/file_picker.rs`
+//! - Stratégies : voir `common/strategy_badges.rs`
+//! - Progress : voir `common/progress.rs`
+//! - Overrides : voir `common/overrides.rs`
 pub mod setup;
 pub mod analysis;
 pub mod strategy;
