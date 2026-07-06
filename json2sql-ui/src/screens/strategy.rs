@@ -6,6 +6,8 @@
 //!   right  — strategy configurator (single) or bulk apply (multi)
 //!
 //! Fonctions :
+//! - struct `JaccardDisplay` — données d'affichage de similarité Jaccard (panneau multi-sélection)
+//! - fn `compute_jaccard_display` — calcule les infos d'affichage Jaccard pour une sélection de tables
 //! - fn `StrategyScreen` — composant unique : liste triable/filtrable, détail colonnes ou résumé de sélection multiple, configurateur de stratégie (single) ou application en masse (multi), export du schéma via `pick_save_file`
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 

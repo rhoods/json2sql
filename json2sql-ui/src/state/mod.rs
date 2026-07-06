@@ -1,8 +1,10 @@
 //! Application state — persisted UI state, per-pass progress, and PostgreSQL connection config.
 //!
 //! `AppState` is the root state tree threaded through every screen via `Signal<AppState>`.
-//! Sub-states: `ProjectState` (Setup + PG config), `SchemaState` (Analysis/Strategy/Preview,
-//! includes multi-select logic), `ImportState` (Pass 2 progress), `UiState` (reserved).
+//! Sub-states: `ProjectState` (Setup + PG config), `SchemaState` (Analysis/Strategy/Preview),
+//! `ImportState` (Pass 2 progress), `UiState` (reserved). Table-selection logic
+//! (`apply_click`/`apply_shift_click`/`select_children_visible`) lives in [`selection`];
+//! Jaccard display info for the Strategy screen lives in `crate::screens::strategy`.
 //!
 //! Fonctions :
 //! - enum `AppScreen` — écran courant de l'IHM (routing)
@@ -22,8 +24,6 @@
 //! - struct `SchemaState` — état des écrans Analysis/Strategy/Preview (schémas, overrides, sélection)
 //! - fn `SchemaState::default` — valeurs par défaut (sélection initiale sur la table 0)
 //! - fn `SchemaState::clear` — réinitialise l'état schéma (nouveau fichier / annulation)
-//! - fn `SchemaState::apply_shift_click` — sélection multi-table par Shift+click (plage visible)
-//! - fn `SchemaState::apply_click` — sélection multi-table par click / Ctrl+click
 //! - struct `ImportState` — état de l'écran Import (progression Pass 2)
 //! - struct `UiState` — état de layout réservé (largeurs de panneaux, à venir)
 //! - struct `AppState` — état racine partagé entre tous les écrans via `Signal<AppState>`
@@ -33,9 +33,6 @@
 //! - fn `AppState::cancel` — annule la tâche en cours, tue le worker, réinitialise l'état transitoire
 //! - fn `AppState::apply_worker_result` — applique le résultat lu depuis le fichier JSON du worker
 //! - fn `AppState::apply_progress_event` — dispatch un `ProgressEvent` vers l'état correspondant
-//! - struct `JaccardDisplay` — données d'affichage de similarité Jaccard (panneau multi-sélection)
-//! - fn `compute_jaccard_display` — calcule les infos d'affichage Jaccard pour une sélection de tables
-//! - fn `select_children_visible` — indices des enfants directs d'une table visibles dans la liste
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
