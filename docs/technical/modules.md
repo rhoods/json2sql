@@ -77,7 +77,7 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | `table_schema.rs` | Types fondamentaux : `TableSchema`, `ColumnSchema`, `InferredStrategy`, `UserOverride`, `ChildKind`, `KeyShape`, `SuffixSchema`, `SiblingSchema` |
 | `type_tracker.rs` | `TypeTracker` : histogramme de types par colonne. `InferredType` et `PgType` avec règles de résolution et d'élargissement |
 | `observer.rs` | `SchemaObserver` : accumule les observations row-by-row via `observe_root()` et `merge()`. Contient `TableEntry` (privé) |
-| `finalizer.rs` | `SchemaFinalizer` : transformations post-stream — construit les `TableSchema`, applique les stratégies, trie topologiquement. Contient `apply_column_limit_guard()`, `exclude_absorbed_children()` |
+| `finalizer/` | `SchemaFinalizer` : transformations post-stream — construit les `TableSchema`, applique les stratégies, trie topologiquement — voir sous-section dédiée ci-dessous |
 | `cascading/` | Détection et fusion des tables sœurs (BFS cascade) — voir sous-section dédiée ci-dessous |
 | `wide_strategies.rs` | Fonctions d'application des stratégies wide : `apply_wide_strategy_columns`, `apply_flatten`, `apply_jsonb_flatten`, `apply_normalize_dynamic_keys`, `build_union_columns`, `classify_key_shape` |
 | `strategies.rs` | `StrategyName` (enum des stratégies optionnelles désactivables : `Sibling`, `Pivot`, `StructuredPivot`), `StrategyError`, `parse_disabled_strategies()`. Utilisé par `Pass1Config` et `SchemaRegistry` pour gater les stratégies via `--disable-strategy`. |
@@ -89,6 +89,18 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | `stats.rs` | Struct `ColumnStats` + génère le rapport texte de statistiques de colonnes (types inférés, taux de nullité, colonnes MIXED) |
 | `persistence.rs` | Sérialise/désérialise un résultat Pass 1 en JSON (`SchemaSnapshot`) — utilisé par l'IHM pour séparer Pass 1 et Pass 2 |
 | `mod.rs` | Déclare le module, exporte `PATH_SEP` |
+
+### `src/schema/finalizer/`
+
+Transforme les observations brutes (`TableEntry`) en `TableSchema` finalisés : construction des colonnes, sélection de la stratégie wide-table, détection et collapse des siblings, tri topologique.
+
+| Fichier | Rôle |
+|---|---|
+| `orchestrator.rs` | `SchemaFinalizer` (struct + `impl`, dont `run()`) — orchestre les 4 phases (base → cascade → wide strategies → guard) |
+| `base.rs` | Phase 1 — construction des schémas de base, par table (parallèle via rayon) |
+| `wide_strategy.rs` | Phase 3 — décision de la stratégie wide-table (Columns/`StructuredPivot`/Pivot/Jsonb/`AutoSplit`), par table |
+| `guard.rs` | Phase 4 — garde-fou 1600 colonnes (`apply_column_limit_guard`), exclusion des enfants absorbés (`exclude_absorbed_children`) |
+| `mod.rs` | Déclare les sous-modules, ré-exporte `SchemaFinalizer`, `OverflowWarning`, `exclude_absorbed_children` |
 
 ### `src/schema/cascading/`
 
