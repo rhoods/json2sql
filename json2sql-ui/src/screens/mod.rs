@@ -4,8 +4,7 @@
 //!
 //! Fonctions :
 //!
-//! Hook :
-//! - fn `use_elapsed_timer` — hook Dioxus : incrémente un compteur de secondes jusqu'à ce que `is_done()` retourne vrai
+//! Hook : voir `timer.rs`
 //!
 //! View-model liste de tables :
 //! - struct `TableRowViewModel` — données d'affichage précalculées pour une ligne de la liste de tables
@@ -48,35 +47,12 @@ pub mod import;
 pub mod resume;
 pub mod table_list;
 
+mod timer;
+pub use timer::use_elapsed_timer;
 
 use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
 use json2sql::schema::table_schema::{TableSchema, InferredStrategy, UserOverride};
-
-// ---------------------------------------------------------------------------
-// Shared hook: elapsed timer
-// ---------------------------------------------------------------------------
-
-/// Increments a seconds counter every second until `is_done()` returns true.
-/// Returns the `Signal<u32>` so the caller can display elapsed time.
-pub fn use_elapsed_timer<F>(is_done: F) -> Signal<u32>
-where
-    F: Fn() -> bool + Clone + 'static,
-{
-    let mut elapsed_secs: Signal<u32> = use_signal(|| 0);
-    use_coroutine(move |_: UnboundedReceiver<()>| {
-        let is_done = is_done.clone();
-        async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                if is_done() { break; }
-                let e = *elapsed_secs.read();
-                if e < u32::MAX { *elapsed_secs.write() = e + 1; }
-            }
-        }
-    });
-    elapsed_secs
-}
 
 // ---------------------------------------------------------------------------
 // TableRowViewModel — presentation data for one row in the table list panel
