@@ -22,8 +22,7 @@
 //!
 //! Progress : voir `progress.rs`
 //!
-//! Overrides :
-//! - fn `build_effective_schemas` — applique les overrides utilisateur à une copie des schémas (déduplique défensivement, retire aussi la table `_wide` compagnon si le parent est skip)
+//! Overrides : voir `overrides.rs`
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 pub mod setup;
 pub mod analysis;
@@ -44,6 +43,9 @@ pub use strategy_badges::{strategy_label, strategy_badge, user_override_badge};
 
 mod progress;
 pub use progress::{progress_pct, progress_bar_class, ProgressBar};
+
+mod overrides;
+pub use overrides::build_effective_schemas;
 
 use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
@@ -239,25 +241,6 @@ pub fn compute_last_child(order: &[usize], schemas: &[TableSchema]) -> Vec<bool>
     result
 }
 
-/// Apply user strategy overrides (`Pivot | Jsonb | Skip`) to a copy of `schemas`.
-///
-/// Delegates to `json2sql::schema::config::apply_user_overrides` so both the GUI
-/// and CLI paths produce identical output for the same overrides. `Skip` removes the
-/// table and — for `AutoSplit` tables — also removes the companion `_wide` table.
-/// The original slice is never mutated.
-pub fn build_effective_schemas(
-    schemas: &[TableSchema],
-    strategy_overrides: &HashMap<String, UserOverride>,
-) -> Vec<TableSchema> {
-    let mut result = schemas.to_vec();
-    json2sql::schema::config::apply_user_overrides(&mut result, strategy_overrides);
-    // Defensive dedup: stale snapshots saved before the finalizer fix may contain
-    // duplicate table names, which would cause add_constraints() to fail with 42P16.
-    let mut seen = std::collections::HashSet::new();
-    result.retain(|s| seen.insert(s.name.clone()));
-    result
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -378,103 +361,6 @@ mod tests {
         assert_eq!(rows[1].connector, "├─ ", "c1 a un frère après lui");
         assert_eq!(rows[2].name, "c2");
         assert_eq!(rows[2].connector, "└─ ", "c2 est le dernier");
-    }
-
-    // --- build_effective_schemas ---
-
-    #[test]
-    fn ignore_removes_table() {
-        let schemas = vec![make_table("a", None), make_table("b", None)];
-        let mut overrides = HashMap::new();
-        overrides.insert("a".to_string(), UserOverride::Skip);
-        let result = build_effective_schemas(&schemas, &overrides);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "b");
-    }
-
-    #[test]
-    fn no_overrides_returns_full_clone() {
-        let schemas = vec![make_table("x", None), make_table("y", None)];
-        let result = build_effective_schemas(&schemas, &HashMap::new());
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].name, "x");
-    }
-
-    #[test]
-    fn jsonb_override_applied() {
-        use json2sql::schema::table_schema::ColumnSchema;
-        use json2sql::schema::type_tracker::PgType;
-
-        let mut t = make_table("wide", None);
-        // Add a data column so apply_wide_strategy_columns has something to restructure.
-        t.columns.push(ColumnSchema {
-            name: "val".to_string(),
-            original_name: "val".to_string(),
-            pg_type: PgType::Text,
-            not_null: false,
-            is_generated: false,
-            is_parent_fk: false,
-        });
-        let schemas = vec![t];
-        let mut overrides = HashMap::new();
-        overrides.insert("wide".to_string(), UserOverride::Jsonb);
-        let result = build_effective_schemas(&schemas, &overrides);
-        assert_eq!(result[0].ui_override(), Some(&UserOverride::Jsonb), "ui_override must be set");
-        assert_eq!(result[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must be preserved");
-        assert_eq!(*result[0].effective_strategy(), InferredStrategy::Jsonb, "effective_strategy must reflect override");
-    }
-
-    #[test]
-    fn original_schemas_not_mutated() {
-        let schemas = vec![make_table("a", None), make_table("b", None)];
-        let original_len = schemas.len();
-        let mut overrides = HashMap::new();
-        overrides.insert("a".to_string(), UserOverride::Skip);
-        let _ = build_effective_schemas(&schemas, &overrides);
-        assert_eq!(schemas.len(), original_len, "original slice must not be mutated");
-    }
-
-    #[test]
-    fn duplicate_names_in_input_are_deduped() {
-        // Regression: stale snapshots saved before the finalizer dedup fix can
-        // contain duplicate table names → add_constraints() would fail with 42P16.
-        // build_effective_schemas must dedup defensively.
-        let schemas = vec![
-            make_table("a", None),
-            make_table("b", None),
-            make_table("a", None), // duplicate
-        ];
-        let result = build_effective_schemas(&schemas, &HashMap::new());
-        assert_eq!(result.len(), 2, "duplicate table names must be removed");
-        assert!(result.iter().any(|s| s.name == "a"));
-        assert!(result.iter().any(|s| s.name == "b"));
-    }
-
-
-    #[test]
-    fn skip_autosplit_removes_companion_wide_table() {
-        // AutoSplit produces two tables: the main (e.g. "events") and a companion
-        // "events_wide". Applying Skip on the main must remove BOTH so the GUI
-        // Preview shows the same schema as the CLI snapshot-restore path.
-        let mut main = make_table("events", None);
-        main.inferred_strategy = InferredStrategy::AutoSplit {
-            stable_threshold: 0.8,
-            rare_threshold: 0.1,
-            medium_keys: std::collections::HashSet::new(),
-            wide_table_name: "events_wide".to_string(),
-        };
-        let companion = make_table("events_wide", None);
-        let other = make_table("users", None);
-
-        let schemas = vec![main, companion, other];
-        let mut overrides = HashMap::new();
-        overrides.insert("events".to_string(), UserOverride::Skip);
-        let result = build_effective_schemas(&schemas, &overrides);
-
-        let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
-        assert!(!names.contains(&"events"),      "main table must be removed");
-        assert!(!names.contains(&"events_wide"), "companion _wide table must be removed");
-        assert!(names.contains(&"users"),        "unrelated table must survive");
     }
 
     // --- build_table_rows helpers ---
