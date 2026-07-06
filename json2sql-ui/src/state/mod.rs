@@ -1,8 +1,10 @@
 //! Application state — persisted UI state, per-pass progress, and PostgreSQL connection config.
 //!
 //! `AppState` is the root state tree threaded through every screen via `Signal<AppState>`.
-//! Sub-states: `ProjectState` (Setup + PG config), `SchemaState` (Analysis/Strategy/Preview,
-//! includes multi-select logic), `ImportState` (Pass 2 progress), `UiState` (reserved).
+//! Sub-states: `ProjectState` (Setup + PG config), `SchemaState` (Analysis/Strategy/Preview),
+//! `ImportState` (Pass 2 progress), `UiState` (reserved). Table-selection logic
+//! (`apply_click`/`apply_shift_click`/`select_children_visible`) lives in [`selection`];
+//! Jaccard display info for the Strategy screen lives in `crate::screens::strategy`.
 //!
 //! Fonctions :
 //! - enum `AppScreen` — écran courant de l'IHM (routing)
@@ -22,8 +24,6 @@
 //! - struct `SchemaState` — état des écrans Analysis/Strategy/Preview (schémas, overrides, sélection)
 //! - fn `SchemaState::default` — valeurs par défaut (sélection initiale sur la table 0)
 //! - fn `SchemaState::clear` — réinitialise l'état schéma (nouveau fichier / annulation)
-//! - fn `SchemaState::apply_shift_click` — sélection multi-table par Shift+click (plage visible)
-//! - fn `SchemaState::apply_click` — sélection multi-table par click / Ctrl+click
 //! - struct `ImportState` — état de l'écran Import (progression Pass 2)
 //! - struct `UiState` — état de layout réservé (largeurs de panneaux, à venir)
 //! - struct `AppState` — état racine partagé entre tous les écrans via `Signal<AppState>`
@@ -33,9 +33,6 @@
 //! - fn `AppState::cancel` — annule la tâche en cours, tue le worker, réinitialise l'état transitoire
 //! - fn `AppState::apply_worker_result` — applique le résultat lu depuis le fichier JSON du worker
 //! - fn `AppState::apply_progress_event` — dispatch un `ProgressEvent` vers l'état correspondant
-//! - struct `JaccardDisplay` — données d'affichage de similarité Jaccard (panneau multi-sélection)
-//! - fn `compute_jaccard_display` — calcule les infos d'affichage Jaccard pour une sélection de tables
-//! - fn `select_children_visible` — indices des enfants directs d'une table visibles dans la liste
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -51,6 +48,9 @@ use json2sql::schema::config::ConfigWarning;
 use json2sql::schema::table_schema::{TableSchema, UserOverride};
 
 use crate::worker_client::WorkerKillHandle;
+
+mod selection;
+pub use selection::select_children_visible;
 
 // ---------------------------------------------------------------------------
 // Screen navigation
@@ -365,44 +365,6 @@ impl SchemaState {
         self.config_warnings = Vec::new();
         self.detected_format = None;
     }
-
-    /// Apply a Shift+click range-select.
-    ///
-    /// Selects all entries in `visible_indices` whose index falls in
-    /// `[min(anchor, i), max(anchor, i)]`, skipping rows not in `visible_indices`.
-    pub fn apply_shift_click(&mut self, i: usize, anchor: usize, visible_indices: &[usize]) {
-        let lo = anchor.min(i);
-        let hi = anchor.max(i);
-        let range: HashSet<usize> = visible_indices.iter()
-            .copied()
-            .filter(|&idx| idx >= lo && idx <= hi)
-            .collect();
-        if !range.is_empty() {
-            self.selected_table_indices = range;
-            self.last_selected_idx = i;
-        }
-    }
-
-    /// Apply a table-row click to the selection.
-    ///
-    /// `ctrl` = Ctrl or Meta modifier held.
-    /// Plain click replaces the selection; Ctrl+click toggles the row in/out,
-    /// refusing to deselect when it is the last selected item.
-    pub fn apply_click(&mut self, i: usize, ctrl: bool) {
-        if ctrl {
-            if self.selected_table_indices.contains(&i) {
-                if self.selected_table_indices.len() > 1 {
-                    self.selected_table_indices.remove(&i);
-                }
-            } else {
-                self.selected_table_indices.insert(i);
-                self.last_selected_idx = i;
-            }
-        } else {
-            self.selected_table_indices = HashSet::from([i]);
-            self.last_selected_idx = i;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -625,197 +587,9 @@ impl AppState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Jaccard display info (multi-select panel)
-// ---------------------------------------------------------------------------
-
-/// Display data for the Jaccard similarity section in the Strategy right panel.
-pub struct JaccardDisplay {
-    /// Minimum pairwise Jaccard score across all selected table pairs.
-    pub score: f64,
-    /// Number of data-column names present in ALL selected tables (intersection).
-    pub common: usize,
-    /// Total distinct data-column names across all selected tables (union).
-    pub union_count: usize,
-}
-
-/// Compute Jaccard display info for the given selection.
-/// Returns defaults (score=1.0, empty counts) when fewer than 2 tables are selected.
-pub fn compute_jaccard_display(schemas: &[TableSchema], indices: &[usize]) -> JaccardDisplay {
-    use json2sql::schema::cascading::scoring::pairwise_jaccard_min;
-    use std::collections::HashSet as HS;
-
-    if indices.len() < 2 {
-        return JaccardDisplay { score: 1.0, common: 0, union_count: 0 };
-    }
-
-    let tables: Vec<&TableSchema> = indices.iter().filter_map(|&i| schemas.get(i)).collect();
-
-    // Column name sets (data columns only).
-    let col_sets: Vec<HS<&str>> = tables.iter()
-        .map(|t| t.data_columns().map(|c| c.original_name.as_str()).collect())
-        .collect();
-
-    let union_cols: HS<&str> = col_sets.iter().flatten().copied().collect();
-    let union_count = union_cols.len();
-    let common = if col_sets.is_empty() { 0 } else {
-        union_cols.iter().filter(|&&c| col_sets.iter().all(|s| s.contains(c))).count()
-    };
-
-    let score = pairwise_jaccard_min(schemas, indices);
-
-    JaccardDisplay { score, common, union_count }
-}
-
-// ---------------------------------------------------------------------------
-
-
-/// Return the indices of direct children of `schemas[parent_idx]` that are in `visible_indices`.
-pub fn select_children_visible(
-    schemas: &[TableSchema],
-    parent_idx: usize,
-    visible_indices: &[usize],
-) -> HashSet<usize> {
-    let Some(parent) = schemas.get(parent_idx) else { return HashSet::new() };
-    visible_indices.iter()
-        .copied()
-        .filter(|&i| {
-            schemas.get(i)
-                .and_then(|t| t.parent_table.as_ref())
-                .is_some_and(|p| p == &parent.name)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- apply_click ---
-
-    fn schema_with_selection(selected: impl IntoIterator<Item = usize>, last: usize) -> SchemaState {
-        let mut s = SchemaState::default();
-        s.selected_table_indices = selected.into_iter().collect();
-        s.last_selected_idx = last;
-        s
-    }
-
-    #[test]
-    fn plain_click_replaces_selection() {
-        let mut s = schema_with_selection([0, 1, 2], 2);
-        s.apply_click(5, false);
-        assert_eq!(s.selected_table_indices, HashSet::from([5]));
-        assert_eq!(s.last_selected_idx, 5);
-    }
-
-    #[test]
-    fn ctrl_click_adds_new_item() {
-        let mut s = schema_with_selection([0], 0);
-        s.apply_click(3, true);
-        assert!(s.selected_table_indices.contains(&0));
-        assert!(s.selected_table_indices.contains(&3));
-        assert_eq!(s.last_selected_idx, 3);
-    }
-
-    #[test]
-    fn ctrl_click_removes_selected_item() {
-        let mut s = schema_with_selection([0, 3], 3);
-        s.apply_click(3, true);
-        assert_eq!(s.selected_table_indices, HashSet::from([0]));
-    }
-
-    #[test]
-    fn ctrl_click_cannot_deselect_last_item() {
-        let mut s = schema_with_selection([0], 0);
-        s.apply_click(0, true);
-        assert_eq!(s.selected_table_indices, HashSet::from([0]), "last item must stay selected");
-    }
-
-    // --- apply_shift_click ---
-
-    #[test]
-    fn shift_click_selects_visible_range_forward() {
-        // visible: 0, 1, 3, 5 (2 and 4 filtered out)
-        let visible = vec![0, 1, 3, 5];
-        let mut s = schema_with_selection([0], 0);
-        s.apply_shift_click(3, 0, &visible);
-        assert_eq!(s.selected_table_indices, HashSet::from([0, 1, 3]));
-        assert_eq!(s.last_selected_idx, 3);
-    }
-
-    #[test]
-    fn shift_click_selects_visible_range_backward() {
-        let visible = vec![0, 1, 3, 5];
-        let mut s = schema_with_selection([5], 5);
-        s.apply_shift_click(1, 5, &visible);
-        assert_eq!(s.selected_table_indices, HashSet::from([1, 3, 5]));
-        assert_eq!(s.last_selected_idx, 1);
-    }
-
-    #[test]
-    fn shift_click_skips_invisible_indices() {
-        // indices 2 and 4 are not in visible list → not selected
-        let visible = vec![0, 1, 3, 5];
-        let mut s = schema_with_selection([0], 0);
-        s.apply_shift_click(5, 0, &visible);
-        assert!(!s.selected_table_indices.contains(&2));
-        assert!(!s.selected_table_indices.contains(&4));
-        assert_eq!(s.selected_table_indices, HashSet::from([0, 1, 3, 5]));
-    }
-
-    #[test]
-    fn shift_click_on_same_item_keeps_selection() {
-        let visible = vec![0, 1, 2];
-        let mut s = schema_with_selection([0], 0);
-        s.apply_shift_click(0, 0, &visible);
-        assert_eq!(s.selected_table_indices, HashSet::from([0]));
-    }
-
-    // --- select_children_visible ---
-
-    fn make_schema(name: &str, parent: Option<&str>) -> json2sql::schema::table_schema::TableSchema {
-        let mut s = json2sql::schema::table_schema::TableSchema::new(
-            name.to_string(), vec![name.to_string()], if parent.is_some() { 1 } else { 0 },
-        );
-        s.parent_table = parent.map(|p| p.to_string());
-        s
-    }
-
-    #[test]
-    fn select_children_returns_direct_children() {
-        let schemas = vec![
-            make_schema("product", None),          // 0
-            make_schema("product_image", Some("product")),  // 1
-            make_schema("product_tag", Some("product")),    // 2
-            make_schema("order", None),             // 3
-        ];
-        let visible = vec![0, 1, 2, 3];
-        let result = select_children_visible(&schemas, 0, &visible);
-        assert_eq!(result, HashSet::from([1, 2]));
-    }
-
-    #[test]
-    fn select_children_skips_invisible() {
-        let schemas = vec![
-            make_schema("product", None),
-            make_schema("product_image", Some("product")),  // 1
-            make_schema("product_tag", Some("product")),    // 2 — filtered out
-        ];
-        let visible = vec![0, 1]; // 2 not visible
-        let result = select_children_visible(&schemas, 0, &visible);
-        assert_eq!(result, HashSet::from([1]));
-    }
-
-    #[test]
-    fn select_children_returns_empty_for_leaf() {
-        let schemas = vec![
-            make_schema("product", None),
-            make_schema("product_image", Some("product")),
-        ];
-        let visible = vec![0, 1];
-        let result = select_children_visible(&schemas, 1, &visible);
-        assert!(result.is_empty(), "leaf node has no children");
-    }
 
     // --- Sub-struct defaults ---
 
@@ -1071,48 +845,6 @@ mod tests {
         });
         assert_eq!(s.import.pass2_progress.rows_per_table["orders"], 120);
     }
-
-    // --- jaccard_info + apply_sibling_merge ---
-
-    fn make_schema_with_cols(name: &str, parent: Option<&str>, data_keys: &[&str]) -> json2sql::schema::table_schema::TableSchema {
-        use json2sql::schema::table_schema::ColumnSchema;
-        use json2sql::schema::type_tracker::PgType;
-        let mut s = make_schema(name, parent);
-        s.columns.push(ColumnSchema { name: "j2s_id".to_string(), original_name: "j2s_id".to_string(), pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false });
-        for &k in data_keys {
-            s.columns.push(ColumnSchema { name: k.to_string(), original_name: k.to_string(), pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false });
-        }
-        s
-    }
-
-    #[test]
-    fn jaccard_display_identical_siblings_score_one() {
-        let schemas = vec![
-            make_schema_with_cols("img_front", Some("img"), &["url", "width"]),
-            make_schema_with_cols("img_back",  Some("img"), &["url", "width"]),
-        ];
-        let d = compute_jaccard_display(&schemas, &[0, 1]);
-        assert!((d.score - 1.0).abs() < 1e-9);
-        assert_eq!(d.common, 2);
-        assert_eq!(d.union_count, 2);
-    }
-
-    #[test]
-    fn jaccard_display_partial_overlap() {
-        let schemas = vec![
-            make_schema_with_cols("p_a", Some("p"), &["x", "y", "z"]),
-            make_schema_with_cols("p_b", Some("p"), &["x", "y", "w"]),
-        ];
-        let d = compute_jaccard_display(&schemas, &[0, 1]);
-        // union_count and common are computed before noise-filtering.
-        assert_eq!(d.common, 2);      // {x,y} present in both
-        assert_eq!(d.union_count, 4); // {x,y,z,w}
-        // pairwise_jaccard_min applies noise-filtering: with n=2 schemas,
-        // min_presence = max(2, 2/20) = 2, so z and w are filtered out.
-        // Filtered sets: p_a={x,y}, p_b={x,y} → Jaccard = 1.0.
-        assert!((d.score - 1.0).abs() < 1e-9);
-    }
-
 
     #[test]
     fn pass2_flush_duplicate_emit_doubles_count() {
