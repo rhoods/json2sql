@@ -7,8 +7,8 @@
 //! **Flatten / `JsonbFlatten`** : les colonnes de la table enfant remontent dans le parent.
 //! **`NormalizeDynamicKeys`** : les clés dynamiques sont normalisées en table EAV.
 //!
-//! Frontière avec `finalizer.rs` : ce module génère les colonnes résultantes d'une
-//! stratégie donnée. `finalizer.rs` décide *quelle* stratégie appliquer à chaque table.
+//! Frontière avec `finalizer/` : ce module génère les colonnes résultantes d'une
+//! stratégie donnée. `finalizer/` décide *quelle* stratégie appliquer à chaque table.
 //!
 //! Fonctions :
 //! - fn `suggest_wide_strategy` — Pivot si les valeurs sont homogènes en type, sinon Jsonb.
