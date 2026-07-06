@@ -1,6 +1,14 @@
 //! Application des collapses — transformation des schémas détectés en tables pivot.
 //!
 //! Extrait de `detection.rs` (voir `super` pour l'orchestration et les types partagés).
+//!
+//! Fonctions :
+//! - struct `ParentCtx` — nom/chemin/profondeur/`array_children` du parent en cours de traitement.
+//! - fn `apply_collapses` — dispatch Single/Multi et journalise.
+//! - fn `apply_single_collapse` — transforme le parent en table pivot unique.
+//! - fn `apply_multi_collapse` — crée les tables pivot synthétiques (une par sous-groupe).
+//! - fn `build_multi_group_entry` — construit l'entrée de schéma d'un sous-groupe pivot.
+//! - fn `make_pivot_preamble` — colonnes générées communes (`j2s_id`, FK, order).
 
 use super::super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, SiblingSchema, TableSchema};
 use super::super::super::type_tracker::PgType;

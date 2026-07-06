@@ -1,6 +1,16 @@
 //! Post-pass keyed-pivot — fusion des orphelins `Columns` sous un parent `SiblingCollapse`.
 //!
 //! Extrait de `detection.rs` (voir `super` pour l'orchestration et les types partagés).
+//!
+//! Fonctions :
+//! - fn `run_keyed_pivot_children_wave` — détecte et traite ces orphelins.
+//! - fn `collect_keyed_pivot_work_items` — collecte les items de travail keyed-pivot.
+//! - fn `process_keyed_pivot_work_item` — traite un item de travail keyed-pivot.
+//! - fn `resolve_pivot_key_info` — résout la clé/forme du sous-pivot.
+//! - fn `build_sub_pivot_columns` — construit les colonnes union du sous-pivot.
+//! - fn `build_sub_pivot_schema` — construit le schéma du sous-pivot.
+//! - fn `collect_pivot_co_siblings` — reparente les enfants absorbés.
+//! - fn `reparent_and_update_routes` — met à jour `child_routes` du parent.
 
 use super::super::super::wide_strategies::{build_union_columns, classify_key_shape};
 use super::super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, KeyShape, SiblingSchema, TableSchema};

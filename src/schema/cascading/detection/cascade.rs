@@ -1,6 +1,14 @@
 //! Cascade des co-siblings (waves 1+) — fusion des tables enfants partageant une clé JSON.
 //!
 //! Extrait de `detection.rs` (voir `super` pour l'orchestration et les types partagés).
+//!
+//! Fonctions :
+//! - fn `collect_children_by_key` — regroupe les enfants par clé JSON partagée.
+//! - fn `process_co_sibling_group` — dispatch fusion ou reparentage seul.
+//! - fn `handle_single_co_sibling` — reparente un co-sibling isolé.
+//! - fn `merge_co_sibling_group` — fusionne un groupe de co-siblings en une nouvelle table T.
+//! - fn `build_co_sibling_schema` — construit le schéma de la nouvelle table T fusionnée.
+//! - fn `cascade_grandchildren_to_next_wave` — propage les enfants de T à la vague suivante.
 
 use super::super::super::wide_strategies::build_union_columns;
 use super::super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};

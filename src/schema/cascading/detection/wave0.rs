@@ -2,6 +2,25 @@
 //!
 //! Extrait de `detection.rs` (voir `super` pour l'orchestration et les types partagés
 //! `Collapse`, `CollapseKind`, `SiblingDetectCtx`, `SubgroupData`).
+//!
+//! Fonctions :
+//! - fn `build_work_items` — construit les items de travail à partir des maps parent/enfants.
+//! - fn `build_sibling_ctx` — construit le contexte de détection pour un parent.
+//! - fn `should_skip_parent` — filtre les parents non éligibles.
+//! - fn `collect_sibling_collapses` — collecte les collapses détectés sur tous les parents éligibles.
+//! - fn `detect_homogeneous_collapse` — dispatch pour un groupe de clés homogènes.
+//! - fn `detect_mixed_collapse` — dispatch pour un groupe mixte numérique/texte.
+//! - fn `filter_significant_siblings` — exclut les tables de routing pures.
+//! - fn `filter_routing_tables` — exclut les tables de routing du calcul de Jaccard.
+//! - fn `effective_jaccard_for_regular` — calcule le Jaccard effectif hors tables de routing.
+//! - fn `try_unified_fallback` — repli quand le Jaccard global est insuffisant (fusion unifiée).
+//! - fn `try_cluster_fallback` — repli par clustering glouton.
+//! - fn `build_non_num_clusters` — construit les clusters non-numériques pour le repli clustering.
+//! - fn `build_synthetic_pivot_collapse` — construit la structure `Collapse` finale (cas Multi).
+//! - fn `build_classic_keyed_pivot_collapse` — construit la structure `Collapse` finale (cas Single classique).
+//! - fn `assemble_mixed_collapse` — assemble le `Collapse` final pour un groupe mixte.
+//! - fn `make_subgroup` — construit un `SubgroupData` (nom, clé, colonnes union) pour un sous-groupe.
+//! - fn `pick_unique_suffix` — suffixe de table sans collision.
 
 use super::super::super::wide_strategies::{build_union_columns, classify_key_shape};
 use super::super::super::table_schema::{ColumnSchema, KeyShape, TableSchema, InferredStrategy};
