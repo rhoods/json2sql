@@ -1448,3 +1448,75 @@ async fn test_pivot_split_object_array_parent_with_real_grandchild() {
         assert_eq!(p1_auteur, "Alice");
     }).await;
 }
+
+// ---------------------------------------------------------------------------
+// [issue #45, tâche 11] `ObjectArray` hétérogène → Jsonb (Problème 2b).
+//
+// Ferme la boucle des tâches 3/9/10 : une table `ObjectArray`-parent dont les clés
+// sont hétérogènes (int + string + bool → plusieurs catégories de type,
+// `suggest_wide_strategy` choisit Jsonb au lieu de Pivot) doit produire un DDL à
+// 4 colonnes (j2s_id, parent_fk, j2s_order, data JSONB), un blob round-trip
+// correct par élément, et `j2s_order` peuplé selon la position dans l'array.
+//
+// Avant #45 : `avis` restait bloquée en `Columns` (tâche 3) ; même une fois
+// éligible, `insert_array` aurait écrit `NULL` dans `data` pour chaque élément
+// (tâche 10, confirmé par test unitaire rouge).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_object_array_heterogeneous_jsonb_end_to_end() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("wide_object_array_jsonb.jsonl");
+        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
+            root_table: "produits".to_string(),
+            registry: RegistryConfig { wide_column_threshold: 2, ..Default::default() },
+            num_workers: None,
+        }, None).unwrap();
+
+        let avis = p1.schemas.iter().find(|s| s.name == "produits_avis")
+            .expect("produits_avis manquant");
+        assert_eq!(avis.inferred_strategy, InferredStrategy::Jsonb,
+            "score/comment/verified hétérogènes → Jsonb attendu");
+        assert_eq!(avis.data_columns().count(), 1, "une seule colonne data");
+        assert!(avis.find_by_original("data").is_some());
+        // DDL : j2s_id, j2s_produits_id, j2s_order, data — 4 colonnes au total.
+        assert_eq!(avis.columns.len(), 4, "j2s_id + parent_fk + j2s_order + data");
+        assert!(avis.columns.iter().any(|c| c.original_name == "j2s_order"),
+            "j2s_order doit être présent sur une table ObjectArray, même en Jsonb");
+
+        let schemas = p1.schemas.clone();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("produits", &schema), None)
+            .await.unwrap();
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+        assert_eq!(*p2.rows_per_table.get("produits").unwrap(), 6);
+        // 6 produits, P2 a 2 avis, les 5 autres en ont 1 = 7.
+        assert_eq!(*p2.rows_per_table.get("produits_avis").unwrap(), 7);
+        assert_eq!(common::row_count(&client, &schema, "produits_avis").await, 7);
+
+        // Round-trip + j2s_order : les 2 avis de P2, dans l'ordre.
+        let rows = client.query(
+            &format!(
+                "SELECT a.j2s_order, \
+                        a.data->>'score'    AS score, \
+                        a.data->>'comment'  AS comment, \
+                        a.data->>'verified' AS verified \
+                 FROM \"{s}\".\"produits_avis\" a \
+                 JOIN \"{s}\".\"produits\" p ON a.j2s_produits_id = p.j2s_id \
+                 WHERE p.name = 'P2' ORDER BY a.j2s_order",
+                s = schema,
+            ),
+            &[],
+        ).await.unwrap();
+        assert_eq!(rows.len(), 2, "P2 doit avoir 2 lignes dans produits_avis");
+        assert_eq!(rows[0].get::<_, i64>("j2s_order"), 0);
+        assert_eq!(rows[0].get::<_, &str>("score"), "20");
+        assert_eq!(rows[0].get::<_, &str>("comment"), "moyen");
+        assert_eq!(rows[0].get::<_, &str>("verified"), "false");
+        assert_eq!(rows[1].get::<_, i64>("j2s_order"), 1);
+        assert_eq!(rows[1].get::<_, &str>("score"), "25");
+        assert_eq!(rows[1].get::<_, &str>("comment"), "pas mal");
+        assert_eq!(rows[1].get::<_, &str>("verified"), "true");
+    }).await;
+}

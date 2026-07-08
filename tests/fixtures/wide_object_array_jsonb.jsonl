@@ -1,0 +1,6 @@
+{"id": 1, "name": "P1", "avis": [{"score": 10, "comment": "bien", "verified": true}]}
+{"id": 2, "name": "P2", "avis": [{"score": 20, "comment": "moyen", "verified": false}, {"score": 25, "comment": "pas mal", "verified": true}]}
+{"id": 3, "name": "P3", "avis": [{"score": 30, "comment": "top", "verified": true}]}
+{"id": 4, "name": "P4", "avis": [{"score": 40, "comment": "nul", "verified": false}]}
+{"id": 5, "name": "P5", "avis": [{"score": 50, "comment": "super", "verified": true}]}
+{"id": 6, "name": "P6", "avis": [{"score": 60, "comment": "bof", "verified": false}]}
