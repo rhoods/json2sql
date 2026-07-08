@@ -2,6 +2,7 @@ mod common;
 
 use json2sql::{db, pass1, pass2};
 use json2sql::schema::config::{apply_overrides, SchemaConfig};
+use json2sql::schema::table_schema::InferredStrategy;
 
 // ---------------------------------------------------------------------------
 // Override de type valide : score FLOAT → TEXT.
@@ -146,5 +147,64 @@ async fn test_override_bad() {
         // Les tables enfants reçoivent leurs lignes malgré l'override sur la table root.
         assert_eq!(common::row_count(&client, &schema, "people_address").await, 3,
             "people_address doit avoir 3 lignes (une par utilisateur)");
+    }).await;
+}
+
+// ---------------------------------------------------------------------------
+// [issue #45, tâche 8] Override manuel --schema-config forçant Pivot : le chemin
+// plat existant (insert_pivot_object) doit rester inchangé — pas de split
+// identité/compagnon (celui-ci ne s'applique qu'au pipeline automatique, cf.
+// tâche 4 : apply_wide_strategy n'est jamais invoquée pour un override manuel,
+// apply_user_overrides s'applique après finalize() sur le schéma déjà figé).
+//
+// Fixture : people_address (Object child de people, 2 colonnes street/city,
+// Columns par défaut car sous le seuil wide) — override_pivot.toml force
+// strategy = "pivot" dessus.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_override_strategy_pivot_flat_path_unchanged() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("users.jsonl");
+        let mut p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
+
+        let pre_address = p1.schemas.iter().find(|s| s.name == "people_address").unwrap();
+        assert_eq!(pre_address.inferred_strategy, InferredStrategy::Columns,
+            "people_address doit être Columns avant override (2 colonnes, sous le seuil wide)");
+
+        let config = SchemaConfig::from_file(&common::fixture("override_pivot.toml")).unwrap();
+        let warnings = apply_overrides(&mut p1.schemas, &config).unwrap();
+        assert!(warnings.is_empty(), "aucun warning attendu, obtenu : {warnings:?}");
+
+        let address = p1.schemas.iter().find(|s| s.name == "people_address").unwrap();
+        // ui_override prioritaire — inferred_strategy n'est jamais muté par un override manuel.
+        assert_eq!(address.inferred_strategy, InferredStrategy::Columns, "inferred_strategy inchangé");
+        assert_eq!(*address.effective_strategy(), InferredStrategy::Pivot);
+        // Chemin plat : (key, value) sur LA MÊME table, pas de split identité/compagnon.
+        assert_eq!(address.data_columns().count(), 2, "(key, value) — table plate, pas de split");
+        assert!(
+            !p1.schemas.iter().any(|s| s.name == "people_address_pivot"),
+            "aucun compagnon _pivot ne doit être créé pour un override manuel"
+        );
+
+        let schemas = p1.schemas.clone();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("people", &schema), None)
+            .await.unwrap();
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+        // street + city = 2 paires EAV par personne × 3 personnes = 6.
+        assert_eq!(*p2.rows_per_table.get("people_address").unwrap(), 6);
+        assert_eq!(common::row_count(&client, &schema, "people_address").await, 6);
+
+        let alice_city: String = client.query_one(
+            &format!(
+                "SELECT a.value FROM \"{s}\".\"people_address\" a \
+                 JOIN \"{s}\".\"people\" p ON a.j2s_people_id = p.j2s_id \
+                 WHERE p.name = 'Alice' AND a.key = 'city'",
+                s = schema,
+            ),
+            &[],
+        ).await.unwrap().get(0);
+        assert_eq!(alice_city, "Springfield");
     }).await;
 }
