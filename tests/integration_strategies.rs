@@ -1087,3 +1087,135 @@ fn test_disable_structured_pivot_gives_pivot_integration() {
         "structured_pivot disabled → InferredStrategy::Pivot attendu (fallback all-numeric)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// [issue #45, tâche 2 — RED] Split identité/compagnon systématique quand
+// apply_non_autosplit_strategy choisit Pivot sur une table Object-parent
+// SANS enfant réel.
+//
+// Fixture : racine `produits` (id, name — stables, reste en Columns), enfant
+// `nutriments` (ChildKind::Object) avec 2 clés stables (calcium, iron,
+// présentes dans les 10 lignes) et 3 clés rares (selenium/iodine/zinc,
+// chacune présente dans 1 seule ligne sur 10 → sous rare_threshold=0.15).
+//
+// Design attendu (voir issue #45, section "Design final validé") :
+//   - `produits` reste Columns (2 colonnes stables, aucun split — ratio
+//     stable 100%, bien au-dessus du seuil "Columns").
+//   - `produits_nutriments` (identité) : SEULEMENT colonnes générées
+//     (j2s_id, FK vers produits) — rétention inconditionnelle à zéro colonne
+//     de donnée, même les clés stables (calcium/iron) migrent vers le
+//     compagnon.
+//   - `produits_nutriments_pivot` (compagnon) : (key, value) EAV, FK vers
+//     l'identité — TOUTES les clés y arrivent, y compris les rares (aucune
+//     ne doit être droppée silencieusement comme le ferait l'ancien
+//     mécanisme AutoSplit `collect_medium_keys`).
+//
+// État avant les tâches 3/4 : ce test est ROUGE — `apply_non_autosplit_strategy`
+// pivote aujourd'hui `produits_nutriments` sur place (une seule table, pas de
+// split identité/compagnon) : `schemas.len() == 2`, pas 3.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_pivot_identity_companion_split_no_real_child() {
+    use std::collections::HashSet;
+
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("pivot_split_no_child.jsonl");
+        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
+            root_table: "produits".to_string(),
+            registry: RegistryConfig { wide_column_threshold: 1, stable_threshold: 0.5, rare_threshold: 0.15, ..Default::default() },
+            num_workers: None,
+        }, None).unwrap();
+
+        // `produits` (racine) reste en Columns — ratio stable 100% (id, name toujours présents).
+        let produits_schema = p1.schemas.iter().find(|s| s.name == "produits")
+            .expect("produits manquant");
+        assert_eq!(produits_schema.inferred_strategy, InferredStrategy::Columns,
+            "produits doit rester Columns (ratio stable 100%, pas de split)");
+        assert_eq!(produits_schema.data_columns().count(), 2, "produits doit garder id + name");
+
+        // 3 tables attendues : produits, produits_nutriments (identité), produits_nutriments_pivot (compagnon).
+        assert_eq!(p1.schemas.len(), 3,
+            "3 tables attendues (produits + identité + compagnon) — trouvé : {:?}",
+            p1.schemas.iter().map(|s| &s.name).collect::<Vec<_>>());
+
+        let identity = p1.schemas.iter().find(|s| s.name == "produits_nutriments")
+            .expect("produits_nutriments (identité) manquante");
+        let companion = p1.schemas.iter().find(|s| s.name == "produits_nutriments_pivot")
+            .expect("produits_nutriments_pivot (compagnon) manquant");
+
+        // Identité : rétention inconditionnelle à zéro colonne de donnée — même calcium/iron migrent.
+        assert_eq!(identity.data_columns().count(), 0,
+            "identité doit avoir 0 colonne de donnée — toutes les clés migrent vers le compagnon");
+
+        // Compagnon : (key, value) EAV.
+        let companion_data_cols: Vec<_> = companion.data_columns().collect();
+        assert_eq!(companion_data_cols.len(), 2, "compagnon : exactement (key, value)");
+        assert!(companion_data_cols.iter().any(|c| c.name == "key"));
+        assert!(companion_data_cols.iter().any(|c| c.name == "value"));
+
+        // medium_keys doit contenir TOUTES les clés (stables + rares), aucune droppée.
+        match &identity.inferred_strategy {
+            InferredStrategy::AutoSplit { medium_keys, wide_table_name, .. } => {
+                assert_eq!(
+                    medium_keys.clone(),
+                    HashSet::from([
+                        "calcium".to_string(), "iron".to_string(),
+                        "selenium".to_string(), "iodine".to_string(), "zinc".to_string(),
+                    ]),
+                    "medium_keys doit contenir les 5 clés — aucune rétention, aucun drop"
+                );
+                assert_eq!(wide_table_name, "produits_nutriments_pivot");
+            }
+            other => panic!("identité doit porter InferredStrategy::AutoSplit, trouvé : {other:?}"),
+        }
+
+        // Compagnon FK → identité (pas directement vers produits).
+        let companion_fk = companion.columns.iter().find(|c| c.is_parent_fk)
+            .expect("compagnon doit avoir une FK vers son parent");
+        let identity_fk = identity.columns.iter().find(|c| c.is_parent_fk)
+            .expect("identité doit avoir une FK vers produits");
+
+        let schemas = p1.schemas.clone();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("produits", &schema), None)
+            .await.unwrap();
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0, "aucune anomalie attendue");
+        assert_eq!(*p2.rows_per_table.get("produits").unwrap(), 10);
+        assert_eq!(*p2.rows_per_table.get("produits_nutriments").unwrap(), 10,
+            "identité : une ligne d'ancrage par occurrence");
+        // calcium×10 + iron×10 + selenium×1 + iodine×1 + zinc×1 = 23
+        assert_eq!(*p2.rows_per_table.get("produits_nutriments_pivot").unwrap(), 23);
+
+        assert_eq!(common::row_count(&client, &schema, "produits").await, 10);
+        assert_eq!(common::row_count(&client, &schema, "produits_nutriments").await, 10);
+        assert_eq!(common::row_count(&client, &schema, "produits_nutriments_pivot").await, 23);
+
+        // La clé rare "selenium" (P1) n'est pas droppée et sa valeur traverse intacte.
+        let selenium_value: i64 = client.query_one(
+            &format!(
+                "SELECT CAST(c.value AS bigint) FROM \"{s}\".\"produits_nutriments_pivot\" c \
+                 JOIN \"{s}\".\"produits_nutriments\" i ON c.{cfk} = i.j2s_id \
+                 JOIN \"{s}\".\"produits\" p ON i.{ifk} = p.j2s_id \
+                 WHERE p.name = 'P1' AND c.key = 'selenium'",
+                s = schema, cfk = companion_fk.name, ifk = identity_fk.name,
+            ),
+            &[],
+        ).await.unwrap().get(0);
+        assert_eq!(selenium_value, 1, "selenium (clé rare) doit atteindre le compagnon avec sa valeur intacte");
+
+        // P4 n'a aucune ligne 'selenium' (n'a jamais eu cette clé).
+        let p4_selenium: i64 = client.query_one(
+            &format!(
+                "SELECT COUNT(*) FROM \"{s}\".\"produits_nutriments_pivot\" c \
+                 JOIN \"{s}\".\"produits_nutriments\" i ON c.{cfk} = i.j2s_id \
+                 JOIN \"{s}\".\"produits\" p ON i.{ifk} = p.j2s_id \
+                 WHERE p.name = 'P4' AND c.key = 'selenium'",
+                s = schema, cfk = companion_fk.name, ifk = identity_fk.name,
+            ),
+            &[],
+        ).await.unwrap().get(0);
+        assert_eq!(p4_selenium, 0, "P4 ne doit pas avoir de ligne 'selenium'");
+    }).await;
+}
