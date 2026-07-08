@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_wide_object_pivot_homogeneous() {
-        // 3 numeric keys → threshold=2 → should get InferredStrategy::Pivot
+        // 3 numeric keys → threshold=2 → Pivot suggéré → split identité/compagnon (issue #45).
         let mut reg = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
         let obj = json!({
             "id": 1,
@@ -249,15 +249,19 @@ mod tests {
         reg.observe_root("ingredient", make_root(&obj));
         let schemas = reg.finalize();
 
-        // Child tables of pivot table should be removed → only ingredient + ingredient_nutrients
-        let nutrients = schemas.iter().find(|s| s.name == "ingredient_nutrients");
-        assert!(nutrients.is_some(), "nutrients table should exist");
-        let n = nutrients.unwrap();
-        assert_eq!(n.inferred_strategy, InferredStrategy::Pivot);
-        // Should have j2s_id, j2s_parent_id, key, value
-        assert!(n.find_by_original("key").is_some());
-        assert!(n.find_by_original("value").is_some());
-        assert_eq!(n.data_columns().count(), 2);
+        // Identité : garde le nom, colonnes générées seulement (rétention inconditionnelle à zéro).
+        let identity = schemas.iter().find(|s| s.name == "ingredient_nutrients")
+            .expect("identity table should exist");
+        assert!(matches!(&identity.inferred_strategy, InferredStrategy::AutoSplit { .. }));
+        assert_eq!(identity.data_columns().count(), 0, "identity retains no data column");
+
+        // Compagnon : (key, value) EAV, toutes les clés.
+        let companion = schemas.iter().find(|s| s.name == "ingredient_nutrients_pivot")
+            .expect("companion table should exist");
+        assert_eq!(companion.inferred_strategy, InferredStrategy::Pivot);
+        assert!(companion.find_by_original("key").is_some());
+        assert!(companion.find_by_original("value").is_some());
+        assert_eq!(companion.data_columns().count(), 2);
     }
 
     #[test]
@@ -286,10 +290,12 @@ mod tests {
 
     #[test]
     fn test_wide_children_excluded() {
-        // Sub-tables of a pivot table must be filtered out
+        // This fixture has no real nested child under "nutrients" (all 3 keys are scalar) — it
+        // exercises the identity/companion split (issue #45) with zero real children, not
+        // "children silently absorbed". The only table parented to the identity must be its own
+        // `_pivot` companion — a real orphaned child (if the split ever mis-parents one) would
+        // show up here as an extra, unexpected entry.
         let mut reg = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
-        // nutrients has 3 numeric keys → pivot
-        // each nutrient value is a nested object → would create child tables, but should be dropped
         let obj = json!({
             "id": 1,
             "nutrients": {
@@ -301,12 +307,15 @@ mod tests {
         reg.observe_root("ingredient", make_root(&obj));
         let schemas = reg.finalize();
 
-        // No table should have ingredient_nutrients as parent
-        let orphans: Vec<_> = schemas
+        let children_of_identity: Vec<&str> = schemas
             .iter()
             .filter(|s| s.parent_table.as_deref() == Some("ingredient_nutrients"))
+            .map(|s| s.name.as_str())
             .collect();
-        assert!(orphans.is_empty(), "no orphan children of pivot table");
+        assert_eq!(
+            children_of_identity, vec!["ingredient_nutrients_pivot"],
+            "only the companion should be parented to the identity — no orphan real child"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1262,9 +1271,13 @@ mod tests {
         let mut reg_normal = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
         reg_normal.observe_root("item", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
+        // Pivot enabled → identité/compagnon split (issue #45) : identité en AutoSplit,
+        // compagnon "item_nutrients_pivot" en Pivot.
         let nutrients_normal = schemas_normal.iter().find(|s| s.name == "item_nutrients").unwrap();
-        assert_eq!(nutrients_normal.inferred_strategy, InferredStrategy::Pivot,
-            "pivot enabled → Pivot expected");
+        assert!(matches!(&nutrients_normal.inferred_strategy, InferredStrategy::AutoSplit { .. }),
+            "pivot enabled → identity split into AutoSplit expected");
+        assert!(schemas_normal.iter().any(|s| s.name == "item_nutrients_pivot" && s.inferred_strategy == InferredStrategy::Pivot),
+            "pivot enabled → companion item_nutrients_pivot expected");
 
         let mut reg_disabled = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, disabled_strategies: HashSet::from([StrategyName::Pivot]), ..Default::default() });
         reg_disabled.observe_root("item", make_root(&obj));
@@ -1307,9 +1320,12 @@ mod tests {
         let mut reg = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
         reg.observe_root("item", make_root(&obj));
         let schemas = reg.finalize();
+        // empty disabled set → default Pivot behavior unchanged, i.e. still the identity/companion
+        // split introduced by issue #45 (not the pre-#45 flat Pivot layout).
         let nutrients = schemas.iter().find(|s| s.name == "item_nutrients").unwrap();
-        assert_eq!(nutrients.inferred_strategy, InferredStrategy::Pivot,
-            "empty disabled set → default Pivot behavior unchanged");
+        assert!(matches!(&nutrients.inferred_strategy, InferredStrategy::AutoSplit { .. }),
+            "empty disabled set → default Pivot behavior (split) unchanged");
+        assert!(schemas.iter().any(|s| s.name == "item_nutrients_pivot" && s.inferred_strategy == InferredStrategy::Pivot));
     }
 
     #[test]
