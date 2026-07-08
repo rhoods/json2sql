@@ -68,7 +68,8 @@ pub(super) struct FinalizerConfig {
 
 /// Apply a wide-table strategy to `schema` if the column count exceeds the threshold.
 ///
-/// Only eligible for direct Object children (not ObjectArray/ScalarArray).
+/// Eligible for Object and ObjectArray children (not ScalarArray, which only ever has
+/// a single fixed `value` column and can never be "wide").
 /// Returns a companion `_wide` table if the `AutoSplit` strategy is chosen.
 fn apply_wide_strategy(
     schema: &mut TableSchema,
@@ -76,7 +77,7 @@ fn apply_wide_strategy(
     config: &FinalizerConfig,
     tables_with_object_children: &std::collections::HashSet<String>,
 ) -> Option<TableSchema> {
-    let is_wide_eligible = matches!(entry.child_kind, Some(ChildKind::Object) | None);
+    let is_wide_eligible = matches!(entry.child_kind, Some(ChildKind::Object | ChildKind::ObjectArray) | None);
     let data_col_count = schema.data_columns().count();
 
     if !is_wide_eligible || data_col_count <= config.wide_column_threshold {

@@ -1219,3 +1219,53 @@ async fn test_pivot_identity_companion_split_no_real_child() {
         assert_eq!(p4_selenium, 0, "P4 ne doit pas avoir de ligne 'selenium'");
     }).await;
 }
+
+// ---------------------------------------------------------------------------
+// [issue #45, tâche 3] `is_wide_eligible` doit accepter `ChildKind::ObjectArray`.
+//
+// Fixture : racine `produits`, chacun avec un array `avis` d'un seul objet
+// review portant UNE clé numérique distincte par produit (score_a..score_f,
+// 6 produits) — 6 clés au total, type homogène (entier) → `suggest_wide_strategy`
+// choisirait Pivot une fois la table éligible (freq=1/6 par clé — au-dessus du
+// `stable_threshold` par défaut 0.10, mais `row_count`(6) < 10 évite le garde-fou
+// "high stable ratio → Columns" de `wide_strategy.rs:98`, qui exige row_count>=10).
+//
+// Avant le fix : `avis` (ChildKind::ObjectArray) reste Columns quel que soit
+// le nombre de colonnes — `is_wide_eligible` l'exclut structurellement
+// (`wide_strategy.rs:79`). Ce test est donc rouge tant que la tâche 3 n'est
+// pas faite.
+//
+// Portée volontairement limitée au niveau schéma (pas de pass2/DB), et à la
+// seule éligibilité (pas Columns) sans figer la stratégie exacte : la tâche 4
+// fera basculer ce cas précis (ObjectArray-parent → Pivot suggéré) sur le
+// split identité/compagnon (AutoSplit), et le chemin d'écriture correspondant
+// n'existe pas avant les tâches 9-10 (insert_array route encore vers
+// insert_object) — écrire un test pass2/DB ici serait donc prématuré.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_object_array_eligible_for_wide_strategy() {
+    let path = common::fixture("wide_object_array.jsonl");
+    let config = pass1::runner::Pass1Config {
+        registry: RegistryConfig { wide_column_threshold: 2, ..Default::default() },
+        ..common::pass1_config("produits")
+    };
+
+    let p1 = pass1::runner::run(&path, &config, None).unwrap();
+
+    let avis_schema = p1.schemas.iter().find(|s| s.name == "produits_avis")
+        .expect("produits_avis manquant");
+    assert_eq!(
+        avis_schema.child_kind,
+        Some(json2sql::schema::table_schema::ChildKind::ObjectArray),
+        "produits_avis doit être ChildKind::ObjectArray"
+    );
+    assert_ne!(
+        avis_schema.inferred_strategy, InferredStrategy::Columns,
+        "produits_avis (ObjectArray, 6 colonnes > seuil 2) doit maintenant être éligible \
+         au wide-table strategy — plus jamais bloqué en Columns"
+    );
+    // Pas d'assertion sur la stratégie exacte (Pivot aujourd'hui) : dès la tâche 4, ce cas
+    // (ObjectArray-parent → apply_non_autosplit_strategy choisirait Pivot) bascule sur le split
+    // identité/compagnon, donc sur InferredStrategy::AutoSplit. Seule la portée de la tâche 3
+    // (éligibilité) est garantie ici — figer Pivot ferait de ce test un faux rouge à la tâche 4.
+}
