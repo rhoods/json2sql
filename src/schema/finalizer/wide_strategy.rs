@@ -3,11 +3,22 @@
 //! - fn `apply_wide_table_strategies` — applique la stratégie choisie à chaque table éligible.
 //! - fn `apply_wide_strategy` — décide Columns/`StructuredPivot`/Pivot/Jsonb/`AutoSplit` selon le
 //!   ratio de colonnes stables.
-//! - fn `apply_non_autosplit_strategy` — branche `StructuredPivot` ou Pivot/Jsonb.
-//! - fn `apply_autosplit_strategy` — construit la table EAV compagnon `_wide`.
-//! - fn `build_wide_pivot_schema` — construit la table EAV compagnon `_wide`.
-//! - fn `collect_medium_keys` — sélectionne les clés de fréquence moyenne.
-//! - fn `infer_medium_value_type` — détermine leur type de valeur commun.
+//! - fn `apply_non_autosplit_strategy` — branche `StructuredPivot`, Jsonb, ou le split
+//!   identité/compagnon (Pivot).
+//! - fn `apply_pivot_split` — split identité/compagnon à rétention zéro (toutes les clés
+//!   migrent vers le compagnon `_pivot`), déclenché quand `apply_non_autosplit_strategy`
+//!   choisirait Pivot — que la table soit `Object`- ou `ObjectArray`-parent.
+//! - fn `unique_pivot_name` — nom du compagnon `_pivot`, unique contre toutes les tables déjà
+//!   connues (fallback `_pivot_eav` sur auto-collision, `_pivot_2`/`_pivot_3`/... sur collision
+//!   externe).
+//! - fn `apply_autosplit_strategy` — construit la table EAV compagnon `_wide` (racine + vrai
+//!   enfant `Object` — partition par fréquence, inchangé).
+//! - fn `build_wide_pivot_schema` — construit la table EAV compagnon (réutilisée par
+//!   `apply_autosplit_strategy` et `apply_pivot_split`, qui diffèrent seulement par la
+//!   politique de rétention et le jeu de clés envoyé en compagnon).
+//! - fn `collect_medium_keys` — sélectionne les clés de fréquence moyenne (AutoSplit racine
+//!   uniquement).
+//! - fn `infer_medium_value_type` — détermine le type de valeur commun d'un jeu de clés.
 //! - fn `build_finalizer_config` — assemble la config figée passée à ces fonctions.
 //! - struct `FinalizerConfig` — config figée (seuils + stratégies désactivées) pour cette phase.
 
@@ -34,11 +45,17 @@ pub(super) fn apply_wide_table_strategies(
     let mut extra_schemas: Vec<TableSchema> = Vec::new();
     let schema_map: std::collections::HashMap<String, usize> =
         schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+    // Toutes les tables déjà nommées à ce stade — sert à garantir l'unicité des noms de
+    // compagnon `_pivot` synthétiques (mis à jour au fil des créations pour couvrir aussi
+    // les collisions entre deux compagnons créés dans le même passage).
+    let mut existing_names: std::collections::HashSet<String> =
+        schemas.iter().map(|s| s.name.clone()).collect();
 
     for (path_key, entry) in tables {
         let pg_name = naming.table_name_lookup_from_dot_key(path_key);
         if let Some(&idx) = schema_map.get(&pg_name) {
-            if let Some(extra) = apply_wide_strategy(&mut schemas[idx], entry, config, tables_with_object_children) {
+            if let Some(extra) = apply_wide_strategy(&mut schemas[idx], entry, config, tables_with_object_children, &existing_names) {
+                existing_names.insert(extra.name.clone());
                 extra_schemas.push(extra);
             }
         }
@@ -76,6 +93,7 @@ fn apply_wide_strategy(
     entry: &TableEntry,
     config: &FinalizerConfig,
     tables_with_object_children: &std::collections::HashSet<String>,
+    existing_names: &std::collections::HashSet<String>,
 ) -> Option<TableSchema> {
     let is_wide_eligible = matches!(entry.child_kind, Some(ChildKind::Object | ChildKind::ObjectArray) | None);
     let data_col_count = schema.data_columns().count();
@@ -108,17 +126,20 @@ fn apply_wide_strategy(
         return Some(apply_autosplit_strategy(schema, entry, config, row_count, data_col_count, ratio_stable));
     }
 
-    apply_non_autosplit_strategy(schema, entry, config, data_col_count, ratio_stable);
-    None
+    apply_non_autosplit_strategy(schema, entry, config, data_col_count, ratio_stable, existing_names)
 }
 
+/// Chooses `StructuredPivot`, Jsonb, or the identity/companion split (Pivot) for a table that
+/// is not `is_root && has_object_children` — i.e. every wide-eligible table except the P5
+/// AutoSplit root case, which `apply_autosplit_strategy` handles separately and unchanged.
 fn apply_non_autosplit_strategy(
     schema: &mut TableSchema,
     entry: &TableEntry,
     config: &FinalizerConfig,
     data_col_count: usize,
     ratio_stable: f64,
-) {
+    existing_names: &std::collections::HashSet<String>,
+) -> Option<TableSchema> {
     let suffix_schema = if config.disable_structured_pivot {
         None
     } else {
@@ -130,14 +151,63 @@ fn apply_non_autosplit_strategy(
             schema.name, data_col_count, ratio_stable * 100.0, suffix_schema.suffix_cols.len()
         );
         apply_structured_pivot_columns(schema, suffix_schema);
-    } else {
-        let strategy = if config.disable_pivot { InferredStrategy::Jsonb } else { suggest_wide_strategy(entry) };
-        eprintln!(
-            "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: {:?}",
-            schema.name, data_col_count, ratio_stable * 100.0, strategy
-        );
-        apply_wide_strategy_columns(schema, strategy);
+        return None;
     }
+
+    let strategy = if config.disable_pivot { InferredStrategy::Jsonb } else { suggest_wide_strategy(entry) };
+    if strategy == InferredStrategy::Pivot {
+        eprintln!(
+            "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: Pivot \
+            (split identité/compagnon)",
+            schema.name, data_col_count, ratio_stable * 100.0
+        );
+        return Some(apply_pivot_split(schema, entry, config, existing_names));
+    }
+
+    eprintln!(
+        "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: {:?}",
+        schema.name, data_col_count, ratio_stable * 100.0, strategy
+    );
+    apply_wide_strategy_columns(schema, strategy);
+    None
+}
+
+/// Split a table that would otherwise be flat-Pivoted into an identity table (zero data
+/// columns, unconditional retention, keeps the original name) and a companion `_pivot` EAV
+/// table holding every key — no frequency-based retention or dropping, unlike P5 AutoSplit.
+///
+/// Applies uniformly whether `schema` is `Object`- or `ObjectArray`-parent: a single rule
+/// avoids the conditional-split trap (detecting "does this table have a real child" is itself
+/// a bug surface, cf. issue #45) and reuses the already-correct `AutoSplit` write path
+/// (`recurse_children`) for any real children of `schema` instead of `insert_pivot_object`,
+/// which never recursed into them.
+fn apply_pivot_split(
+    schema: &mut TableSchema,
+    entry: &TableEntry,
+    config: &FinalizerConfig,
+    existing_names: &std::collections::HashSet<String>,
+) -> TableSchema {
+    let all_keys: std::collections::HashSet<String> =
+        schema.data_columns().map(|c| c.original_name.clone()).collect();
+    schema.columns.retain(|c| c.is_generated);
+    let wide_name = unique_pivot_name(&schema.name, existing_names);
+    let value_type = infer_medium_value_type(entry, &all_keys);
+    build_wide_pivot_schema(schema, wide_name, value_type, all_keys, config)
+}
+
+/// Companion name for `apply_pivot_split`: `{base}_pivot`, falling back to `{base}_pivot_eav`
+/// on self-collision (schema already named `..._pivot`) and to an incremental `_pivot_2`,
+/// `_pivot_3`, ... on collision with any other already-known table name.
+fn unique_pivot_name(schema_name: &str, existing_names: &std::collections::HashSet<String>) -> String {
+    let base_name = schema_name.strip_suffix("_pivot").unwrap_or(schema_name);
+    let candidate = format!("{base_name}_pivot");
+    let mut candidate = if candidate == schema_name { format!("{base_name}_pivot_eav") } else { candidate };
+    let mut suffix_n = 2;
+    while existing_names.contains(&candidate) {
+        candidate = format!("{base_name}_pivot_{suffix_n}");
+        suffix_n += 1;
+    }
+    candidate
 }
 
 /// Apply the P5 `AutoSplit` strategy: retain stable columns on the main table,
