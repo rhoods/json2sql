@@ -1357,3 +1357,94 @@ async fn test_pivot_split_with_real_object_array_child() {
         assert_eq!(p1_labo, "LabA");
     }).await;
 }
+
+// ---------------------------------------------------------------------------
+// [issue #45, tâche 7] `ObjectArray`+`Pivot` avec un vrai enfant propre (petit-enfant).
+//
+// Contrairement à la tâche 6 (table `Object`-parent avec un vrai enfant), ici c'est
+// la table pivotée elle-même qui est `ObjectArray`-parent (relation 1:n avec SA
+// PROPRE mère) — le cas rendu éligible par la tâche 3 — ET qui possède en plus un
+// vrai enfant à elle (`commentaires`, petit-enfant de la racine). Vérifie que
+// `recurse_children` route ce petit-enfant vers l'identité de la table `avis`
+// (et non vers la racine `produits` ni vers le compagnon), quelle que soit la
+// relation de la table pivotée avec SA PROPRE mère.
+//
+// Fixture : 6 produits, chacun avec un seul élément `avis` (clé de score dynamique
+// distincte par produit → Pivot une fois éligible, cf. tâche 3) et un vrai enfant
+// `commentaires` (1 à 2 entrées texte/auteur).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_pivot_split_object_array_parent_with_real_grandchild() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("wide_object_array_with_grandchild.jsonl");
+        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
+            root_table: "produits".to_string(),
+            registry: RegistryConfig { wide_column_threshold: 2, ..Default::default() },
+            num_workers: None,
+        }, None).unwrap();
+
+        // 4 tables : produits, identité (avis), compagnon (avis_pivot), commentaires (petit-enfant).
+        assert_eq!(p1.schemas.len(), 4,
+            "4 tables attendues (produits + identité + compagnon + commentaires) — trouvé : {:?}",
+            p1.schemas.iter().map(|s| &s.name).collect::<Vec<_>>());
+
+        let identity = p1.schemas.iter().find(|s| s.name == "produits_avis")
+            .expect("produits_avis (identité) manquante");
+        assert!(matches!(&identity.inferred_strategy, InferredStrategy::AutoSplit { .. }),
+            "identité doit porter AutoSplit");
+        assert_eq!(identity.data_columns().count(), 0, "identité : 0 colonne de donnée");
+
+        let companion = p1.schemas.iter().find(|s| s.name == "produits_avis_pivot")
+            .expect("produits_avis_pivot (compagnon) manquant");
+        assert_eq!(companion.data_columns().count(), 2, "compagnon : (key, value)");
+
+        let commentaires = p1.schemas.iter().find(|s| s.name == "produits_avis_commentaires")
+            .expect("produits_avis_commentaires (petit-enfant) manquante — absorbée/droppée ?");
+        assert_eq!(commentaires.parent_table.as_deref(), Some("produits_avis"),
+            "commentaires doit être rattachée à l'identité produits_avis, pas à produits ni au compagnon");
+
+        let commentaires_fk = commentaires.columns.iter().find(|c| c.is_parent_fk)
+            .expect("commentaires doit avoir une FK");
+        let identity_fk = identity.columns.iter().find(|c| c.is_parent_fk)
+            .expect("identité doit avoir une FK vers produits");
+
+        let schemas = p1.schemas.clone();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("produits", &schema), None)
+            .await.unwrap();
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+        assert_eq!(*p2.rows_per_table.get("produits").unwrap(), 6);
+        assert_eq!(*p2.rows_per_table.get("produits_avis").unwrap(), 6, "1 avis par produit");
+        assert_eq!(*p2.rows_per_table.get("produits_avis_pivot").unwrap(), 6, "1 clé de score par avis");
+        // P2 a 2 commentaires, les 5 autres en ont 1 chacun = 7.
+        assert_eq!(*p2.rows_per_table.get("produits_avis_commentaires").unwrap(), 7);
+
+        // Les 2 commentaires de P2 sont bien rattachés à l'identité de l'avis de P2.
+        let p2_comment_count: i64 = client.query_one(
+            &format!(
+                "SELECT COUNT(*) FROM \"{s}\".\"produits_avis_commentaires\" c \
+                 JOIN \"{s}\".\"produits_avis\" i ON c.{cfk} = i.j2s_id \
+                 JOIN \"{s}\".\"produits\" p ON i.{ifk} = p.j2s_id \
+                 WHERE p.name = 'P2'",
+                s = schema, cfk = commentaires_fk.name, ifk = identity_fk.name,
+            ),
+            &[],
+        ).await.unwrap().get(0);
+        assert_eq!(p2_comment_count, 2);
+
+        // Round-trip : l'auteur du commentaire unique de P1.
+        let p1_auteur: String = client.query_one(
+            &format!(
+                "SELECT c.auteur FROM \"{s}\".\"produits_avis_commentaires\" c \
+                 JOIN \"{s}\".\"produits_avis\" i ON c.{cfk} = i.j2s_id \
+                 JOIN \"{s}\".\"produits\" p ON i.{ifk} = p.j2s_id \
+                 WHERE p.name = 'P1'",
+                s = schema, cfk = commentaires_fk.name, ifk = identity_fk.name,
+            ),
+            &[],
+        ).await.unwrap().get(0);
+        assert_eq!(p1_auteur, "Alice");
+    }).await;
+}

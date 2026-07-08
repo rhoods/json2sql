@@ -1,0 +1,6 @@
+{"id": 1, "name": "P1", "avis": [{"score_a": 10, "commentaires": [{"texte": "bien", "auteur": "Alice"}]}]}
+{"id": 2, "name": "P2", "avis": [{"score_b": 20, "commentaires": [{"texte": "moyen", "auteur": "Bob"}, {"texte": "ok", "auteur": "Bob2"}]}]}
+{"id": 3, "name": "P3", "avis": [{"score_c": 30, "commentaires": [{"texte": "top", "auteur": "Carol"}]}]}
+{"id": 4, "name": "P4", "avis": [{"score_d": 40, "commentaires": [{"texte": "nul", "auteur": "Dave"}]}]}
+{"id": 5, "name": "P5", "avis": [{"score_e": 50, "commentaires": [{"texte": "super", "auteur": "Eve"}]}]}
+{"id": 6, "name": "P6", "avis": [{"score_f": 60, "commentaires": [{"texte": "bof", "auteur": "Faye"}]}]}
