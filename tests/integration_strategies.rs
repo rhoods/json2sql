@@ -1269,3 +1269,91 @@ fn test_object_array_eligible_for_wide_strategy() {
     // identité/compagnon, donc sur InferredStrategy::AutoSplit. Seule la portée de la tâche 3
     // (éligibilité) est garantie ici — figer Pivot ferait de ce test un faux rouge à la tâche 4.
 }
+
+// ---------------------------------------------------------------------------
+// [issue #45, tâche 6] Repro empirique nutriments/historique — le cas réel qui a
+// déclenché le chantier : une table Object-parent (`nutriments`) choisie Pivot ET
+// possédant un vrai enfant ObjectArray (`historique`, ex: historique de mesures).
+//
+// Avant #45 : `historique` était exclue du schéma final et ses données coercées en
+// texte dans la colonne `value` du pivot → anomalies + perte de données (Problème 1
+// de l'issue). Après le split identité/compagnon, `historique` reste une table à
+// part entière, routée via `recurse_children` (réutilisation du chemin AutoSplit)
+// vers l'identité — jamais absorbée par le compagnon EAV.
+//
+// Fixture : 10 produits, `nutriments` avec calcium/iron stables + 3 clés rares
+// (une par produit sur 3), et `historique` (1 à 2 entrées date_mesure/labo) sur
+// chaque produit.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_pivot_split_with_real_object_array_child() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("pivot_split_real_child.jsonl");
+        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
+            root_table: "produits".to_string(),
+            registry: RegistryConfig { wide_column_threshold: 1, stable_threshold: 0.5, rare_threshold: 0.15, ..Default::default() },
+            num_workers: None,
+        }, None).unwrap();
+
+        // 4 tables : produits, identité, compagnon, ET historique (vrai enfant préservé).
+        assert_eq!(p1.schemas.len(), 4,
+            "4 tables attendues (produits + identité + compagnon + historique) — trouvé : {:?}",
+            p1.schemas.iter().map(|s| &s.name).collect::<Vec<_>>());
+
+        let identity = p1.schemas.iter().find(|s| s.name == "produits_nutriments")
+            .expect("produits_nutriments (identité) manquante");
+        let historique = p1.schemas.iter().find(|s| s.name == "produits_nutriments_historique")
+            .expect("produits_nutriments_historique (vrai enfant) manquante — absorbée/droppée ?");
+
+        // historique.parent_fk doit référencer l'identité (pas produits directement).
+        assert_eq!(historique.parent_table.as_deref(), Some("produits_nutriments"),
+            "historique doit être rattachée à l'identité produits_nutriments");
+        let historique_fk = historique.columns.iter().find(|c| c.is_parent_fk)
+            .expect("historique doit avoir une FK");
+        let identity_fk = identity.columns.iter().find(|c| c.is_parent_fk)
+            .expect("identité doit avoir une FK vers produits");
+
+        let schemas = p1.schemas.clone();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+
+        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("produits", &schema), None)
+            .await.unwrap();
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0,
+            "0 anomalie attendue — historique ne doit plus être coercée en texte dans value");
+        assert_eq!(*p2.rows_per_table.get("produits").unwrap(), 10);
+        assert_eq!(*p2.rows_per_table.get("produits_nutriments").unwrap(), 10);
+        assert_eq!(*p2.rows_per_table.get("produits_nutriments_pivot").unwrap(), 23);
+        // P2 a 2 entrées, les 9 autres en ont 1 chacune = 11.
+        assert_eq!(*p2.rows_per_table.get("produits_nutriments_historique").unwrap(), 11);
+
+        assert_eq!(common::row_count(&client, &schema, "produits_nutriments_historique").await, 11);
+
+        // Les 2 entrées d'historique de P2 sont bien rattachées à l'identité de P2, pas à un
+        // ancêtre commun ou à une ligne du compagnon.
+        let p2_historique_count: i64 = client.query_one(
+            &format!(
+                "SELECT COUNT(*) FROM \"{s}\".\"produits_nutriments_historique\" h \
+                 JOIN \"{s}\".\"produits_nutriments\" i ON h.{hfk} = i.j2s_id \
+                 JOIN \"{s}\".\"produits\" p ON i.{ifk} = p.j2s_id \
+                 WHERE p.name = 'P2'",
+                s = schema, hfk = historique_fk.name, ifk = identity_fk.name,
+            ),
+            &[],
+        ).await.unwrap().get(0);
+        assert_eq!(p2_historique_count, 2, "P2 doit avoir 2 entrées d'historique");
+
+        // Round-trip d'une valeur : le labo de la 1ère entrée de P1.
+        let p1_labo: String = client.query_one(
+            &format!(
+                "SELECT h.labo FROM \"{s}\".\"produits_nutriments_historique\" h \
+                 JOIN \"{s}\".\"produits_nutriments\" i ON h.{hfk} = i.j2s_id \
+                 JOIN \"{s}\".\"produits\" p ON i.{ifk} = p.j2s_id \
+                 WHERE p.name = 'P1'",
+                s = schema, hfk = historique_fk.name, ifk = identity_fk.name,
+            ),
+            &[],
+        ).await.unwrap().get(0);
+        assert_eq!(p1_labo, "LabA");
+    }).await;
+}
