@@ -145,7 +145,7 @@ pub fn insert_object<S: RowSink, A: AnomalyCollect>(
     Ok(())
 }
 
-fn push_generated_col_insert(
+pub(super) fn push_generated_col_insert(
     builder: &mut RowBuilder,
     col: &crate::schema::table_schema::ColumnSchema,
     row_id: Uuid,
@@ -166,7 +166,7 @@ fn push_generated_col_insert(
     }
 }
 
-fn push_jsonb_col(builder: &mut RowBuilder, json_val: &Value) {
+pub(super) fn push_jsonb_col(builder: &mut RowBuilder, json_val: &Value) {
     if matches!(json_val, Value::Null) { builder.push_null(); return; }
     let json_str = serde_json::to_string(json_val).unwrap_or_default();
     match escape_copy_text(&json_str) {
@@ -231,7 +231,9 @@ fn insert_child_object<S: RowSink, A: AnomalyCollect>(
             insert_pivot_object(ctx.sinks, ctx.anomalies, child_schema, nested, parent_id)?;
         }
         InferredStrategy::Jsonb => {
-            insert_jsonb_object(path_map, ctx.sinks, ctx.anomalies, child_schema, value, parent_id)?;
+            // Object-kind child: no positional order (only ObjectArray elements carry one,
+            // cf. insert_array in traversal.rs).
+            insert_jsonb_object(path_map, ctx.sinks, ctx.anomalies, child_schema, value, parent_id, None)?;
         }
         InferredStrategy::StructuredPivot(suffix_schema) => {
             insert_structured_pivot_object(

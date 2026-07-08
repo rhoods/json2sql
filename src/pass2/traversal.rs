@@ -60,7 +60,7 @@ use crate::pass2::sink::RowSink;
 use crate::schema::PATH_SEP;
 use crate::schema::table_schema::{ChildKind, ColumnSchema, SiblingGroup, SiblingSchema, SuffixSchema, TableSchema, InferredStrategy};
 
-use super::insert::{insert_object, InsertCtx};
+use super::insert::{insert_object, push_generated_col_insert, push_jsonb_col, InsertCtx};
 
 fn push_coerced<A: AnomalyCollect>(
     builder: &mut RowBuilder,
@@ -115,7 +115,12 @@ pub(super) fn insert_pivot_object<S: RowSink>(
 
 /// Insert one row containing the entire object serialized as JSONB, then recurse into
 /// any children of this table so they still receive data.
-/// Columns: `j2s_id`, `j2s_parent_id`, data JSONB
+///
+/// Builds the row generically from `schema.columns` (rather than a fixed 3-field layout) so
+/// this also works for an `ObjectArray`-parent Jsonb table, which carries a `j2s_order`
+/// column that a fixed-arity builder would silently omit (issue #45, tâche 9). `order` is
+/// `None` for `Object`-kind children (no positional meaning) and `Some(i)` when called from
+/// `insert_array` for an `ObjectArray` element.
 pub(super) fn insert_jsonb_object<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -123,15 +128,16 @@ pub(super) fn insert_jsonb_object<S: RowSink>(
     schema: &TableSchema,
     value: &Value,
     parent_id: Uuid,
+    order: Option<i64>,
 ) -> Result<()> {
     let child_id = Uuid::now_v7();
     let mut builder = RowBuilder::new();
-    builder.push_uuid(child_id);
-    builder.push_uuid(parent_id);
-    let json_str = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
-    match escape_copy_text(&json_str) {
-        Some(escaped) => builder.push_value(&escaped),
-        None => builder.push_null(), // null byte in JSON — treat as NULL, not empty string
+    for col in &schema.columns {
+        if col.is_generated {
+            push_generated_col_insert(&mut builder, col, child_id, Some(parent_id), order);
+        } else {
+            push_jsonb_col(&mut builder, value);
+        }
     }
     anomalies.inc_total(&schema.name);
     if let Some(sink) = sinks.get_mut(&schema.name) {
@@ -155,7 +161,7 @@ fn dispatch_child_object<S: RowSink>(
     let eff = child_schema.effective_strategy();
     match &*eff {
         InferredStrategy::Pivot => insert_pivot_object(sinks, anomalies, child_schema, nested, child_id)?,
-        InferredStrategy::Jsonb => insert_jsonb_object(path_map, sinks, anomalies, child_schema, child_value, child_id)?,
+        InferredStrategy::Jsonb => insert_jsonb_object(path_map, sinks, anomalies, child_schema, child_value, child_id, None)?,
         InferredStrategy::StructuredPivot(suffix_schema) => {
             insert_structured_pivot_object(sinks, anomalies, child_schema, nested, child_id, suffix_schema)?;
         }
@@ -678,7 +684,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use crate::schema::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
+    use crate::schema::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
     use crate::schema::type_tracker::PgType;
 
     // ---------------------------------------------------------------------------
@@ -697,6 +703,10 @@ mod tests {
         ColumnSchema { name: format!("j2s_{parent}_id"), original_name: format!("j2s_{parent}_id"), pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: true }
     }
 
+    fn generated_order() -> ColumnSchema {
+        ColumnSchema { name: "j2s_order".to_string(), original_name: "j2s_order".to_string(), pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false }
+    }
+
     /// Pivot schema: j2s_id, j2s_{parent}_id, key TEXT, value TEXT
     fn make_pivot_schema(name: &str, parent: &str) -> TableSchema {
         let mut s = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
@@ -710,6 +720,14 @@ mod tests {
         let mut s = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
         s.inferred_strategy = InferredStrategy::Jsonb;
         s.columns = vec![generated_id(), parent_fk(parent), col("data", PgType::Text)];
+        s
+    }
+
+    /// Jsonb schema for an `ObjectArray`-parent table: j2s_id, j2s_{parent}_id, j2s_order, data.
+    fn make_jsonb_object_array_schema(name: &str, parent: &str) -> TableSchema {
+        let mut s = make_jsonb_schema(name, parent);
+        s.child_kind = Some(ChildKind::ObjectArray);
+        s.columns.insert(2, generated_order());
         s
     }
 
@@ -851,7 +869,7 @@ mod tests {
         let path_map = HashMap::new();
         let value = serde_json::json!({"x": 1, "y": "hello"});
 
-        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id()).unwrap();
+        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id(), None).unwrap();
 
         let rows = &sinks["evts"].0;
         assert_eq!(rows.len(), 1, "one JSONB row emitted");
@@ -881,7 +899,7 @@ mod tests {
         let mut anomalies = CountingAnomaly::default();
         let value = serde_json::json!({"tags": {"a": "v1", "b": "v2"}});
 
-        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id()).unwrap();
+        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id(), None).unwrap();
 
         assert_eq!(sinks["evts"].0.len(), 1, "one JSONB row for parent");
         assert_eq!(sinks["evts_tags"].0.len(), 2, "two pivot rows for child tags");
@@ -896,9 +914,51 @@ mod tests {
         let path_map: HashMap<String, crate::schema::table_schema::TableSchema> = HashMap::new();
         let value = serde_json::json!({"nested": {"x": 1}});
 
-        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id()).unwrap();
+        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id(), None).unwrap();
 
         assert_eq!(sinks["evts"].0.len(), 1, "one row — no child dispatch without path_map");
+    }
+
+    // ---------------------------------------------------------------------------
+    // [issue #45, tâche 9] ObjectArray+Jsonb : builder générique, j2s_order peuplé.
+    //
+    // Avant le fix, insert_jsonb_object écrivait un nombre de champs figé (uuid,
+    // parent_uuid, json_data) sans jamais consulter schema.columns — sur un schéma
+    // ObjectArray+Jsonb (4 colonnes : j2s_id, parent_fk, j2s_order, data), la ligne
+    // COPY n'aurait que 3 champs pour 4 colonnes déclarées (arité invalide),
+    // j2s_order n'étant jamais poussé.
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn jsonb_object_array_populates_order_column() {
+        let schema = make_jsonb_object_array_schema("reviews", "produits");
+        let mut sinks = make_sinks(&["reviews"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let value = serde_json::json!({"score": 5});
+
+        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id(), Some(2)).unwrap();
+
+        let rows = &sinks["reviews"].0;
+        assert_eq!(rows.len(), 1);
+        let fields = parse_fields(&rows[0]);
+        assert_eq!(fields.len(), 4, "uuid, parent_uuid, order, json_data — une ligne par colonne déclarée");
+        assert_eq!(fields[2], "2", "j2s_order doit porter la position passée en paramètre");
+        let parsed: serde_json::Value = serde_json::from_str(fields[3]).unwrap();
+        assert_eq!(parsed["score"], 5);
+    }
+
+    #[test]
+    fn jsonb_object_array_order_none_pushes_null() {
+        let schema = make_jsonb_object_array_schema("reviews", "produits");
+        let mut sinks = make_sinks(&["reviews"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let value = serde_json::json!({"score": 5});
+
+        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id(), None).unwrap();
+
+        let fields = parse_fields(&sinks["reviews"].0[0]);
+        assert_eq!(fields[2], r"\N", "pas d'ordre fourni → j2s_order NULL");
     }
 
     // ---------------------------------------------------------------------------
