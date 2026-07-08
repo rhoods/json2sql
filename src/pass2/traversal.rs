@@ -615,6 +615,12 @@ pub(super) fn insert_array<S: RowSink>(
         let child_id = Uuid::now_v7();
         let order = i as i64;
         match (&schema.child_kind, item) {
+            (Some(ChildKind::ObjectArray), Value::Object(_)) if matches!(*schema.effective_strategy(), InferredStrategy::Jsonb) => {
+                // Jsonb needs the whole element as a blob, not just its object fields — insert_object's
+                // generic per-column loop would look up a literal "data" JSON key that never exists and
+                // silently write NULL (issue #45, tâche 10).
+                insert_jsonb_object(path_map, sinks, anomalies, schema, item, parent_id, Some(order))?;
+            }
             (Some(ChildKind::ObjectArray), Value::Object(obj)) => {
                 insert_object(
                     path_map, &mut InsertCtx { sinks, anomalies },
@@ -1302,6 +1308,59 @@ mod tests {
         assert_eq!(sinks["pivot_a_key"].0.len(), 2, "a1 + a2 → pivot_a_key");
         assert_eq!(sinks["pivot_b_key"].0.len(), 2, "b1 + b2 → pivot_b_key");
         // root sink is absent → no routing row emitted by route_multi_collapse_children
+    }
+
+    // ---------------------------------------------------------------------------
+    // [issue #45, tâche 10] insert_array : dispatch ObjectArray vers insert_jsonb_object
+    // quand effective_strategy()==Jsonb, au lieu d'insert_object qui écrirait NULL
+    // (le schéma Jsonb n'a qu'une colonne "data" — obj.get("data") ne trouve jamais
+    // la clé JSON réelle, insert_object pousserait NULL silencieusement).
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn insert_array_object_array_jsonb_writes_blob_not_null() {
+        let schema = make_jsonb_object_array_schema("reviews", "produits");
+        let mut sinks = make_sinks(&["reviews"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let arr = vec![
+            serde_json::json!({"score": 5, "note": "top"}),
+            serde_json::json!({"score": 2}),
+        ];
+
+        super::insert_array(&path_map, &mut sinks, &mut anomalies, &schema, &arr, dummy_parent_id()).unwrap();
+
+        let rows = &sinks["reviews"].0;
+        assert_eq!(rows.len(), 2, "un élément d'array → une ligne JSONB, pas un no-op silencieux");
+        for (i, row) in rows.iter().enumerate() {
+            let fields = parse_fields(row);
+            assert_eq!(fields.len(), 4, "uuid, parent_uuid, order, data");
+            assert_ne!(fields[3], r"\N", "le blob JSON ne doit pas être NULL (bug pré-#45)");
+            assert_eq!(fields[2], i.to_string(), "j2s_order doit suivre la position dans l'array");
+        }
+        let first: serde_json::Value = serde_json::from_str(parse_fields(&rows[0]).remove(3)).unwrap();
+        assert_eq!(first["score"], 5);
+        assert_eq!(first["note"], "top");
+    }
+
+    #[test]
+    fn insert_array_object_array_columns_unaffected() {
+        // Non-régression : le dispatch générique existant (insert_object, cf. tâches 6/7 —
+        // AutoSplit après le split identité/compagnon, ou Columns simple) ne doit pas être
+        // détourné par le nouveau branchement Jsonb quand effective_strategy() != Jsonb.
+        let mut schema = TableSchema::new("items".to_string(), vec!["items".to_string()], 1);
+        schema.child_kind = Some(ChildKind::ObjectArray);
+        schema.columns = vec![generated_id(), parent_fk("root"), generated_order(), col("a", PgType::Text)];
+        let mut sinks = make_sinks(&["items"]);
+        let mut anomalies = CountingAnomaly::default();
+        let path_map = HashMap::new();
+        let arr = vec![serde_json::json!({"a": "x"})];
+
+        super::insert_array(&path_map, &mut sinks, &mut anomalies, &schema, &arr, dummy_parent_id()).unwrap();
+
+        let fields = parse_fields(&sinks["items"].0[0]);
+        assert_eq!(fields.len(), 4);
+        assert_eq!(fields[3], "x", "colonne 'a' peuplée depuis la clé JSON réelle — chemin Columns inchangé");
     }
 
     // Smoke tests for fakes
