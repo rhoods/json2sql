@@ -54,6 +54,15 @@ pub(super) fn apply_wide_table_strategies(
     for (path_key, entry) in tables {
         let pg_name = naming.table_name_lookup_from_dot_key(path_key);
         if let Some(&idx) = schema_map.get(&pg_name) {
+            // [issue #45, finding 6] `tables` liste les chemins PRÉ-fusion (Phase 1) ; un
+            // chemin pré-fusion peut se résoudre, via NamingRegistry, vers une table que la
+            // Phase 2 (finalize_cascading) a déjà fusionnée (SiblingCollapse/SiblingCollapseMulti/
+            // ...). Retraiter cette table avec le TableEntry pré-fusion associé au chemin corrompt
+            // la table déjà fusionnée (colonnes/medium_keys issus d'une autre observation) —
+            // confirmé empiriquement en production (medium_keys peuplé de colonnes étrangères).
+            if !matches!(schemas[idx].inferred_strategy, InferredStrategy::Columns) {
+                continue;
+            }
             if let Some(extra) = apply_wide_strategy(&mut schemas[idx], entry, config, tables_with_object_children, &existing_names) {
                 existing_names.insert(extra.name.clone());
                 extra_schemas.push(extra);
@@ -305,3 +314,79 @@ const WIDE_TABLE_HIGH_STABLE_RATIO: f64 = 0.5;
 
 /// Minimum fraction of columns that must share a common suffix pattern to trigger `StructuredPivot`.
 const SUFFIX_MIN_COVERAGE: f64 = 0.3;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    use crate::schema::naming::NamingRegistry;
+    use crate::schema::observer::SchemaObserver;
+    use crate::schema::table_schema::{KeyShape, SiblingSchema};
+    use crate::schema::type_tracker::PgType;
+
+    fn make_config() -> FinalizerConfig {
+        FinalizerConfig {
+            wide_column_threshold: 2,
+            stable_threshold: 0.1,
+            rare_threshold: 0.001,
+            text_threshold: 256,
+            disable_pivot: false,
+            disable_structured_pivot: false,
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // [issue #45] Phase 3 ne doit jamais retraiter une table déjà assignée par la Phase 2
+    // (finding 6 de l'issue, confirmé empiriquement en production sur OpenFoodFacts :
+    // medium_keys d'une table AutoSplit peuplé à partir des colonnes d'une TOUTE AUTRE table).
+    //
+    // apply_wide_table_strategies boucle sur `tables` — les chemins PRÉ-fusion de la Phase 1.
+    // Un chemin pré-fusion peut toujours se résoudre, via NamingRegistry, vers une table que
+    // la Phase 2 a déjà fusionnée (SiblingCollapse) — apply_wide_strategy ne doit alors JAMAIS
+    // la retraiter avec ce TableEntry, quel qu'il soit.
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn already_assigned_schema_is_never_reprocessed() {
+        let mut observer = SchemaObserver::new(256, false);
+        let obj: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{"id": 1, "foo": {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}}"#,
+        ).unwrap();
+        observer.observe_root("root", &obj);
+
+        let mut naming = NamingRegistry::new();
+        for path_key in observer.tables.keys().cloned().collect::<Vec<_>>() {
+            naming.table_name_from_dot_key(&path_key);
+        }
+
+        // Simule la Phase 2 ayant déjà fusionné "root_foo" en SiblingCollapse — une forme de
+        // colonnes différente de ce que le TableEntry brut (5 colonnes scalaires) produirait.
+        let mut fused = TableSchema::new("root_foo".to_string(), vec!["root".to_string(), "foo".to_string()], 1);
+        fused.parent_table = Some("root".to_string());
+        fused.inferred_strategy = InferredStrategy::SiblingCollapse(SiblingSchema {
+            key_col_name: "key".to_string(), key_shape: KeyShape::Slug, array_children: false,
+        });
+        fused.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        fused.columns.push(ColumnSchema::parent_fk("root"));
+        // 3 colonnes data > wide_column_threshold(2) — nécessaire pour que apply_wide_strategy
+        // dépasse le premier seuil et atteigne réellement le chemin de retraitement.
+        for col_name in ["key", "x1", "imgid"] {
+            fused.columns.push(ColumnSchema {
+                name: col_name.to_string(), original_name: col_name.to_string(),
+                pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false,
+            });
+        }
+        let mut schemas = vec![fused];
+
+        apply_wide_table_strategies(
+            &mut schemas, &observer.tables, &naming, &make_config(), &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(schemas.len(), 1, "aucun compagnon ne doit être créé à partir d'une table déjà fusionnée");
+        assert!(
+            matches!(schemas[0].inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            "le SiblingCollapse de la Phase 2 doit survivre intact — trouvé : {:?}", schemas[0].inferred_strategy
+        );
+        assert_eq!(schemas[0].data_columns().count(), 3, "colonnes inchangées (key, x1, imgid)");
+    }
+}
