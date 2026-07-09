@@ -447,11 +447,20 @@ fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, mem
     None
 }
 
+/// Recorded when a `Skip` (direct, or via an `AutoSplit` `_wide` companion) cascades onto
+/// real children (`parent_table` pointing at a removed table, at any depth).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkipCascadeWarning {
+    pub removed_table: String,
+    pub cascaded_children: Vec<String>,
+}
+
 /// Apply IHM strategy overrides (`Pivot | Jsonb | Skip`) to a mutable schema slice.
 ///
 /// Called by the CLI after loading a snapshot that includes `strategy_overrides`.
 /// `Skip` removes the table — and if it had `AutoSplit`, also removes the companion
-/// `_wide` table. `Pivot` and `Jsonb` mutate `inferred_strategy` in place.
+/// `_wide` table, along with any real children cascading transitively from either
+/// (see [`SkipCascadeWarning`]). `Pivot` and `Jsonb` mutate `inferred_strategy` in place.
 pub fn apply_user_overrides(
     schemas: &mut Vec<TableSchema>,
     overrides: &HashMap<String, UserOverride>,
