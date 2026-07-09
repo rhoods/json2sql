@@ -9,6 +9,7 @@
 //! `` - enum `{Nom}` ``, suivie de ` — description`. Les libellés de section libres (non taggés)
 //! entre le marqueur `Fonctions :` et les entrées sont ignorés par le parseur — ils ne servent
 //! qu'à la lisibilité humaine des gros fichiers.
+#![allow(clippy::disallowed_methods)]
 
 use std::collections::HashSet;
 use std::fs;

@@ -11,6 +11,7 @@
 //! Chaque test crée un schéma `j2s_test_<random>` via `with_schema_url()` et le supprime à la fin,
 //! même en cas de panic. `with_schema_url` capture le panic via `catch_unwind`, drop le schéma
 //! avec une connexion fraîche, puis resume le panic pour que le test soit marqué FAILED.
+#![allow(clippy::disallowed_methods)]
 
 use std::future::Future;
 use std::path::PathBuf;

@@ -436,6 +436,7 @@ const fn is_digit(c: u8) -> bool {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use serde_json::json;
