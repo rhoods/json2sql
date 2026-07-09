@@ -25,13 +25,13 @@ use crate::worker_client::{connect_with_retry, spawn_worker, SocketEventReader, 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[component]
 pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
+    #[allow(dead_code)]
+    enum ImportMsg { Cancel }
+
     // ── Elapsed timer ─────────────────────────────────────────────────────
     let elapsed_secs = crate::screens::use_elapsed_timer(move || state.read().import.pass2_progress.done);
 
     // ── Pass 2 runner — subprocess worker ────────────────────────────────
-    #[allow(dead_code)]
-    enum ImportMsg { Cancel }
-
     let mut once = use_signal(|| false);
     let import_task = use_coroutine(move |mut rx: UnboundedReceiver<ImportMsg>| async move {
         if *once.peek() { return; }
