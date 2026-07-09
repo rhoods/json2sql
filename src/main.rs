@@ -43,7 +43,8 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("{e}"))
         }
         None => {
-            // Validate --disable-strategy flags before any file I/O.
+            // Validate --disable-strategy and --array-as-pg-array before any file I/O.
+            reject_array_as_pg_array(cli.array_as_pg_array)?;
             let disabled_strategies = parse_disabled_strategies(&cli.disable_strategy)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let root_table = cli.root_table_name();
@@ -80,6 +81,19 @@ async fn main() -> anyhow::Result<()> {
             pipeline::run_pipeline(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))
         }
     }
+}
+
+/// `--array-as-pg-array` is temporarily disabled: it silently drops data (`AutoSplit`
+/// companion tables) or crashes DDL (flat tables) when a normally-scalar field has an
+/// occasional array occurrence. See issue #48 for the root-cause fix.
+fn reject_array_as_pg_array(enabled: bool) -> anyhow::Result<()> {
+    if enabled {
+        anyhow::bail!(
+            "--array-as-pg-array est temporairement désactivé (voir issue #48 : \
+             perte de données silencieuse ou crash DDL sur hétérogénéité scalaire/array)"
+        );
+    }
+    Ok(())
 }
 
 fn run_inspect(
@@ -159,4 +173,21 @@ fn write_sample_file(objects: &[serde_json::Value], out_path: &std::path::Path) 
     }
     eprintln!("Sample written: {} objects → {}", objects.len(), out_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reject_array_as_pg_array_errors_when_enabled() {
+        let err = reject_array_as_pg_array(true).unwrap_err();
+        assert!(err.to_string().contains("array-as-pg-array"));
+        assert!(err.to_string().contains("#48"));
+    }
+
+    #[test]
+    fn reject_array_as_pg_array_ok_when_disabled() {
+        assert!(reject_array_as_pg_array(false).is_ok());
+    }
 }
