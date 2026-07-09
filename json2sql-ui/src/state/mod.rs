@@ -721,7 +721,7 @@ mod tests {
         let snapshot = SchemaSnapshot {
             version: 1,
             total_rows: 3,
-            schemas: vec![dup.clone(), other.clone(), dup.clone()], // duplicate "dup"
+            schemas: vec![dup.clone(), other, dup], // duplicate "dup"
             truncated_names: vec![],
             column_collisions: vec![],
             stats: vec![],

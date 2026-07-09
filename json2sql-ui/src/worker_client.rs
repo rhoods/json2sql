@@ -487,7 +487,7 @@ mod tests {
         // We construct one with a dummy child... actually we can't without spawning.
         // Just verify default clone behaves correctly.
         let h1 = WorkerKillHandle::default();
-        let h2 = h1.clone();
+        let h2 = h1;
         assert!(!h2.is_some());
     }
 }
