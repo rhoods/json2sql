@@ -119,9 +119,6 @@ json2sql --input data.json --dry-run --schema staging
 json2sql --input data.json --dry-run --schema-report
 json2sql --input data.json --dry-run --schema-report-output stats.txt
 
-# Stocker les tableaux scalaires en colonnes PostgreSQL natives
-json2sql --input data.json --db-url $DATABASE_URL --array-as-pg-array
-
 # Import complet avec options
 json2sql \
   --input data.jsonl \
@@ -162,7 +159,7 @@ json2sql \
 | `--rare-threshold` | 0.001 | Fréquence max avant suppression (AutoSplit) |
 | `--sibling-threshold` | 3 | Nb min de tables sœurs pour fusion |
 | `--sibling-jaccard` | 0.5 | Similarité min des colonnes sœurs |
-| `--array-as-pg-array` | false | Tableaux scalaires → colonne `TEXT[]` |
+| `--array-as-pg-array` | *(désactivé)* | ⚠️ Temporairement désactivé — rejeté au démarrage (voir [issue #48](https://github.com/rhoods/json2sql/issues/48) : perte de données silencieuse ou crash DDL sur hétérogénéité scalaire/array) |
 | `--depth-limit` | aucun | Avertissement si imbrication dépasse N niveaux |
 | `--disable-strategy` | aucun | Désactive une stratégie d'inférence optionnelle. Répétable. Valeurs : `sibling`, `pivot`, `structured_pivot`. La stratégie `split` (wide-table) est obligatoire et ne peut pas être désactivée. |
 
