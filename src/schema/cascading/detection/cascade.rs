@@ -188,6 +188,7 @@ fn merge_co_sibling_group(
 
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use super::super::super::super::table_schema::{ColumnSchema, InferredStrategy, TableSchema};

@@ -51,6 +51,7 @@ pub fn ProgressBar(pct: u32, done: bool, label: String, phase: String) -> Elemen
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
 

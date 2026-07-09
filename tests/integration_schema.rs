@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 mod common;
 
 // pass2 is used by all async tests in this file; pass1-only test_schema_inference_no_db

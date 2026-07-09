@@ -129,6 +129,7 @@ fn parse_json_object(bytes: &mut [u8]) -> Result<serde_json::Map<String, Value>>
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use std::collections::HashMap;
     use crate::pass2::runner::test_support::make_schema_with_rows;

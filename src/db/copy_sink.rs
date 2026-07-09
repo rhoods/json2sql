@@ -155,6 +155,7 @@ pub async fn flush_mem_sink_to_pg(buf: Bytes, copy_sql: &str, client: &Client) -
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use crate::schema::table_schema::{ColumnSchema, TableSchema};

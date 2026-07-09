@@ -193,6 +193,7 @@ pub fn build_suffix_schema_from_list(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
 

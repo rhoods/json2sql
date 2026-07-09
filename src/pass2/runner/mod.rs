@@ -316,6 +316,7 @@ fn build_pass2_result(
 mod test_support;
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use std::collections::HashMap;
     use super::Pass2Timing;

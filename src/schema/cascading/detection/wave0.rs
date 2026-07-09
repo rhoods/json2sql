@@ -543,6 +543,7 @@ pub(super) fn collect_sibling_collapses(
 
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use super::super::super::super::table_schema::{ColumnSchema, KeyShape, TableSchema, InferredStrategy};

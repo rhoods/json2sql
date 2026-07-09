@@ -768,6 +768,7 @@ impl std::fmt::Display for KeyShape {
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use crate::schema::naming::PG_TABLE_MAX_IDENT;

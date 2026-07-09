@@ -13,7 +13,6 @@
 #![deny(clippy::all)]
 #![deny(clippy::pedantic)]
 #![deny(clippy::nursery)]
-#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 mod anomaly;
 mod cli;
@@ -176,6 +175,7 @@ fn write_sample_file(objects: &[serde_json::Value], out_path: &std::path::Path) 
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
 

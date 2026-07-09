@@ -163,6 +163,7 @@ fn extract_key_suffixes(names: &[&str]) -> Vec<String> {
 
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use super::super::super::table_schema::{ColumnSchema, KeyShape, TableSchema, InferredStrategy};

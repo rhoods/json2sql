@@ -48,6 +48,7 @@ pub fn ram_pressure_exceeded(threshold_pct: u8) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
 

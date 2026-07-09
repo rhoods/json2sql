@@ -660,6 +660,7 @@ fn parse_pg_type(s: &str) -> Option<PgType> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
 

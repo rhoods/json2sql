@@ -92,6 +92,7 @@ pub fn escape_copy_text(s: &str) -> Option<CopyEscaped> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
 
