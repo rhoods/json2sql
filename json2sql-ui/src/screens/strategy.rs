@@ -90,6 +90,9 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
     let overflow_names: std::collections::HashSet<String> =
         overflow_warnings.iter().map(|w| w.table_name.clone()).collect();
+    // Real children that a Skip elsewhere in strategy_overrides will remove by cascade —
+    // never chosen by the user directly (#47). Computed on the full, un-reduced list.
+    let cascaded_names = crate::screens::skip_cascade_names(&schemas, &overrides_snap);
 
     let tables_count  = schemas.len();
     let columns_count: usize = schemas.iter().map(|s| s.columns.len()).sum();
@@ -142,6 +145,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let table_rows = build_table_rows(&schemas, &TableRowsCtx {
         overrides: &overrides_snap, overflow_names: &overflow_names,
         selected_indices: &selected_indices, absorbed_names: &absorbed_names,
+        cascaded_names: &cascaded_names,
         filter: &filter, show_warn_only: show_warn, anomaly_counts: &anomaly_counts,
     });
     let visible_indices: Vec<usize> = table_rows.iter()

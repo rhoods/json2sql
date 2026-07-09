@@ -83,6 +83,24 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
         })
         .collect();
 
+    // Real children removed by cascade from a Skip elsewhere — never chosen by the user
+    // directly, so they never surface in `diffs` above. Surfaced separately here so the
+    // user sees, before importing, everything a Skip took down with it (#47).
+    let (_removed, cascade_warnings) = json2sql::schema::config::compute_skip_cascade(&schemas_orig, &strategy_overrides);
+    let cascade_diffs: Vec<DiffEntry> = cascade_warnings.iter()
+        .flat_map(|w| w.cascaded_children.iter())
+        .filter_map(|child| {
+            let orig = schemas_orig.iter().find(|s| &s.name == child)?;
+            let (_from_cls, from_lbl) = strategy_badge(&orig.inferred_strategy);
+            Some(DiffEntry {
+                table_name: child.clone(),
+                from_lbl,
+                to_cls: "skip",
+                to_lbl: "skip (cascade)",
+            })
+        })
+        .collect();
+
     let (sel_cls, sel_lbl) = strategy_badge(&selected.inferred_strategy);
     let selected_name = selected.name.clone();
     let parent_table  = selected.parent_table.clone();
@@ -114,6 +132,9 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                     span { class: "badge muted sq", "{schemas.len()} tables" }
                     if !diffs.is_empty() {
                         span { class: "badge acc sq", "{diffs.len()} overrides" }
+                    }
+                    if !cascade_diffs.is_empty() {
+                        span { class: "badge skip sq", "{cascade_diffs.len()} cascaded" }
                     }
                 }
             }
@@ -148,6 +169,9 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                                 overflow_names: &std::collections::HashSet::new(),
                                 selected_indices: &std::collections::HashSet::from([idx]),
                                 absorbed_names: &state.read().schema.absorbed_names,
+                                // Cascaded real children are already absent from `schemas`
+                                // (the effective, reduced list) — nothing left to badge here.
+                                cascaded_names: &std::collections::HashSet::new(),
                                 filter: "", show_warn_only: false,
                                 anomaly_counts: &state.read().import.pass2_progress.anomaly_counts_per_table,
                             }),
@@ -254,6 +278,33 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                                         span { class: "badge muted", "{diff.from_lbl}" }
                                         span { style: "color:var(--fg-4);font-size:var(--fs-xs);", "→" }
                                         span { class: "badge {diff.to_cls}", "{diff.to_lbl}" }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Cascaded-by-Skip section — real children removed as a side effect
+                        // of a Skip elsewhere, never chosen by the user directly (#47).
+                        if !cascade_diffs.is_empty() {
+                            div { style: "padding:14px 16px;border-top:1px solid var(--bd);",
+                                div { style: "font-size:var(--fs-xs);font-weight:600;color:var(--fg-3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;",
+                                    "Cascaded by Skip"
+                                }
+                                p { style: "font-size:var(--fs-xs);color:var(--fg-4);margin:0 0 10px;",
+                                    "Removed because their parent table was skipped — not chosen individually."
+                                }
+                                for diff in &cascade_diffs {
+                                    div {
+                                        key: "{diff.table_name}",
+                                        style: "margin-bottom:12px;",
+                                        div { style: "font-size:var(--fs-xs);font-family:var(--font-code);color:var(--fg);margin-bottom:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                            "{diff.table_name}"
+                                        }
+                                        div { style: "display:flex;align-items:center;gap:5px;flex-wrap:wrap;",
+                                            span { class: "badge muted", "{diff.from_lbl}" }
+                                            span { style: "color:var(--fg-4);font-size:var(--fs-xs);", "→" }
+                                            span { class: "badge {diff.to_cls}", "{diff.to_lbl}" }
+                                        }
                                     }
                                 }
                             }
