@@ -25,7 +25,7 @@ async fn test_override_type_valid() {
         );
 
         let config = SchemaConfig::from_file(&common::fixture("override_score.toml")).unwrap();
-        apply_overrides(&mut p1.schemas, &config);
+        apply_overrides(&mut p1.schemas, &config).unwrap();
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
         let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("people", &schema), None)
@@ -89,7 +89,7 @@ async fn test_override_bad() {
         );
 
         let config = SchemaConfig::from_file(&common::fixture("override_bad.toml")).unwrap();
-        apply_overrides(&mut p1.schemas, &config);
+        apply_overrides(&mut p1.schemas, &config).unwrap();
 
         let people_schema = p1.schemas.iter().find(|s| s.name == "people").unwrap();
         let score_col = people_schema.find_by_original("score").unwrap();

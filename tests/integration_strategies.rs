@@ -201,7 +201,7 @@ async fn test_flatten_strategy() {
         assert!(p1.schemas.iter().any(|s| s.name == "products_dims"));
 
         let mut schemas = p1.schemas;
-        apply_flatten(&mut schemas, "products_dims", "dims_", 1);
+        apply_flatten(&mut schemas, "products_dims", "dims_", 1).unwrap();
 
         assert_eq!(schemas.len(), 1);
         assert!(schemas.iter().all(|s| s.name != "products_dims"));
@@ -692,7 +692,7 @@ async fn test_normalize_dynamic_keys_strategy() {
             "products_images doit exister après pass1");
 
         let mut schemas = p1.schemas;
-        apply_normalize_dynamic_keys(&mut schemas, "products_images", "image_id".to_string());
+        apply_normalize_dynamic_keys(&mut schemas, "products_images", "image_id".to_string()).unwrap();
 
         // Les 5 tables images enfants doivent être absorbées
         assert_eq!(schemas.len(), 2, "2 schemas attendus après absorption des enfants");
@@ -766,7 +766,7 @@ async fn test_jsonb_flatten_strategy() {
         assert!(p1.schemas.iter().any(|s| s.name == "products_dims"));
 
         let mut schemas = p1.schemas;
-        apply_jsonb_flatten(&mut schemas, "products_dims");
+        apply_jsonb_flatten(&mut schemas, "products_dims").unwrap();
 
         // Child table removed
         assert_eq!(schemas.len(), 1);
