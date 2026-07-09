@@ -23,10 +23,11 @@
 //! - fn `print_schema_summary` — affiche les tables inférées.
 //!
 //! Warnings Pass 1 :
-//! - fn `report_pass1_warnings` — dispatch vers les 4 warns ci-dessous.
+//! - fn `report_pass1_warnings` — dispatch vers les 5 warns ci-dessous.
 //! - fn `warn_truncated_names` — avertit des noms de table tronqués.
 //! - fn `warn_column_collisions` — avertit des collisions de noms de colonnes.
 //! - fn `warn_overflow` — avertit du dépassement du plafond de 1600 colonnes.
+//! - fn `warn_skip_cascade` — avertit des vrais enfants cascadés par un `Skip` (#47).
 //! - fn `warn_depth` — avertit d'une profondeur de nesting excessive.
 //!
 //! Post-traitement schéma :
@@ -46,6 +47,7 @@ use std::path::{Path, PathBuf};
 use crate::anomaly::reporter::AnomalyFormat;
 use crate::error::{J2sError, Result};
 use crate::pass1::runner::{Pass1Config, Pass1Result};
+use crate::schema::config::SkipCascadeWarning;
 use crate::schema::finalizer::OverflowWarning;
 use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::strategies::StrategyName;
@@ -255,9 +257,11 @@ fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
     eprintln!("Loading schema snapshot from '{}'...", schema_path.display());
     let snap = crate::schema::persistence::load(schema_path)?;
     let mut schemas = snap.schemas;
-    if !snap.strategy_overrides.is_empty() {
-        crate::schema::config::apply_user_overrides(&mut schemas, &snap.strategy_overrides);
-    }
+    let skip_cascade_warnings = if snap.strategy_overrides.is_empty() {
+        Vec::new()
+    } else {
+        crate::schema::config::apply_user_overrides(&mut schemas, &snap.strategy_overrides)
+    };
     eprintln!("Snapshot loaded: {} tables, {} rows originally scanned.", schemas.len(), snap.total_rows);
     Ok(Pass1Result {
         schemas,
@@ -266,6 +270,7 @@ fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
         truncated_names: snap.truncated_names,
         column_collisions: snap.column_collisions,
         overflow_warnings: snap.overflow_warnings,
+        skip_cascade_warnings,
         detected_format: snap.detected_format,
     })
 }
@@ -322,6 +327,7 @@ fn report_pass1_warnings(pass1: &Pass1Result, depth_limit: Option<usize>) {
     warn_truncated_names(&pass1.truncated_names);
     warn_column_collisions(&pass1.column_collisions);
     warn_overflow(&pass1.overflow_warnings);
+    warn_skip_cascade(&pass1.skip_cascade_warnings);
     warn_depth(&pass1.schemas, depth_limit);
 }
 
@@ -371,6 +377,19 @@ fn warn_overflow(warnings: &[OverflowWarning]) {
         );
     }
     eprintln!("  Their child tables are preserved and will still receive data.");
+}
+
+fn warn_skip_cascade(warnings: &[SkipCascadeWarning]) {
+    if warnings.is_empty() {
+        return;
+    }
+    eprintln!(
+        "\nWARNING: {} table(s) removed by Skip cascaded onto real children:",
+        warnings.len()
+    );
+    for w in warnings {
+        eprintln!("  {} → {}", w.removed_table, w.cascaded_children.join(", "));
+    }
 }
 
 fn warn_depth(schemas: &[TableSchema], depth_limit: Option<usize>) {
@@ -541,6 +560,7 @@ mod tests {
             truncated_names: vec![],
             column_collisions: vec![],
             overflow_warnings: vec![],
+            skip_cascade_warnings: vec![],
             detected_format: None,
         }
     }
