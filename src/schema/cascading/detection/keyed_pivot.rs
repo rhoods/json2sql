@@ -239,7 +239,7 @@ fn reparent_and_update_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::super::super::table_schema::{InferredStrategy, KeyShape, SiblingSchema};
+    use super::super::super::super::table_schema::InferredStrategy;
 
     #[test]
     fn test_build_sub_pivot_schema_wires_fields() {

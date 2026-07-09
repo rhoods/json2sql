@@ -190,7 +190,7 @@ fn merge_co_sibling_group(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::super::super::table_schema::{ColumnSchema, InferredStrategy, KeyShape, SiblingSchema, TableSchema};
+    use super::super::super::super::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
     use super::super::super::super::type_tracker::PgType;
 
     fn make_parent(name: &str) -> TableSchema {
@@ -380,7 +380,6 @@ mod tests {
 
     #[test]
     fn build_co_sibling_schema_propagates_row_count() {
-        use crate::schema::table_schema::ChildKind;
         let group = CoSiblingGroup {
             synthetic_parent_name: "pivot".to_string(),
             json_key: "en".to_string(),

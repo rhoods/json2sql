@@ -18,6 +18,3 @@ pub mod detection;
 pub mod merge;
 
 pub use detection::finalize_cascading;
-
-#[cfg(test)]
-pub use scoring::child_compatibility_score;
