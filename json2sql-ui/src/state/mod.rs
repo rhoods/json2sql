@@ -1,4 +1,4 @@
-//! Application state — persisted UI state, per-pass progress, and PostgreSQL connection config.
+//! Application state — persisted UI state, per-pass progress, and `PostgreSQL` connection config.
 //!
 //! `AppState` is the root state tree threaded through every screen via `Signal<AppState>`.
 //! Sub-states: `ProjectState` (Setup + PG config), `SchemaState` (Analysis/Strategy/Preview),
@@ -721,7 +721,7 @@ mod tests {
         let snapshot = SchemaSnapshot {
             version: 1,
             total_rows: 3,
-            schemas: vec![dup.clone(), other.clone(), dup.clone()], // duplicate "dup"
+            schemas: vec![dup.clone(), other, dup], // duplicate "dup"
             truncated_names: vec![],
             column_collisions: vec![],
             stats: vec![],
@@ -791,8 +791,7 @@ mod tests {
     fn pass2_parallel_matches_available_cpus_capped_at_8() {
         let s = AppState::default();
         let cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
+            .map_or(4, std::num::NonZeroUsize::get);
         assert_eq!(s.project.pass2_parallel, cpus.min(8));
     }
 

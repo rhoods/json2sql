@@ -828,7 +828,7 @@ mod tests {
         let mut s = TableSchema::new(
             name.to_string(), vec![name.to_string()], if parent.is_some() { 1 } else { 0 },
         );
-        s.parent_table = parent.map(|p| p.to_string());
+        s.parent_table = parent.map(str::to_string);
         s
     }
 

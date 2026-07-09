@@ -28,6 +28,8 @@ use crate::state::{AppScreen, AppState};
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[component]
 pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
+    use json2sql::schema::table_schema::{InferredStrategy, UserOverride};
+
     let (schemas_orig, strategy_overrides) = {
         let s = state.read();
         (s.schema.schemas.clone(), s.schema.strategy_overrides.clone())
@@ -58,7 +60,6 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
         });
 
     // Strategy diff — tables whose user override differs from the inferred strategy.
-    use json2sql::schema::table_schema::{InferredStrategy, UserOverride};
     let diffs: Vec<DiffEntry> = schemas_orig.iter()
         .filter_map(|orig| {
             let ov = strategy_overrides.get(&orig.name)?;

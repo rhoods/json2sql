@@ -41,7 +41,7 @@ pub const fn strategy_badge(s: &InferredStrategy) -> (&'static str, &'static str
     }
 }
 
-pub fn user_override_badge(o: &UserOverride) -> (&'static str, &'static str) {
+pub const fn user_override_badge(o: &UserOverride) -> (&'static str, &'static str) {
     match o {
         UserOverride::Columns                      => ("columns",   "columns"),
         UserOverride::Pivot                        => ("pivot",     "pivot"),
@@ -60,7 +60,7 @@ mod tests {
 
     fn make_table(name: &str, parent: Option<&str>) -> TableSchema {
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
-        t.parent_table = parent.map(|s| s.to_string());
+        t.parent_table = parent.map(str::to_string);
         t
     }
 
