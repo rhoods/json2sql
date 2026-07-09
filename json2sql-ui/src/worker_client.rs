@@ -67,7 +67,7 @@ impl WorkerKillHandle {
         })))
     }
 
-    pub fn is_some(&self) -> bool {
+    pub const fn is_some(&self) -> bool {
         self.0.is_some()
     }
 
@@ -126,7 +126,7 @@ impl SocketEventReader {
 
 /// Spawn `json2sql-worker` with `cfg` sent via stdin, then connect to its socket.
 ///
-/// The PostgreSQL password must be passed via `pg_password` — it is set as the
+/// The `PostgreSQL` password must be passed via `pg_password` — it is set as the
 /// `J2S_PG_PASSWORD` environment variable and is NOT serialised into `WorkerConfig`.
 #[cfg(unix)]
 pub async fn spawn_worker(

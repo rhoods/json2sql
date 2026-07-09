@@ -220,7 +220,7 @@ mod tests {
 
     fn make_table(name: &str, parent: Option<&str>) -> TableSchema {
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
-        t.parent_table = parent.map(|s| s.to_string());
+        t.parent_table = parent.map(str::to_string);
         t
     }
 
@@ -335,7 +335,7 @@ mod tests {
 
     fn make_table_depth(name: &str, parent: Option<&str>, depth: usize) -> TableSchema {
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], depth);
-        t.parent_table = parent.map(|s| s.to_string());
+        t.parent_table = parent.map(str::to_string);
         t
     }
 

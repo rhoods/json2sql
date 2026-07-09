@@ -107,10 +107,10 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
 
             // Locate the worker binary (colocated with the UI executable).
             let worker_bin = match std::env::current_exe() {
-                Ok(exe) => exe
-                    .parent()
-                    .map(|d| d.join("json2sql-worker"))
-                    .unwrap_or_else(|| std::path::PathBuf::from("json2sql-worker")),
+                Ok(exe) => exe.parent().map_or_else(
+                    || std::path::PathBuf::from("json2sql-worker"),
+                    |d| d.join("json2sql-worker"),
+                ),
                 Err(e) => {
                     state.write().import.pass2_progress.push_log(
                         format!("Cannot locate worker binary: {e}")

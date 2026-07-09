@@ -16,11 +16,10 @@ use crate::state::{AppScreen, AppState};
 pub fn ResumeScreen(mut state: Signal<AppState>) -> Element {
     // Path of the active worker socket detected at startup.
     let socket_path = state.read().resume_socket.clone();
-    let socket_label = socket_path
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "unknown".to_string());
+    let socket_label = socket_path.as_ref().and_then(|p| p.file_name()).map_or_else(
+        || "unknown".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
 
     rsx! {
         div {
