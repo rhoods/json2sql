@@ -8,8 +8,8 @@
 //!
 //! ## Schémas de test
 //!
-//! Chaque test crée un schéma `j2s_test_<random>` via `with_schema()` et le supprime à la fin,
-//! même en cas de panic. `with_schema` capture le panic via `catch_unwind`, drop le schéma
+//! Chaque test crée un schéma `j2s_test_<random>` via `with_schema_url()` et le supprime à la fin,
+//! même en cas de panic. `with_schema_url` capture le panic via `catch_unwind`, drop le schéma
 //! avec une connexion fraîche, puis resume le panic pour que le test soit marqué FAILED.
 
 use std::future::Future;
@@ -24,6 +24,7 @@ use json2sql::pass2::Pass2Config;
 use json2sql::schema::registry::RegistryConfig;
 
 /// Default Pass1Config for integration tests — all strategies enabled, standard thresholds.
+#[allow(dead_code)]
 pub fn pass1_config(root_table: &str) -> Pass1Config {
     Pass1Config {
         root_table: root_table.to_string(),
@@ -33,6 +34,7 @@ pub fn pass1_config(root_table: &str) -> Pass1Config {
 }
 
 /// Default Pass2Config for integration tests — parallel=1, no limit, no dirs.
+#[allow(dead_code)]
 pub fn pass2_config(root_table: &str, pg_schema: &str) -> Pass2Config {
     Pass2Config {
         root_table: root_table.to_string(),
@@ -49,6 +51,7 @@ pub fn pass2_config(root_table: &str, pg_schema: &str) -> Pass2Config {
     }
 }
 
+#[allow(dead_code)]
 pub fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -58,11 +61,6 @@ pub fn fixture(name: &str) -> PathBuf {
 
 pub fn db_url() -> Option<String> {
     std::env::var("TEST_DATABASE_URL").ok()
-}
-
-pub async fn connect_test_db() -> Option<tokio_postgres::Client> {
-    let url = db_url()?;
-    connection::connect(&url).await.ok()
 }
 
 pub fn unique_schema() -> String {
@@ -88,54 +86,8 @@ pub async fn drop_schema(client: &tokio_postgres::Client, schema: &str) {
 }
 
 /// Run a test body with a fresh PostgreSQL schema, guaranteed to be dropped even on panic.
-///
-/// If `TEST_DATABASE_URL` is not set or the connection fails, the test is skipped with a
-/// `[SKIP]` message on stderr (visible via `cargo test -- --nocapture`).
-/// On panic: the schema is dropped via a fresh connection, then the panic is resumed so the
-/// test is reported as FAILED rather than silently swallowed.
-pub async fn with_schema<F, Fut>(f: F)
-where
-    F: FnOnce(tokio_postgres::Client, String) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let url = match db_url() {
-        Some(u) => u,
-        None => {
-            eprintln!("[SKIP] TEST_DATABASE_URL not set — test requires a PostgreSQL connection.");
-            return;
-        }
-    };
-
-    let client = match connection::connect(&url).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[SKIP] Could not connect to TEST_DATABASE_URL: {e}");
-            return;
-        }
-    };
-
-    let schema = unique_schema();
-    client
-        .execute(&format!("CREATE SCHEMA \"{}\"", schema), &[])
-        .await
-        .unwrap();
-
-    let result = std::panic::AssertUnwindSafe(f(client, schema.clone()))
-        .catch_unwind()
-        .await;
-
-    // Always drop — open a fresh connection since the original was consumed by f().
-    if let Ok(cleanup) = connection::connect(&url).await {
-        drop_schema(&cleanup, &schema).await;
-    }
-
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
-}
-
-/// Variant of `with_schema` that also passes the database URL to the test body.
-/// Needed for tests that open additional connections (e.g. parallel COPY).
+/// Passes the database URL to the test body — needed for tests that open additional
+/// connections (e.g. parallel COPY).
 pub async fn with_schema_url<F, Fut>(f: F)
 where
     F: FnOnce(tokio_postgres::Client, String, String) -> Fut,

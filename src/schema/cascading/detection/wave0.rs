@@ -23,7 +23,7 @@
 //! - fn `pick_unique_suffix` — suffixe de table sans collision.
 
 use super::super::super::wide_strategies::{build_union_columns, classify_key_shape};
-use super::super::super::table_schema::{ColumnSchema, KeyShape, TableSchema, InferredStrategy};
+use super::super::super::table_schema::{KeyShape, TableSchema, InferredStrategy};
 use super::super::scoring::{child_compatibility_score, greedy_schema_clusters, pairwise_jaccard_min, siblings_key_prefix, unique_cluster_suffix};
 use super::{Collapse, CollapseKind, SiblingDetectCtx, SubgroupData};
 

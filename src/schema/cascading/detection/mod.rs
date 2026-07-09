@@ -209,7 +209,7 @@ fn run_sibling_wave(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::super::table_schema::{ColumnSchema, InferredStrategy, KeyShape, SiblingSchema, TableSchema};
+    use super::super::super::table_schema::{ColumnSchema, TableSchema};
     use super::super::super::type_tracker::PgType;
 
     fn make_parent(name: &str) -> TableSchema {

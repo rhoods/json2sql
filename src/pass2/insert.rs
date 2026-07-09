@@ -361,7 +361,6 @@ mod tests {
     use serde_json::Value;
     use uuid::Uuid;
     use crate::anomaly::collector::AnomalyCollector;
-    use crate::error::Result;
     use crate::pass2::test_utils::CaptureSink;
     use crate::schema::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
     use crate::schema::type_tracker::PgType;
