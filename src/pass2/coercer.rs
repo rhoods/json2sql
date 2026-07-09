@@ -353,6 +353,7 @@ const fn json_type_name(v: &Value) -> &'static str {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use serde_json::json;

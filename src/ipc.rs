@@ -95,6 +95,7 @@ pub fn lockfile_path() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
 

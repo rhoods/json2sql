@@ -472,6 +472,7 @@ fn truncate_value(s: &str, max: usize) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use tempfile::TempDir;

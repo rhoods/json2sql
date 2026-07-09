@@ -316,6 +316,7 @@ const WIDE_TABLE_HIGH_STABLE_RATIO: f64 = 0.5;
 const SUFFIX_MIN_COVERAGE: f64 = 0.3;
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use serde_json::Value;

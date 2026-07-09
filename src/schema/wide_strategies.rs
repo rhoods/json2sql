@@ -404,6 +404,7 @@ pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &st
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use crate::schema::type_tracker::PgType;

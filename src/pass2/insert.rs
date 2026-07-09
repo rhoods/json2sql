@@ -356,6 +356,7 @@ fn recurse_children<S: RowSink, A: AnomalyCollect>(
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use std::collections::HashMap;
     use serde_json::Value;

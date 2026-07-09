@@ -71,6 +71,7 @@ pub fn parse_disabled_strategies(raw: &[String]) -> Result<HashSet<StrategyName>
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
 

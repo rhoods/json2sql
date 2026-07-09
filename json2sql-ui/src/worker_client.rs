@@ -270,6 +270,7 @@ pub async fn find_active_socket() -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 #[cfg(unix)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use json2sql::io::progress_event::ProgressEvent;

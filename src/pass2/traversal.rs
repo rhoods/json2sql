@@ -651,6 +651,7 @@ pub(super) fn insert_array<S: RowSink>(
 
 #[cfg(test)]
 #[allow(dead_code)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use std::collections::HashMap;
 

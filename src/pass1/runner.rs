@@ -470,6 +470,7 @@ fn join_and_merge_workers(
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use std::collections::HashSet;

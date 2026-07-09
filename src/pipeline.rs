@@ -544,6 +544,7 @@ fn report_pass2_results(
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use crate::anomaly::collector::AnomalySummary;

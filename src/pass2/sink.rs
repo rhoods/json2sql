@@ -32,6 +32,7 @@ impl RowSink for Arc<Mutex<MemSink>> {
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use crate::db::copy_sink::MemSink;
