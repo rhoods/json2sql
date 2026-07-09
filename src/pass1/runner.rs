@@ -47,6 +47,7 @@ use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonFormat, JsonReader};
 use crate::schema::naming::{ColumnCollision, TruncatedName};
+use crate::schema::config::SkipCascadeWarning;
 use crate::schema::finalizer::OverflowWarning;
 use crate::schema::registry::{RegistryConfig, SchemaRegistry};
 use crate::schema::stats::ColumnStats;
@@ -83,6 +84,9 @@ pub struct Pass1Result {
     pub column_collisions: Vec<ColumnCollision>,
     /// Tables auto-converted to JSONB because they exceeded `PostgreSQL`'s 1600-column limit.
     pub overflow_warnings: Vec<OverflowWarning>,
+    /// Real children cascaded away by a `Skip` override. Always empty on a fresh Pass 1 run —
+    /// only populated when restoring a snapshot whose `strategy_overrides` include a `Skip`.
+    pub skip_cascade_warnings: Vec<SkipCascadeWarning>,
     /// JSON format detected during pass1. `None` when restored from an old snapshot that
     /// predates this field — pass2 will re-detect in that case.
     pub detected_format: Option<JsonFormat>,
@@ -189,7 +193,11 @@ fn build_pass1_result(
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
     }
-    Pass1Result { schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings, detected_format: Some(format) }
+    Pass1Result {
+        schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings,
+        skip_cascade_warnings: Vec::new(),
+        detected_format: Some(format),
+    }
 }
 
 /// Result of an inspect run (raw schema, no strategies or guards applied).
