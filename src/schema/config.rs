@@ -35,7 +35,8 @@
 //! - fn `close_over_real_children` — fermeture transitive d'un ensemble de tables sur leurs
 //!   vrais enfants (`parent_table`), en une passe (schémas triés topologiquement).
 //! - fn `compute_skip_cascade` — ensemble complet des tables à retirer pour `Skip` + un
-//!   `SkipCascadeWarning` par racine ayant réellement cascadé.
+//!   `SkipCascadeWarning` par racine ayant réellement cascadé (`pub` : requête pure réutilisable
+//!   par l'IHM pour afficher la cascade avant application).
 //! - fn `prime_tracker_from_pg_type` — reconstruit un `TypeTracker` représentatif depuis un `PgType`
 //!   déjà résolu (pour réutiliser `build_suffix_schema_from_list` après finalisation).
 //! - fn `parse_pg_type` — parse une chaîne de type SQL (avec alias) en `PgType`.
@@ -556,7 +557,10 @@ fn close_over_real_children(schemas: &[TableSchema], seed: HashSet<String>) -> H
 ///
 /// A table the user Skip-ed directly is always reported as its own root, never folded into
 /// another root's `cascaded_children` — even if it's also reachable by cascade from that root.
-fn compute_skip_cascade(
+///
+/// Public so callers that need to *display* the cascade (e.g. the GUI, before the user commits
+/// to an import) can query it without mutating `schemas`, the way [`apply_user_overrides`] does.
+pub fn compute_skip_cascade(
     schemas: &[TableSchema],
     overrides: &HashMap<String, UserOverride>,
 ) -> (HashSet<String>, Vec<SkipCascadeWarning>) {

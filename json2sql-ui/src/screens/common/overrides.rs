@@ -2,7 +2,9 @@
 //!
 //! Fonctions :
 //! - fn `build_effective_schemas` — applique les overrides utilisateur à une copie des schémas (déduplique défensivement, retire aussi la table `_wide` compagnon si le parent est skip)
-use std::collections::HashMap;
+//! - fn `skip_cascade_names` — noms des vrais enfants retirés par cascade d'un `Skip` (#47),
+//!   pour affichage (badges, récapitulatif) sans muter les schémas.
+use std::collections::{HashMap, HashSet};
 use json2sql::schema::table_schema::{TableSchema, UserOverride};
 
 /// Apply user strategy overrides (`Pivot | Jsonb | Skip`) to a copy of `schemas`.
@@ -22,6 +24,19 @@ pub fn build_effective_schemas(
     let mut seen = std::collections::HashSet::new();
     result.retain(|s| seen.insert(s.name.clone()));
     result
+}
+
+/// Names of real children that will be removed by cascade from a `Skip` override on an
+/// ancestor (direct root or its `AutoSplit` `_wide` companion) — never set by the user
+/// directly. A pure query: `schemas` is never mutated, so this is safe to call on the
+/// full, un-reduced table list (e.g. the Strategy screen, before `build_effective_schemas`
+/// has removed anything).
+pub fn skip_cascade_names(
+    schemas: &[TableSchema],
+    strategy_overrides: &HashMap<String, UserOverride>,
+) -> HashSet<String> {
+    let (_removed, warnings) = json2sql::schema::config::compute_skip_cascade(schemas, strategy_overrides);
+    warnings.into_iter().flat_map(|w| w.cascaded_children).collect()
 }
 
 #[cfg(test)]
@@ -127,5 +142,30 @@ mod tests {
         assert!(!names.contains(&"events"),      "main table must be removed");
         assert!(!names.contains(&"events_wide"), "companion _wide table must be removed");
         assert!(names.contains(&"users"),        "unrelated table must survive");
+    }
+
+    #[test]
+    fn skip_cascade_names_reports_real_child_without_mutating_input() {
+        let parent = make_table("parent", None);
+        let child = make_table("child", Some("parent"));
+        let schemas = vec![parent, child];
+        let mut overrides = HashMap::new();
+        overrides.insert("parent".to_string(), UserOverride::Skip);
+
+        let names = skip_cascade_names(&schemas, &overrides);
+
+        assert_eq!(names, std::collections::HashSet::from(["child".to_string()]));
+        assert_eq!(schemas.len(), 2, "schemas must not be mutated by a display-only query");
+    }
+
+    #[test]
+    fn skip_cascade_names_empty_when_no_real_children() {
+        let schemas = vec![make_table("a", None), make_table("b", None)];
+        let mut overrides = HashMap::new();
+        overrides.insert("a".to_string(), UserOverride::Skip);
+
+        let names = skip_cascade_names(&schemas, &overrides);
+
+        assert!(names.is_empty(), "a plain Skip with no real children cascades nothing");
     }
 }
