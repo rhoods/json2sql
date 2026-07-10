@@ -478,14 +478,43 @@ mod tests {
         assert!(format!("{h:?}").contains("none"));
     }
 
-    #[test]
-    fn worker_kill_handle_clone_shares_same_arc() {
-        // We can't easily test kill() without a real subprocess, but we can verify
-        // that clone() produces an is_some() handle when the original is_some().
-        // We construct one with a dummy child... actually we can't without spawning.
-        // Just verify default clone behaves correctly.
-        let h1 = WorkerKillHandle::default();
-        let h2 = h1;
-        assert!(!h2.is_some());
+    #[tokio::test]
+    async fn worker_kill_handle_clone_shares_same_arc() {
+        let child = tokio::process::Command::new("cargo")
+            .arg("--version")
+            .spawn()
+            .expect("cargo must be on PATH to run this test suite");
+        let h1 = WorkerKillHandle::new(child);
+
+        let inner = h1.0.as_ref().expect("h1 must be Some right after construction");
+        assert_eq!(Arc::strong_count(inner), 1, "no clone yet");
+
+        let h2 = h1.clone();
+        assert_eq!(
+            Arc::strong_count(inner),
+            2,
+            "clone() must share the same Arc, not deep-copy"
+        );
+
+        drop(h2);
+        assert_eq!(Arc::strong_count(inner), 1, "dropping a clone must release its Arc ref");
+
+        // Re-clone, then prove the sharing is functional, not just structural: kill()
+        // on one clone must be observable from the other via the same underlying Child.
+        let h2 = h1.clone();
+        h1.kill();
+        let wait_result = tokio::time::timeout(Duration::from_secs(5), async {
+            h2.0.expect("h2 must be Some")
+                .child
+                .lock()
+                .expect("child mutex must not be poisoned")
+                .wait()
+                .await
+        })
+        .await;
+        assert!(
+            wait_result.is_ok(),
+            "waiting on h2's child after h1.kill() timed out — the two handles may not share the same process"
+        );
     }
 }
