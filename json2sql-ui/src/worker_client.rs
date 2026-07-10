@@ -479,6 +479,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // single test case: structural (strong_count) + functional (kill+poll) sharing checks
     async fn worker_kill_handle_clone_shares_same_arc() {
         let child = tokio::process::Command::new("cargo")
             .arg("--version")
@@ -503,18 +504,23 @@ mod tests {
         // on one clone must be observable from the other via the same underlying Child.
         let h2 = h1.clone();
         h1.kill();
-        let wait_result = tokio::time::timeout(Duration::from_secs(5), async {
-            h2.0.expect("h2 must be Some")
-                .child
-                .lock()
-                .expect("child mutex must not be poisoned")
-                .wait()
-                .await
-        })
-        .await;
+        let inner2 = h2.0.expect("h2 must be Some");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut exited = false;
+        while tokio::time::Instant::now() < deadline {
+            {
+                // Lock scope kept sync and short — never held across an .await point.
+                let mut guard = inner2.child.lock().expect("child mutex must not be poisoned");
+                if guard.try_wait().expect("try_wait must not error").is_some() {
+                    exited = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert!(
-            wait_result.is_ok(),
-            "waiting on h2's child after h1.kill() timed out — the two handles may not share the same process"
+            exited,
+            "h2's child never exited after h1.kill() within 5s — the two handles may not share the same process"
         );
     }
 }
