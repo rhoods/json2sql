@@ -348,6 +348,7 @@ mod tests {
     // la retraiter avec ce TableEntry, quel qu'il soit.
     // ---------------------------------------------------------------------------
     #[test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn already_assigned_schema_is_never_reprocessed() {
         let mut observer = SchemaObserver::new(256, false);
         let obj: serde_json::Map<String, Value> = serde_json::from_str(

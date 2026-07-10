@@ -442,6 +442,7 @@ mod tests {
     /// events sent via `AnomalyProxy` reach the `AnomalyCollector` in the writer task,
     /// and NDJSON files are created on disk.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     async fn anomaly_writer_task_creates_ndjson_files() {
         use crate::anomaly::collector::{AnomalyCollect, AnomalyCollector, AnomalyEvent, AnomalyProxy};
         use tempfile::TempDir;

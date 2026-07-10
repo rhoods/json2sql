@@ -229,6 +229,7 @@ mod tests {
     // --- Finding 3: child_routes.insert écrasé pour co-siblings avec le même json_key ---
 
     #[test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn test_collect_children_by_key_object_and_array_conflict_sets_array_children() {
         // Input JSON scenario:
         //   { "sibling_a": { "info": { "x": 1 } },          -- Object child
@@ -289,6 +290,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn test_process_co_sibling_low_jaccard_still_merges_and_routes() {
         // Co-siblings share the same json_key → they MUST produce a single routable table
         // even when their schemas are disjoint (Jaccard=0). The routing table must have a
@@ -332,6 +334,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn test_two_co_sibling_groups_same_wave_both_merged() {
         // Regression test for #8/#9: two CoSiblingGroups processed in the same BFS wave
         // must both produce routable child_routes entries on their respective parents,

@@ -346,6 +346,7 @@ struct SiblingCollapseRowInput<'a> {
     sibling_schema: &'a SiblingSchema,
 }
 
+#[allow(clippy::too_many_lines)] // single per-column dispatch loop, one responsibility (build one row)
 fn write_keyed_pivot_columns<A: AnomalyCollect>(
     builder: &mut RowBuilder,
     anomalies: &mut A,
@@ -603,6 +604,7 @@ fn find_group_for_key(groups: &[SiblingGroup], key: &str) -> Option<usize> {
 }
 
 #[allow(clippy::cast_possible_wrap)] // array index never reaches i64::MAX
+#[allow(clippy::too_many_lines)] // single per-element dispatch loop, one responsibility
 pub(super) fn insert_array<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,

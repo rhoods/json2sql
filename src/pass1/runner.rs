@@ -392,6 +392,7 @@ fn spawn_worker_threads(
 /// reading is done. Returns `Err` only for I/O errors opening the file; parse errors are
 /// returned as the `Option<J2sError>`.
 #[allow(clippy::needless_pass_by_value)] // tx is dropped at return to signal workers that reading is done
+#[allow(clippy::too_many_lines)] // streaming read+dispatch loop; do not split — extracting would move tx/rx across fn boundaries
 fn read_and_dispatch(
     path: &Path,
     tx: crossbeam_channel::Sender<(Option<String>, Vec<u8>)>,
@@ -716,6 +717,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // single test case, long due to verbose config struct construction
     fn test_parallel_worker_error_no_double_invalid_input_prefix() {
         use std::io::Write;
         let mut f = tempfile::NamedTempFile::new().unwrap();

@@ -430,6 +430,7 @@ mod tests {
     /// Verified via direct call to `pairwise_jaccard_min` with schemas that have
     /// only generated columns (`data_columns()` yields nothing).
     #[test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn test_jaccard_pure_containers_early_exit() {
         use crate::schema::table_schema::ColumnSchema;
 
@@ -1118,6 +1119,7 @@ mod tests {
     ///   (`root_selected_fr`, `root_selected_en`, `root_selected_de`).
     /// Post-pass: those 3 Columns children of the `SiblingCollapse` → merged into `root_selected_key`.
     #[test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn test_keyed_pivot_orphan_children_merged_by_post_pass() {
         let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
         let obj = json!({

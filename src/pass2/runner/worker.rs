@@ -73,6 +73,7 @@ pub(super) struct WorkerDisklessConfig {
 /// For wrapper-format files, `key` carries the raw wrapper key and the worker resolves the
 /// correct root schema via `path_map`; for regular formats `key` is `None` and `root_schema`
 /// is used directly.
+#[allow(clippy::too_many_lines)] // event loop over rx; do not split — would move rx across fn boundaries
 pub(super) async fn run_worker_diskless(
     mut rx: tokio::sync::mpsc::Receiver<(Option<String>, Vec<u8>)>,
     mut sinks: HashMap<String, crate::db::copy_sink::MemSink>,
@@ -139,6 +140,7 @@ mod tests {
     /// even if `pause_flag` is never cleared. This test FAILS on the old code (infinite spin)
     /// and PASSES after the fix (spin checks `error_flag`).
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     async fn worker_exits_pause_spin_when_error_flag_set_while_spinning() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -186,6 +188,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     async fn worker_returns_err_immediately_when_error_flag_preset() {
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;

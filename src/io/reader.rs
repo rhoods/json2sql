@@ -313,6 +313,7 @@ fn fmt_skip_primitive_rest(reader: &mut impl BufRead) -> Result<()> {
 /// - If all top-level values are arrays → [`JsonFormat::RootWrapper`].
 /// - If top-level values are mixed (some arrays, some not) → error.
 /// - If no arrays at all (single plain object) → [`JsonFormat::Lines`] (backward compat).
+#[allow(clippy::too_many_lines)] // cohesive parser state machine, not decomposable without hurting readability
 fn fmt_detect_root_object(reader: &mut impl BufRead) -> Result<JsonFormat> {
     let mut array_keys: Vec<String> = Vec::new();
     let mut has_non_array = false;
@@ -841,6 +842,7 @@ impl JsonRootWrapperReader {
     // -- internal helpers --
 
     /// Advance the reader to the `[` of the next wrapper key's array.
+    #[allow(clippy::too_many_lines)] // cohesive parser loop over wrapper-key scanning states
     fn advance_to_next_array(&mut self) -> Result<()> {
         // Skip whitespace/commas to '"' (key start)
         loop {

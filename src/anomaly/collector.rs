@@ -254,6 +254,7 @@ impl AnomalyCollector {
     /// Returns `Err` only if file I/O fails. Callers must propagate the
     /// error — silently continuing would leave the anomaly file incomplete
     /// and give the user a false sense of completeness.
+    #[allow(clippy::too_many_lines)] // single cohesive record operation: stats update + optional file stream
     pub fn record(
         &mut self,
         table: &str,

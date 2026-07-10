@@ -237,6 +237,7 @@ fn detect_mixed_collapse(
 /// -- p_num already exists, new pivot gets a distinct name:
 /// CREATE TABLE p_num_2 (j2s_id uuid, j2s_p_id uuid, key_id text, val text);
 /// ```
+#[allow(clippy::too_many_lines)] // 31/30 after extracting push_subgroup; further splitting would be cosmetic only
 fn assemble_mixed_collapse(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
@@ -248,25 +249,22 @@ fn assemble_mixed_collapse(
     let mut groups: Vec<SubgroupData> = Vec::new();
     let mut all_absorbed: Vec<usize> = Vec::new();
     let mut used_suffixes: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if num_ok {
-        let suffix = pick_unique_suffix(&ctx.parent_name, "num", schemas, &used_suffixes);
+    let mut push_subgroup = |desired: &str, indices: &[usize], is_numeric: bool| {
+        let suffix = pick_unique_suffix(&ctx.parent_name, desired, schemas, &used_suffixes);
         used_suffixes.insert(suffix.clone());
-        all_absorbed.extend_from_slice(&ctx.numeric_idx);
-        groups.push(make_subgroup(schemas, &ctx.parent_name, &ctx.numeric_idx, true, &suffix));
+        all_absorbed.extend_from_slice(indices);
+        groups.push(make_subgroup(schemas, &ctx.parent_name, indices, is_numeric, &suffix));
+    };
+    if num_ok {
+        push_subgroup("num", &ctx.numeric_idx, true);
     }
     if non_ok {
-        let suffix = pick_unique_suffix(&ctx.parent_name, "key", schemas, &used_suffixes);
-        used_suffixes.insert(suffix.clone());
-        all_absorbed.extend_from_slice(non_num_regular);
-        groups.push(make_subgroup(schemas, &ctx.parent_name, non_num_regular, false, &suffix));
+        push_subgroup("key", non_num_regular, false);
     }
     for (i, cluster) in non_num_clusters.iter().enumerate() {
         let prefix = siblings_key_prefix(schemas, cluster);
         let desired = if prefix.is_empty() { format!("cluster_{i}") } else { format!("{prefix}_key") };
-        let suffix = pick_unique_suffix(&ctx.parent_name, &desired, schemas, &used_suffixes);
-        used_suffixes.insert(suffix.clone());
-        all_absorbed.extend_from_slice(cluster);
-        groups.push(make_subgroup(schemas, &ctx.parent_name, cluster, false, &suffix));
+        push_subgroup(&desired, cluster, false);
     }
     let kind_label = if ctx.array_children { "ObjectArray" } else { "Object" };
     Collapse {

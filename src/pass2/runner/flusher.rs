@@ -138,6 +138,7 @@ async fn flush_table_to_pg(
 /// watermark during bulk imports.
 ///
 /// Returns total row count per table after draining all remaining buffers.
+#[allow(clippy::too_many_lines)] // tokio::select! event loop over rx; do not split — would move rx across fn boundaries
 pub(super) async fn run_flusher(
     mut rx: tokio::sync::mpsc::Receiver<(String, bytes::Bytes, u64)>,
     copy_sql_map: HashMap<String, String>,

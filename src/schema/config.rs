@@ -151,6 +151,7 @@ struct DeferredFlatten  { table_name: String, prefix: String, max_depth: u8 }
 /// Matches by table name and column name (both sanitized `PostgreSQL` identifiers).
 /// Unknown tables, columns, types, or strategies are returned as `ConfigWarning` values
 /// rather than written to stderr — the caller decides how to display them.
+#[allow(clippy::too_many_lines)] // exhaustive dispatch over override kinds; see apply_strategy_override below for same pattern
 pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) -> crate::error::Result<Vec<ConfigWarning>> {
     let mut warnings: Vec<ConfigWarning> = Vec::new();
     let mut deferred_normalize: Vec<DeferredNormalize> = Vec::new();
