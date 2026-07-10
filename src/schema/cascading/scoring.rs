@@ -346,6 +346,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // determinism test: same min-aggregation must be bit-identical regardless of input order
     fn test_pairwise_jaccard_large_group_order_independent() {
         let mut schemas: Vec<TableSchema> = vec![
             TableSchema::new("root".to_string(), vec!["root".to_string()], 0),

@@ -418,6 +418,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // exact literal return value from an early-return guard, not an approximation
     fn ram_used_ratio_zero_total_returns_zero() {
         assert_eq!(super::ram_used_ratio(0, 0), 0.0);
     }

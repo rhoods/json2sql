@@ -123,12 +123,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // exact const value check, not an approximate computation
     fn default_ram_high_watermark_is_logging_threshold() {
         // RAM watermarks are now informational only — actual pause uses total_buffered.
         assert_eq!(DEFAULT_RAM_HIGH_WATERMARK, 0.70);
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // exact const value check, not an approximate computation
     fn default_ram_low_watermark_kept_for_config_compat() {
         assert_eq!(DEFAULT_RAM_LOW_WATERMARK, 0.50);
     }

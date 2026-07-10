@@ -431,6 +431,7 @@ mod tests {
     /// only generated columns (`data_columns()` yields nothing).
     #[test]
     #[allow(clippy::too_many_lines)] // single test case with verbose setup
+    #[allow(clippy::float_cmp)] // exact boundary values (0.0/1.0) from explicit early-return branches
     fn test_jaccard_pure_containers_early_exit() {
         use crate::schema::table_schema::ColumnSchema;
 
@@ -872,6 +873,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // exact boundary value (1.0) from an explicit early-return branch
     fn child_compat_no_children_is_one() {
         // Siblings A, B have no children → vacuously compatible
         let a = make_schema_with_cols("p_a", Some("p"), &["col1", "col2"], 1);
@@ -887,6 +889,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // exact boundary value (1.0) from an explicit early-return branch
     fn child_compat_shared_compatible_children_is_high() {
         // A has child A_k (col1, col2), B has child B_k (col1, col2) → same schema, compat ≈ 1.0
         let mut schemas = vec![
@@ -910,6 +913,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // exact boundary value (0.0) from an explicit early-return branch
     fn child_compat_shared_incompatible_children_is_zero() {
         // A has child A_k (col1, col2), B has child B_k (col3, col4) → disjoint schemas → Jaccard = 0
         let mut schemas = vec![
@@ -932,6 +936,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // exact boundary value (1.0) from an explicit early-return branch
     fn child_compat_unshared_keys_ignored() {
         // A has child A_k1, B has child B_k2 (different keys) → no shared keys → compat = 1.0
         let mut schemas = vec![
