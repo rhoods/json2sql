@@ -196,14 +196,13 @@ pub async fn connect_with_retry(
 pub fn is_lockfile_free() -> bool {
     use fs2::FileExt as _;
     let path = json2sql::ipc::lockfile_path();
-    let file = match std::fs::OpenOptions::new()
+    let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(&path)
-    {
-        Ok(f) => f,
-        Err(_) => return true, // cannot open → assume free (soft check)
+    else {
+        return true; // cannot open → assume free (soft check)
     };
     match file.try_lock_exclusive() {
         Ok(()) => {
@@ -226,9 +225,8 @@ pub fn is_lockfile_free() -> bool {
 #[cfg(unix)]
 pub async fn find_active_socket() -> Option<std::path::PathBuf> {
     let dir = std::env::temp_dir();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return None,
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return None;
     };
 
     // Scan ALL matching files: delete every orphan, return the first active socket.
@@ -241,7 +239,7 @@ pub async fn find_active_socket() -> Option<std::path::PathBuf> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if !name.starts_with("json2sql-") || !name.ends_with(".sock") {
+        if !name.starts_with("json2sql-") || path.extension().is_none_or(|e| e != "sock") {
             continue;
         }
         match tokio::net::UnixStream::connect(&path).await {

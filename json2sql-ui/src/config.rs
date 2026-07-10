@@ -167,8 +167,7 @@ mod tests {
 
     #[test]
     fn from_project_maps_all_fields_except_password() {
-        let mut p = ProjectState::default();
-        p.source_file = Some(PathBuf::from("/tmp/data.json"));
+        let mut p = ProjectState { source_file: Some(PathBuf::from("/tmp/data.json")), ..Default::default() };
         p.pg.host = "myhost".to_string();
         p.pg.port = 5433;
         p.pg.database = "mydb".to_string();
@@ -280,8 +279,7 @@ mod tests {
 
     #[test]
     fn skip_constraints_round_trips_toml() {
-        let mut p = ProjectState::default();
-        p.skip_constraints = true;
+        let p = ProjectState { skip_constraints: true, ..Default::default() };
         let cfg = ProjectConfig::from_project(&p);
         let toml_str = toml::to_string(&cfg).expect("serialize");
         let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
@@ -308,8 +306,7 @@ mod tests {
 
     #[test]
     fn temp_dir_round_trips_toml() {
-        let mut p = ProjectState::default();
-        p.temp_dir = Some(PathBuf::from("/data/tmp"));
+        let p = ProjectState { temp_dir: Some(PathBuf::from("/data/tmp")), ..Default::default() };
         let cfg = ProjectConfig::from_project(&p);
         let toml_str = toml::to_string(&cfg).expect("serialize");
         let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
@@ -325,8 +322,7 @@ mod tests {
 
     #[test]
     fn import_limit_round_trips_toml() {
-        let mut p = ProjectState::default();
-        p.import_limit = Some(500);
+        let p = ProjectState { import_limit: Some(500), ..Default::default() };
         let cfg = ProjectConfig::from_project(&p);
         let toml_str = toml::to_string(&cfg).expect("serialize");
         let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");

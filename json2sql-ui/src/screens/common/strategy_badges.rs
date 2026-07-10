@@ -70,7 +70,7 @@ mod tests {
         let mut t = make_table("tags", None);
         t.set_ui_override(Some(UserOverride::Pivot));
         // strategy_badge on effective_strategy() should give Pivot badge, not Columns
-        let (cls_eff, lbl_eff) = strategy_badge(&*t.effective_strategy());
+        let (cls_eff, lbl_eff) = strategy_badge(&t.effective_strategy());
         let (cls_inf, lbl_inf) = strategy_badge(&t.inferred_strategy);
         assert_ne!(lbl_eff, lbl_inf, "effective badge must differ from inferred badge");
         assert_eq!(lbl_eff, "pivot", "effective badge must be pivot");

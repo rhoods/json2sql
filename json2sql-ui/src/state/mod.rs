@@ -234,6 +234,7 @@ impl Pass2Progress {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)] // always constructed via named-field literal or Default, never positionally — no argument-order risk
 pub struct ProjectState {
     pub source_file: Option<PathBuf>,
     pub pg: PgConfig,
@@ -463,22 +464,19 @@ impl AppState {
     /// If status is `"success"`, synthesises a `Pass2Done` event so the UI shows the
     /// success banner. Otherwise, pushes an error log line.
     pub fn apply_worker_result(&mut self, result: json2sql::ipc::WorkerResult) {
-        match result.status.as_str() {
-            "success" => {
-                self.apply_progress_event(ProgressEvent::Pass2Done {
-                    total_rows: result.total_rows,
-                    anomaly_count: result.anomaly_count,
-                    constraint_warning_count: result.constraint_warning_count,
-                });
-            }
-            _ => {
-                let msg = result
-                    .message
-                    .unwrap_or_else(|| format!("status: {}", result.status));
-                self.import
-                    .pass2_progress
-                    .push_log(format!("Import terminé (hors-connexion) : {msg}"));
-            }
+        if result.status == "success" {
+            self.apply_progress_event(ProgressEvent::Pass2Done {
+                total_rows: result.total_rows,
+                anomaly_count: result.anomaly_count,
+                constraint_warning_count: result.constraint_warning_count,
+            });
+        } else {
+            let msg = result
+                .message
+                .unwrap_or_else(|| format!("status: {}", result.status));
+            self.import
+                .pass2_progress
+                .push_log(format!("Import terminé (hors-connexion) : {msg}"));
         }
     }
 
@@ -625,8 +623,7 @@ mod tests {
     #[test]
     fn schema_state_clear_resets_config_warnings() {
         use json2sql::schema::config::ConfigWarning;
-        let mut s = SchemaState::default();
-        s.config_warnings = vec![ConfigWarning::UnknownTable("t".to_string())];
+        let mut s = SchemaState { config_warnings: vec![ConfigWarning::UnknownTable("t".to_string())], ..Default::default() };
         s.clear();
         assert!(s.config_warnings.is_empty());
     }
