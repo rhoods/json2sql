@@ -589,6 +589,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // name_a*/name_b* deliberately parallel, testing insertion-order independence
     fn ensure_unique_collision_is_deterministic() {
         // Two paths that both Phase-1 trim to "shared_suffix" must get the SAME names
         // regardless of registration order — verifies hash-based (not counter-based) collision.
@@ -624,6 +625,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // name_a*/name_b* deliberately parallel, testing insertion-order independence
     fn direct_sanitization_collision_produces_distinct_deterministic_names() {
         // Two short paths that sanitize to the same name WITHOUT truncation — exercises the
         // collision path in ensure_unique where truncated == sanitized (no Phase-1 strip).

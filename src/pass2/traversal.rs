@@ -1280,6 +1280,7 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
+    #[allow(clippy::similar_names)] // pivot_a_schema/pivot_b_schema deliberately parallel, testing symmetric groups
     fn route_multi_collapse_children_routes_both_groups_without_routing_row() {
         // Verifies that route_multi_collapse_children uses the supplied routing_id
         // (no emit_routing_row) and correctly distributes keys to each pivot group.

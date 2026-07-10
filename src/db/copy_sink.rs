@@ -121,10 +121,9 @@ impl MemSink {
         Self { buf: BytesMut::new(), row_count: 0, copy_sql }
     }
 
-    pub fn write_row(&mut self, row: &[u8]) -> crate::error::Result<()> {
+    pub fn write_row(&mut self, row: &[u8]) {
         self.buf.extend_from_slice(row);
         self.row_count += 1;
-        Ok(())
     }
 }
 
@@ -188,8 +187,8 @@ mod tests {
     #[test]
     fn mem_sink_write_row_appends_bytes_and_tracks_count() {
         let mut sink = make_mem_sink();
-        sink.write_row(b"val1\n").unwrap();
-        sink.write_row(b"val2\n").unwrap();
+        sink.write_row(b"val1\n");
+        sink.write_row(b"val2\n");
         assert_eq!(sink.row_count, 2);
         assert_eq!(&sink.buf[..], b"val1\nval2\n");
     }
@@ -197,7 +196,7 @@ mod tests {
     #[test]
     fn mem_sink_write_row_empty_slice_increments_row_count() {
         let mut sink = make_mem_sink();
-        sink.write_row(b"").unwrap();
+        sink.write_row(b"");
         assert_eq!(sink.row_count, 1);
         assert!(sink.buf.is_empty());
     }

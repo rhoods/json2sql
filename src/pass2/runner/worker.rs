@@ -256,7 +256,7 @@ mod tests {
     fn make_mem_sink_with_data(table: &str, data: &[u8]) -> crate::db::copy_sink::MemSink {
         let schema = TableSchema::new(table.to_string(), vec![table.to_string()], 0);
         let mut sink = crate::db::copy_sink::MemSink::new(&schema, "public");
-        sink.write_row(data).unwrap();
+        sink.write_row(data);
         sink
     }
 

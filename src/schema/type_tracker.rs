@@ -450,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is an arbitrary test float, not pi
     fn test_float_widens_integer() {
         let mut t = TypeTracker::new(256);
         t.observe(&json!(42));
@@ -591,6 +592,7 @@ mod tests {
 
     /// Quand la string est plus longue que la repr numérique, c'est `max_len` string qui prime.
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is an arbitrary test float, not pi
     fn test_mixed_string_longer_than_num_repr_uses_string_max() {
         let mut t = TypeTracker::new(256);
         t.observe(&json!("a very long product name here!")); // 30 bytes
@@ -602,6 +604,7 @@ mod tests {
     /// Parity test: observing on two separate trackers then merging must equal
     /// observing all values on a single tracker.
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is an arbitrary test float, not pi
     fn test_merge_parity() {
         let values = vec![
             json!(1), json!(2), json!(null), json!("hello"),

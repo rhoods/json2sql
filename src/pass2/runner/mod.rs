@@ -128,6 +128,7 @@ pub async fn run(
     config: &Pass2Config,
     progress_tx: Option<ProgressTx>,
 ) -> Result<Pass2Result> {
+    const WORKER_CHANNEL_CAP: usize = 256;
     config::validate_run_params(config.parallel)?;
 
     let mem_flush_threshold = config.mem_flush_threshold_bytes.unwrap_or(64 * 1024 * 1024);
@@ -194,7 +195,6 @@ pub async fn run(
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
     let root_schema_arc: Arc<TableSchema> = Arc::new(root_schema);
 
-    const WORKER_CHANNEL_CAP: usize = 256;
     let mut senders = Vec::with_capacity(parallel);
     let mut worker_handles: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::with_capacity(parallel);
     for _ in 0..parallel {
@@ -340,9 +340,7 @@ mod tests {
         let first_error: Option<J2sError> = Some(worker_err);
 
         let result: crate::error::Result<()> = match flusher_result {
-            Ok(_) => {
-                if let Some(e) = first_error { Err(e) } else { Ok(()) }
-            }
+            Ok(_) => first_error.map_or(Ok(()), Err),
             Err(e) => Err(e),
         };
 

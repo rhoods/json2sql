@@ -522,9 +522,9 @@ mod tests {
 
     #[test]
     fn test_inspect_no_column_limit_guard() {
+        use crate::schema::table_schema::InferredStrategy;
         let path = fixture("users.jsonl");
         let result = run_inspect(&path, &inspect_config("users"), 10).unwrap();
-        use crate::schema::table_schema::InferredStrategy;
         assert!(
             result.schemas.iter().all(|s| !matches!(s.inferred_strategy, InferredStrategy::Jsonb)),
             "column limit guard must not be applied in inspect mode"
@@ -532,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation)] // small fixture (3 rows), never near usize::MAX
     fn test_inspect_sampled_objects_count_matches_rows_scanned() {
         let path = fixture("users.jsonl"); // 3 rows
         let result = run_inspect(&path, &inspect_config("users"), 2).unwrap();
@@ -566,7 +567,7 @@ mod tests {
 
     // ── run_parallel tests ──────────────────────────────────────────────────
 
-    fn run_parallel_default(path: &std::path::PathBuf, workers: usize) -> crate::error::Result<Pass1Result> {
+    fn run_parallel_default(path: &std::path::Path, workers: usize) -> crate::error::Result<Pass1Result> {
         run_parallel(
             path,
             &Pass1Config {

@@ -988,22 +988,22 @@ mod tests {
                 let mut ui_then_toml = make_schema("t");
                 ui_then_toml.inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column: "k".into() };
                 ui_then_toml.set_ui_override(ui.clone());
-                assert_expected_effective_strategy(&ui_then_toml, ui, &None);
+                assert_expected_effective_strategy(&ui_then_toml, ui.as_ref(), None);
                 ui_then_toml.set_toml_override(toml.clone());
-                assert_expected_effective_strategy(&ui_then_toml, ui, toml);
+                assert_expected_effective_strategy(&ui_then_toml, ui.as_ref(), toml.as_ref());
 
                 let mut toml_then_ui = make_schema("t");
                 toml_then_ui.inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column: "k".into() };
                 toml_then_ui.set_toml_override(toml.clone());
-                assert_expected_effective_strategy(&toml_then_ui, &None, toml);
+                assert_expected_effective_strategy(&toml_then_ui, None, toml.as_ref());
                 toml_then_ui.set_ui_override(ui.clone());
-                assert_expected_effective_strategy(&toml_then_ui, ui, toml);
+                assert_expected_effective_strategy(&toml_then_ui, ui.as_ref(), toml.as_ref());
 
                 // Clearing back to None must also recompute correctly, in both orders.
                 toml_then_ui.set_ui_override(None);
-                assert_expected_effective_strategy(&toml_then_ui, &None, toml);
+                assert_expected_effective_strategy(&toml_then_ui, None, toml.as_ref());
                 toml_then_ui.set_toml_override(None);
-                assert_expected_effective_strategy(&toml_then_ui, &None, &None);
+                assert_expected_effective_strategy(&toml_then_ui, None, None);
             }
         }
     }
@@ -1013,8 +1013,8 @@ mod tests {
     /// documented on `effective_strategy()`.
     fn assert_expected_effective_strategy(
         s: &TableSchema,
-        ui: &Option<UserOverride>,
-        toml: &Option<UserOverride>,
+        ui: Option<&UserOverride>,
+        toml: Option<&UserOverride>,
     ) {
         let expected = match (ui, toml) {
             (Some(ov), _) | (None, Some(ov)) => InferredStrategy::from(ov),

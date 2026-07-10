@@ -588,9 +588,8 @@ impl ByteScanner {
     fn collect_string(&mut self) -> Result<()> {
         let mut escape_next = false;
         loop {
-            let b = match self.read_byte()? {
-                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".to_string())),
-                Some(b) => b,
+            let Some(b) = self.read_byte()? else {
+                return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".to_string()));
             };
             self.buf.push(b);
             if escape_next {
@@ -657,6 +656,7 @@ impl JsonArrayReader {
     /// Skip whitespace and commas at the top level until we find the
     /// first byte of the next value (or `]` for end-of-array).
     /// Returns the first significant byte, or None on EOF.
+    #[allow(clippy::match_same_arms)] // Ok(None) and the InvalidInput case are kept separate deliberately, see comment below
     fn skip_to_next_value(&mut self) -> Option<Result<u8>> {
         match self.scanner.skip_to_next_value(b']') {
             Ok(None) => None,

@@ -49,6 +49,7 @@ fn topological_drain_order(topo_order: &[String], buffers: &HashMap<String, byte
 }
 
 /// RAM usage ratio in [0.0, 1.0]. Returns 0.0 when total memory is zero.
+#[allow(clippy::cast_precision_loss)] // byte counts fit well within f64's 52-bit mantissa for any realistic RAM size
 fn ram_used_ratio(available: u64, total: u64) -> f64 {
     if total == 0 { return 0.0; }
     total.saturating_sub(available) as f64 / total as f64
@@ -89,6 +90,7 @@ fn find_largest_buffer(buffers: &HashMap<String, bytes::BytesMut>) -> Option<Str
 /// Flush one table's pending buffer to `PostgreSQL` and update accounting.
 /// Removes the table from `buffers` and `pending_rows`, adds to `total_rows`.
 /// Sets `error_flag` and returns `Err` on PG failure.
+#[allow(clippy::too_many_arguments)] // each param is distinct flush/accounting state, not groupable without an artificial struct
 async fn flush_table_to_pg(
     table_id: &str,
     buffers: &mut HashMap<String, bytes::BytesMut>,
@@ -139,6 +141,7 @@ async fn flush_table_to_pg(
 ///
 /// Returns total row count per table after draining all remaining buffers.
 #[allow(clippy::too_many_lines)] // tokio::select! event loop over rx; do not split — would move rx across fn boundaries
+#[allow(clippy::too_many_arguments)] // each param is distinct flusher config/state, not groupable without an artificial struct
 pub(super) async fn run_flusher(
     mut rx: tokio::sync::mpsc::Receiver<(String, bytes::Bytes, u64)>,
     copy_sql_map: HashMap<String, String>,

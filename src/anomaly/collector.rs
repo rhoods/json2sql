@@ -603,7 +603,7 @@ mod tests {
                 assert_eq!(actual_value, "bad");
                 assert_eq!(actual_type, "string");
             }
-            _ => panic!("expected AnomalyEvent::Record"),
+            AnomalyEvent::IncTotal { .. } => panic!("expected AnomalyEvent::Record"),
         }
     }
 
@@ -615,7 +615,7 @@ mod tests {
         let event = rx.try_recv().expect("event must be in channel");
         match event {
             AnomalyEvent::IncTotal { table } => assert_eq!(table, "users"),
-            _ => panic!("expected AnomalyEvent::IncTotal"),
+            AnomalyEvent::Record { .. } => panic!("expected AnomalyEvent::IncTotal"),
         }
     }
 

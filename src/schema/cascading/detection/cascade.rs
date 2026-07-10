@@ -335,6 +335,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)] // single test case with verbose setup
+    #[allow(clippy::similar_names)] // pa/pb, ta_name/tb_name deliberately parallel, testing symmetric groups
     fn test_two_co_sibling_groups_same_wave_both_merged() {
         // Regression test for #8/#9: two CoSiblingGroups processed in the same BFS wave
         // must both produce routable child_routes entries on their respective parents,

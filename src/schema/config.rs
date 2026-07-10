@@ -1368,7 +1368,7 @@ mod tests {
         t.inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.8,
             rare_threshold: 0.01,
-            medium_keys: Default::default(),
+            medium_keys: std::collections::HashSet::default(),
             wide_table_name: "products_wide".to_string(),
         };
         let mut schemas = vec![t, simple_table("products_wide"), simple_table("orders")];
@@ -1424,7 +1424,7 @@ mod tests {
         t.inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.8,
             rare_threshold: 0.01,
-            medium_keys: Default::default(),
+            medium_keys: std::collections::HashSet::default(),
             wide_table_name: "products_wide".to_string(),
         };
         let mut wide_child = simple_table("products_wide_tags");

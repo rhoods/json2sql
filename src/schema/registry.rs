@@ -472,7 +472,7 @@ mod tests {
     }
 
     /// A JSON field name containing '.' must produce a child table at depth 1, not depth 2.
-    /// Without normalization, "root.v1.0" splits into path ["root","v1","0"] → depth 2,
+    /// Without normalization, "root.v1.0" splits into path `["root","v1","0"]` → depth 2,
     /// breaking topological sort and Pass 2 flush order.
     #[test]
     fn test_dotted_field_name_correct_depth() {

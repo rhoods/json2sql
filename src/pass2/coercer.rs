@@ -178,6 +178,7 @@ fn coerce_integer(value: &Value) -> CoerceResult {
 }
 
 #[allow(clippy::too_many_lines)] // exhaustive type dispatch per JSON variant
+#[allow(clippy::cast_precision_loss)] // i64::MIN/MAX as f64 bounds check, already reasoned about exact behavior (see comment below)
 fn coerce_bigint(value: &Value) -> CoerceResult {
     match value {
         Value::Number(n) => {
@@ -373,6 +374,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is an arbitrary test float, not pi
     fn test_coerce_float_nan_infinity() {
         // NaN et Infinity ne sont pas des valeurs JSON valides → anomalie
         // On ne peut pas les créer via serde_json::json!(), on passe par f64 directement
