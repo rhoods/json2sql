@@ -60,10 +60,9 @@ async fn test_pivot_strategy() {
         // Widget a bien 4 lignes EAV
         let widget_count: i64 = client.query_one(
             &format!(
-                "SELECT COUNT(*) FROM \"{s}\".\"products_nutrients\" n \
-                 JOIN \"{s}\".\"products\" p ON n.{fk} = p.j2s_id \
+                "SELECT COUNT(*) FROM \"{schema}\".\"products_nutrients\" n \
+                 JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Widget'",
-                s = schema, fk = fk_col_name,
             ),
             &[],
         ).await.unwrap().get(0);
@@ -72,10 +71,9 @@ async fn test_pivot_strategy() {
         // Gadget → protein = 15
         let gadget_protein: i64 = client.query_one(
             &format!(
-                "SELECT CAST(n.value AS bigint) FROM \"{s}\".\"products_nutrients\" n \
-                 JOIN \"{s}\".\"products\" p ON n.{fk} = p.j2s_id \
+                "SELECT CAST(n.value AS bigint) FROM \"{schema}\".\"products_nutrients\" n \
+                 JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Gadget' AND n.key = 'protein'",
-                s = schema, fk = fk_col_name,
             ),
             &[],
         ).await.unwrap().get(0);
@@ -84,10 +82,9 @@ async fn test_pivot_strategy() {
         // Doohickey : pas de ligne 'carbs'
         let doohickey_carbs: i64 = client.query_one(
             &format!(
-                "SELECT COUNT(*) FROM \"{s}\".\"products_nutrients\" n \
-                 JOIN \"{s}\".\"products\" p ON n.{fk} = p.j2s_id \
+                "SELECT COUNT(*) FROM \"{schema}\".\"products_nutrients\" n \
+                 JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Doohickey' AND n.key = 'carbs'",
-                s = schema, fk = fk_col_name,
             ),
             &[],
         ).await.unwrap().get(0);
@@ -161,10 +158,9 @@ async fn test_jsonb_strategy() {
                     pa.data->>'weight' AS weight, \
                     pa.data->>'speed'  AS speed, \
                     pa.data->>'size'   AS size \
-             FROM \"{s}\".\"products\" p \
-             JOIN \"{s}\".\"products_attrs\" pa ON pa.{fk} = p.{id} \
+             FROM \"{schema}\".\"products\" p \
+             JOIN \"{schema}\".\"products_attrs\" pa ON pa.{fk_col_name} = p.{products_id_col} \
              ORDER BY p.id",
-            s = schema, fk = fk_col_name, id = products_id_col,
         );
         let rows = client.query(&sql_all, &[]).await.unwrap();
         assert_eq!(rows.len(), 3);
@@ -235,21 +231,21 @@ async fn test_flatten_strategy() {
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
         let row = client.query_opt(
-            &format!("SELECT dims_width, dims_height, dims_depth FROM \"{}\".\"products\" WHERE name = 'Widget'", schema),
+            &format!("SELECT dims_width, dims_height, dims_depth FROM \"{schema}\".\"products\" WHERE name = 'Widget'"),
             &[]).await.unwrap().expect("Widget row not found");
         assert_eq!(row.get::<_, i32>("dims_width"), 10);
         assert_eq!(row.get::<_, i32>("dims_height"), 20);
         assert_eq!(row.get::<_, i32>("dims_depth"), 5);
 
         let row_g = client.query_opt(
-            &format!("SELECT dims_width, dims_height, dims_depth FROM \"{}\".\"products\" WHERE name = 'Gadget'", schema),
+            &format!("SELECT dims_width, dims_height, dims_depth FROM \"{schema}\".\"products\" WHERE name = 'Gadget'"),
             &[]).await.unwrap().expect("Gadget row not found");
         assert_eq!(row_g.get::<_, i32>("dims_width"), 15);
         assert_eq!(row_g.get::<_, i32>("dims_height"), 30);
         assert_eq!(row_g.get::<_, i32>("dims_depth"), 8);
 
         let row_null = client.query_opt(
-            &format!("SELECT dims_depth FROM \"{}\".\"products\" WHERE name = 'Doohickey'", schema),
+            &format!("SELECT dims_depth FROM \"{schema}\".\"products\" WHERE name = 'Doohickey'"),
             &[]).await.unwrap().expect("Doohickey row not found");
         assert!(row_null.get::<_, Option<i32>>("dims_depth").is_none(),
             "dims_depth should be NULL for Doohickey");
@@ -290,22 +286,22 @@ async fn test_null_patterns() {
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
         let row = client.query_opt(
-            &format!("SELECT tag FROM \"{}\".\"people\" WHERE name = 'Alice'", schema), &[])
+            &format!("SELECT tag FROM \"{schema}\".\"people\" WHERE name = 'Alice'"), &[])
             .await.unwrap().expect("Alice row not found");
         assert_eq!(row.get::<_, Option<String>>("tag").as_deref(), Some("present"));
 
         let bob_null: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{}\".\"people\" WHERE name = 'Bob' AND tag IS NULL", schema), &[])
+            &format!("SELECT COUNT(*) FROM \"{schema}\".\"people\" WHERE name = 'Bob' AND tag IS NULL"), &[])
             .await.unwrap().get("count");
         assert_eq!(bob_null, 1, "JSON null should produce SQL NULL");
 
         let charlie_null: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{}\".\"people\" WHERE name = 'Charlie' AND tag IS NULL", schema), &[])
+            &format!("SELECT COUNT(*) FROM \"{schema}\".\"people\" WHERE name = 'Charlie' AND tag IS NULL"), &[])
             .await.unwrap().get("count");
         assert_eq!(charlie_null, 1, "absent key should produce SQL NULL");
 
         let row_diana = client.query_opt(
-            &format!("SELECT tag FROM \"{}\".\"people\" WHERE name = 'Diana'", schema), &[])
+            &format!("SELECT tag FROM \"{schema}\".\"people\" WHERE name = 'Diana'"), &[])
             .await.unwrap().expect("Diana row not found");
         assert_eq!(row_diana.get::<_, Option<String>>("tag").as_deref(), Some("null"),
             "string 'null' must be stored as text, not SQL NULL");
@@ -376,10 +372,9 @@ async fn test_structured_pivot_strategy() {
         let row = client.query_one(
             &format!(
                 "SELECT n.value, n.per_100g, n.per_serving \
-                 FROM \"{s}\".\"products_nutrients\" n \
-                 JOIN \"{s}\".\"products\" p ON n.{fk} = p.j2s_id \
+                 FROM \"{schema}\".\"products_nutrients\" n \
+                 JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Widget' AND n.name = 'calories'",
-                s = schema, fk = fk_col_name,
             ),
             &[],
         ).await.unwrap();
@@ -390,10 +385,9 @@ async fn test_structured_pivot_strategy() {
         // Gadget fat : per_serving NULL (clé absente dans la fixture)
         let gadget_fat = client.query_one(
             &format!(
-                "SELECT n.per_serving FROM \"{s}\".\"products_nutrients\" n \
-                 JOIN \"{s}\".\"products\" p ON n.{fk} = p.j2s_id \
+                "SELECT n.per_serving FROM \"{schema}\".\"products_nutrients\" n \
+                 JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Gadget' AND n.name = 'fat'",
-                s = schema, fk = fk_col_name,
             ),
             &[],
         ).await.unwrap();
@@ -403,10 +397,9 @@ async fn test_structured_pivot_strategy() {
         // Doohickey : exactement 1 ligne (pas de fat)
         let doohickey_count: i64 = client.query_one(
             &format!(
-                "SELECT COUNT(*) FROM \"{s}\".\"products_nutrients\" n \
-                 JOIN \"{s}\".\"products\" p ON n.{fk} = p.j2s_id \
+                "SELECT COUNT(*) FROM \"{schema}\".\"products_nutrients\" n \
+                 JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Doohickey'",
-                s = schema, fk = fk_col_name,
             ),
             &[],
         ).await.unwrap().get(0);
@@ -474,11 +467,10 @@ async fn test_auto_split_strategy() {
         let wide_rows = client.query(
             &format!(
                 "SELECT w.key, w.value::text AS val \
-                 FROM \"{s}\".\"products_wide\" w \
-                 JOIN \"{s}\".\"products\" p ON w.j2s_products_id = p.j2s_id \
+                 FROM \"{schema}\".\"products_wide\" w \
+                 JOIN \"{schema}\".\"products\" p ON w.j2s_products_id = p.j2s_id \
                  WHERE p.name = 'Widget' \
                  ORDER BY w.key",
-                s = schema,
             ),
             &[],
         ).await.unwrap();
@@ -491,10 +483,9 @@ async fn test_auto_split_strategy() {
         // Thingamajig : aucune ligne dans products_wide (pas de tag_a/tag_b)
         let thingamajig_wide: i64 = client.query_one(
             &format!(
-                "SELECT COUNT(*) FROM \"{s}\".\"products_wide\" w \
-                 JOIN \"{s}\".\"products\" p ON w.j2s_products_id = p.j2s_id \
+                "SELECT COUNT(*) FROM \"{schema}\".\"products_wide\" w \
+                 JOIN \"{schema}\".\"products\" p ON w.j2s_products_id = p.j2s_id \
                  WHERE p.name = 'Thingamajig'",
-                s = schema,
             ),
             &[],
         ).await.unwrap().get(0);
@@ -502,7 +493,7 @@ async fn test_auto_split_strategy() {
 
         // rare_key (Whatsit) ne doit pas apparaître dans products_wide
         let rare_key_count: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{s}\".\"products_wide\" WHERE key = 'rare_key'", s = schema),
+            &format!("SELECT COUNT(*) FROM \"{schema}\".\"products_wide\" WHERE key = 'rare_key'"),
             &[],
         ).await.unwrap().get(0);
         assert_eq!(rare_key_count, 0, "rare_key ne doit pas être écrit dans products_wide");
@@ -577,10 +568,9 @@ async fn test_keyed_pivot_strategy() {
         let widget_fr = client.query_one(
             &format!(
                 "SELECT t.label, t.desc \
-                 FROM \"{s}\".\"products_translations\" t \
-                 JOIN \"{s}\".\"products\" p ON t.j2s_products_id = p.j2s_id \
+                 FROM \"{schema}\".\"products_translations\" t \
+                 JOIN \"{schema}\".\"products\" p ON t.j2s_products_id = p.j2s_id \
                  WHERE p.name = 'Widget' AND t.lang_code = 'fr'",
-                s = schema,
             ),
             &[],
         ).await.unwrap();
@@ -590,10 +580,9 @@ async fn test_keyed_pivot_strategy() {
         // Gadget/de → desc="Blau"
         let gadget_de = client.query_one(
             &format!(
-                "SELECT t.desc FROM \"{s}\".\"products_translations\" t \
-                 JOIN \"{s}\".\"products\" p ON t.j2s_products_id = p.j2s_id \
+                "SELECT t.desc FROM \"{schema}\".\"products_translations\" t \
+                 JOIN \"{schema}\".\"products\" p ON t.j2s_products_id = p.j2s_id \
                  WHERE p.name = 'Gadget' AND t.lang_code = 'de'",
-                s = schema,
             ),
             &[],
         ).await.unwrap();
@@ -726,10 +715,9 @@ async fn test_normalize_dynamic_keys_strategy() {
         // Widget a bien 2 images
         let widget_count: i64 = client.query_one(
             &format!(
-                "SELECT COUNT(*) FROM \"{s}\".\"products_images\" i \
-                 JOIN \"{s}\".\"products\" p ON i.j2s_products_id = p.j2s_id \
+                "SELECT COUNT(*) FROM \"{schema}\".\"products_images\" i \
+                 JOIN \"{schema}\".\"products\" p ON i.j2s_products_id = p.j2s_id \
                  WHERE p.name = 'Widget'",
-                s = schema,
             ),
             &[],
         ).await.unwrap().get(0);
@@ -738,9 +726,8 @@ async fn test_normalize_dynamic_keys_strategy() {
         // img_789 → url="http://c.com", width=1024
         let img_789 = client.query_one(
             &format!(
-                "SELECT i.url, i.width FROM \"{s}\".\"products_images\" i \
+                "SELECT i.url, i.width FROM \"{schema}\".\"products_images\" i \
                  WHERE i.image_id = 'img_789'",
-                s = schema,
             ),
             &[],
         ).await.unwrap();
@@ -798,7 +785,7 @@ async fn test_jsonb_flatten_strategy() {
 
         // Widget : dims = {"width": 10, "height": 20, "depth": 5}
         let widget = client.query_one(
-            &format!("SELECT products_dims::text FROM \"{s}\".\"products\" WHERE id = 1", s = schema),
+            &format!("SELECT products_dims::text FROM \"{schema}\".\"products\" WHERE id = 1"),
             &[],
         ).await.unwrap();
         let dims: serde_json::Value = serde_json::from_str(widget.get::<_, &str>("products_dims")).unwrap();
@@ -807,7 +794,7 @@ async fn test_jsonb_flatten_strategy() {
 
         // Doohickey : dims partial (no depth)
         let doohickey = client.query_one(
-            &format!("SELECT products_dims::text FROM \"{s}\".\"products\" WHERE id = 3", s = schema),
+            &format!("SELECT products_dims::text FROM \"{schema}\".\"products\" WHERE id = 3"),
             &[],
         ).await.unwrap();
         let dims3: serde_json::Value = serde_json::from_str(doohickey.get::<_, &str>("products_dims")).unwrap();
@@ -854,7 +841,7 @@ async fn test_keyed_pivot_array_strategy() {
         // La stratégie doit être SiblingCollapse avec array_children=true
         match &genomes_schema.inferred_strategy {
             InferredStrategy::SiblingCollapse(SiblingSchema { array_children: true, .. }) => {}
-            other => panic!("expected SiblingCollapse(array_children=true), got {:?}", other),
+            other => panic!("expected SiblingCollapse(array_children=true), got {other:?}"),
         }
 
         // j2s_order doit être présent parmi les colonnes générées
@@ -895,10 +882,9 @@ async fn test_keyed_pivot_array_strategy() {
         // id=1 / gcf_001 → 2 lignes (j2s_order 0 et 1)
         let gcf001_count: i64 = client.query_one(
             &format!(
-                "SELECT COUNT(*) FROM \"{s}\".\"graph_genomes\" g \
-                 JOIN \"{s}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
+                "SELECT COUNT(*) FROM \"{schema}\".\"graph_genomes\" g \
+                 JOIN \"{schema}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
                  WHERE r.id = 1 AND g.key = 'gcf_001'",
-                s = schema,
             ),
             &[],
         ).await.unwrap().get(0);
@@ -908,10 +894,9 @@ async fn test_keyed_pivot_array_strategy() {
         let first = client.query_one(
             &format!(
                 "SELECT g.length, g.source, g.target \
-                 FROM \"{s}\".\"graph_genomes\" g \
-                 JOIN \"{s}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
+                 FROM \"{schema}\".\"graph_genomes\" g \
+                 JOIN \"{schema}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
                  WHERE r.id = 1 AND g.key = 'gcf_001' AND g.j2s_order = 0",
-                s = schema,
             ),
             &[],
         ).await.unwrap();
@@ -923,10 +908,9 @@ async fn test_keyed_pivot_array_strategy() {
         let second = client.query_one(
             &format!(
                 "SELECT g.length, g.source, g.target \
-                 FROM \"{s}\".\"graph_genomes\" g \
-                 JOIN \"{s}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
+                 FROM \"{schema}\".\"graph_genomes\" g \
+                 JOIN \"{schema}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
                  WHERE r.id = 1 AND g.key = 'gcf_001' AND g.j2s_order = 1",
-                s = schema,
             ),
             &[],
         ).await.unwrap();
@@ -1003,8 +987,7 @@ async fn test_jsonb_strategy_root_table() {
         // Root JSONB blob contains the full object — verify via JSONB field access.
         let rows = client.query(
             &format!(
-                "SELECT data->>'name' AS name FROM \"{}\".\"products\" ORDER BY data->>'name'",
-                schema
+                "SELECT data->>'name' AS name FROM \"{schema}\".\"products\" ORDER BY data->>'name'"
             ),
             &[],
         ).await.unwrap();
@@ -1503,10 +1486,9 @@ async fn test_object_array_heterogeneous_jsonb_end_to_end() {
                         a.data->>'score'    AS score, \
                         a.data->>'comment'  AS comment, \
                         a.data->>'verified' AS verified \
-                 FROM \"{s}\".\"produits_avis\" a \
-                 JOIN \"{s}\".\"produits\" p ON a.j2s_produits_id = p.j2s_id \
+                 FROM \"{schema}\".\"produits_avis\" a \
+                 JOIN \"{schema}\".\"produits\" p ON a.j2s_produits_id = p.j2s_id \
                  WHERE p.name = 'P2' ORDER BY a.j2s_order",
-                s = schema,
             ),
             &[],
         ).await.unwrap();

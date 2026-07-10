@@ -16,7 +16,7 @@
 //! - fn `build_wide_pivot_schema` — construit la table EAV compagnon (réutilisée par
 //!   `apply_autosplit_strategy` et `apply_pivot_split`, qui diffèrent seulement par la
 //!   politique de rétention et le jeu de clés envoyé en compagnon).
-//! - fn `collect_medium_keys` — sélectionne les clés de fréquence moyenne (AutoSplit racine
+//! - fn `collect_medium_keys` — sélectionne les clés de fréquence moyenne (`AutoSplit` racine
 //!   uniquement).
 //! - fn `infer_medium_value_type` — détermine le type de valeur commun d'un jeu de clés.
 //! - fn `build_finalizer_config` — assemble la config figée passée à ces fonctions.
@@ -33,7 +33,7 @@ use super::super::type_tracker::{widen_pg_types, PgType};
 use super::super::wide_strategies::{apply_structured_pivot_columns, apply_wide_strategy_columns, suggest_wide_strategy};
 use super::SchemaFinalizer;
 
-/// Phase 3: apply per-table wide strategies (Pivot, Jsonb, StructuredPivot, AutoSplit)
+/// Phase 3: apply per-table wide strategies (Pivot, Jsonb, `StructuredPivot`, `AutoSplit`)
 /// to all remaining tables after fusion is complete.
 pub(super) fn apply_wide_table_strategies(
     schemas: &mut Vec<TableSchema>,
@@ -94,7 +94,7 @@ pub(super) struct FinalizerConfig {
 
 /// Apply a wide-table strategy to `schema` if the column count exceeds the threshold.
 ///
-/// Eligible for Object and ObjectArray children (not ScalarArray, which only ever has
+/// Eligible for Object and `ObjectArray` children (not `ScalarArray`, which only ever has
 /// a single fixed `value` column and can never be "wide").
 /// Returns a companion `_wide` table if the `AutoSplit` strategy is chosen.
 fn apply_wide_strategy(
@@ -140,7 +140,7 @@ fn apply_wide_strategy(
 
 /// Chooses `StructuredPivot`, Jsonb, or the identity/companion split (Pivot) for a table that
 /// is not `is_root && has_object_children` — i.e. every wide-eligible table except the P5
-/// AutoSplit root case, which `apply_autosplit_strategy` handles separately and unchanged.
+/// `AutoSplit` root case, which `apply_autosplit_strategy` handles separately and unchanged.
 fn apply_non_autosplit_strategy(
     schema: &mut TableSchema,
     entry: &TableEntry,
@@ -183,7 +183,7 @@ fn apply_non_autosplit_strategy(
 
 /// Split a table that would otherwise be flat-Pivoted into an identity table (zero data
 /// columns, unconditional retention, keeps the original name) and a companion `_pivot` EAV
-/// table holding every key — no frequency-based retention or dropping, unlike P5 AutoSplit.
+/// table holding every key — no frequency-based retention or dropping, unlike P5 `AutoSplit`.
 ///
 /// Applies uniformly whether `schema` is `Object`- or `ObjectArray`-parent: a single rule
 /// avoids the conditional-split trap (detecting "does this table have a real child" is itself
@@ -356,8 +356,8 @@ mod tests {
         observer.observe_root("root", &obj);
 
         let mut naming = NamingRegistry::new();
-        for path_key in observer.tables.keys().cloned().collect::<Vec<_>>() {
-            naming.table_name_from_dot_key(&path_key);
+        for path_key in observer.tables.keys() {
+            naming.table_name_from_dot_key(path_key);
         }
 
         // Simule la Phase 2 ayant déjà fusionné "root_foo" en SiblingCollapse — une forme de

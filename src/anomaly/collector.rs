@@ -499,7 +499,7 @@ mod tests {
     fn test_example_cap() {
         let mut c = AnomalyCollector::new(None);
         for i in 0..10 {
-            c.record("t", "col", &format!("row{}", i), "integer", "bad", "string").unwrap();
+            c.record("t", "col", &format!("row{i}"), "integer", "bad", "string").unwrap();
         }
         assert_eq!(c.total_anomalies(), 10);
         let sums = c.summaries();

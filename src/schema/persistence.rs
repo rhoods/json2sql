@@ -213,9 +213,9 @@ mod tests {
 
         let err = load(tmp.path()).err().expect("expected an error for v1 snapshot");
         let msg = err.to_string();
-        assert!(msg.contains("v1"), "error should mention v1, got: {}", msg);
+        assert!(msg.contains("v1"), "error should mention v1, got: {msg}");
         assert!(msg.contains("Pass 1") || msg.contains("re-run") || msg.contains("regenerate"),
-            "error should tell user to re-run Pass 1, got: {}", msg);
+            "error should tell user to re-run Pass 1, got: {msg}");
     }
 
     #[test]

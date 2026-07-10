@@ -676,9 +676,9 @@ mod tests {
                 // With 4 workers and 8 bad elements, each worker sees ≥1 error.
                 // Aggregation must produce a message with ≥2 "root level" occurrences.
                 let count = msg.matches("root level").count();
-                assert!(count >= 2, "expected ≥2 errors aggregated in message, got {}: {}", count, msg);
+                assert!(count >= 2, "expected ≥2 errors aggregated in message, got {count}: {msg}");
             }
-            Err(e) => panic!("expected InvalidInput, got: {}", e),
+            Err(e) => panic!("expected InvalidInput, got: {e}"),
             Ok(_)  => panic!("expected Err"),
         }
     }
@@ -709,10 +709,10 @@ mod tests {
         );
         match result {
             Err(crate::error::J2sError::InvalidInput(msg)) =>
-                assert!(msg.contains("root level"), "error must mention root level: {}", msg),
-            Err(e) => panic!("expected InvalidInput, got: {}", e),
+                assert!(msg.contains("root level"), "error must mention root level: {msg}"),
+            Err(e) => panic!("expected InvalidInput, got: {e}"),
             Ok(_)  => panic!("expected Err for non-object root element"),
-        };
+        }
     }
 
     #[test]
@@ -769,7 +769,7 @@ mod tests {
 
     #[test]
     fn test_effective_workers_over_cap_is_clamped() {
-        let cap = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let cap = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         let (n, warn) = effective_workers(cap + 1000);
         assert_eq!(n, cap, "must be clamped to cap");
         assert_eq!(warn, Some(cap), "must report the cap when clamping");
@@ -915,7 +915,7 @@ mod tests {
 
     #[test]
     fn test_effective_workers_exactly_at_cap_no_warning() {
-        let cap = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let cap = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         let (n, warn) = effective_workers(cap);
         assert_eq!(n, cap);
         assert!(warn.is_none(), "exactly at cap must not warn");

@@ -20,7 +20,7 @@ async fn test_anomaly_detection() {
         assert_eq!(p2.anomaly_collector.total_anomalies(), 1);
 
         let null_count: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{}\".\"people\" WHERE \"score\" IS NULL", schema), &[])
+            &format!("SELECT COUNT(*) FROM \"{schema}\".\"people\" WHERE \"score\" IS NULL"), &[])
             .await.unwrap().get(0);
         assert_eq!(null_count, 1);
     }).await;
@@ -108,7 +108,7 @@ async fn test_float_anomaly_boolean_value() {
         assert_eq!(p2.anomaly_collector.total_anomalies(), 1);
 
         let null_count: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{}\".\"items\" WHERE \"score\" IS NULL", schema), &[])
+            &format!("SELECT COUNT(*) FROM \"{schema}\".\"items\" WHERE \"score\" IS NULL"), &[])
             .await.unwrap().get(0);
         assert_eq!(null_count, 1);
     }).await;
@@ -131,7 +131,7 @@ async fn test_null_byte_anomaly() {
         assert_eq!(p2.anomaly_collector.total_anomalies(), 1);
 
         let null_count: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{}\".\"people\" WHERE \"bio\" IS NULL", schema), &[])
+            &format!("SELECT COUNT(*) FROM \"{schema}\".\"people\" WHERE \"bio\" IS NULL"), &[])
             .await.unwrap().get(0);
         assert_eq!(null_count, 1);
     }).await;

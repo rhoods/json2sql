@@ -130,7 +130,7 @@ impl MemSink {
 
 const COPY_CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB per COPY feed call
 
-/// Flush `buf` to PostgreSQL via `COPY FROM STDIN`, streaming in 4 MiB chunks.
+/// Flush `buf` to `PostgreSQL` via `COPY FROM STDIN`, streaming in 4 MiB chunks.
 /// No-op when `buf` is empty — avoids opening a COPY session for zero data.
 /// Row count tracking is the caller's responsibility.
 pub async fn flush_mem_sink_to_pg(buf: Bytes, copy_sql: &str, client: &Client) -> crate::error::Result<()> {

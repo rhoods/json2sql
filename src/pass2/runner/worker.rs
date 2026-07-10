@@ -67,7 +67,7 @@ pub(super) struct WorkerDisklessConfig {
     pub(super) mem_flush_threshold: u64,
 }
 
-/// Diskless worker: local MemSink accumulation, sends batches to `run_flusher` via channel.
+/// Diskless worker: local `MemSink` accumulation, sends batches to `run_flusher` via channel.
 /// Checks `error_flag` each iteration (flusher fatal error) and yields on `pause_flag`
 /// (flusher buffer pressure). Workers spin without draining — flusher controls when to resume.
 /// For wrapper-format files, `key` carries the raw wrapper key and the worker resolves the
@@ -106,7 +106,7 @@ pub(super) async fn run_worker_diskless(
         process_worker_item_diskless(bytes, &mut sinks, &mut proxy, &flush_tx, &path_map, effective_root, mem_flush_threshold).await?;
     }
     // Final flush: drain remaining sink buffers
-    for (table_id, sink) in sinks.iter_mut() {
+    for (table_id, sink) in &mut sinks {
         if sink.buf.is_empty() { continue; }
         let chunk = std::mem::take(&mut sink.buf).freeze();
         let rows = std::mem::replace(&mut sink.row_count, 0);
@@ -135,9 +135,9 @@ mod tests {
     use crate::pass2::runner::test_support::make_schema_with_rows;
     use crate::schema::table_schema::TableSchema;
 
-    /// Verifies that the worker exits its pause spin when error_flag is set externally,
-    /// even if pause_flag is never cleared. This test FAILS on the old code (infinite spin)
-    /// and PASSES after the fix (spin checks error_flag).
+    /// Verifies that the worker exits its pause spin when `error_flag` is set externally,
+    /// even if `pause_flag` is never cleared. This test FAILS on the old code (infinite spin)
+    /// and PASSES after the fix (spin checks `error_flag`).
     #[tokio::test]
     async fn worker_exits_pause_spin_when_error_flag_set_while_spinning() {
         use std::sync::Arc;

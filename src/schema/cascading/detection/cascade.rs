@@ -17,7 +17,7 @@ use super::{apply, CoSiblingGroup};
 
 /// Collect the children of `sibling_indices` grouped by their last JSON path segment.
 /// Returns `(json_key, child_indices, array_children)` triples sorted by key.
-/// `array_children` is `true` when at least one sibling exposes the key as an ObjectArray.
+/// `array_children` is `true` when at least one sibling exposes the key as an `ObjectArray`.
 ///
 /// Example input:
 /// ```json
@@ -327,7 +327,7 @@ mod tests {
         let target_name = schemas[pivot_idx].child_routes["desc"].clone();
         assert!(
             schemas.iter().any(|s| s.name == target_name),
-            "target table '{}' must exist in schemas", target_name
+            "target table '{target_name}' must exist in schemas"
         );
     }
 

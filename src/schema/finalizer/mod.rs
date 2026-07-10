@@ -24,7 +24,7 @@ mod base;
 mod wide_strategy;
 
 mod guard;
-pub(crate) use guard::apply_column_limit_guard;
+pub use guard::apply_column_limit_guard;
 pub use guard::{OverflowWarning, exclude_absorbed_children};
 #[cfg(test)]
 pub use guard::PG_MAX_COLUMNS;

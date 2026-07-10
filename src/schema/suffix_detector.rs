@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn test_filter_by_coverage_keeps_high_coverage() {
-        let base_set: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let base_set: HashSet<String> = ["a", "b", "c"].iter().map(std::string::ToString::to_string).collect();
         let candidates = vec![
             ("_unit".to_string(), HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()])),
             ("_rare".to_string(), HashSet::from(["a".to_string()])),

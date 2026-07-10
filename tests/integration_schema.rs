@@ -146,7 +146,7 @@ fn test_keyed_pivot_mixed_key_shapes() {
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
 
     // products + products_images (parent SiblingCollapseMulti) + 2 tables pivots synthétiques.
-    assert_eq!(p1.schemas.len(), 4, "attendu 4 schemas, obtenu: {:?}", names);
+    assert_eq!(p1.schemas.len(), 4, "attendu 4 schemas, obtenu: {names:?}");
     assert!(names.contains(&"products"),              "products manquant");
     assert!(names.contains(&"products_images"),       "products_images (parent) manquant");
     assert!(names.contains(&"products_images_num"),   "products_images_num (pivot numérique) manquant");
@@ -199,11 +199,11 @@ fn test_sibling_significant_container_not_diluting_jaccard() {
     // T1: images_uploaded must NOT have been absorbed into the text pivot.
     // It is a significant container (pure container with many children) — left independent.
     assert!(names.contains(&"root_images_uploaded"),
-        "images_uploaded doit rester indépendant (significant container); schemas: {:?}", names);
+        "images_uploaded doit rester indépendant (significant container); schemas: {names:?}");
 
     // T1: text pivot must exist (front/ingredients/nutrition collapsed, uploaded excluded).
     assert!(names.contains(&"root_images_key"),
-        "root_images_key (pivot textuel) doit exister; schemas: {:?}", names);
+        "root_images_key (pivot textuel) doit exister; schemas: {names:?}");
 
     // T1: images parent — all text children → synthetic pivot → SiblingCollapseMulti with one group.
     let images = p1.schemas.iter().find(|s| s.name == "root_images").unwrap();
@@ -216,12 +216,12 @@ fn test_sibling_significant_container_not_diluting_jaccard() {
     assert!(matches!(uploaded.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
         "root_images_uploaded doit avoir SiblingCollapse (pure container); actual: {:?}", uploaded.inferred_strategy);
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(cols.contains(&"uploaded_t"), "SiblingCollapse uploaded : uploaded_t manquant; cols: {:?}", cols);
-    assert!(cols.contains(&"uploader"),   "SiblingCollapse uploaded : uploader manquant; cols: {:?}", cols);
+    assert!(cols.contains(&"uploaded_t"), "SiblingCollapse uploaded : uploaded_t manquant; cols: {cols:?}");
+    assert!(cols.contains(&"uploader"),   "SiblingCollapse uploaded : uploader manquant; cols: {cols:?}");
 
     // The individual numeric children must have been absorbed (excluded from schema).
     assert!(!names.iter().any(|n| n.starts_with("root_images_uploaded_1")),
-        "root_images_uploaded_1xx doivent être absorbés; schemas: {:?}", names);
+        "root_images_uploaded_1xx doivent être absorbés; schemas: {names:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -248,19 +248,19 @@ fn test_sibling_noisy_schema_jaccard_filter() {
     // malgré les colonnes parasites dans uploaded.4.
     let uploaded = p1.schemas.iter().find(|s| s.name == "root_images_uploaded");
     assert!(uploaded.is_some(),
-        "root_images_uploaded doit exister; schemas: {:?}", names);
+        "root_images_uploaded doit exister; schemas: {names:?}");
     let uploaded = uploaded.unwrap();
     assert!(matches!(uploaded.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
         "root_images_uploaded doit avoir SiblingCollapse; actual: {:?}", uploaded.inferred_strategy);
 
     // Les colonnes stables (uploaded_t, uploader) doivent être présentes.
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(cols.contains(&"uploaded_t"), "uploaded_t manquant; cols: {:?}", cols);
-    assert!(cols.contains(&"uploader"),   "uploader manquant; cols: {:?}", cols);
+    assert!(cols.contains(&"uploaded_t"), "uploaded_t manquant; cols: {cols:?}");
+    assert!(cols.contains(&"uploader"),   "uploader manquant; cols: {cols:?}");
 
     // Les tables individuelles uploaded.N doivent être absorbées.
     assert!(!names.iter().any(|n| n.starts_with("root_images_uploaded_")),
-        "root_images_uploaded_N doivent être absorbés; schemas: {:?}", names);
+        "root_images_uploaded_N doivent être absorbés; schemas: {names:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -287,25 +287,25 @@ fn test_sibling_all_pure_container_collapse() {
     // root_uploaded doit exister et avoir SiblingCollapse.
     let uploaded = p1.schemas.iter().find(|s| s.name == "root_uploaded");
     assert!(uploaded.is_some(),
-        "root_uploaded doit exister; schemas: {:?}", names);
+        "root_uploaded doit exister; schemas: {names:?}");
     assert!(matches!(uploaded.unwrap().inferred_strategy, InferredStrategy::SiblingCollapse(_)),
         "root_uploaded doit avoir SiblingCollapse; actual: {:?}", uploaded.unwrap().inferred_strategy);
 
     // Les tables sibling individuelles (1, 2, 3) doivent être absorbées.
     for n in &["root_uploaded_1", "root_uploaded_2", "root_uploaded_3"] {
         assert!(!names.contains(n),
-            "{} doit être absorbé; schemas: {:?}", n, names);
+            "{n} doit être absorbé; schemas: {names:?}");
     }
 
     // Les tables de cascade (co-siblings fusionnés) doivent survivre.
     assert!(names.contains(&"root_uploaded_sizes"),
-        "root_uploaded_sizes doit survivre (wave-1 merge); schemas: {:?}", names);
+        "root_uploaded_sizes doit survivre (wave-1 merge); schemas: {names:?}");
     assert!(names.contains(&"root_uploaded_imgid"),
-        "root_uploaded_imgid doit survivre (wave-1 merge); schemas: {:?}", names);
+        "root_uploaded_imgid doit survivre (wave-1 merge); schemas: {names:?}");
     assert!(names.contains(&"root_uploaded_selected"),
-        "root_uploaded_selected doit survivre (wave-1 merge); schemas: {:?}", names);
+        "root_uploaded_selected doit survivre (wave-1 merge); schemas: {names:?}");
     assert!(names.contains(&"root_uploaded_sizes_100"),
-        "root_uploaded_sizes_100 doit survivre (wave-2 merge); schemas: {:?}", names);
+        "root_uploaded_sizes_100 doit survivre (wave-2 merge); schemas: {names:?}");
 
     // root_uploaded.child_routes doit pointer vers les tables fusionnées.
     let uploaded = uploaded.unwrap();
@@ -317,7 +317,7 @@ fn test_sibling_all_pure_container_collapse() {
 
     // root + root_uploaded + sizes + imgid + selected + sizes_100 = 6.
     assert_eq!(p1.schemas.len(), 6,
-        "attendu 6 schemas; obtenu: {:?}", names);
+        "attendu 6 schemas; obtenu: {names:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +342,7 @@ fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
 
     // root_front doit avoir SiblingCollapse (wave 0 a fusionné en, fr, de).
     let front = p1.schemas.iter().find(|s| s.name == "root_front");
-    assert!(front.is_some(), "root_front doit exister; schemas: {:?}", names);
+    assert!(front.is_some(), "root_front doit exister; schemas: {names:?}");
     assert!(
         matches!(front.unwrap().inferred_strategy, InferredStrategy::SiblingCollapse(_)),
         "root_front doit avoir SiblingCollapse; actual: {:?}", front.unwrap().inferred_strategy
@@ -352,14 +352,14 @@ fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
     let sizes = p1.schemas.iter().find(|s| s.name == "root_front_sizes");
     assert!(
         sizes.is_some(),
-        "root_front_sizes doit survivre (child_route cible); schemas: {:?}", names
+        "root_front_sizes doit survivre (child_route cible); schemas: {names:?}"
     );
 
     // root_front_sizes doit avoir les colonnes w et h (union des co-siblings).
     let sizes = sizes.unwrap();
     let cols: Vec<&str> = sizes.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(cols.contains(&"w"), "w manquant dans root_front_sizes; cols: {:?}", cols);
-    assert!(cols.contains(&"h"), "h manquant dans root_front_sizes; cols: {:?}", cols);
+    assert!(cols.contains(&"w"), "w manquant dans root_front_sizes; cols: {cols:?}");
+    assert!(cols.contains(&"h"), "h manquant dans root_front_sizes; cols: {cols:?}");
 
     // root_front.child_routes["sizes"] doit pointer vers root_front_sizes.
     let front = front.unwrap();
@@ -372,12 +372,12 @@ fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
     // Tables individuelles absorbées.
     for n in &["root_front_en", "root_front_fr", "root_front_de",
                "root_front_en_sizes", "root_front_fr_sizes", "root_front_de_sizes"] {
-        assert!(!names.contains(n), "{} doit être absorbé; schemas: {:?}", n, names);
+        assert!(!names.contains(n), "{n} doit être absorbé; schemas: {names:?}");
     }
 
     // root + root_front + root_front_sizes = 3.
     assert_eq!(p1.schemas.len(), 3,
-        "attendu 3 schemas; obtenu: {:?}", names);
+        "attendu 3 schemas; obtenu: {names:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -401,19 +401,19 @@ fn test_sibling_pure_diluter_absorbed() {
     // root_uploaded doit avoir SiblingCollapse.
     let uploaded = p1.schemas.iter().find(|s| s.name == "root_uploaded");
     assert!(uploaded.is_some(),
-        "root_uploaded doit exister; schemas: {:?}", names);
+        "root_uploaded doit exister; schemas: {names:?}");
     let uploaded = uploaded.unwrap();
     assert!(matches!(uploaded.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
         "root_uploaded doit avoir SiblingCollapse; actual: {:?}", uploaded.inferred_strategy);
 
     // Les colonnes data-bearing (x, y) doivent être présentes.
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(cols.contains(&"x"), "x manquant dans root_uploaded; cols: {:?}", cols);
-    assert!(cols.contains(&"y"), "y manquant dans root_uploaded; cols: {:?}", cols);
+    assert!(cols.contains(&"x"), "x manquant dans root_uploaded; cols: {cols:?}");
+    assert!(cols.contains(&"y"), "y manquant dans root_uploaded; cols: {cols:?}");
 
     // Tous les enfants (1, 2, 3, 4) doivent être absorbés.
     assert!(!names.iter().any(|n| n.starts_with("root_uploaded_")),
-        "root_uploaded_N doivent être absorbés; schemas: {:?}", names);
+        "root_uploaded_N doivent être absorbés; schemas: {names:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -438,23 +438,23 @@ fn test_sibling_mixed_unified_fallback() {
     // root_sizes doit exister et avoir SiblingCollapse (pas SiblingCollapseMulti).
     let sizes = p1.schemas.iter().find(|s| s.name == "root_sizes");
     assert!(sizes.is_some(),
-        "root_sizes doit exister; schemas: {:?}", names);
+        "root_sizes doit exister; schemas: {names:?}");
     let sizes = sizes.unwrap();
     assert!(matches!(sizes.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
         "root_sizes doit avoir SiblingCollapse (fallback unifié); actual: {:?}", sizes.inferred_strategy);
 
     // Les colonnes w et h doivent être présentes.
     let cols: Vec<&str> = sizes.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(cols.contains(&"w"), "w manquant dans root_sizes; cols: {:?}", cols);
-    assert!(cols.contains(&"h"), "h manquant dans root_sizes; cols: {:?}", cols);
+    assert!(cols.contains(&"w"), "w manquant dans root_sizes; cols: {cols:?}");
+    assert!(cols.contains(&"h"), "h manquant dans root_sizes; cols: {cols:?}");
 
     // Toutes les tables enfants (100, 400, full) doivent être absorbées.
     assert!(!names.iter().any(|n| n.starts_with("root_sizes_")),
-        "root_sizes_N doivent être absorbés; schemas: {:?}", names);
+        "root_sizes_N doivent être absorbés; schemas: {names:?}");
 
     // Seuls root et root_sizes doivent rester.
     assert_eq!(p1.schemas.len(), 2,
-        "attendu 2 schemas (root + root_sizes), obtenu: {:?}", names);
+        "attendu 2 schemas (root + root_sizes), obtenu: {names:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +505,7 @@ fn test_parallel_non_object_root_returns_error() {
     );
     match result {
         Err(e) => assert!(e.to_string().contains("root level"),
-            "error message should mention root level: {}", e),
+            "error message should mention root level: {e}"),
         Ok(_) => panic!("expected Err for non-object root element, got Ok"),
     };
 }
@@ -574,8 +574,7 @@ async fn test_array_as_pg_array() {
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
         let sql = format!(
-            "SELECT array_length(\"tags\", 1) FROM \"{}\".\"users\" WHERE \"name\" = 'Alice'",
-            schema
+            "SELECT array_length(\"tags\", 1) FROM \"{schema}\".\"users\" WHERE \"name\" = 'Alice'"
         );
         let row = client.query_one(&sql, &[]).await.unwrap();
         let len: i32 = row.get(0);
@@ -627,8 +626,7 @@ async fn test_column_limit_guard_jsonb_non_root_with_children() {
 
         // La colonne data ne doit pas être NULL
         let sql = format!(
-            "SELECT COUNT(*) FROM \"{}\".\"root_middle\" WHERE \"data\" IS NOT NULL",
-            schema
+            "SELECT COUNT(*) FROM \"{schema}\".\"root_middle\" WHERE \"data\" IS NOT NULL"
         );
         let row = client.query_one(&sql, &[]).await.unwrap();
         let non_null: i64 = row.get(0);
@@ -727,7 +725,7 @@ async fn test_parallel_streaming_matches_sequential() {
         // Parallel streaming run on a second schema
         let schema2 = common::unique_schema();
         let client2 = db::connection::connect(&url).await.unwrap();
-        client2.execute(&format!("CREATE SCHEMA \"{}\"", schema2), &[]).await.unwrap();
+        client2.execute(&format!("CREATE SCHEMA \"{schema2}\""), &[]).await.unwrap();
         db::ddl::create_tables_no_constraints(&client2, &p1.schemas, &schema2, false, None).await.unwrap();
         let par = pass2::runner::run(
             &path, &p1.schemas, &client2, &url,
@@ -850,7 +848,7 @@ async fn test_no_duplicate_pk_on_num_key_collision_structure() {
     }).await;
 }
 
-/// Regression test for findings 1+2: SiblingCollapseMulti with two non-numeric clusters must
+/// Regression test for findings 1+2: `SiblingCollapseMulti` with two non-numeric clusters must
 /// populate BOTH pivot tables, not just the last one (path collision bug).
 ///
 /// The fixture has 6 child keys split into 2 incompatible clusters (Jaccard=0 between them):
@@ -879,7 +877,7 @@ async fn test_multi_cluster_non_numeric_both_pivots_populated() {
             .collect();
 
         assert_eq!(pivot_tables.len(), 2,
-            "expected exactly 2 pivot tables from SiblingCollapseMulti; got {:?}", pivot_tables);
+            "expected exactly 2 pivot tables from SiblingCollapseMulti; got {pivot_tables:?}");
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
             .await.unwrap();
@@ -892,8 +890,7 @@ async fn test_multi_cluster_non_numeric_both_pivots_populated() {
         for pivot_name in &pivot_tables {
             let count = common::row_count(&client, &schema, pivot_name).await;
             assert_eq!(count, 9,
-                "pivot table '{}' must have 9 rows (3 keys × 3 docs); got {}",
-                pivot_name, count);
+                "pivot table '{pivot_name}' must have 9 rows (3 keys × 3 docs); got {count}");
         }
     }).await;
 }

@@ -1,5 +1,5 @@
 //! Sink `RowSink` de test — capture les lignes écrites en mémoire pour assertions,
-//! sans passer par `MemSink`/PostgreSQL.
+//! sans passer par `MemSink`/`PostgreSQL`.
 //!
 //! Fonctions :
 //! - struct `CaptureSink` — sink de test qui capture les lignes écrites dans un `Vec` interne.
@@ -8,7 +8,7 @@
 use crate::error::Result;
 use crate::pass2::sink::RowSink;
 
-pub(crate) struct CaptureSink(pub Vec<Vec<u8>>);
+pub struct CaptureSink(pub Vec<Vec<u8>>);
 
 impl RowSink for CaptureSink {
     fn write_row(&mut self, row: &[u8]) -> Result<()> {

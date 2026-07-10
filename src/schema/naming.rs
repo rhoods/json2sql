@@ -250,7 +250,7 @@ impl NamingRegistry {
             let existing_key = existing.clone();
 
             // Promote the existing key to its hash suffix if it still holds the plain name.
-            if self.cache.get(&existing_key).map(|n| n == &truncated).unwrap_or(false) {
+            if self.cache.get(&existing_key).is_some_and(|n| n == &truncated) {
                 let promoted = self.hash_suffixed_name(&truncated, &existing_key);
                 self.cache.insert(existing_key.clone(), promoted.clone());
                 self.reverse.insert(promoted, existing_key);
@@ -521,7 +521,7 @@ mod tests {
     fn truncate_table_phase2_result_fits_real_pg_limit() {
         // Real-world: path with leaf > 53 chars (padded to 55)
         let leaf = "a".repeat(55);
-        let k = format!("root{}{}", PATH_SEP, leaf);
+        let k = format!("root{PATH_SEP}{leaf}");
         let sanitized = format!("root_{}", "a".repeat(55));
         let result = truncate_table_name(&sanitized, &k, PG_TABLE_MAX_IDENT);
         assert!(result.len() <= PG_TABLE_MAX_IDENT,
@@ -558,9 +558,9 @@ mod tests {
         // "root_ja_details_very_very_long_name_yes_indeed" after full sanitization
         let sanitized = sanitize_identifier("root_ja:カルシウム_details_very_very_long_name_yes_indeed");
         let result = truncate_table_name(&sanitized, &k, 15);
-        assert!(result.len() <= 15, "result '{}' exceeds 15 chars", result);
+        assert!(result.len() <= 15, "result '{result}' exceeds 15 chars");
         // Must be valid ASCII (no panics during construction)
-        assert!(result.is_ascii(), "result '{}' must be ASCII", result);
+        assert!(result.is_ascii(), "result '{result}' must be ASCII");
     }
 
     #[test]
@@ -581,8 +581,8 @@ mod tests {
         let name_a = reg.table_name_lookup_from_dot_key(&key_a);
         let name_b = reg.table_name_lookup_from_dot_key(&key_b);
         assert_ne!(name_a, name_b, "colliding trimmed names must be deduplicated");
-        assert!(name_a.len() <= PG_TABLE_MAX_IDENT, "name_a '{}' too long", name_a);
-        assert!(name_b.len() <= PG_TABLE_MAX_IDENT, "name_b '{}' too long", name_b);
+        assert!(name_a.len() <= PG_TABLE_MAX_IDENT, "name_a '{name_a}' too long");
+        assert!(name_b.len() <= PG_TABLE_MAX_IDENT, "name_b '{name_b}' too long");
         // Both must start with the trimmed base — not the long pre-truncation sanitized form.
         assert!(name_a.starts_with("shared_suffix"), "name_a '{name_a}' must start with shared_suffix");
         assert!(name_b.starts_with("shared_suffix"), "name_b '{name_b}' must start with shared_suffix");
@@ -597,8 +597,8 @@ mod tests {
         // then read via lookup — which returns the final (post-promotion) names.
         let long_prefix_a = "a".repeat(40);
         let long_prefix_b = "b".repeat(40);
-        let path_a = vec![long_prefix_a.clone(), "shared_suffix".to_string()];
-        let path_b = vec![long_prefix_b.clone(), "shared_suffix".to_string()];
+        let path_a = vec![long_prefix_a, "shared_suffix".to_string()];
+        let path_b = vec![long_prefix_b, "shared_suffix".to_string()];
         let key_a = path_a.join(&PATH_SEP.to_string());
         let key_b = path_b.join(&PATH_SEP.to_string());
 
@@ -619,8 +619,8 @@ mod tests {
         assert_eq!(name_a1, name_a2, "path A must get same name regardless of insertion order");
         assert_eq!(name_b1, name_b2, "path B must get same name regardless of insertion order");
         assert_ne!(name_a1, name_b1, "paths must produce distinct names");
-        assert!(name_a1.len() <= PG_TABLE_MAX_IDENT, "name_a '{}' too long", name_a1);
-        assert!(name_b1.len() <= PG_TABLE_MAX_IDENT, "name_b '{}' too long", name_b1);
+        assert!(name_a1.len() <= PG_TABLE_MAX_IDENT, "name_a '{name_a1}' too long");
+        assert!(name_b1.len() <= PG_TABLE_MAX_IDENT, "name_b '{name_b1}' too long");
     }
 
     #[test]
@@ -762,8 +762,8 @@ mod tests {
         assert_ne!(r1, r2);
 
         // Both must start with "ja_"
-        assert!(r1.starts_with("ja_"), "got: {}", r1);
-        assert!(r2.starts_with("ja_"), "got: {}", r2);
+        assert!(r1.starts_with("ja_"), "got: {r1}");
+        assert!(r2.starts_with("ja_"), "got: {r2}");
 
         // Both must fit within 63 chars
         assert!(r1.len() <= 63);
@@ -773,7 +773,7 @@ mod tests {
     #[test]
     fn test_long_table_name() {
         let mut reg = NamingRegistry::new();
-        let path: Vec<String> = (0..10).map(|i| format!("level{}", i)).collect();
+        let path: Vec<String> = (0..10).map(|i| format!("level{i}")).collect();
         let name = reg.table_name(&path);
         // Must fit PG_TABLE_MAX_IDENT (53), not just PG_MAX_IDENT (63):
         // derived identifiers like fk_{name}_parent need the 10-char budget.
@@ -814,7 +814,7 @@ mod tests {
 
     #[test]
     fn test_table_name_from_dot_key_long_path() {
-        let path: Vec<String> = (0..10).map(|i| format!("level{}", i)).collect();
+        let path: Vec<String> = (0..10).map(|i| format!("level{i}")).collect();
         let key = path.join(&PATH_SEP.to_string());
 
         let mut reg_path = NamingRegistry::new();
@@ -853,8 +853,8 @@ mod tests {
         ];
         let name = reg.table_name(&path);
         assert!(
-            format!("pk_{}", name).len() <= 63,
-            "pk_{} is {} chars (> 63)", name, format!("pk_{}", name).len()
+            format!("pk_{name}").len() <= 63,
+            "pk_{} is {} chars (> 63)", name, format!("pk_{name}").len()
         );
     }
 
@@ -868,8 +868,8 @@ mod tests {
         ];
         let name = reg.table_name(&path);
         assert!(
-            format!("fk_{}_parent", name).len() <= 63,
-            "fk_{}_parent is {} chars (> 63)", name, format!("fk_{}_parent", name).len()
+            format!("fk_{name}_parent").len() <= 63,
+            "fk_{}_parent is {} chars (> 63)", name, format!("fk_{name}_parent").len()
         );
     }
 
@@ -883,8 +883,8 @@ mod tests {
         ];
         let name = reg.table_name(&path);
         assert!(
-            format!("j2s_{}_id", name).len() <= 63,
-            "j2s_{}_id is {} chars (> 63)", name, format!("j2s_{}_id", name).len()
+            format!("j2s_{name}_id").len() <= 63,
+            "j2s_{}_id is {} chars (> 63)", name, format!("j2s_{name}_id").len()
         );
     }
 

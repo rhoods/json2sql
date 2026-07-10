@@ -115,7 +115,7 @@ fn build_copy_sql_map(schemas: &[TableSchema], pg_schema: &str) -> HashMap<Strin
 }
 
 /// Diskless pipeline: N workers stream JSON into local `MemSink` buffers, sending batches to a
-/// concurrent flusher that COPYs directly to PostgreSQL. Phase B (temp-file re-read) is eliminated.
+/// concurrent flusher that COPYs directly to `PostgreSQL`. Phase B (temp-file re-read) is eliminated.
 ///
 /// Phase D — `add_constraints()` adds PRIMARY KEY (fatal on error) then
 /// FOREIGN KEY (failures become `constraint_warnings`).
@@ -439,7 +439,7 @@ mod tests {
     }
 
     /// Validates the writer task pattern without a database:
-    /// events sent via AnomalyProxy reach the AnomalyCollector in the writer task,
+    /// events sent via `AnomalyProxy` reach the `AnomalyCollector` in the writer task,
     /// and NDJSON files are created on disk.
     #[tokio::test]
     async fn anomaly_writer_task_creates_ndjson_files() {

@@ -365,7 +365,7 @@ pub fn apply_group_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConf
                 }
             }
             other => warnings.push(ConfigWarning::UnknownGroupStrategy {
-                group: group_name.to_string(),
+                group: group_name.clone(),
                 strategy: other.to_string(),
             }),
         }
@@ -725,14 +725,14 @@ mod tests {
         let w = ConfigWarning::GroupMergeFailed { group: "merged".to_string(), found: 1, expected: 3 };
         let msg = w.to_message();
         assert!(msg.contains("merged"));
-        assert!(msg.contains("1"));
-        assert!(msg.contains("3"));
+        assert!(msg.contains('1'));
+        assert!(msg.contains('3'));
     }
 
     #[test]
     fn config_warning_clone_and_eq() {
         let w = ConfigWarning::UnknownTable("t".to_string());
-        assert_eq!(w.clone(), ConfigWarning::UnknownTable("t".to_string()));
+        assert_eq!(w, ConfigWarning::UnknownTable("t".to_string()));
         assert_ne!(w, ConfigWarning::UnknownTable("other".to_string()));
     }
 
@@ -1290,7 +1290,7 @@ mod tests {
             strategy: "keyed_pivot".to_string(),
             members: vec!["a".to_string(), "b".to_string()],
         });
-        let config = SchemaConfig { tables, group };
+        let config = SchemaConfig { group, tables };
         let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
         assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::UnknownTable(_))));
         assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::GroupMergeFailed { .. })));
@@ -1329,7 +1329,7 @@ mod tests {
     }
 
     /// `exclude_absorbed_children()` (called inside `apply_overrides_complete`) reads
-    /// `absorbs_children()` → `effective_strategy()`, so a toml_override applied earlier in the
+    /// `absorbs_children()` → `effective_strategy()`, so a `toml_override` applied earlier in the
     /// same call that flips `absorbs_children()` to true must already be visible to it.
     #[test]
     fn apply_overrides_complete_excludes_children_absorbed_by_a_new_override() {

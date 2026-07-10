@@ -34,7 +34,7 @@ pub struct SchemaFinalizer {
 
 impl SchemaFinalizer {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         wide_column_threshold: usize,
         sibling_threshold: usize,
         sibling_jaccard: f64,
@@ -56,11 +56,11 @@ impl SchemaFinalizer {
     ///
     /// **Phase A — per-table (parallelisable):** Phases 1 and 3 process each table
     /// independently. Phase 1 builds base schemas; Phase 3 applies wide-table strategies
-    /// (Pivot, Jsonb, AutoSplit…). These are safe to parallelise because each table is
+    /// (Pivot, Jsonb, `AutoSplit`…). These are safe to parallelise because each table is
     /// self-contained at this point.
     ///
     /// **Phase B — cross-table (sequential):** Phase 2 runs sibling detection and
-    /// cascade fusion (SiblingCollapse, KeyedPivot). It *must* execute between Phase 1
+    /// cascade fusion (`SiblingCollapse`, `KeyedPivot`). It *must* execute between Phase 1
     /// and Phase 3: fusible tables must be merged into their final form before any
     /// wide-table strategy is applied, otherwise the strategy targets a pre-fusion table
     /// that no longer exists, producing either a missing table or a double-split.

@@ -1,4 +1,4 @@
-//! Phase 4 — garde-fou de limite de colonnes PostgreSQL, exclusion des enfants absorbés.
+//! Phase 4 — garde-fou de limite de colonnes `PostgreSQL`, exclusion des enfants absorbés.
 //!
 //! - struct `OverflowWarning` — enregistré quand une table est auto-convertie en JSONB (> 1600 colonnes).
 //! - fn `apply_column_limit_guard` — convertit en Jsonb les tables dépassant 1600 colonnes.
@@ -26,7 +26,7 @@ pub struct OverflowWarning {
 ///
 /// Must be called after `finalize()` (schemas in topological order). Each table is
 /// evaluated independently — a child can be converted without its parent being converted.
-pub(crate) fn apply_column_limit_guard(schemas: &mut [TableSchema]) -> Vec<OverflowWarning> {
+pub fn apply_column_limit_guard(schemas: &mut [TableSchema]) -> Vec<OverflowWarning> {
     let mut warnings = Vec::new();
     for schema in schemas.iter_mut() {
         let count = schema.data_columns().count();

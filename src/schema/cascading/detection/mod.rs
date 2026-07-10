@@ -275,8 +275,7 @@ mod tests {
         let last_segs: Vec<Option<&String>> = pivot_schemas.iter().map(|s| s.path.last()).collect();
         assert_ne!(
             last_segs[0], last_segs[1],
-            "pivot schemas must have distinct path last-segments; got {:?}",
-            last_segs,
+            "pivot schemas must have distinct path last-segments; got {last_segs:?}",
         );
     }
 }

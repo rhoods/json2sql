@@ -587,12 +587,12 @@ mod tests {
         min_jaccard: f64,
     ) -> SiblingDetectCtx {
         let (numeric_idx, non_numeric_idx) = child_indices.iter().partition(|&&i| {
-            schemas[i].path.last().map(|k| k.chars().all(|c| c.is_ascii_digit())).unwrap_or(false)
+            schemas[i].path.last().is_some_and(|k| k.chars().all(|c| c.is_ascii_digit()))
         });
         SiblingDetectCtx {
             parent_name: schemas[parent_idx].name.clone(),
             parent_idx,
-            child_indices: child_indices.clone(),
+            child_indices,
             array_children: false,
             threshold,
             min_jaccard,
@@ -884,7 +884,7 @@ mod tests {
         ];
         let g = make_subgroup(&schemas, "p", &[0, 1, 2], false, "cluster_0");
         assert_eq!(g.path_segment, "cluster_0");
-        let mut segs = g.absorbed_path_segments.clone();
+        let mut segs = g.absorbed_path_segments;
         segs.sort();
         assert_eq!(segs, vec!["back", "front", "top"]);
     }
