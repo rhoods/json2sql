@@ -54,6 +54,14 @@ jobs:
         with:
           components: clippy
 
+      # json2sql-ui (Dioxus desktop) needs these to build on Linux — other CI jobs never
+      # hit this because they run bare `cargo check`/`cargo test` (root package only, no
+      # --workspace), so json2sql-ui is never compiled there.
+      - name: Install Dioxus desktop system deps (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
