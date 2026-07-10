@@ -94,7 +94,6 @@ document.addEventListener('DOMContentLoaded', function () {{\n\
         .launch(App);
 }
 
-#[allow(clippy::disallowed_methods)]
 #[component]
 fn App() -> Element {
     // Global state — one Signal shared across all screens via props.
@@ -119,15 +118,20 @@ fn App() -> Element {
 
     let screen = state.read().screen.clone();
 
-    rsx! {
-        div { style: "background:var(--bg);color:var(--fg);height:100vh;overflow:hidden;",
-            match screen {
-                AppScreen::Setup    => rsx! { SetupScreen    { state } },
-                AppScreen::Analysis => rsx! { AnalysisScreen { state } },
-                AppScreen::Strategy => rsx! { StrategyScreen { state } },
-                AppScreen::Preview  => rsx! { PreviewScreen  { state } },
-                AppScreen::Import   => rsx! { ImportScreen   { state } },
-                AppScreen::Resume   => rsx! { ResumeScreen   { state } },
+    // rsx! macro expansion triggers a disallowed_methods false positive (no unwrap() below) —
+    // scoped to this block only, so a real unwrap() in the state/coroutine logic above still errors.
+    #[allow(clippy::disallowed_methods)]
+    {
+        rsx! {
+            div { style: "background:var(--bg);color:var(--fg);height:100vh;overflow:hidden;",
+                match screen {
+                    AppScreen::Setup    => rsx! { SetupScreen    { state } },
+                    AppScreen::Analysis => rsx! { AnalysisScreen { state } },
+                    AppScreen::Strategy => rsx! { StrategyScreen { state } },
+                    AppScreen::Preview  => rsx! { PreviewScreen  { state } },
+                    AppScreen::Import   => rsx! { ImportScreen   { state } },
+                    AppScreen::Resume   => rsx! { ResumeScreen   { state } },
+                }
             }
         }
     }
