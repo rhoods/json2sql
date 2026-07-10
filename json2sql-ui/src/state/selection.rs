@@ -75,8 +75,7 @@ mod tests {
     // --- apply_click ---
 
     fn schema_with_selection(selected: impl IntoIterator<Item = usize>, last: usize) -> SchemaState {
-        let mut s = SchemaState::default();
-        s.selected_table_indices = selected.into_iter().collect();
+        let mut s = SchemaState { selected_table_indices: selected.into_iter().collect(), ..Default::default() };
         s.last_selected_idx = last;
         s
     }
@@ -156,7 +155,7 @@ mod tests {
 
     fn make_schema(name: &str, parent: Option<&str>) -> TableSchema {
         let mut s = TableSchema::new(
-            name.to_string(), vec![name.to_string()], if parent.is_some() { 1 } else { 0 },
+            name.to_string(), vec![name.to_string()], usize::from(parent.is_some()),
         );
         s.parent_table = parent.map(str::to_string);
         s

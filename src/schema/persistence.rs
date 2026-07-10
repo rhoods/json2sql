@@ -68,6 +68,7 @@ pub fn write_snapshot(snapshot: &SchemaSnapshot, path: &Path, atomic: bool) -> R
 /// Save a Pass 1 result to a JSON file. `detected_format` must be the format
 /// returned by `JsonReader::open` during pass1 — it is always known after a fresh run.
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)] // each param is a distinct snapshot field, mirrors SchemaSnapshot's own shape
 pub fn save(
     schemas: &[TableSchema],
     total_rows: u64,
@@ -95,6 +96,7 @@ pub fn save(
 /// Save a schema snapshot including user strategy overrides.
 /// `detected_format` must be the format detected during pass1 — always known at IHM save time.
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)] // each param is a distinct snapshot field, mirrors SchemaSnapshot's own shape
 pub fn save_with_overrides(
     schemas: &[TableSchema],
     total_rows: u64,
@@ -213,9 +215,9 @@ mod tests {
 
         let err = load(tmp.path()).err().expect("expected an error for v1 snapshot");
         let msg = err.to_string();
-        assert!(msg.contains("v1"), "error should mention v1, got: {}", msg);
+        assert!(msg.contains("v1"), "error should mention v1, got: {msg}");
         assert!(msg.contains("Pass 1") || msg.contains("re-run") || msg.contains("regenerate"),
-            "error should tell user to re-run Pass 1, got: {}", msg);
+            "error should tell user to re-run Pass 1, got: {msg}");
     }
 
     #[test]

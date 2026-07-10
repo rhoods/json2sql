@@ -91,7 +91,7 @@ impl RowFlags {
             else if is_routing { ("muted", "ROUTE") }
             else if is_overflow { ("warn", "JSONB ⚠") }
             else if let Some(ov) = ctx.overrides.get(&table.name) { user_override_badge(ov) }
-            else { strategy_badge(&*effective) };
+            else { strategy_badge(&effective) };
         Self { is_routing, is_absorbed, is_cascaded_skip, has_warn, badge_cls, badge_lbl }
     }
 }

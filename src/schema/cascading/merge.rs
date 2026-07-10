@@ -203,7 +203,7 @@ mod tests {
         let r = build_sibling_collapse_from_siblings(&schemas, &[1, 2], "img_key").unwrap();
         assert_eq!(r.parent_name, "products_images");
         assert!(matches!(r.strategy, InferredStrategy::SiblingCollapse(_)));
-        let mut absorbed = r.absorbed_names.clone();
+        let mut absorbed = r.absorbed_names;
         absorbed.sort();
         assert_eq!(absorbed, vec!["products_images_back", "products_images_front"]);
     }
@@ -301,7 +301,7 @@ mod tests {
             make_sibling("x_c", "x", &["v"]),
         ];
         let r = build_sibling_collapse_from_siblings(&schemas, &[1, 2, 3], "key").unwrap();
-        let mut absorbed = r.absorbed_names.clone();
+        let mut absorbed = r.absorbed_names;
         absorbed.sort();
         assert_eq!(absorbed, vec!["x_a", "x_b", "x_c"]);
     }

@@ -38,19 +38,19 @@ async fn test_override_type_valid() {
 
         // score IS NOT NULL pour les 3 lignes : total_anomalies()==0 ne détecte pas un NULL silencieux.
         let not_null_count: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{}\".\"people\" WHERE score IS NOT NULL", schema), &[])
+            &format!("SELECT COUNT(*) FROM \"{schema}\".\"people\" WHERE score IS NOT NULL"), &[])
             .await.unwrap().get(0);
         assert_eq!(not_null_count, 3, "score doit être NOT NULL pour les 3 lignes");
 
         // Valeurs exactes : float JSON → string, pas de représentation inattendue.
         for (name, expected_score) in [("Alice", "9.5"), ("Bob", "7.2"), ("Charlie", "8.8")] {
             let row = client.query_opt(
-                &format!("SELECT score FROM \"{}\".\"people\" WHERE name = '{}'", schema, name), &[])
+                &format!("SELECT score FROM \"{schema}\".\"people\" WHERE name = '{name}'"), &[])
                 .await.unwrap()
-                .unwrap_or_else(|| panic!("ligne introuvable pour {}", name));
+                .unwrap_or_else(|| panic!("ligne introuvable pour {name}"));
             let score: Option<String> = row.get("score");
             assert_eq!(score.as_deref(), Some(expected_score),
-                "score de {} doit être '{}', obtenu {:?}", name, expected_score, score);
+                "score de {name} doit être '{expected_score}', obtenu {score:?}");
         }
 
         // Type DDL réel via pg_catalog.
@@ -62,7 +62,7 @@ async fn test_override_type_valid() {
         let row = client.query_opt(type_sql, &[&schema]).await.unwrap()
             .expect("colonne 'score' introuvable dans pg_attribute — vérifier le naming sanitizer");
         let pg_type: String = row.get(0);
-        assert_eq!(pg_type, "text", "score doit être TEXT après override, obtenu: {}", pg_type);
+        assert_eq!(pg_type, "text", "score doit être TEXT après override, obtenu: {pg_type}");
     }).await;
 }
 
@@ -110,7 +110,7 @@ async fn test_override_bad() {
         let row = client.query_opt(type_sql, &[&schema]).await.unwrap()
             .expect("colonne 'score' introuvable dans pg_attribute — l'override DDL n'a pas été appliqué");
         let pg_type: String = row.get(0);
-        assert_eq!(pg_type, "integer", "score doit être INTEGER en base, obtenu: {}", pg_type);
+        assert_eq!(pg_type, "integer", "score doit être INTEGER en base, obtenu: {pg_type}");
 
         let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("people", &schema), None)
             .await.unwrap();
@@ -134,13 +134,13 @@ async fn test_override_bad() {
 
         // Coerceur strict : score IS NULL pour les 3 lignes (pas de trunc silencieux 9.5 → 9).
         let null_count: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{}\".\"people\" WHERE score IS NULL", schema), &[])
+            &format!("SELECT COUNT(*) FROM \"{schema}\".\"people\" WHERE score IS NULL"), &[])
             .await.unwrap().get(0);
-        assert_eq!(null_count, 3, "score doit être NULL pour les 3 lignes, obtenu {} NULL", null_count);
+        assert_eq!(null_count, 3, "score doit être NULL pour les 3 lignes, obtenu {null_count} NULL");
 
         // L'override sur score ne corrompt pas les colonnes adjacentes.
         let alice_row = client
-            .query_opt(&format!("SELECT name FROM \"{}\".\"people\" WHERE name = 'Alice'", schema), &[])
+            .query_opt(&format!("SELECT name FROM \"{schema}\".\"people\" WHERE name = 'Alice'"), &[])
             .await.unwrap()
             .expect("ligne Alice introuvable — l'override a peut-être corrompu la table");
         assert_eq!(alice_row.get::<_, String>("name"), "Alice");
@@ -199,10 +199,9 @@ async fn test_override_strategy_pivot_flat_path_unchanged() {
 
         let alice_city: String = client.query_one(
             &format!(
-                "SELECT a.value FROM \"{s}\".\"people_address\" a \
-                 JOIN \"{s}\".\"people\" p ON a.j2s_people_id = p.j2s_id \
+                "SELECT a.value FROM \"{schema}\".\"people_address\" a \
+                 JOIN \"{schema}\".\"people\" p ON a.j2s_people_id = p.j2s_id \
                  WHERE p.name = 'Alice' AND a.key = 'city'",
-                s = schema,
             ),
             &[],
         ).await.unwrap().get(0);

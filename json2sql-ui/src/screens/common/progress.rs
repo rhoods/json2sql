@@ -32,19 +32,24 @@ pub const fn progress_bar_class(done: bool, pct: u32) -> &'static str {
 #[component]
 pub fn ProgressBar(pct: u32, done: bool, label: String, phase: String) -> Element {
     let cls = progress_bar_class(done, pct);
-    rsx! {
-        div {
-            div { style: "display:flex;align-items:center;gap:8px;margin-bottom:4px;",
-                span { style: "font-size:var(--fs-xs);color:var(--fg-3);font-family:'JetBrains Mono',monospace;min-width:32px;",
-                    "{pct}%"
+    // rsx! macro expansion triggers a disallowed_methods false positive (no unwrap() below) —
+    // scoped to this block only, same pattern as main.rs:App().
+    #[allow(clippy::disallowed_methods)]
+    {
+        rsx! {
+            div {
+                div { style: "display:flex;align-items:center;gap:8px;margin-bottom:4px;",
+                    span { style: "font-size:var(--fs-xs);color:var(--fg-3);font-family:'JetBrains Mono',monospace;min-width:32px;",
+                        "{pct}%"
+                    }
+                    span { style: "font-size:var(--fs-xs);color:var(--fg-2);font-weight:600;", "{phase}" }
                 }
-                span { style: "font-size:var(--fs-xs);color:var(--fg-2);font-weight:600;", "{phase}" }
-            }
-            div { class: "{cls}",
-                i { style: "width:{pct}%;", "" }
-            }
-            span { style: "font-size:var(--fs-xs);color:var(--fg-3);font-family:'JetBrains Mono',monospace;",
-                "{label}"
+                div { class: "{cls}",
+                    i { style: "width:{pct}%;", "" }
+                }
+                span { style: "font-size:var(--fs-xs);color:var(--fg-3);font-family:'JetBrains Mono',monospace;",
+                    "{label}"
+                }
             }
         }
     }

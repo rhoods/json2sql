@@ -389,7 +389,7 @@ mod tests {
         schema
     }
 
-    /// write_root_jsonb must serialize the full object as valid JSONB.
+    /// `write_root_jsonb` must serialize the full object as valid JSONB.
     /// Guards against regressions on the no-clone serialization path.
     #[test]
     fn write_root_jsonb_produces_valid_json_blob() {
@@ -417,7 +417,7 @@ mod tests {
 
         // Row format: uuid\tJSON\n — extract the JSONB column
         let row = std::str::from_utf8(&rows[0]).unwrap();
-        let json_part = row.splitn(2, '\t').nth(1).unwrap().trim_end_matches('\n');
+        let json_part = row.split_once('\t').unwrap().1.trim_end_matches('\n');
         let v: Value = serde_json::from_str(json_part).expect("JSONB blob must be valid JSON");
         assert_eq!(v["name"], "Widget");
         assert_eq!(v["count"], 3);

@@ -21,7 +21,7 @@ use crate::io::progress_event::{ProgressEvent, ProgressTx};
 
 use super::config;
 
-/// Returns all table_ids with a non-empty pending buffer, in arbitrary order.
+/// Returns all `table_ids` with a non-empty pending buffer, in arbitrary order.
 /// Used during RAM-pressure flushes to drain every accumulated table in one tick.
 fn find_all_nonempty_buffers(buffers: &HashMap<String, bytes::BytesMut>) -> Vec<String> {
     buffers.iter()
@@ -36,10 +36,10 @@ fn find_all_nonempty_buffers(buffers: &HashMap<String, bytes::BytesMut>) -> Vec<
 /// when flushing child tables before their parents.
 fn topological_drain_order(topo_order: &[String], buffers: &HashMap<String, bytes::BytesMut>) -> Vec<String> {
     let mut result: Vec<String> = topo_order.iter()
-        .filter(|t| buffers.get(*t).map_or(false, |b| !b.is_empty()))
+        .filter(|t| buffers.get(*t).is_some_and(|b| !b.is_empty()))
         .cloned()
         .collect();
-    let in_topo: std::collections::HashSet<&str> = topo_order.iter().map(|s| s.as_str()).collect();
+    let in_topo: std::collections::HashSet<&str> = topo_order.iter().map(std::string::String::as_str).collect();
     for (k, b) in buffers {
         if !b.is_empty() && !in_topo.contains(k.as_str()) {
             result.push(k.clone());
@@ -49,6 +49,7 @@ fn topological_drain_order(topo_order: &[String], buffers: &HashMap<String, byte
 }
 
 /// RAM usage ratio in [0.0, 1.0]. Returns 0.0 when total memory is zero.
+#[allow(clippy::cast_precision_loss)] // byte counts fit well within f64's 52-bit mantissa for any realistic RAM size
 fn ram_used_ratio(available: u64, total: u64) -> f64 {
     if total == 0 { return 0.0; }
     total.saturating_sub(available) as f64 / total as f64
@@ -56,15 +57,13 @@ fn ram_used_ratio(available: u64, total: u64) -> f64 {
 
 fn format_flusher_pause_log(total_mb: u64, high_mb: u64) -> String {
     format!(
-        "[FLUSHER] {} MB in buffers > {} MB threshold — workers paused",
-        total_mb, high_mb
+        "[FLUSHER] {total_mb} MB in buffers > {high_mb} MB threshold — workers paused"
     )
 }
 
 fn format_flusher_resume_log(total_mb: u64, low_mb: u64) -> String {
     format!(
-        "[FLUSHER] {} MB in buffers < {} MB threshold — workers resumed",
-        total_mb, low_mb
+        "[FLUSHER] {total_mb} MB in buffers < {low_mb} MB threshold — workers resumed"
     )
 }
 
@@ -88,9 +87,10 @@ fn find_largest_buffer(buffers: &HashMap<String, bytes::BytesMut>) -> Option<Str
         .map(|(k, _)| k.clone())
 }
 
-/// Flush one table's pending buffer to PostgreSQL and update accounting.
+/// Flush one table's pending buffer to `PostgreSQL` and update accounting.
 /// Removes the table from `buffers` and `pending_rows`, adds to `total_rows`.
 /// Sets `error_flag` and returns `Err` on PG failure.
+#[allow(clippy::too_many_arguments)] // each param is distinct flush/accounting state, not groupable without an artificial struct
 async fn flush_table_to_pg(
     table_id: &str,
     buffers: &mut HashMap<String, bytes::BytesMut>,
@@ -130,16 +130,18 @@ async fn flush_table_to_pg(
 }
 
 /// Concurrent flusher task: receives `(table_id, bytes, row_count)` batches from workers,
-/// accumulates per-table `BytesMut` buffers, and COPYs to PostgreSQL when:
+/// accumulates per-table `BytesMut` buffers, and COPYs to `PostgreSQL` when:
 /// - a table's buffer exceeds `mem_flush_threshold_bytes`, or
 /// - the flusher's own total buffered bytes exceed `DEFAULT_HIGH_FLUSHER_BYTES` (flushes
 ///   the largest table and pauses workers until buffers drop below `DEFAULT_LOW_FLUSHER_BYTES`).
 ///
-/// Unlike a system-RAM-based signal, the total_buffered counter is unaffected by PostgreSQL's
+/// Unlike a system-RAM-based signal, the `total_buffered` counter is unaffected by `PostgreSQL`'s
 /// buffer cache growth, which would otherwise keep `available_memory()` permanently above any
 /// watermark during bulk imports.
 ///
 /// Returns total row count per table after draining all remaining buffers.
+#[allow(clippy::too_many_lines)] // tokio::select! event loop over rx; do not split — would move rx across fn boundaries
+#[allow(clippy::too_many_arguments)] // each param is distinct flusher config/state, not groupable without an artificial struct
 pub(super) async fn run_flusher(
     mut rx: tokio::sync::mpsc::Receiver<(String, bytes::Bytes, u64)>,
     copy_sql_map: HashMap<String, String>,
@@ -187,7 +189,7 @@ pub(super) async fn run_flusher(
                 // avoids unnecessary small COPYs while still making meaningful progress.
                 if pause_flag.load(Ordering::Acquire) {
                     let mut candidates = find_all_nonempty_buffers(&buffers);
-                    candidates.sort_by_key(|k| std::cmp::Reverse(buffers.get(k).map_or(0, |b| b.len())));
+                    candidates.sort_by_key(|k| std::cmp::Reverse(buffers.get(k).map_or(0, bytes::BytesMut::len)));
                     for table_id in candidates {
                         if total_buffered < DEFAULT_LOW_FLUSHER_BYTES { break; }
                         let pre_flush = buffers.get(&table_id).map_or(0, |b| b.len() as u64);
@@ -291,7 +293,7 @@ pub(super) async fn run_flusher(
 
 /// Flusher's own in-process buffer high-water mark (512 MiB).
 /// Workers are paused when the flusher's total buffered bytes exceeds this.
-/// Independent of system RAM — unaffected by PostgreSQL's buffer cache.
+/// Independent of system RAM — unaffected by `PostgreSQL`'s buffer cache.
 const DEFAULT_HIGH_FLUSHER_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Flusher's own in-process buffer low-water mark (128 MiB).
@@ -397,7 +399,7 @@ mod tests {
         big.extend_from_slice(&vec![0u8; 1000]);
         buffers.insert("big".to_string(), big);
         let mut small = bytes::BytesMut::new();
-        small.extend_from_slice(&vec![0u8; 100]);
+        small.extend_from_slice(&[0u8; 100]);
         buffers.insert("small".to_string(), small);
         assert_eq!(super::find_largest_buffer(&buffers), Some("big".to_string()));
     }

@@ -169,7 +169,7 @@ pub enum InferredStrategy {
     /// EAV pivot: rotates dynamic keys into rows — `(key TEXT, value <type>)` instead of one column per key.
     ///
     /// Trigger: more than `wide_column_threshold` distinct keys (default **100**, CLI flag
-    /// `--wide-column-threshold`), all values share a compatible PostgreSQL type (detected by
+    /// `--wide-column-threshold`), all values share a compatible `PostgreSQL` type (detected by
     /// `suggest_wide_strategy`: if values mix TEXT + FLOAT + BOOL → `Jsonb` instead).
     ///
     /// JSON input (3 products, each with the same nutrient keys):
@@ -194,7 +194,7 @@ pub enum InferredStrategy {
     /// Trigger (two independent paths):
     /// - Wide table (> `wide_column_threshold`, default **100**) with heterogeneous value types
     ///   (e.g. INTEGER + TEXT + BOOL in the same object) → `Pivot` is not possible.
-    /// - Any table exceeding the PostgreSQL hard limit of **1600** total columns after `finalize()`
+    /// - Any table exceeding the `PostgreSQL` hard limit of **1600** total columns after `finalize()`
     ///   → forced by `apply_column_limit_guard` regardless of the wide threshold.
     ///
     /// JSON input:
@@ -250,7 +250,7 @@ pub enum InferredStrategy {
     /// } }
     /// ```
     /// Pass 1 creates 3 sibling tables: `images_front`, `images_back`, `images_top`.
-    /// SiblingCollapse merges them — columns are the **union** of all siblings, missing fields → NULL:
+    /// `SiblingCollapse` merges them — columns are the **union** of all siblings, missing fields → NULL:
     ///
     /// ```text
     /// CREATE TABLE images (
@@ -279,7 +279,7 @@ pub enum InferredStrategy {
     ///     "front": {"url":"c.jpg","size":950 }
     /// } }
     /// ```
-    /// Pass 1 creates 3 siblings. SiblingCollapseMulti splits them into 2 synthetic tables:
+    /// Pass 1 creates 3 siblings. `SiblingCollapseMulti` splits them into 2 synthetic tables:
     ///
     /// ```text
     /// -- Parent: routing only, no data rows
@@ -315,7 +315,7 @@ pub enum InferredStrategy {
     /// - `rare_threshold` ≤ freq < `stable_threshold`    → EAV row in `{name}_wide`
     /// - freq < `rare_threshold`                          → dropped (anomaly report)
     ///
-    /// JSON input (1000 products; "name" in 100% rows, "desc" in 60%, "promo_code" in 0.3%):
+    /// JSON input (1000 products; "name" in 100% rows, "desc" in 60%, "`promo_code`" in 0.3%):
     /// ```text
     /// {"name":"Nutella","desc":"Chocolate spread","promo_code":"SAVE10", ...}
     /// {"name":"Oreo",   "desc":"Cookies",                               ...}
@@ -472,16 +472,16 @@ pub enum UserOverride {
 impl From<&UserOverride> for InferredStrategy {
     fn from(ov: &UserOverride) -> Self {
         match ov {
-            UserOverride::Columns                           => InferredStrategy::Columns,
-            UserOverride::Pivot                             => InferredStrategy::Pivot,
-            UserOverride::Jsonb                             => InferredStrategy::Jsonb,
-            UserOverride::Skip                              => InferredStrategy::Ignore,
-            UserOverride::JsonbFlatten                      => InferredStrategy::JsonbFlatten,
-            UserOverride::Flatten { prefix, max_depth }     => InferredStrategy::Flatten {
+            UserOverride::Columns                           => Self::Columns,
+            UserOverride::Pivot                             => Self::Pivot,
+            UserOverride::Jsonb                             => Self::Jsonb,
+            UserOverride::Skip                              => Self::Ignore,
+            UserOverride::JsonbFlatten                      => Self::JsonbFlatten,
+            UserOverride::Flatten { prefix, max_depth }     => Self::Flatten {
                 prefix: prefix.clone(),
                 max_depth: *max_depth,
             },
-            UserOverride::NormalizeDynamicKeys { id_column } => InferredStrategy::NormalizeDynamicKeys {
+            UserOverride::NormalizeDynamicKeys { id_column } => Self::NormalizeDynamicKeys {
                 id_column: id_column.clone(),
             },
         }
@@ -617,13 +617,13 @@ impl TableSchema {
         }
     }
 
-    /// Returns the effective strategy applying priority: ui_override > toml_override > inferred_strategy.
+    /// Returns the effective strategy applying priority: `ui_override` > `toml_override` > `inferred_strategy`.
     ///
     /// `Flatten`/`NormalizeDynamicKeys` carry their `String` payload as `Arc<str>`, so the
     /// `Cow::Owned` clone below is a refcount bump, not a heap allocation — cheap enough to
     /// compute fresh on every call in the Pass 2 hot path, with no cache to keep in sync.
     #[must_use]
-    pub fn effective_strategy(&self) -> std::borrow::Cow<InferredStrategy> {
+    pub fn effective_strategy(&self) -> std::borrow::Cow<'_, InferredStrategy> {
         if let Some(ov) = &self.ui_override {
             return std::borrow::Cow::Owned(InferredStrategy::from(ov));
         }
@@ -646,7 +646,7 @@ impl TableSchema {
 
     /// Current config.toml-level strategy override, if any.
     /// Only read from tests today (production code checks `ui_override()` only) — kept `pub`
-    /// for API symmetry with `set_toml_override()`/`ui_override()`. `main.rs` denies dead_code
+    /// for API symmetry with `set_toml_override()`/`ui_override()`. `main.rs` denies `dead_code`
     /// crate-wide, and the bin target doesn't see `#[cfg(test)]` call sites, hence the `allow`.
     #[must_use]
     #[allow(dead_code)]
@@ -791,8 +791,8 @@ mod tests {
 
         let json = serde_json::to_string(&s).unwrap();
         let back: TableSchema = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.child_routes.get("k1").map(|s| s.as_str()), Some("root_pivot_k1"));
-        assert_eq!(back.child_routes.get("k2").map(|s| s.as_str()), Some("root_pivot_k2"));
+        assert_eq!(back.child_routes.get("k1").map(std::string::String::as_str), Some("root_pivot_k1"));
+        assert_eq!(back.child_routes.get("k2").map(std::string::String::as_str), Some("root_pivot_k2"));
     }
 
     #[test]
@@ -988,33 +988,33 @@ mod tests {
                 let mut ui_then_toml = make_schema("t");
                 ui_then_toml.inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column: "k".into() };
                 ui_then_toml.set_ui_override(ui.clone());
-                assert_expected_effective_strategy(&ui_then_toml, ui, &None);
+                assert_expected_effective_strategy(&ui_then_toml, ui.as_ref(), None);
                 ui_then_toml.set_toml_override(toml.clone());
-                assert_expected_effective_strategy(&ui_then_toml, ui, toml);
+                assert_expected_effective_strategy(&ui_then_toml, ui.as_ref(), toml.as_ref());
 
                 let mut toml_then_ui = make_schema("t");
                 toml_then_ui.inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column: "k".into() };
                 toml_then_ui.set_toml_override(toml.clone());
-                assert_expected_effective_strategy(&toml_then_ui, &None, toml);
+                assert_expected_effective_strategy(&toml_then_ui, None, toml.as_ref());
                 toml_then_ui.set_ui_override(ui.clone());
-                assert_expected_effective_strategy(&toml_then_ui, ui, toml);
+                assert_expected_effective_strategy(&toml_then_ui, ui.as_ref(), toml.as_ref());
 
                 // Clearing back to None must also recompute correctly, in both orders.
                 toml_then_ui.set_ui_override(None);
-                assert_expected_effective_strategy(&toml_then_ui, &None, toml);
+                assert_expected_effective_strategy(&toml_then_ui, None, toml.as_ref());
                 toml_then_ui.set_toml_override(None);
-                assert_expected_effective_strategy(&toml_then_ui, &None, &None);
+                assert_expected_effective_strategy(&toml_then_ui, None, None);
             }
         }
     }
 
     /// Helper for `effective_strategy_never_diverges_across_setter_sequences`: computes the
-    /// expected strategy from the same ui_override > toml_override > inferred_strategy priority
+    /// expected strategy from the same `ui_override` > `toml_override` > `inferred_strategy` priority
     /// documented on `effective_strategy()`.
     fn assert_expected_effective_strategy(
         s: &TableSchema,
-        ui: &Option<UserOverride>,
-        toml: &Option<UserOverride>,
+        ui: Option<&UserOverride>,
+        toml: Option<&UserOverride>,
     ) {
         let expected = match (ui, toml) {
             (Some(ov), _) | (None, Some(ov)) => InferredStrategy::from(ov),

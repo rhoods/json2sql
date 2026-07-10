@@ -163,7 +163,7 @@ pub(super) async fn dispatch_loop(
             if limit.is_some_and(|n| rows_processed >= n) { break 'dispatch; }
             robin = (robin + 1) % parallel;
             update_row_progress(progress, progress_tx, rows_processed, reader.bytes_read(), total_bytes);
-            if verbose && rows_processed % 10_000 == 0 {
+            if verbose && rows_processed.is_multiple_of(10_000) {
                 eprintln!("[DISPATCH] {} records, {} MB scanned", rows_processed, reader.bytes_read() / 1024 / 1024);
             }
         }

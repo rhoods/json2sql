@@ -206,6 +206,7 @@ mod tests {
 
 
     #[test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn build_multi_group_entry_propagates_sum_of_absorbed_row_counts() {
         let mut parent = make_parent("p");
         parent.row_count = 0;

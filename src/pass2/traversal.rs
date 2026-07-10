@@ -346,6 +346,7 @@ struct SiblingCollapseRowInput<'a> {
     sibling_schema: &'a SiblingSchema,
 }
 
+#[allow(clippy::too_many_lines)] // single per-column dispatch loop, one responsibility (build one row)
 fn write_keyed_pivot_columns<A: AnomalyCollect>(
     builder: &mut RowBuilder,
     anomalies: &mut A,
@@ -603,6 +604,7 @@ fn find_group_for_key(groups: &[SiblingGroup], key: &str) -> Option<usize> {
 }
 
 #[allow(clippy::cast_possible_wrap)] // array index never reaches i64::MAX
+#[allow(clippy::too_many_lines)] // single per-element dispatch loop, one responsibility
 pub(super) fn insert_array<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -714,7 +716,7 @@ mod tests {
         ColumnSchema { name: "j2s_order".to_string(), original_name: "j2s_order".to_string(), pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false }
     }
 
-    /// Pivot schema: j2s_id, j2s_{parent}_id, key TEXT, value TEXT
+    /// Pivot schema: `j2s_id`, j2s_{parent}_id, key TEXT, value TEXT
     fn make_pivot_schema(name: &str, parent: &str) -> TableSchema {
         let mut s = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
         s.inferred_strategy = InferredStrategy::Pivot;
@@ -722,7 +724,7 @@ mod tests {
         s
     }
 
-    /// Jsonb schema: j2s_id, j2s_{parent}_id, data TEXT (JSONB stored as text in COPY)
+    /// Jsonb schema: `j2s_id`, j2s_{parent}_id, data TEXT (JSONB stored as text in COPY)
     fn make_jsonb_schema(name: &str, parent: &str) -> TableSchema {
         let mut s = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
         s.inferred_strategy = InferredStrategy::Jsonb;
@@ -730,7 +732,7 @@ mod tests {
         s
     }
 
-    /// Jsonb schema for an `ObjectArray`-parent table: j2s_id, j2s_{parent}_id, j2s_order, data.
+    /// Jsonb schema for an `ObjectArray`-parent table: `j2s_id`, j2s_{parent}_id, `j2s_order`, data.
     fn make_jsonb_object_array_schema(name: &str, parent: &str) -> TableSchema {
         let mut s = make_jsonb_schema(name, parent);
         s.child_kind = Some(ChildKind::ObjectArray);
@@ -1136,7 +1138,7 @@ mod tests {
 
     fn make_routing_schema(name: &str, parent: &str, path: &[&str]) -> crate::schema::table_schema::TableSchema {
         let mut s = crate::schema::table_schema::TableSchema::new(
-            name.to_string(), path.iter().map(|p| p.to_string()).collect(), 1
+            name.to_string(), path.iter().map(std::string::ToString::to_string).collect(), 1
         );
         s.columns = vec![generated_id(), parent_fk(parent)];
         s
@@ -1149,7 +1151,7 @@ mod tests {
             sibling_schema: SiblingSchema { key_col_name: key_col.to_string(), key_shape: KeyShape::Mixed, array_children: false },
             absorbed_names: vec![],
             path_segment: path_segment.to_string(),
-            absorbed_path_segments: absorbed.iter().map(|s| s.to_string()).collect(),
+            absorbed_path_segments: absorbed.iter().map(std::string::ToString::to_string).collect(),
         }
     }
 
@@ -1278,6 +1280,7 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
+    #[allow(clippy::similar_names)] // pivot_a_schema/pivot_b_schema deliberately parallel, testing symmetric groups
     fn route_multi_collapse_children_routes_both_groups_without_routing_row() {
         // Verifies that route_multi_collapse_children uses the supplied routing_id
         // (no emit_routing_row) and correctly distributes keys to each pivot group.

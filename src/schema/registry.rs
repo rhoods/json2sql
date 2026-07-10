@@ -335,10 +335,10 @@ mod tests {
         for i in 0..10_000usize {
             let mut genome = serde_json::Map::new();
             genome.insert(
-                format!("nc_{:05}", i),
+                format!("nc_{i:05}"),
                 json!({ "is_circular": false }),
             );
-            genomes.insert(format!("gcf_{:05}", i), Value::Object(genome));
+            genomes.insert(format!("gcf_{i:05}"), Value::Object(genome));
         }
         let root = json!({ "id": 1, "genomes": Value::Object(genomes) });
 
@@ -369,7 +369,7 @@ mod tests {
         );
     }
 
-    /// 500 homogeneous siblings (identical schemas) → all similar → collapsed into SiblingCollapse.
+    /// 500 homogeneous siblings (identical schemas) → all similar → collapsed into `SiblingCollapse`.
     #[test]
     fn test_jaccard_large_homogeneous_collapses() {
         let mut reg = SchemaRegistry::new(RegistryConfig { sibling_jaccard: 0.0, ..Default::default() });
@@ -377,7 +377,7 @@ mod tests {
         let mut langs = serde_json::Map::new();
         for i in 0..500usize {
             langs.insert(
-                format!("lang_{:03}", i),
+                format!("lang_{i:03}"),
                 json!({ "name": "foo", "value": 42 }),
             );
         }
@@ -403,7 +403,7 @@ mod tests {
         let mut items = serde_json::Map::new();
         // 299 siblings with {a, b, c}
         for i in 0..299usize {
-            items.insert(format!("item_{:03}", i), json!({ "a": 1, "b": 2, "c": 3 }));
+            items.insert(format!("item_{i:03}"), json!({ "a": 1, "b": 2, "c": 3 }));
         }
         // 1 outlier with completely different columns {x, y, z}
         items.insert("item_outlier".to_string(), json!({ "x": 10, "y": 20, "z": 30 }));
@@ -426,10 +426,11 @@ mod tests {
         );
     }
 
-    /// Pure-container check must short-circuit BEFORE HashSet construction.
-    /// Verified via direct call to pairwise_jaccard_min with schemas that have
-    /// only generated columns (data_columns() yields nothing).
+    /// Pure-container check must short-circuit BEFORE `HashSet` construction.
+    /// Verified via direct call to `pairwise_jaccard_min` with schemas that have
+    /// only generated columns (`data_columns()` yields nothing).
     #[test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn test_jaccard_pure_containers_early_exit() {
         use crate::schema::table_schema::ColumnSchema;
 
@@ -437,7 +438,7 @@ mod tests {
         let schemas: Vec<TableSchema> = (0..5)
             .map(|i| {
                 let mut s = TableSchema::new(
-                    format!("s{}", i),
+                    format!("s{i}"),
                     vec![format!("s{}", i)],
                     1,
                 );
@@ -454,7 +455,7 @@ mod tests {
 
         // Mixed: 4 pure containers + 1 with a real data column → must NOT return 1.0
         // (Jaccard between the data sibling and each pure container = 0).
-        let mut schemas_mixed = schemas.clone();
+        let mut schemas_mixed = schemas;
         schemas_mixed[2].columns.push(ColumnSchema {
             name: "val".to_string(),
             original_name: "val".to_string(),
@@ -471,7 +472,7 @@ mod tests {
     }
 
     /// A JSON field name containing '.' must produce a child table at depth 1, not depth 2.
-    /// Without normalization, "root.v1.0" splits into path ["root","v1","0"] → depth 2,
+    /// Without normalization, "root.v1.0" splits into path `["root","v1","0"]` → depth 2,
     /// breaking topological sort and Pass 2 flush order.
     #[test]
     fn test_dotted_field_name_correct_depth() {
@@ -494,7 +495,7 @@ mod tests {
         );
     }
 
-    /// ObjectArray field with '.' in name must also produce correct depth.
+    /// `ObjectArray` field with '.' in name must also produce correct depth.
     #[test]
     fn test_dotted_field_name_array_correct_depth() {
         let mut reg = SchemaRegistry::new(RegistryConfig::default());
@@ -686,8 +687,8 @@ mod tests {
         }
         for i in 0..data_col_count {
             s.columns.push(ColumnSchema {
-                name: format!("col_{}", i),
-                original_name: format!("col_{}", i),
+                name: format!("col_{i}"),
+                original_name: format!("col_{i}"),
                 pg_type: PgType::Text,
                 not_null: false,
                 is_generated: false,
@@ -727,7 +728,7 @@ mod tests {
         // 1600 data + 1 generated = 1601 total → must be converted.
         let mut schemas2 = vec![make_wide_schema("t", None, PG_MAX_COLUMNS)];
         let warnings2 = apply_column_limit_guard(&mut schemas2);
-        assert_eq!(warnings2.len(), 1, "{} data cols (root) must trigger the guard", PG_MAX_COLUMNS);
+        assert_eq!(warnings2.len(), 1, "{PG_MAX_COLUMNS} data cols (root) must trigger the guard");
 
         // Child table has 2 generated cols (j2s_id + j2s_parent_id).
         // Max safe data cols = PG_MAX_COLUMNS - 2 = 1598.
@@ -851,10 +852,10 @@ mod tests {
     fn make_schema_with_cols(name: &str, parent: Option<&str>, cols: &[&str], depth: usize) -> TableSchema {
         let mut s = TableSchema::new(
             name.to_string(),
-            name.split('_').map(|p| p.to_string()).collect(),
+            name.split('_').map(std::string::ToString::to_string).collect(),
             depth,
         );
-        s.parent_table = parent.map(|p| p.to_string());
+        s.parent_table = parent.map(std::string::ToString::to_string);
         for col in cols {
             s.columns.push(ColumnSchema {
                 name: col.to_string(),
@@ -866,7 +867,7 @@ mod tests {
             });
         }
         // Set path.last() to the last segment for key lookups
-        s.path = name.split('_').map(|p| p.to_string()).collect();
+        s.path = name.split('_').map(std::string::ToString::to_string).collect();
         s
     }
 
@@ -954,7 +955,7 @@ mod tests {
 
     // ── Dot-in-key regression tests ──────────────────────────────────────────
 
-    /// A JSON object field named "foo.bar" must NOT be merged with "foo_bar".
+    /// A JSON object field named "foo.bar" must NOT be merged with "`foo_bar`".
     /// Both are scalar columns → they should be two distinct columns in root.
     #[test]
     fn dot_in_scalar_field_distinct_from_underscore() {
@@ -973,7 +974,7 @@ mod tests {
     }
 
     /// A field "foo.bar" that is an object must NOT be merged with a field
-    /// "foo_bar" that is also an object. They must produce two distinct child
+    /// "`foo_bar`" that is also an object. They must produce two distinct child
     /// tables, not one merged table.
     #[test]
     fn dot_in_object_field_creates_distinct_child_table() {
@@ -992,7 +993,7 @@ mod tests {
     // ── Sibling determinism ───────────────────────────────────────────────────
 
     /// Observing siblings in different order must produce the same schema names.
-    /// Catches non-determinism from par_iter() or HashMap iteration in the
+    /// Catches non-determinism from `par_iter()` or `HashMap` iteration in the
     /// sibling detection pipeline.
     #[test]
     fn sibling_detection_schema_names_are_deterministic() {
@@ -1018,7 +1019,7 @@ mod tests {
         assert_eq!(fwd, rev, "schema names must be identical regardless of observation order");
     }
 
-    /// With threshold=2, a pair of 2 identical siblings must be auto-merged into a SiblingCollapse.
+    /// With threshold=2, a pair of 2 identical siblings must be auto-merged into a `SiblingCollapse`.
     #[test]
     fn test_sibling_threshold_two_detects_pair() {
         let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
@@ -1053,7 +1054,7 @@ mod tests {
         );
     }
 
-    /// Non-mixed group with 2 disjoint sub-schemas → greedy clustering produces SiblingCollapseMulti.
+    /// Non-mixed group with 2 disjoint sub-schemas → greedy clustering produces `SiblingCollapseMulti`.
     /// Without clustering this would fall through (global pairwise Jaccard = 0).
     #[test]
     fn test_schema_clustering_non_mixed_two_groups() {
@@ -1109,15 +1110,16 @@ mod tests {
         }
     }
 
-    /// Post-pass: after the BFS cascade, Columns children of a SiblingCollapse parent that
+    /// Post-pass: after the BFS cascade, Columns children of a `SiblingCollapse` parent that
     /// are numerous enough and sufficiently similar must be fused into a sub-pivot.
     ///
     /// Structure: `selected.{type}.{lang} = {imgid, rev}`
-    /// Wave 0: selected absorbs {front, nutrition} → SiblingCollapse (key = image type).
+    /// Wave 0: selected absorbs {front, nutrition} → `SiblingCollapse` (key = image type).
     /// Cascade wave 1: creates one T table per shared lang code
-    ///   (root_selected_fr, root_selected_en, root_selected_de).
-    /// Post-pass: those 3 Columns children of the SiblingCollapse → merged into root_selected_key.
+    ///   (`root_selected_fr`, `root_selected_en`, `root_selected_de`).
+    /// Post-pass: those 3 Columns children of the `SiblingCollapse` → merged into `root_selected_key`.
     #[test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn test_keyed_pivot_orphan_children_merged_by_post_pass() {
         let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
         let obj = json!({
@@ -1195,8 +1197,8 @@ mod tests {
         );
     }
 
-    /// ScalarArray siblings (≥ threshold) with identical value schemas must be merged into SiblingCollapse.
-    /// Concrete case: nova_groups_markers {"2": [...], "3": [...], "4": [...]} → parent becomes SiblingCollapse.
+    /// `ScalarArray` siblings (≥ threshold) with identical value schemas must be merged into `SiblingCollapse`.
+    /// Concrete case: `nova_groups_markers` {"2": [...], "3": [...], "4": [...]} → parent becomes `SiblingCollapse`.
     #[test]
     fn test_scalar_array_siblings_merged_keyed_pivot() {
         let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
@@ -1221,7 +1223,7 @@ mod tests {
         );
     }
 
-    /// A single ScalarArray child (below threshold=2) must NOT trigger a merge.
+    /// A single `ScalarArray` child (below threshold=2) must NOT trigger a merge.
     #[test]
     fn test_scalar_array_single_child_not_merged() {
         let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });

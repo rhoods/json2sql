@@ -16,7 +16,7 @@ use crate::pass2::Pass2Config;
 use crate::schema::table_schema::TableSchema;
 
 /// Configuration sent by the UI to the worker via stdin (JSON).
-/// PostgreSQL password is NOT included — passed via `J2S_PG_PASSWORD` env var.
+/// `PostgreSQL` password is NOT included — passed via `J2S_PG_PASSWORD` env var.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkerConfig {
     pub source_file: PathBuf,

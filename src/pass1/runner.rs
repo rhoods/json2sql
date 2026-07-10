@@ -392,6 +392,7 @@ fn spawn_worker_threads(
 /// reading is done. Returns `Err` only for I/O errors opening the file; parse errors are
 /// returned as the `Option<J2sError>`.
 #[allow(clippy::needless_pass_by_value)] // tx is dropped at return to signal workers that reading is done
+#[allow(clippy::too_many_lines)] // streaming read+dispatch loop; do not split — extracting would move tx/rx across fn boundaries
 fn read_and_dispatch(
     path: &Path,
     tx: crossbeam_channel::Sender<(Option<String>, Vec<u8>)>,
@@ -521,9 +522,9 @@ mod tests {
 
     #[test]
     fn test_inspect_no_column_limit_guard() {
+        use crate::schema::table_schema::InferredStrategy;
         let path = fixture("users.jsonl");
         let result = run_inspect(&path, &inspect_config("users"), 10).unwrap();
-        use crate::schema::table_schema::InferredStrategy;
         assert!(
             result.schemas.iter().all(|s| !matches!(s.inferred_strategy, InferredStrategy::Jsonb)),
             "column limit guard must not be applied in inspect mode"
@@ -531,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation)] // small fixture (3 rows), never near usize::MAX
     fn test_inspect_sampled_objects_count_matches_rows_scanned() {
         let path = fixture("users.jsonl"); // 3 rows
         let result = run_inspect(&path, &inspect_config("users"), 2).unwrap();
@@ -565,7 +567,7 @@ mod tests {
 
     // ── run_parallel tests ──────────────────────────────────────────────────
 
-    fn run_parallel_default(path: &std::path::PathBuf, workers: usize) -> crate::error::Result<Pass1Result> {
+    fn run_parallel_default(path: &std::path::Path, workers: usize) -> crate::error::Result<Pass1Result> {
         run_parallel(
             path,
             &Pass1Config {
@@ -676,9 +678,9 @@ mod tests {
                 // With 4 workers and 8 bad elements, each worker sees ≥1 error.
                 // Aggregation must produce a message with ≥2 "root level" occurrences.
                 let count = msg.matches("root level").count();
-                assert!(count >= 2, "expected ≥2 errors aggregated in message, got {}: {}", count, msg);
+                assert!(count >= 2, "expected ≥2 errors aggregated in message, got {count}: {msg}");
             }
-            Err(e) => panic!("expected InvalidInput, got: {}", e),
+            Err(e) => panic!("expected InvalidInput, got: {e}"),
             Ok(_)  => panic!("expected Err"),
         }
     }
@@ -709,13 +711,14 @@ mod tests {
         );
         match result {
             Err(crate::error::J2sError::InvalidInput(msg)) =>
-                assert!(msg.contains("root level"), "error must mention root level: {}", msg),
-            Err(e) => panic!("expected InvalidInput, got: {}", e),
+                assert!(msg.contains("root level"), "error must mention root level: {msg}"),
+            Err(e) => panic!("expected InvalidInput, got: {e}"),
             Ok(_)  => panic!("expected Err for non-object root element"),
-        };
+        }
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // single test case, long due to verbose config struct construction
     fn test_parallel_worker_error_no_double_invalid_input_prefix() {
         use std::io::Write;
         let mut f = tempfile::NamedTempFile::new().unwrap();
@@ -769,7 +772,7 @@ mod tests {
 
     #[test]
     fn test_effective_workers_over_cap_is_clamped() {
-        let cap = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let cap = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         let (n, warn) = effective_workers(cap + 1000);
         assert_eq!(n, cap, "must be clamped to cap");
         assert_eq!(warn, Some(cap), "must report the cap when clamping");
@@ -915,7 +918,7 @@ mod tests {
 
     #[test]
     fn test_effective_workers_exactly_at_cap_no_warning() {
-        let cap = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let cap = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         let (n, warn) = effective_workers(cap);
         assert_eq!(n, cap);
         assert!(warn.is_none(), "exactly at cap must not warn");

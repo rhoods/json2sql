@@ -67,12 +67,13 @@ pub(super) struct WorkerDisklessConfig {
     pub(super) mem_flush_threshold: u64,
 }
 
-/// Diskless worker: local MemSink accumulation, sends batches to `run_flusher` via channel.
+/// Diskless worker: local `MemSink` accumulation, sends batches to `run_flusher` via channel.
 /// Checks `error_flag` each iteration (flusher fatal error) and yields on `pause_flag`
 /// (flusher buffer pressure). Workers spin without draining — flusher controls when to resume.
 /// For wrapper-format files, `key` carries the raw wrapper key and the worker resolves the
 /// correct root schema via `path_map`; for regular formats `key` is `None` and `root_schema`
 /// is used directly.
+#[allow(clippy::too_many_lines)] // event loop over rx; do not split — would move rx across fn boundaries
 pub(super) async fn run_worker_diskless(
     mut rx: tokio::sync::mpsc::Receiver<(Option<String>, Vec<u8>)>,
     mut sinks: HashMap<String, crate::db::copy_sink::MemSink>,
@@ -106,7 +107,7 @@ pub(super) async fn run_worker_diskless(
         process_worker_item_diskless(bytes, &mut sinks, &mut proxy, &flush_tx, &path_map, effective_root, mem_flush_threshold).await?;
     }
     // Final flush: drain remaining sink buffers
-    for (table_id, sink) in sinks.iter_mut() {
+    for (table_id, sink) in &mut sinks {
         if sink.buf.is_empty() { continue; }
         let chunk = std::mem::take(&mut sink.buf).freeze();
         let rows = std::mem::replace(&mut sink.row_count, 0);
@@ -135,10 +136,11 @@ mod tests {
     use crate::pass2::runner::test_support::make_schema_with_rows;
     use crate::schema::table_schema::TableSchema;
 
-    /// Verifies that the worker exits its pause spin when error_flag is set externally,
-    /// even if pause_flag is never cleared. This test FAILS on the old code (infinite spin)
-    /// and PASSES after the fix (spin checks error_flag).
+    /// Verifies that the worker exits its pause spin when `error_flag` is set externally,
+    /// even if `pause_flag` is never cleared. This test FAILS on the old code (infinite spin)
+    /// and PASSES after the fix (spin checks `error_flag`).
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     async fn worker_exits_pause_spin_when_error_flag_set_while_spinning() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -186,6 +188,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     async fn worker_returns_err_immediately_when_error_flag_preset() {
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
@@ -253,7 +256,7 @@ mod tests {
     fn make_mem_sink_with_data(table: &str, data: &[u8]) -> crate::db::copy_sink::MemSink {
         let schema = TableSchema::new(table.to_string(), vec![table.to_string()], 0);
         let mut sink = crate::db::copy_sink::MemSink::new(&schema, "public");
-        sink.write_row(data).unwrap();
+        sink.write_row(data);
         sink
     }
 

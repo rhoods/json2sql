@@ -450,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is an arbitrary test float, not pi
     fn test_float_widens_integer() {
         let mut t = TypeTracker::new(256);
         t.observe(&json!(42));
@@ -558,8 +559,8 @@ mod tests {
 
     // --- Mixed string+numeric VarChar sizing ---
 
-    /// Champ mixte string+float : max_len string est petit (3) mais les floats
-    /// formattés peuvent atteindre 25 chars → VarChar doit valoir ceil(25*1.2)=30.
+    /// Champ mixte string+float : `max_len` string est petit (3) mais les floats
+    /// formattés peuvent atteindre 25 chars → `VarChar` doit valoir ceil(25*1.2)=30.
     #[test]
     fn test_mixed_string_float_varchar_sized_for_float() {
         let mut t = TypeTracker::new(256);
@@ -569,7 +570,7 @@ mod tests {
         assert_eq!(t.to_pg_type(), PgType::VarChar(30));
     }
 
-    /// Champ mixte string+bigint : VarChar doit valoir ceil(20*1.2)=24.
+    /// Champ mixte string+bigint : `VarChar` doit valoir ceil(20*1.2)=24.
     #[test]
     fn test_mixed_string_bigint_varchar_sized_for_bigint() {
         let mut t = TypeTracker::new(256);
@@ -579,7 +580,7 @@ mod tests {
         assert_eq!(t.to_pg_type(), PgType::VarChar(24));
     }
 
-    /// Champ mixte string+integer : VarChar doit valoir ceil(11*1.2)=14.
+    /// Champ mixte string+integer : `VarChar` doit valoir ceil(11*1.2)=14.
     #[test]
     fn test_mixed_string_integer_varchar_sized_for_integer() {
         let mut t = TypeTracker::new(256);
@@ -589,8 +590,9 @@ mod tests {
         assert_eq!(t.to_pg_type(), PgType::VarChar(14));
     }
 
-    /// Quand la string est plus longue que la repr numérique, c'est max_len string qui prime.
+    /// Quand la string est plus longue que la repr numérique, c'est `max_len` string qui prime.
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is an arbitrary test float, not pi
     fn test_mixed_string_longer_than_num_repr_uses_string_max() {
         let mut t = TypeTracker::new(256);
         t.observe(&json!("a very long product name here!")); // 30 bytes
@@ -602,6 +604,7 @@ mod tests {
     /// Parity test: observing on two separate trackers then merging must equal
     /// observing all values on a single tracker.
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is an arbitrary test float, not pi
     fn test_merge_parity() {
         let values = vec![
             json!(1), json!(2), json!(null), json!("hello"),

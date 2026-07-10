@@ -254,6 +254,7 @@ impl AnomalyCollector {
     /// Returns `Err` only if file I/O fails. Callers must propagate the
     /// error — silently continuing would leave the anomaly file incomplete
     /// and give the user a false sense of completeness.
+    #[allow(clippy::too_many_lines)] // single cohesive record operation: stats update + optional file stream
     pub fn record(
         &mut self,
         table: &str,
@@ -499,7 +500,7 @@ mod tests {
     fn test_example_cap() {
         let mut c = AnomalyCollector::new(None);
         for i in 0..10 {
-            c.record("t", "col", &format!("row{}", i), "integer", "bad", "string").unwrap();
+            c.record("t", "col", &format!("row{i}"), "integer", "bad", "string").unwrap();
         }
         assert_eq!(c.total_anomalies(), 10);
         let sums = c.summaries();
@@ -602,7 +603,7 @@ mod tests {
                 assert_eq!(actual_value, "bad");
                 assert_eq!(actual_type, "string");
             }
-            _ => panic!("expected AnomalyEvent::Record"),
+            AnomalyEvent::IncTotal { .. } => panic!("expected AnomalyEvent::Record"),
         }
     }
 
@@ -614,7 +615,7 @@ mod tests {
         let event = rx.try_recv().expect("event must be in channel");
         match event {
             AnomalyEvent::IncTotal { table } => assert_eq!(table, "users"),
-            _ => panic!("expected AnomalyEvent::IncTotal"),
+            AnomalyEvent::Record { .. } => panic!("expected AnomalyEvent::IncTotal"),
         }
     }
 

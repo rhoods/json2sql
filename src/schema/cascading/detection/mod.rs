@@ -92,37 +92,14 @@ pub fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usize, min_
     let co_siblings_0 = run_sibling_wave(schemas, threshold, min_jaccard);
 
     // ── Waves 1+: cascade ────────────────────────────────────────────────────
-    // Maps and name_to_idx are rebuilt once per wave (not per group — #8/#9).
-    let mut pending: Vec<CoSiblingGroup> = co_siblings_0;
-    while !pending.is_empty() {
-        let (obj_map, arr_map) = build_parent_child_maps(schemas);
-        let name_to_idx: std::collections::HashMap<String, usize> =
-            schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
-        let mut next_pending: Vec<CoSiblingGroup> = Vec::new();
-        for group in pending {
-            let produced = cascade::process_co_sibling_group(schemas, &group, &obj_map, &arr_map, &name_to_idx);
-            next_pending.extend(produced);
-        }
-        pending = next_pending;
-    }
+    drain_cascade_waves(schemas, co_siblings_0);
 
     // ── Wave 0 bis: sibling detection on T tables created by the BFS cascade ──
     // Tables produced by process_co_sibling_group (e.g. cluster_0_sizes_100/200/400/full)
     // share a Columns parent but did not exist during wave 0. This pass fuses them.
     // Parents already converted to SiblingCollapse/SiblingCollapseMulti are skipped automatically.
     let co_siblings_bis = run_sibling_wave(schemas, threshold, min_jaccard);
-    let mut pending_bis: Vec<CoSiblingGroup> = co_siblings_bis;
-    while !pending_bis.is_empty() {
-        let (obj_map, arr_map) = build_parent_child_maps(schemas);
-        let name_to_idx: std::collections::HashMap<String, usize> =
-            schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
-        let mut next_pending: Vec<CoSiblingGroup> = Vec::new();
-        for group in pending_bis {
-            let produced = cascade::process_co_sibling_group(schemas, &group, &obj_map, &arr_map, &name_to_idx);
-            next_pending.extend(produced);
-        }
-        pending_bis = next_pending;
-    }
+    drain_cascade_waves(schemas, co_siblings_bis);
 
     // ── Post-pass: merge Columns orphans under SiblingCollapse parents ───────────
     // After the BFS cascade, some Columns tables survive as children of a SiblingCollapse
@@ -130,7 +107,13 @@ pub fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usize, min_
     // are numerous and similar).  A second sibling-detection pass fuses them into
     // a synthetic sub-pivot and cascades their own children.
     let post_co_siblings = keyed_pivot::run_keyed_pivot_children_wave(schemas, threshold, min_jaccard);
-    let mut pending: Vec<CoSiblingGroup> = post_co_siblings;
+    drain_cascade_waves(schemas, post_co_siblings);
+}
+
+/// Repeatedly processes co-sibling groups until no further groups are produced.
+/// Maps and `name_to_idx` are rebuilt once per wave (not per group — #8/#9).
+fn drain_cascade_waves(schemas: &mut Vec<TableSchema>, initial: Vec<CoSiblingGroup>) {
+    let mut pending = initial;
     while !pending.is_empty() {
         let (obj_map, arr_map) = build_parent_child_maps(schemas);
         let name_to_idx: std::collections::HashMap<String, usize> =
@@ -275,8 +258,7 @@ mod tests {
         let last_segs: Vec<Option<&String>> = pivot_schemas.iter().map(|s| s.path.last()).collect();
         assert_ne!(
             last_segs[0], last_segs[1],
-            "pivot schemas must have distinct path last-segments; got {:?}",
-            last_segs,
+            "pivot schemas must have distinct path last-segments; got {last_segs:?}",
         );
     }
 }

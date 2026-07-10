@@ -275,6 +275,7 @@ fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
     })
 }
 
+#[allow(clippy::too_many_lines)] // verbose config struct construction, not multiple responsibilities
 fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Result> {
     eprintln!("Pass 1: inferring schema from '{}'...", input_path.display());
     let base_cfg = Pass1Config {

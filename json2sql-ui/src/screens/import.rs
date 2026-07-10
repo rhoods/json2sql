@@ -26,6 +26,7 @@ use crate::worker_client::{connect_with_retry, spawn_worker, SocketEventReader, 
 #[component]
 pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     #[allow(dead_code)]
+    #[derive(PartialEq)]
     enum ImportMsg { Cancel }
 
     // ── Elapsed timer ─────────────────────────────────────────────────────
@@ -181,7 +182,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             tokio::select! {
                 biased;
                 msg = rx.recv() => {
-                    if let Ok(ImportMsg::Cancel) = msg {
+                    if msg == Ok(ImportMsg::Cancel) {
                         // Send cancel command to the worker (graceful stop).
                         if let Some(ref mut wh) = write_half_opt {
                             let _ = tokio::io::AsyncWriteExt::write_all(

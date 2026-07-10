@@ -53,7 +53,7 @@ fn base_config(root: &str, input: &str) -> PipelineConfig {
     }
 }
 
-/// run_pipeline with dry_run=true must succeed without any database connection.
+/// `run_pipeline` with `dry_run=true` must succeed without any database connection.
 #[tokio::test]
 async fn test_pipeline_dry_run_no_db() {
     let config = PipelineConfig {
@@ -64,7 +64,7 @@ async fn test_pipeline_dry_run_no_db() {
     assert!(result.is_ok(), "dry_run should succeed without a DB: {result:?}");
 }
 
-/// Full end-to-end import via PipelineConfig (no CLI) — proves the API is usable in tests.
+/// Full end-to-end import via `PipelineConfig` (no CLI) — proves the API is usable in tests.
 #[tokio::test]
 async fn test_pipeline_end_to_end_basic() {
     common::with_schema_url(|client, schema, url| async move {

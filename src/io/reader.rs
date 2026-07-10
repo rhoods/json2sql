@@ -152,7 +152,7 @@ fn fmt_skip_ws_comma(reader: &mut impl BufRead) -> Result<Option<u8>> {
     loop {
         match fmt_read_one(reader)? {
             None => return Ok(None),
-            Some(b',') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') => {}
+            Some(b',' | b' ' | b'\t' | b'\n' | b'\r') => {}
             Some(b) => return Ok(Some(b)),
         }
     }
@@ -313,6 +313,7 @@ fn fmt_skip_primitive_rest(reader: &mut impl BufRead) -> Result<()> {
 /// - If all top-level values are arrays → [`JsonFormat::RootWrapper`].
 /// - If top-level values are mixed (some arrays, some not) → error.
 /// - If no arrays at all (single plain object) → [`JsonFormat::Lines`] (backward compat).
+#[allow(clippy::too_many_lines)] // cohesive parser state machine, not decomposable without hurting readability
 fn fmt_detect_root_object(reader: &mut impl BufRead) -> Result<JsonFormat> {
     let mut array_keys: Vec<String> = Vec::new();
     let mut has_non_array = false;
@@ -501,7 +502,7 @@ impl ByteScanner {
     }
 
     #[must_use]
-    fn buf_mut(&mut self) -> &mut Vec<u8> {
+    const fn buf_mut(&mut self) -> &mut Vec<u8> {
         &mut self.buf
     }
 
@@ -587,9 +588,8 @@ impl ByteScanner {
     fn collect_string(&mut self) -> Result<()> {
         let mut escape_next = false;
         loop {
-            let b = match self.read_byte()? {
-                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".to_string())),
-                Some(b) => b,
+            let Some(b) = self.read_byte()? else {
+                return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".to_string()));
             };
             self.buf.push(b);
             if escape_next {
@@ -656,6 +656,7 @@ impl JsonArrayReader {
     /// Skip whitespace and commas at the top level until we find the
     /// first byte of the next value (or `]` for end-of-array).
     /// Returns the first significant byte, or None on EOF.
+    #[allow(clippy::match_same_arms)] // Ok(None) and the InvalidInput case are kept separate deliberately, see comment below
     fn skip_to_next_value(&mut self) -> Option<Result<u8>> {
         match self.scanner.skip_to_next_value(b']') {
             Ok(None) => None,
@@ -841,6 +842,7 @@ impl JsonRootWrapperReader {
     // -- internal helpers --
 
     /// Advance the reader to the `[` of the next wrapper key's array.
+    #[allow(clippy::too_many_lines)] // cohesive parser loop over wrapper-key scanning states
     fn advance_to_next_array(&mut self) -> Result<()> {
         // Skip whitespace/commas to '"' (key start)
         loop {
@@ -989,7 +991,7 @@ impl JsonReader {
     }
 
     #[must_use]
-    pub fn bytes_read(&self) -> u64 {
+    pub const fn bytes_read(&self) -> u64 {
         match self {
             Self::Lines(r) => r.bytes_read(),
             Self::Array(r) => r.bytes_read(),
@@ -1045,7 +1047,7 @@ mod tests {
         let f = tmp_file(br#""a":1,"b":{"c":2}}"#);
         let mut s = ByteScanner::open(f.path()).unwrap();
         s.collect_value(b'{').unwrap();
-        let parsed: serde_json::Value = serde_json::from_slice(&mut s.buf().to_vec()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(s.buf()).unwrap();
         assert_eq!(parsed["a"], 1);
         assert_eq!(parsed["b"]["c"], 2);
     }
@@ -1071,7 +1073,7 @@ mod tests {
         let f = tmp_file(br#""key": "value {nested} here", "n": 42}"#);
         let mut s = ByteScanner::open(f.path()).unwrap();
         s.collect_value(b'{').unwrap();
-        let parsed: serde_json::Value = serde_json::from_slice(&mut s.buf().to_vec()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(s.buf()).unwrap();
         assert_eq!(parsed["n"], 42);
         assert!(parsed["key"].as_str().unwrap().contains('}'));
     }
@@ -1120,7 +1122,7 @@ mod tests {
         assert!(s.skip_to_next_value(b']').is_err());
     }
 
-    /// next_raw() on a JSON array must return the same bytes that parse to the same value as next().
+    /// `next_raw()` on a JSON array must return the same bytes that parse to the same value as `next()`.
     #[test]
     fn test_next_raw_array_parity() {
         let json = br#"[{"a": 1}, {"b": 2}]"#;
@@ -1169,7 +1171,7 @@ mod tests {
         assert_eq!(v["q"], r#"say "hello""#);
     }
 
-    /// next_raw() on NDJSON returns one raw line per object.
+    /// `next_raw()` on NDJSON returns one raw line per object.
     #[test]
     fn test_next_raw_ndjson_parity() {
         let json = b"{\"a\":1}\n{\"b\":2}\n";

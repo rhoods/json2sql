@@ -19,7 +19,8 @@ pub trait RowSink {
 
 impl RowSink for MemSink {
     fn write_row(&mut self, row: &[u8]) -> Result<()> {
-        Self::write_row(self, row)
+        Self::write_row(self, row);
+        Ok(())
     }
 }
 
@@ -27,7 +28,8 @@ impl RowSink for MemSink {
 /// Lock is held only for the duration of `write_row` (nanoseconds — pure memory append).
 impl RowSink for Arc<Mutex<MemSink>> {
     fn write_row(&mut self, row: &[u8]) -> Result<()> {
-        self.lock().expect("sink mutex is not poisoned").write_row(row)
+        self.lock().expect("sink mutex is not poisoned").write_row(row);
+        Ok(())
     }
 }
 
@@ -66,8 +68,11 @@ mod tests {
         let sink = Arc::new(Mutex::new(make_mem_sink()));
         let mut shared = Arc::clone(&sink);
         <Arc<Mutex<MemSink>> as RowSink>::write_row(&mut shared, b"row\n").unwrap();
-        let inner = sink.lock().unwrap();
-        assert_eq!(inner.row_count, 1);
-        assert_eq!(&inner.buf[..], b"row\n");
+        let (row_count, buf) = {
+            let inner = sink.lock().unwrap();
+            (inner.row_count, inner.buf.clone())
+        };
+        assert_eq!(row_count, 1);
+        assert_eq!(&buf[..], b"row\n");
     }
 }

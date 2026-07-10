@@ -115,7 +115,7 @@ fn build_copy_sql_map(schemas: &[TableSchema], pg_schema: &str) -> HashMap<Strin
 }
 
 /// Diskless pipeline: N workers stream JSON into local `MemSink` buffers, sending batches to a
-/// concurrent flusher that COPYs directly to PostgreSQL. Phase B (temp-file re-read) is eliminated.
+/// concurrent flusher that COPYs directly to `PostgreSQL`. Phase B (temp-file re-read) is eliminated.
 ///
 /// Phase D — `add_constraints()` adds PRIMARY KEY (fatal on error) then
 /// FOREIGN KEY (failures become `constraint_warnings`).
@@ -128,6 +128,7 @@ pub async fn run(
     config: &Pass2Config,
     progress_tx: Option<ProgressTx>,
 ) -> Result<Pass2Result> {
+    const WORKER_CHANNEL_CAP: usize = 256;
     config::validate_run_params(config.parallel)?;
 
     let mem_flush_threshold = config.mem_flush_threshold_bytes.unwrap_or(64 * 1024 * 1024);
@@ -194,7 +195,6 @@ pub async fn run(
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
     let root_schema_arc: Arc<TableSchema> = Arc::new(root_schema);
 
-    const WORKER_CHANNEL_CAP: usize = 256;
     let mut senders = Vec::with_capacity(parallel);
     let mut worker_handles: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::with_capacity(parallel);
     for _ in 0..parallel {
@@ -340,9 +340,7 @@ mod tests {
         let first_error: Option<J2sError> = Some(worker_err);
 
         let result: crate::error::Result<()> = match flusher_result {
-            Ok(_) => {
-                if let Some(e) = first_error { Err(e) } else { Ok(()) }
-            }
+            Ok(_) => first_error.map_or(Ok(()), Err),
             Err(e) => Err(e),
         };
 
@@ -439,9 +437,10 @@ mod tests {
     }
 
     /// Validates the writer task pattern without a database:
-    /// events sent via AnomalyProxy reach the AnomalyCollector in the writer task,
+    /// events sent via `AnomalyProxy` reach the `AnomalyCollector` in the writer task,
     /// and NDJSON files are created on disk.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // single test case with verbose setup
     async fn anomaly_writer_task_creates_ndjson_files() {
         use crate::anomaly::collector::{AnomalyCollect, AnomalyCollector, AnomalyEvent, AnomalyProxy};
         use tempfile::TempDir;

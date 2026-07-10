@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn pass1_log_constructs_and_clones() {
         let e = ProgressEvent::Pass1Log("Root wrapper detected — streaming keys: [Foods]".to_string());
-        let cloned = e.clone();
+        let cloned = e;
         assert!(format!("{cloned:?}").contains("Foods"));
     }
 
@@ -108,7 +108,7 @@ mod tests {
             ProgressEvent::ConstraintsProgress { done: 1, total: 6 },
             ProgressEvent::ConstraintsDone,
         ];
-        let cloned = events.clone();
+        let cloned = events;
         for e in &cloned {
             let _ = format!("{e:?}");
         }
@@ -120,7 +120,7 @@ mod tests {
             table_name: "orders".to_string(),
             message: "COPY failed: duplicate key".to_string(),
         };
-        let cloned = e.clone();
+        let cloned = e;
         let debug = format!("{cloned:?}");
         assert!(debug.contains("orders"));
         assert!(debug.contains("duplicate key"));

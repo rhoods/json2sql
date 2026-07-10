@@ -437,11 +437,10 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                 for &i in selected_indices.iter() {
                                                     if let Some(t) = schemas.get(i) {
                                                         {
-                                                            let (bc, bl) = if let Some(ov) = overrides_snap.get(&t.name) {
-                                                                user_override_badge(ov)
-                                                            } else {
-                                                                strategy_badge(&*t.effective_strategy())
-                                                            };
+                                                            let (bc, bl) = overrides_snap.get(&t.name).map_or_else(
+                                                                || strategy_badge(&t.effective_strategy()),
+                                                                user_override_badge,
+                                                            );
                                                             let is_indented = t.depth > 0;
                                                             rsx! {
                                                                 tr { key: "{t.name}",
@@ -826,7 +825,7 @@ mod tests {
 
     fn make_schema(name: &str, parent: Option<&str>) -> TableSchema {
         let mut s = TableSchema::new(
-            name.to_string(), vec![name.to_string()], if parent.is_some() { 1 } else { 0 },
+            name.to_string(), vec![name.to_string()], usize::from(parent.is_some()),
         );
         s.parent_table = parent.map(str::to_string);
         s

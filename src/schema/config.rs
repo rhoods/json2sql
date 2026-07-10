@@ -151,6 +151,7 @@ struct DeferredFlatten  { table_name: String, prefix: String, max_depth: u8 }
 /// Matches by table name and column name (both sanitized `PostgreSQL` identifiers).
 /// Unknown tables, columns, types, or strategies are returned as `ConfigWarning` values
 /// rather than written to stderr — the caller decides how to display them.
+#[allow(clippy::too_many_lines)] // exhaustive dispatch over override kinds; see apply_strategy_override below for same pattern
 pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) -> crate::error::Result<Vec<ConfigWarning>> {
     let mut warnings: Vec<ConfigWarning> = Vec::new();
     let mut deferred_normalize: Vec<DeferredNormalize> = Vec::new();
@@ -365,7 +366,7 @@ pub fn apply_group_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConf
                 }
             }
             other => warnings.push(ConfigWarning::UnknownGroupStrategy {
-                group: group_name.to_string(),
+                group: group_name.clone(),
                 strategy: other.to_string(),
             }),
         }
@@ -725,14 +726,14 @@ mod tests {
         let w = ConfigWarning::GroupMergeFailed { group: "merged".to_string(), found: 1, expected: 3 };
         let msg = w.to_message();
         assert!(msg.contains("merged"));
-        assert!(msg.contains("1"));
-        assert!(msg.contains("3"));
+        assert!(msg.contains('1'));
+        assert!(msg.contains('3'));
     }
 
     #[test]
     fn config_warning_clone_and_eq() {
         let w = ConfigWarning::UnknownTable("t".to_string());
-        assert_eq!(w.clone(), ConfigWarning::UnknownTable("t".to_string()));
+        assert_eq!(w, ConfigWarning::UnknownTable("t".to_string()));
         assert_ne!(w, ConfigWarning::UnknownTable("other".to_string()));
     }
 
@@ -1290,7 +1291,7 @@ mod tests {
             strategy: "keyed_pivot".to_string(),
             members: vec!["a".to_string(), "b".to_string()],
         });
-        let config = SchemaConfig { tables, group };
+        let config = SchemaConfig { group, tables };
         let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
         assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::UnknownTable(_))));
         assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::GroupMergeFailed { .. })));
@@ -1329,7 +1330,7 @@ mod tests {
     }
 
     /// `exclude_absorbed_children()` (called inside `apply_overrides_complete`) reads
-    /// `absorbs_children()` → `effective_strategy()`, so a toml_override applied earlier in the
+    /// `absorbs_children()` → `effective_strategy()`, so a `toml_override` applied earlier in the
     /// same call that flips `absorbs_children()` to true must already be visible to it.
     #[test]
     fn apply_overrides_complete_excludes_children_absorbed_by_a_new_override() {
@@ -1367,7 +1368,7 @@ mod tests {
         t.inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.8,
             rare_threshold: 0.01,
-            medium_keys: Default::default(),
+            medium_keys: std::collections::HashSet::default(),
             wide_table_name: "products_wide".to_string(),
         };
         let mut schemas = vec![t, simple_table("products_wide"), simple_table("orders")];
@@ -1423,7 +1424,7 @@ mod tests {
         t.inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.8,
             rare_threshold: 0.01,
-            medium_keys: Default::default(),
+            medium_keys: std::collections::HashSet::default(),
             wide_table_name: "products_wide".to_string(),
         };
         let mut wide_child = simple_table("products_wide_tags");
