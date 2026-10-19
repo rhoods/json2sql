@@ -21,7 +21,7 @@ Règles :
 - **Une ligne = une entrée.** Jamais de regroupement virgule/point-virgule, jamais deux entrées sur la même ligne.
 - Le nom qualifié est **entre backticks**, juste après le tag (`fn`/`struct`/`enum`) — sans backticks, `cargo clippy` sous `#![deny(clippy::pedantic)]` (crate `json2sql-ui`) échoue sur `doc_markdown` (identifiant en case mixte hors code span). Pas de décoration d'argument dans le nom (ex. `(&UserOverride)`) : ce détail va dans la description libre après le `—`.
 - Méthodes d'`impl` : toujours `fn `{Type}::{méthode}``, jamais juste le nom, pour lever l'ambiguïté entre méthodes homonymes de types différents. `impl Trait for Type` → `Type` est toujours le type receveur, jamais le trait (ex. `impl std::fmt::Display for KeyShape` → `` fn `KeyShape::fmt` ``). Self-type générique recopié littéralement (ex. `impl RowSink for Arc<Mutex<MemSink>>` → `` fn `Arc<Mutex<MemSink>>::write_row` ``).
-- Les libellés de section (ex. `Orchestration :`, `Flusher :` sur les gros fichiers comme `pass2/runner.rs`) restent autorisés comme lignes libres **non taguées** entre le marqueur `Fonctions :` et les entrées — le parseur n'agit que sur les lignes commençant par `- fn `/`- struct `/`- enum `, tout le reste est ignoré.
+- Les libellés de section (ex. `Orchestration :`, `Flusher :` sur les gros fichiers comme `pass2/runner/flusher.rs`) restent autorisés comme lignes libres **non taguées** entre le marqueur `Fonctions :` et les entrées — le parseur n'agit que sur les lignes commençant par `- fn `/`- struct `/`- enum `, tout le reste est ignoré.
 - Fichier à un seul point d'entrée (ex. composant Dioxus avec logique en closures internes) : lister honnêtement cette unique fonction, ne pas forcer une structure absente.
 - Fonctions/structs/enums imbriqués dans le corps d'une autre fonction (helper local, type ad-hoc pour une sérialisation ponctuelle) ne sont **pas** des définitions à documenter — même règle que les closures. Une signature de méthode de `trait` sans corps (`trait X { fn y(...); }`) non plus : ce sont les `impl X for Type` qui portent l'implémentation réelle à documenter.
 - Fichier sans fonction/struct/enum à documenter (ex. `mod.rs` ne déclarant que des sous-modules) : pas de bloc `Fonctions :` du tout.
@@ -35,7 +35,9 @@ Règles :
 
 | Fichier | Rôle |
 |---|---|
-| `main.rs` | Point d'entrée. Orchestre la séquence complète : parse CLI → Pass 1 → overrides TOML → Pass 2 → rapport |
+| `main.rs` | Point d'entrée CLI : parse les arguments, gère `inspect`, construit `PipelineConfig` |
+| `pipeline.rs` | `run_pipeline()` indépendant de clap : stdin → Pass 1 → overrides TOML → dry-run ou Pass 2 → rapport |
+| `ipc.rs` | Protocole IHM ↔ worker (config JSON sur stdin, socket Unix, résultat sur disque) — Linux/macOS uniquement |
 | `lib.rs` | Déclare tous les modules publics (nécessaire pour les tests d'intégration dans `tests/`) |
 | `cli.rs` | Définit la struct `Cli` via `clap` — tous les flags et options de la commande |
 | `error.rs` | Enum `J2sError` et alias `Result<T>` utilisés dans tout le projet |
@@ -59,10 +61,10 @@ Pass 2 : relecture du fichier pour insérer les données.
 
 | Fichier | Rôle |
 |---|---|
-| `runner.rs` | Orchestre la Pass 2 : dispatcher → N workers → flush task → N conn tasks → PostgreSQL COPY |
+| `runner/` | Pipeline diskless : `mod.rs` (`run()`), `dispatch.rs` (dispatcher round-robin), `worker.rs` (parse + `MemSink` par table), `flusher.rs` (COPY vers PG, pause sous pression mémoire), `config.rs` (`Pass2Config`) |
 | `insert.rs` | `insert_object()` — orchestrateur (~50 lignes). Construit les colonnes générées et délègue à `traversal.rs` selon la `WideStrategy` |
 | `traversal.rs` | Toutes les fonctions `insert_*` privées : traversal du graphe JSON selon les stratégies (`insert_pivot_object`, `insert_jsonb_object`, `insert_flatten`, `insert_array`…) |
-| `sink.rs` | `trait RowSink { write_row() }` — abstraction sur l'écriture de lignes. `TempFileSink` (dans `db/copy_sink.rs`) en est l'implémentation concrète |
+| `sink.rs` | `trait RowSink { write_row() }` — abstraction sur l'écriture de lignes. `MemSink` (dans `db/copy_sink.rs`) en est l'implémentation concrète |
 | `coercer.rs` | Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cible. Produit `Ok(CopyEscaped)`, `Null` ou `Anomaly` |
 | `mod.rs` | Déclare le module |
 
@@ -108,7 +110,7 @@ BFS cascade — détection des groupes de tables sœurs (*siblings*) et fusion (
 
 | Fichier | Rôle |
 |---|---|
-| `detection.rs` | `finalize_cascading()` — orchestre les vagues BFS. Fichier dense (~1200 lignes, 39 fonctions privées) : candidat à une décomposition en sous-modules |
+| `detection/` | Détection BFS par vagues, découpée par phase : `mod.rs` (types partagés, orchestration), `wave0.rs` (groupes de siblings), `apply.rs` (application des collapses), `cascade.rs` (co-siblings, waves 1+), `keyed_pivot.rs` (post-pass keyed-pivot) |
 | `scoring.rs` | Jaccard (`pairwise_jaccard_min`), clustering glouton — fonctions pures sur `&[TableSchema]` et indices |
 | `merge.rs` | `build_sibling_collapse_from_siblings()` — API publique pour la fusion manuelle depuis l'IHM |
 | `mod.rs` | Déclare les sous-modules, ré-exporte `finalize_cascading` |
@@ -124,7 +126,8 @@ Couche d'accès PostgreSQL.
 | `connection.rs` | Établit une connexion `tokio_postgres` (sans TLS) |
 | `ddl.rs` | Génère et exécute les `CREATE TABLE` en ordre topologique. Gère `DROP ... CASCADE` et les contraintes FK |
 | `copy_text.rs` | Newtype `CopyEscaped` : garantit au niveau du type que les valeurs sont COPY-safe (échappement `\t`, `\n`, `\r`, `\\`, nul) |
-| `copy_sink.rs` | `TempFileSink` : accumule les lignes dans un fichier temporaire, puis exécute `COPY FROM STDIN` par batch (`flush_to_db`) |
+| `copy_sink.rs` | `RowBuilder` (ligne COPY texte), `MemSink` (buffer mémoire par table) et `flush_mem_sink_to_pg` (`COPY FROM STDIN` par chunks de 4 MiB) — aucun fichier temporaire |
+| `error.rs` | Helpers d'erreur partagés de la couche DB |
 | `mod.rs` | Déclare le module |
 
 ---
@@ -175,7 +178,7 @@ IHM desktop Dioxus (5 écrans du workflow d'import).
 | Fichier | Rôle |
 |---|---|
 | `main.rs` | Point d'entrée Dioxus : construit la fenêtre, route vers l'écran courant |
-| `state.rs` | `AppState` — état racine (candidat refactor : mélange définitions d'état, logique de sélection UI, calcul Jaccard) |
+| `state/` | `mod.rs` : `AppState`, état racine et traitement des `ProgressEvent` ; `selection.rs` : logique de sélection UI |
 | `config.rs` | Persistance de la config projet (`~/.config/json2sql/last_project.toml`, sans password) |
 | `worker_client.rs` | Client du worker subprocess : spawn, connexion socket, lecture des événements, détection de résumption |
 | `theme.rs` | Charge le CSS embarqué (`assets/styles.css`) |
@@ -228,7 +231,6 @@ Tests d'intégration end-to-end (Pass 1 + Pass 2 sur une vraie base PostgreSQL).
 
 | Fichier | Rôle |
 |---|---|
-| `Cargo.toml` | Dépendances Rust et métadonnées du projet |
-| `openfoodfacts.toml` | Config TOML de surcharges pour le dataset OpenFoodFacts (exemple réel) |
-| `preprocess_off.py` | Script Python de prétraitement du fichier OpenFoodFacts |
-| `schema_off.json` / `schema_yelp_review.json` | Snapshots de schéma Pass 1 sérialisés (format `SchemaSnapshot`) |
+| `Cargo.toml` | Workspace (`json2sql`, `json2sql-ui`, `json2sql-worker`) et dépendances |
+| `Makefile` | Raccourcis build / test / lint |
+| `LICENSE` | Licence MIT |

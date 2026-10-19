@@ -29,14 +29,20 @@ Chaque champ JSON observé dans la Pass 1 alimente un `TypeTracker` qui accumule
 
 ### Règles de résolution (`to_pg_type`)
 
-- **Élargissement numérique :** Integer ≤ BigInt ≤ Float (le type le plus large l'emporte)
-- **Élargissement texte :** VarChar(N) peut être promu à Text si `N > text_threshold`
-- **Mixte numérique/texte :** le type texte l'emporte
-- **Types contradictoires :** le type dominant (le plus fréquent hors null) l'emporte ; les valeurs hors type sont enregistrées comme **anomalies**
+Le type retenu est le **plus large** parmi ceux observés, pas le plus fréquent. Une seule valeur chaîne suffit à faire passer la colonne en texte. Ordre de priorité :
+
+1. **Une chaîne observée** → `VARCHAR(N)` ou `TEXT` (N tient compte de la représentation texte des nombres éventuellement mélangés)
+2. Sinon **numérique** : `DOUBLE PRECISION` > `BIGINT` > `INTEGER`
+3. Sinon : `BOOLEAN` > `TIMESTAMP` > `DATE` > `UUID`
+4. Aucun type observé (que des `null`) → `TEXT`
+
+Exemples : `1000 entiers + 3 chaînes` → `VARCHAR` (aucune anomalie, les entiers sont stockés en texte) ; `entiers + flottants` → `DOUBLE PRECISION`.
 
 ### Détection d'anomalie
 
-Une valeur est une anomalie si son type diffère du type dominant. Le taux d'anomalie est calculé par colonne et par table. Il peut être comparé à `--max-anomaly-rate` pour faire échouer l'import en cas de données trop incohérentes.
+Une anomalie est détectée en **Pass 2**, quand une valeur ne peut pas être convertie vers le type retenu (`src/pass2/coercer.rs`) : par exemple un booléen dans une colonne `INTEGER` (entiers + booléens → `INTEGER`), ou une chaîne plus longue que le `VARCHAR(N)` inféré. La valeur est insérée en `NULL` et enregistrée dans le rapport d'anomalies. Le taux d'anomalie est comparé à `--max-anomaly-rate` pour faire échouer l'import si les données sont trop incohérentes.
+
+Le rapport de schéma (`--schema-report`) signale en `MIXED` les colonnes ayant plusieurs types observés, avec leur histogramme : utile pour repérer en amont les colonnes qui vont basculer en texte.
 
 ---
 
@@ -51,7 +57,7 @@ Si la longueur maximale observée d'un champ texte dépasse ce seuil, le type pa
 ## 3. Détection des tables larges
 
 **Fichier :** `src/schema/registry.rs`
-**Paramètre CLI :** `--wide-column-threshold` (défaut : 1000, recommandé : 50 pour OpenFoodFacts)
+**Paramètre CLI :** `--wide-column-threshold` (défaut : 15)
 
 Une table est dite **large** si le nombre de colonnes de données (hors colonnes générées `j2s_*`) dépasse ce seuil. Une fois détectée comme large, plusieurs stratégies peuvent s'appliquer.
 
@@ -84,11 +90,13 @@ S'applique uniquement à la **table racine** qui possède des tables enfants (ob
 |---|---|---|
 | **Stable** | fréquence ≥ `stable_threshold` | colonne dans la table principale |
 | **Médium** | fréquence entre `rare_threshold` et `stable_threshold` | ligne dans la table `{nom}_wide` (EAV : `key`, `value`) |
-| **Rare** | fréquence < `rare_threshold` | **supprimée** (ni schéma, ni données) |
+| **Rare** | fréquence < `rare_threshold` | **non importée** (ni schéma, ni données) — un `WARNING` sur stderr liste les clés concernées |
 
 La table `_wide` est une table EAV synthétique générée automatiquement avec les colonnes `j2s_id`, `j2s_parent_id`, `j2s_order`, `key`, `value`. Elle est liée à la table principale via une clé étrangère.
 
 **Exemple OpenFoodFacts :** 189 881 clés observées → 125 stables, 184 médiums, 189 572 rares supprimées.
+
+> ⚠️ **Perte de données volontaire.** Les clés rares sont écartées pour éviter une table EAV de centaines de milliers de clés quasi vides. Pour tout conserver, passer `--rare-threshold 0` : toutes les clés non stables vont alors dans `{nom}_wide`.
 
 ---
 
@@ -113,7 +121,7 @@ Ce comportement peut être forcé manuellement dans le fichier de config TOML vi
 ## 7. Détection de tables sœurs (KeyedPivot)
 
 **Fichier :** `src/schema/registry.rs` — `finalize_siblings()`
-**Paramètres CLI :** `--sibling-threshold` (défaut : 3), `--sibling-jaccard` (défaut : 0.5)
+**Paramètres CLI :** `--sibling-threshold` (défaut : 2), `--sibling-jaccard` (défaut : 0.8)
 
 Quand une table parent a ≥ `sibling_threshold` tables enfants directes avec des colonnes similaires (similarité de Jaccard ≥ `sibling_jaccard`), ces tables sœurs sont fusionnées. Deux types d'enfants sont détectés :
 

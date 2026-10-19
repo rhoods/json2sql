@@ -29,7 +29,7 @@ json2sql-ui/assets/
 
 ---
 
-## AppState (`state.rs`)
+## AppState (`state/mod.rs`)
 
 `AppState` est un **conteneur de données pur**. Il ne contient pas de logique métier — uniquement :
 - L'état de navigation (`screen: AppScreen`)
@@ -251,8 +251,8 @@ Utilise `use_elapsed_timer` pour le chrono. Bannière de succès avec total lign
 
 **Double barre de progression (bottom bar)** :
 Deux composants `ProgressBar` côte à côte (`grid-template-columns: 1fr 1fr`) :
-- **A · Streaming** : `bytes_read / total_bytes` — reflète la Phase A (lecture JSON + écriture des fichiers temporaires). Passe à 100 % quand tout le fichier est parsé.
-- **B · Inserting** : `tables_done / tables_total` — reflète la Phase B (COPY vers PostgreSQL). Incrémente à chaque `Pass2Flush` reçu. Passe à 100 % à `Pass2Done`.
+- **A · Streaming** : `bytes_read / total_bytes` — lecture et parse du JSON par les workers. Passe à 100 % quand tout le fichier est parsé.
+- **B · Inserting** : `tables_done / tables_total` — nombre de tables ayant reçu au moins un COPY du flusher (qui tourne en parallèle du streaming). Incrémente au premier `Pass2Flush` d'une table. Passe à 100 % à `Pass2Done`.
 
 ---
 

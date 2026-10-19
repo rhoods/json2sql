@@ -9,38 +9,50 @@ Vue d'ensemble du pipeline `json2sql` et documentation détaillée de chaque mod
 `json2sql` est un outil CLI en Rust qui importe des fichiers JSON/NDJSON dans PostgreSQL. Il fonctionne en **deux passes** :
 
 - **Pass 1** : lecture complète du fichier pour inférer le schéma (tables, colonnes, types)
-- **Pass 2** : relecture du fichier pour insérer les données via `COPY FROM STDIN`
+- **Pass 2** : relecture du fichier pour insérer les données via `COPY FROM STDIN`, sans fichier temporaire (pipeline *diskless* : workers → buffers mémoire → flusher → PostgreSQL)
 
 ```
 src/
-├── main.rs              # point d'entrée, orchestration
+├── main.rs              # point d'entrée CLI : parse les arguments, construit PipelineConfig
+├── pipeline.rs          # orchestration indépendante de clap (stdin → Pass 1 → overrides → Pass 2)
+├── ipc.rs               # IPC IHM ↔ worker (socket Unix, Linux/macOS uniquement)
 ├── lib.rs               # déclaration des modules publics
 ├── cli.rs               # arguments CLI
 ├── error.rs             # types d'erreur
 ├── anomaly/             # détection et rapport d'anomalies de type
-├── db/                  # couche PostgreSQL
-├── io/                  # lecture JSON, progress bar, événements IHM
+├── db/                  # couche PostgreSQL (DDL, COPY, échappement)
+├── io/                  # lecture JSON, progress bar, événements IHM, mesure RAM
 ├── pass1/               # Pass 1 : inférence de schéma
 ├── pass2/               # Pass 2 : insertion des données
+│   └── runner/          # orchestration diskless : dispatch, worker, flusher, config
 └── schema/              # modèle de schéma, inférence, config, persistance
+    ├── finalizer/       # observations → TableSchema (phases base, wide strategy, garde-fou)
+    └── cascading/       # détection et fusion des tables sœurs
 ```
 
 ---
 
-## `src/main.rs`
+## `src/main.rs` et `src/pipeline.rs`
 
-Point d'entrée et orchestrateur principal. Séquence complète :
+`main.rs` parse les arguments CLI, gère la sous-commande `inspect`, puis construit un `PipelineConfig` (sans type `clap`) et appelle `pipeline::run_pipeline()`. Cette séparation permet aux tests et au worker IHM d'appeler le pipeline sans passer par la CLI.
 
-1. Parse les arguments CLI
-2. Résout l'entrée (fichier ou stdin → fichier temporaire)
-3. Lance la Pass 1 (inférence du schéma)
-4. Affiche les avertissements (noms tronqués, collisions de colonnes, dépassement de profondeur)
-5. Applique les surcharges TOML (`--schema-config`)
-6. Ré-exclut les tables enfants absorbées après les surcharges
-7. Génère le rapport de schéma (optionnel)
-8. En mode `--dry-run` : affiche le DDL SQL et sort
-9. Sinon : se connecte à PostgreSQL, crée les tables, lance la Pass 2
-10. Affiche le résumé d'import et les anomalies
+Séquence de `run_pipeline()` :
+
+1. Résout l'entrée (fichier, ou stdin bufferisé dans un fichier temporaire — seul usage disque de l'outil, nécessaire car le fichier est lu deux fois)
+2. Lance la Pass 1 (ou charge un snapshot via `--schema-input`)
+3. Affiche les avertissements (noms tronqués, collisions de colonnes, dépassement de profondeur)
+4. Applique les surcharges TOML (`--schema-config`)
+5. Ré-exclut les tables enfants absorbées après les surcharges
+6. Génère le rapport de schéma (optionnel)
+7. En mode `--dry-run` : affiche le DDL SQL et sort
+8. Sinon : se connecte à PostgreSQL, crée les tables, lance la Pass 2
+9. Affiche le résumé d'import et les anomalies
+
+---
+
+## `src/ipc.rs`
+
+Protocole entre l'IHM (`json2sql-ui`) et le processus `json2sql-worker` : config envoyée en JSON sur stdin, commandes sur socket Unix, résultat final écrit sur disque. Les sockets Unix ne sont pas disponibles sous Windows : le worker y renvoie une erreur `Unsupported`, l'IHM est donc **Linux/macOS uniquement**. La CLI, elle, est testée en CI sous Linux, macOS et Windows.
 
 ---
 
@@ -74,7 +86,7 @@ Définit `J2sError`, l'enum d'erreur centrale du projet, et l'alias `Result<T>`.
 
 ## `src/anomaly/`
 
-Gestion des anomalies de type : valeurs dont le type JSON diffère du type dominant de la colonne.
+Gestion des anomalies de type : valeurs qui ne peuvent pas être converties vers le type PostgreSQL inféré pour la colonne (insérées en NULL, voir `pass2/coercer.rs`).
 
 ### `collector.rs`
 
@@ -98,19 +110,17 @@ Couche d'accès PostgreSQL.
 
 ### `connection.rs`
 
-- **`connect()`** : établit une connexion `tokio_postgres` sans TLS, spawn la tâche de gestion de la connexion en background
+- **`connect()`** : établit une connexion `tokio_postgres` sans TLS (`NoTls` — pas de support `sslmode=require` pour l'instant), spawn la tâche de gestion de la connexion en background
 
 ### `ddl.rs`
 
 La DDL est séparée en deux temps : **création de tables sans contraintes** (avant le chargement) + **ajout des contraintes** (après le chargement). Cela permet de charger en parallèle sans conflit de FK.
 
 - **`create_tables_no_constraints()`** : crée toutes les tables sans PK ni FK (`IF NOT EXISTS`). Si `drop_existing = true`, supprime d'abord en CASCADE. À appeler avant `pass2::runner::run()`.
-- **`create_tables()`** : version legacy (DDL + contraintes en une passe). Utilisée par `main.rs` dans les chemins non-parallèles.
 - **`generate_create_table_no_constraints()`** : génère le SQL `CREATE TABLE IF NOT EXISTS` sans contraintes pour un schéma.
-- **`generate_create_table()`** : génère le SQL `CREATE TABLE` complet avec PK inline (used by `create_tables()`).
 - **`generate_add_pk_sql()`** : génère l'`ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY` pour un schéma.
 - **`generate_add_fk_sql()`** : génère l'`ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` pour un schéma enfant. Retourne `None` pour les tables racines.
-- **`add_constraints()`** : ajoute d'abord les PK (fatal en cas d'erreur — collision UUID = bug), puis les FK (échecs → `ConstraintWarning`). Appelé en Phase D de la Pass 2, après le chargement complet.
+- **`add_constraints()`** : ajoute d'abord les PK (fatal en cas d'erreur — collision UUID = bug), puis les FK (échecs → `ConstraintWarning`). Appelé en fin de Pass 2, après le chargement complet (sauté avec `--no-constraints`).
 - **`ConstraintWarning`** / **`ConstraintKind`** : contrainte non appliquée après le chargement. `ConstraintKind::PrimaryKey` est toujours fatal ; `ForeignKey` produit un warning.
 - **`generate_ddl_preview()`** : DDL lisible avec FK inline, pour affichage uniquement (dry-run, IHM).
 - **`quote_ident()`** : échappe les identifiants PostgreSQL avec guillemets doubles.
@@ -125,21 +135,11 @@ Type et fonction garantissant la sécurité du format COPY PostgreSQL texte au n
 
 ### `copy_sink.rs`
 
-Implémente le chargement via le protocole `COPY FROM STDIN`.
+Construction des lignes au format COPY texte et envoi vers PostgreSQL. Aucun fichier temporaire : tout transite en mémoire.
 
-Constante interne :
-- **`SPILL_THRESHOLD`** (256 KiB) : taille maximale du buffer in-memory `pending` avant déversement sur disque.
-
-Types et fonctions :
 - **`RowBuilder`** : construit une ligne au format texte COPY (colonnes séparées par `\t`, NULL représenté par `\N`). `push_value()` prend un `&CopyEscaped`. `push_null()` et `push_uuid()` disponibles. `finish()` ajoute le `\n` et retourne le buffer.
-- **`TempFileSink`** : accumule les lignes d'une table pendant la Pass 2. Utilise un **buffer in-memory `pending`** qui se renverse dans un fichier temporaire quand il dépasse `SPILL_THRESHOLD` (256 KiB). Champs publics : `table_name`, `row_count`, `total_flushed`, `bytes_buffered`.
-  - `new(schema, pg_schema, temp_dir: Option<&Path>)` : crée un sink ; si `temp_dir` est fourni, le fichier temporaire est créé dans ce répertoire (défaut : `std::env::temp_dir()`).
-  - `write_row()` : ajoute une ligne ; déclenche un spill automatique si `pending` dépasse le seuil.
-  - `spill()` (interne) : vide `pending` dans le fichier temporaire et **ferme le FD immédiatement** (auto-hibernate). Aucun FD n'est conservé ouvert entre deux écritures — aucun budget global de FD n'est nécessaire.
-  - `force_spill()` : force le déversement de `pending` sur disque même si sous le seuil. Appelé par les workers en fin de Phase A pour libérer la mémoire avant de retourner les sinks.
-  - `hibernate()` : ferme le FD si ouvert, sans toucher `pending`. No-op dans la plupart des cas (spill auto-hiberne déjà).
-  - `is_open()` : `true` uniquement si un FD est actuellement ouvert — toujours `false` après un spill.
-- **`merge_copy_to_db(sinks, client)`** : ouvre **une seule session COPY** et y stream les données de N sinks d'une même table. Lit les fichiers temporaires en **chunks de 4 MiB** (streaming — sans chargement entier en mémoire). Réduit le overhead COPY de `N_workers × N_tables` à `~N_tables`.
+- **`MemSink`** : buffer `BytesMut` des lignes COPY d'une table, détenu par un worker. Pré-génère la requête `COPY … FROM STDIN` (`copy_sql`). `write_row()` accumule une ligne déjà formatée.
+- **`flush_mem_sink_to_pg()`** : ouvre une session `COPY FROM STDIN` et envoie un buffer par chunks de 4 MiB.
 
 ---
 
@@ -170,13 +170,21 @@ Protocole de communication entre les runners et l'IHM Dioxus.
 |---|---|---|
 | `Pass1Progress` | rows_scanned, bytes_read, total_bytes | Pass 1, périodique |
 | `Pass1Done` | total_rows, tables_count, columns_count | Pass 1, fin |
-| `Pass2Progress` | rows_processed, bytes_read, total_bytes | Phase A, périodique |
-| `Pass2Flush` | table_name, rows_flushed | Phase B, à chaque table COPYée |
-| `Pass2AnomalyUpdate` | table_name, count | Phase B, une fois par table après fin des workers |
+| `Pass1Log` | String | Pass 1, messages de log |
+| `DdlStart` / `DdlProgress` / `DdlDone` | table_count, done/total | Création des tables |
+| `ConstraintsStart` / `ConstraintsProgress` / `ConstraintsDone` | table_count, done/total | Ajout des PK/FK |
+| `Pass2Progress` | rows_processed, bytes_read, total_bytes | Dispatch, périodique |
+| `Pass2Flush` | table_name, rows_flushed | Flusher, après chaque COPY réussi |
+| `Pass2Error` | table_name, message | Flusher, COPY en échec (erreur PG réelle) |
+| `Pass2AnomalyUpdate` | table_name, count | Une fois par table après la fin des workers |
 | `Pass2Log` | String | Pass 2, messages de log |
 | `Pass2Done` | total_rows, anomaly_count, constraint_warning_count | Pass 2, fin |
 
 - **`ProgressTx`** : alias `tokio::sync::mpsc::UnboundedSender<ProgressEvent>`
+
+### `mem.rs`
+
+Mesure de la RAM système (RSS, pression mémoire) via `sysinfo`. Utilitaires non câblés dans le pipeline de prod (le flusher interroge `sysinfo` directement, à titre informatif).
 
 ---
 
@@ -201,7 +209,7 @@ Retourne `Pass1Result` contenant :
 
 Abstraction sur l'écriture de lignes, découplant la logique d'insertion du stockage concret.
 
-- **`trait RowSink`** : `write_row(&mut self, row: Vec<u8>) -> Result<()>`. Implémenté par `TempFileSink` (dans `db/copy_sink.rs`) ; une implémentation in-memory peut être fournie pour les tests unitaires.
+- **`trait RowSink`** : `write_row(&mut self, row: Vec<u8>) -> Result<()>`. Implémenté par `MemSink` (dans `db/copy_sink.rs`) ; une implémentation in-memory peut être fournie pour les tests unitaires.
 
 ### `traversal.rs`
 
@@ -225,61 +233,56 @@ Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cibl
 - Types gérés : Integer (contrôle de plage i32), BigInt, DoublePrecision (NaN/Infini → NULL), Boolean (flexible : "yes"/"no"/"1"/"0"...), UUID, Date, Timestamp, Text, VarChar, Jsonb, Array PG
 - **`coerce_pg_array()`** : sérialise un tableau JSON en litéral PostgreSQL `{elem1,elem2,NULL}`
 
-### `runner.rs`
+### `runner/`
 
-Orchestre la Pass 2. Relit le fichier et insère les données via une architecture **2 phases séquentielles** :
+Orchestre la Pass 2 via un pipeline **diskless** : les données ne touchent jamais le disque entre le fichier source et PostgreSQL.
 
 ```
-Phase A — Streaming (aucune connexion PG)
-  N workers ─round-robin─► N × HashMap<table_name, TempFileSink>
-  Fin : workers retournent leurs sinks via JoinHandle
-
-Phase B — COPY post-streaming (parallel connexions PG)
-  Tables regroupées par nom · distribuées round-robin sur parallel tâches
-  Chaque tâche : merge_copy_to_db(sinks) ──► PostgreSQL
+                 ┌─► worker 1 ─┐  (MemSink par table)
+dispatcher ──────┼─► worker 2 ─┼──► canal borné ──► flusher ──COPY FROM STDIN──► PostgreSQL
+(round-robin)    └─► worker N ─┘                      │
+                        ▲                             │
+                        └──── pause_flag (RAM) ◄──────┘
 ```
+
+| Fichier | Rôle |
+|---|---|
+| `mod.rs` | `run()` — câble dispatcher, workers, flusher puis contraintes ; `Pass2Result`, `Pass2Timing` |
+| `config.rs` | `Pass2Config` (tous les paramètres d'un run) et validation |
+| `dispatch.rs` | Boucle de dispatch, progression, rapport d'anomalies, avertissement si tables déjà non vides |
+| `worker.rs` | Boucle worker : parse `simd_json`, `insert_object()`, envoie un buffer au flusher dès qu'il dépasse le seuil |
+| `flusher.rs` | Draine les buffers vers PostgreSQL, met les workers en pause sous pression RAM |
 
 **Signature `run()`** :
 
 ```rust
 pub async fn run(
     path: &Path,
-    root_table: &str,
     schemas: &[TableSchema],
-    client: &Client,           // pour les contraintes (Phase D)
-    pg_url: &str,              // pour les N connexions COPY (Phase B)
-    pg_schema: &str,
-    parallel: usize,
-    anomaly_dir: Option<PathBuf>,
-    temp_dir: Option<PathBuf>, // répertoire pour les fichiers temporaires
+    client: &Client,         // connexion principale
+    pg_url: &str,            // pour les connexions COPY et contraintes
+    config: &Pass2Config,
     progress_tx: Option<ProgressTx>,
-    _ram_pressure_pct: Option<u8>, // réservé, non utilisé
 ) -> Result<Pass2Result>
 ```
 
-Le `client` est utilisé uniquement pour la Phase D (contraintes). Les COPYs passent par des connexions dédiées ouvertes à partir de `pg_url`.
+**Streaming** :
+- Le dispatcher lit le fichier et envoie chaque objet JSON racine (`Vec<u8>`) à un worker en round-robin (`--parallel` workers).
+- Chaque worker parse avec `simd_json`, appelle `insert_object()` récursivement et accumule les lignes dans son propre `HashMap<table, MemSink>`.
+- Quand le buffer d'une table dépasse le seuil par worker (`mem_flush_threshold / parallel`, 64 MiB / N par défaut), il est envoyé au flusher via un canal borné (256 messages) — la contre-pression du canal limite la RAM.
 
-**Phase A — Streaming parallèle (aucune connexion PG)** :
-- Le dispatcher lit le fichier raw byte-par-byte et envoie chaque objet JSON (sérialisé `Vec<u8>`) à un worker en round-robin.
-- Chaque worker parse avec `simd_json`, appelle `insert_object()` récursivement, et accumule les lignes dans son propre `HashMap<table_name, TempFileSink>`.
-- Aucune connexion PostgreSQL n'est ouverte pendant cette phase.
-- **Gestion des FD** : `spill()` auto-hiberne le FD immédiatement après chaque écriture — aucun compteur global de FD n'est nécessaire.
-- En fin de phase, chaque worker appelle `force_spill()` sur tous ses sinks (libération mémoire), puis retourne ses sinks via `JoinHandle`.
-- **Annulation** : un `CancellationToken` + `DropGuard` est créé au début de `run()`. Si le caller avorte la tâche Tokio (ex : bouton Cancel de l'IHM), le token est annulé et tous les workers sortent de leur `tokio::select!`.
+**Flusher** :
+- Une tâche unique avec sa propre connexion PG. Elle reçoit les buffers, les agrège par table et exécute `COPY FROM STDIN` (`flush_mem_sink_to_pg`).
+- Si le volume en attente dépasse 512 MiB, il lève `pause_flag` : les workers attendent pendant que le flusher draine les plus gros buffers, jusqu'à repasser sous 128 MiB. Les watermarks RAM système (`ram_high_watermark`) ne servent qu'au log.
+- En fin de stream, il draine les buffers restants en **ordre topologique** (parents avant enfants).
+- En cas d'erreur PG, il lève `error_flag` (les workers s'arrêtent) et émet `Pass2Error` ; c'est son erreur — qui contient la table et le message PG — qui est remontée, pas l'erreur générique des workers.
 
-**Phase B — COPY post-streaming (`parallel` connexions PG)** :
-- Après join de tous les workers, les sinks sont regroupés par `table_name`.
-- Les tables non-vides sont triées (déterminisme) puis distribuées round-robin sur `parallel` tâches.
-- Chaque tâche ouvre une connexion PG indépendante via `pg_url` et appelle `merge_copy_to_db(sinks)` séquentiellement pour chaque table de son batch.
-- Résultats collectés via `JoinHandle<Result<Vec<(String, u64)>>>` — aucun canal `result_tx`/`result_rx`.
-- Émet `Pass2Flush { table_name, rows_flushed }` après chaque COPY réussi.
-- Émet `Pass2AnomalyUpdate { table_name, count }` une fois par table après la fin des workers.
+**Annulation** : un `CancellationToken` + `DropGuard` est créé au début de `run()`. Si le caller avorte la tâche Tokio (bouton Cancel de l'IHM), tous les workers sortent proprement.
 
-**Phase D — Contraintes** :
-- `add_constraints(client, schemas, pg_schema)` ajoute les PK (fatal en cas d'erreur) puis les FK (échecs → `constraint_warnings`).
+**Contraintes** : `add_constraints()` ajoute les PK (fatal en cas d'erreur) puis les FK (échecs → `constraint_warnings`), sur `parallel` connexions. Sauté avec `--no-constraints`.
 
 **Types de retour** :
-- **`Pass2Timing { streaming_ms, copy_ms }`** : durée de chaque phase. `total_ms()` retourne la somme.
+- **`Pass2Timing { streaming_ms, copy_ms }`** : durée du streaming et de la phase finale (drain + contraintes). `total_ms()` retourne la somme.
 - **`Pass2Result { rows_per_table, anomaly_collector, constraint_warnings, timing }`** : résumé complet de la Pass 2.
 
 **`insert_object()`** (dans `insert.rs`) : orchestrateur principal (~50 lignes). Construit les colonnes générées (UUID, FK parent, j2s_order) puis délègue à `traversal.rs` selon la `WideStrategy` :
@@ -288,7 +291,7 @@ Le `client` est utilisé uniquement pour la Phase D (contraintes). Les COPYs pas
   - `Jsonb` : `insert_jsonb_object()` — l'objet entier sérialisé en JSONB
   - `StructuredPivot` : `insert_structured_pivot_object()` — une ligne par `(parent_id, base, val_suffixe1...)`
   - `KeyedPivot` : `insert_keyed_pivot_object()` / `insert_keyed_pivot_array_of_objects()` — fusion de tables sœurs ; sérialise l'objet enfant dans `j2s_data JSONB`
-  - `AutoSplit` : colonnes stables → table principale, colonnes médiums → table `_wide` (EAV)
+  - `AutoSplit` : colonnes stables → table principale, colonnes médiums → table `_wide` (EAV) ; les clés rares (`< --rare-threshold`) ne sont **pas importées** — voir [schema-inference.md](schema-inference.md)
   - `Ignore` : clé supprimée
 
 **Traversal des tableaux** (dans `traversal.rs`) : `insert_array()` — tableau d'objets → `insert_object()` récursif ; tableau de scalaires → ligne de jonction `(parent_id, order, value)`.
@@ -321,7 +324,7 @@ Définit les types de données fondamentaux du schéma :
 
 Accumule les observations de type pour un champ JSON.
 
-- **`TypeTracker`** : histogramme de types + max longueur chaîne + compteurs null/total
+- **`TypeTracker`** : histogramme de types + max longueur chaîne + compteurs null/total. `to_pg_type()` applique un **élargissement** (le type le plus large observé l'emporte, pas le plus fréquent) — voir [schema-inference.md](schema-inference.md)
 - **`InferredType`** : types JSON observés
 - **`PgType`** : types PostgreSQL cibles avec méthode `as_sql()` pour la génération DDL
 
@@ -334,7 +337,7 @@ Observation mutable row-by-row pendant le streaming JSON.
 - **`observe_root()`** → **`observe_object()`** → **`observe_array()`** : traversée récursive — enregistre chaque champ JSON dans le `TypeTracker` correspondant
 - **`merge()`** : fusionne deux `SchemaObserver` (parallélisme de la Pass 1)
 
-### `finalizer.rs`
+### `finalizer/`
 
 Transformations post-stream sur `Vec<TableSchema>` — après que l'observation est terminée.
 
@@ -345,7 +348,7 @@ Transformations post-stream sur `Vec<TableSchema>` — après que l'observation 
 - **`exclude_absorbed_children()`** : supprime les tables enfants absorbées par une stratégie wide (Flatten, NormalizeDynamicKeys…)
 - **`OverflowWarning`** : type retourné quand une table est forcée en Jsonb par le garde-fou
 
-### `cascading.rs`
+### `cascading/`
 
 Algorithme de détection et fusion des tables sœurs (sibling detection).
 
@@ -353,6 +356,14 @@ Algorithme de détection et fusion des tables sœurs (sibling detection).
 - **`child_compatibility_score()`** : score de compatibilité structurelle entre deux tables sœurs (jaccard sur les colonnes)
 - **`pairwise_jaccard_min()`** : jaccard minimum parmi toutes les paires d'un groupe
 - **`build_parent_child_maps()`**, **`run_sibling_wave()`**, **`process_co_sibling_group()`** : helpers de l'algorithme de fusion par vagues
+
+### `inspector.rs`
+
+Convertit un `SchemaObserver` en `ColumnStats` pour le rapport de la sous-commande `inspect`.
+
+### `strategies.rs`
+
+Enum `StrategyName` des heuristiques désactivables via `--disable-strategy`.
 
 ### `wide_strategies.rs`
 
@@ -442,9 +453,7 @@ Tests d'intégration Rust qui testent des cas end-to-end sur une vraie base Post
 
 | Fichier | Description |
 |---|---|
-| `Cargo.toml` | Dépendances Rust et métadonnées du projet |
+| `Cargo.toml` | Workspace (`json2sql`, `json2sql-ui`, `json2sql-worker`) et dépendances |
 | `Cargo.lock` | Versions exactes des dépendances (reproductibilité) |
-| `openfoodfacts.toml` | Config TOML de surcharges pour le dataset OpenFoodFacts |
-| `preprocess_off.py` | Script Python de prétraitement du fichier OpenFoodFacts |
-| `schema_off.json` | Snapshot schéma Pass 1 sérialisé pour OpenFoodFacts |
-| `schema_yelp_review.json` | Snapshot schéma Pass 1 sérialisé pour Yelp Review |
+| `Makefile` | Raccourcis build / test / lint |
+| `LICENSE` | Licence MIT |
