@@ -19,7 +19,7 @@
 //! | `SiblingCollapse` | inferred | N sibling tables, same schema | merged table with key column |
 //! | `SiblingCollapseMulti` | inferred | siblings with mixed key shapes | two synthetic pivot tables |
 //! | `AutoSplit` | inferred | root table with bi-modal key frequency | main table + `_wide` companion |
-//! | `Ignore` | inferred | key appears in < `rare_threshold` of rows | excluded from schema |
+//! | `Ignore` | internal | set from a user `Skip` override | excluded from schema (rare `AutoSplit` keys are dropped by `AutoSplit` itself) |
 //! | `Skip` | user | user wants table removed | table excluded from DDL and Pass 2 |
 //! | `NormalizeDynamicKeys` | TOML-only | arbitrary JSON keys → row IDs | key becomes a column |
 //! | `Flatten` | TOML-only | inline child fields into parent | child table removed |
@@ -313,7 +313,7 @@ pub enum InferredStrategy {
     /// keys + many rarely-present keys.
     /// - freq ≥ `stable_threshold`                        → regular column on main table
     /// - `rare_threshold` ≤ freq < `stable_threshold`    → EAV row in `{name}_wide`
-    /// - freq < `rare_threshold`                          → dropped (anomaly report)
+    /// - freq < `rare_threshold`                          → dropped (WARNING on stderr listing the keys)
     ///
     /// JSON input (1000 products; "name" in 100% rows, "desc" in 60%, "`promo_code`" in 0.3%):
     /// ```text
@@ -337,7 +337,7 @@ pub enum InferredStrategy {
     ///     key         TEXT NOT NULL,
     ///     value       TEXT
     /// );
-    /// -- "promo_code" dropped: 0.3% < rare_threshold → anomaly report only
+    /// -- "promo_code" dropped: 0.3% < rare_threshold → not imported (stderr warning only)
     /// ```
     AutoSplit {
         stable_threshold: f64,

@@ -249,6 +249,25 @@ fn infer_medium_value_type(
         .unwrap_or(PgType::Text)
 }
 
+/// Rare keys are dropped by `AutoSplit` (data loss): name them on stderr so the drop is never silent.
+fn warn_rare_keys(entry: &TableEntry, row_count: f64, rare_threshold: f64, table: &str, wide_name: &str) {
+    let mut rare_keys: Vec<&str> = entry.columns.iter()
+        .filter(|(_, t)| !t.is_object_field() && !t.is_array_field())
+        .filter(|(_, t)| (t.total_count as f64 / row_count) < rare_threshold)
+        .map(|(k, _)| k.as_str())
+        .collect();
+    if rare_keys.is_empty() { return; }
+    rare_keys.sort_unstable();
+    let shown = rare_keys.iter().take(10).copied().collect::<Vec<_>>().join(", ");
+    let more = rare_keys.len().saturating_sub(10);
+    let more = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+    eprintln!(
+        "  WARNING: {} rare key(s) in '{table}' are NOT imported (frequency < --rare-threshold {rare_threshold}): \
+        {shown}{more}. Use --rare-threshold 0 to keep them in '{wide_name}'.",
+        rare_keys.len(),
+    );
+}
+
 fn apply_autosplit_strategy(
     schema: &mut TableSchema,
     entry: &TableEntry,
@@ -274,6 +293,7 @@ fn apply_autosplit_strategy(
         schema.name, data_col_count, ratio_stable * 100.0,
         stable_col_count, medium_keys.len(), wide_name, rare_count,
     );
+    warn_rare_keys(entry, row_count, config.rare_threshold, &schema.name, &wide_name);
     let value_type = infer_medium_value_type(entry, &medium_keys);
     build_wide_pivot_schema(schema, wide_name, value_type, medium_keys, config)
 }

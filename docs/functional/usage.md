@@ -148,29 +148,32 @@ json2sql \
 | `--dry-run` | false | Affiche le DDL sans se connecter |
 | `--drop-existing` | false | Supprime les tables existantes avant création |
 | `--schema-config` | aucun | Fichier TOML de surcharges manuelles |
+| `--schema-output` | aucun | Sauvegarde le schéma de la Pass 1 (JSON) |
+| `--schema-input` | aucun | Charge un schéma sauvegardé et saute la Pass 1 |
 
 ### Paramètres d'inférence
 
 | Paramètre | Défaut | Description |
 |---|---|---|
 | `--text-threshold` | 256 | Longueur max avant TEXT (sinon VARCHAR) |
-| `--wide-column-threshold` | 1000 | Seuil de détection des tables larges |
+| `--wide-column-threshold` | 15 | Seuil de détection des tables larges |
 | `--stable-threshold` | 0.10 | Fréquence min pour colonne stable (AutoSplit) |
-| `--rare-threshold` | 0.001 | Fréquence max avant suppression (AutoSplit) |
-| `--sibling-threshold` | 3 | Nb min de tables sœurs pour fusion |
-| `--sibling-jaccard` | 0.5 | Similarité min des colonnes sœurs |
+| `--rare-threshold` | 0.001 | Fréquence sous laquelle une clé n'est **pas importée** (AutoSplit). `0` = tout conserver |
+| `--sibling-threshold` | 2 | Nb min de tables sœurs pour fusion |
+| `--sibling-jaccard` | 0.8 | Similarité min des colonnes sœurs |
 | `--array-as-pg-array` | *(désactivé)* | ⚠️ Temporairement désactivé — rejeté au démarrage (voir [issue #48](https://github.com/rhoods/json2sql/issues/48) : perte de données silencieuse ou crash DDL sur hétérogénéité scalaire/array) |
 | `--depth-limit` | aucun | Avertissement si imbrication dépasse N niveaux |
+| `--workers` | 1 | Threads de la Pass 1 (inférence parallèle) |
 | `--disable-strategy` | aucun | Désactive une stratégie d'inférence optionnelle. Répétable. Valeurs : `sibling`, `pivot`, `structured_pivot`. La stratégie `split` (wide-table) est obligatoire et ne peut pas être désactivée. |
 
 ### Paramètres de chargement
 
 | Paramètre | Défaut | Description |
 |---|---|---|
-| `--batch-size` | 100 000 | Flush vers PostgreSQL toutes les N lignes par table |
-| `--parallel` | 1 | Connexions PostgreSQL parallèles pour le COPY (Phase B) |
-| `--temp-dir` | `$TMPDIR` | Répertoire pour les fichiers temporaires de Pass 2 |
-| `--transaction` | false | Enveloppe tout dans une transaction |
+| `--parallel` | 1 | Workers de la Pass 2 (parse + formatage COPY) et connexions pour l'ajout des contraintes |
+| `--no-constraints` | false | N'ajoute pas les PK/FK en fin d'import |
+| `--batch-size` | 100 000 | ⚠️ Sans effet depuis le pipeline diskless (accepté pour compatibilité) |
+| `--transaction` | false | ⚠️ Sans effet actuellement (accepté mais non câblé) |
 | `--limit` | aucun | Arrête le dispatch Pass 2 après N objets racines. Pass 1 tourne toujours sur le fichier complet. `0` = créer les tables sans lignes. |
 
 ### Paramètres d'anomalies
@@ -234,7 +237,7 @@ json2sql \
 ```
 
 ```toml
-# openfoodfacts.toml
+# openfoodfacts.toml (à créer, non fourni dans le dépôt)
 
 # images: ~2600 tables enfants → stocker tout en JSONB
 [openfoodfacts_products_images]
@@ -248,23 +251,13 @@ strategy = "jsonb"
 strategy = "jsonb"
 ```
 
-Résultat : 125 colonnes stables dans la table principale, 184 clés médium dans `_wide` (EAV), 189 572 clés rares supprimées.
+Résultat : 125 colonnes stables dans la table principale, 184 clés médium dans `_wide` (EAV), 189 572 clés rares **non importées** (listées dans un `WARNING` sur stderr ; `--rare-threshold 0` pour tout garder).
 
 ---
 
 ## Conseils pratiques
 
-**Fichiers temporaires volumineux** : la Pass 2 (Phase A) accumule **toutes** les données dans des fichiers temporaires avant le COPY PostgreSQL (Phase B). Sur des datasets de plusieurs Go, choisir un répertoire avec suffisamment d'espace :
-
-```bash
-# Option recommandée — flag dédié
-json2sql --input big.jsonl --db-url $DATABASE_URL --temp-dir /path/to/large/disk
-
-# Alternative — variable d'environnement (s'applique aussi aux autres outils)
-TMPDIR=/path/to/large/disk json2sql --input big.jsonl --db-url $DATABASE_URL
-```
-
-Dimensionnement : le peak disque est ≈ la taille du fichier source. Pour un fichier de 70 Go, prévoir ~70 Go libres dans le répertoire temp.
+**Disque et mémoire** : la Pass 2 n'écrit aucun fichier temporaire, la RAM est bornée (pause des workers au-delà de 512 MiB en attente). Seule exception : une entrée lue sur stdin est d'abord copiée dans `$TMPDIR` (le fichier doit être lu deux fois) — prévoir l'espace correspondant ou passer `--input`.
 
 **Explorer un fichier inconnu** : utiliser `inspect` pour comprendre la structure d'un fichier trop grand à ouvrir, avant tout import :
 

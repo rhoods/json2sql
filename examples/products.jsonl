@@ -1,0 +1,3 @@
+{"code":"3017620422003","name":"Nutella","quantity_g":400,"price":3.99,"tags":["spread","chocolate"],"nutriments":{"energy_kcal":539,"sugars":56.3},"stores":[{"name":"Carrefour","city":"Paris"}]}
+{"code":"7622210449283","name":"Prince","quantity_g":300,"price":2,"tags":["biscuit"],"nutriments":{"energy_kcal":467,"sugars":32},"stores":[]}
+{"code":"3274080005003","name":"Cristaline","quantity_g":1500,"price":"N/A","tags":[],"nutriments":{"energy_kcal":0,"sugars":0},"stores":[{"name":"Leclerc","city":"Lyon"},{"name":"Auchan","city":"Lille"}]}
