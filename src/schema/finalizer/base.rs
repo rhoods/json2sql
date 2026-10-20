@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use super::super::naming::{ColumnCollision, ColumnNameRegistry, NamingRegistry};
 use super::super::observer::TableEntry;
 use super::super::table_schema::{ColumnSchema, TableSchema};
-use super::super::type_tracker::{widen_pg_types, PgType, TypeTracker};
+use super::super::type_tracker::{PgType, TypeTracker};
 
 /// Phase 1: build base `TableSchema` per `TableEntry` WITHOUT wide-table strategies.
 /// Each table is processed independently (parallel). Returns schemas with initial dedup applied.
@@ -141,14 +141,10 @@ fn is_scalar_column(entry: &TableEntry, original_field: &str, tracker: &TypeTrac
 
 fn push_array_columns(schema: &mut TableSchema, entry: &TableEntry, col_registry: &ColumnNameRegistry) {
     for (original_field, elem_tracker) in &entry.array_columns {
-        let elem_type = entry.columns.get(original_field).map_or_else(
-            || elem_tracker.to_pg_type(),
-            |scalar_tracker| widen_pg_types(elem_tracker.to_pg_type(), &scalar_tracker.to_pg_type()),
-        );
         schema.columns.push(ColumnSchema {
             name: col_registry.resolve(original_field),
             original_name: original_field.clone(),
-            pg_type: PgType::Array(Box::new(elem_type)),
+            pg_type: entry.array_column_type(original_field, elem_tracker),
             not_null: false,
             is_generated: false,
             is_parent_fk: false,

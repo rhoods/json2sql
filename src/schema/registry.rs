@@ -1436,4 +1436,17 @@ mod tests {
         assert_single_array_col(identity, "tags");
         assert!(!medium_keys.contains("tags"), "array field leaked into companion keys: {medium_keys:?}");
     }
+
+    #[test]
+    fn pg_array_mixed_field_schema_report_single_widened_entry() {
+        let mut reg = pg_array_reg(usize::MAX);
+        for v in [json!({"codes": 5}), json!({"codes": ["a", "b"]})] {
+            reg.observe_root("products", make_root(&v));
+        }
+        reg.finalize();
+        let stats = reg.collect_stats();
+        let codes: Vec<_> = stats.iter().filter(|s| s.column_name == "codes").collect();
+        assert_eq!(codes.len(), 1, "mixed field must appear once in the schema report: {codes:?}");
+        assert_eq!(codes[0].pg_type, PgType::Array(Box::new(PgType::Text)), "report type must match the DDL");
+    }
 }

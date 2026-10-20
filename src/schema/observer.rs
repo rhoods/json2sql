@@ -9,6 +9,7 @@
 //! - struct `TableEntry` — une entrée par table découverte pendant l'observation Pass 1.
 //! - fn `TableEntry::new` — crée une entrée de table vide pour un chemin donné.
 //! - fn `TableEntry::merge` — fusionne les colonnes/compteurs d'une autre entrée (multi-worker).
+//! - fn `TableEntry::array_column_type` — type PG d'une colonne array, élargi par les occurrences scalaires (#48).
 //! - fn `TableEntry::observe_field` — met à jour le `TypeTracker` d'un champ scalaire.
 //! - struct `SchemaObserver` — accumulateur par worker des observations JSON brutes (Pass 1).
 //! - fn `SchemaObserver::new` — crée l'observateur (seuil texte, mode array-as-pg-array).
@@ -25,7 +26,7 @@ use serde_json::Value;
 
 use super::PATH_SEP;
 use super::table_schema::ChildKind;
-use super::type_tracker::TypeTracker;
+use super::type_tracker::{widen_pg_types, PgType, TypeTracker};
 
 /// One entry per table discovered during Pass 1 observation, keyed by PATH_SEP-joined path.
 #[derive(Debug)]
@@ -78,6 +79,16 @@ impl TableEntry {
             (None, Some(b))    => self.scalar_tracker = Some(b),
             _                  => {}
         }
+    }
+
+    /// PG type of an `array_as_pg_array` column. A field with mixed scalar/array occurrences
+    /// widens its element type with its scalar occurrences, which Pass 2 wraps as `{x}` (issue #48).
+    pub(crate) fn array_column_type(&self, field: &str, elem_tracker: &TypeTracker) -> PgType {
+        let elem_type = self.columns.get(field).map_or_else(
+            || elem_tracker.to_pg_type(),
+            |scalar_tracker| widen_pg_types(elem_tracker.to_pg_type(), &scalar_tracker.to_pg_type()),
+        );
+        PgType::Array(Box::new(elem_type))
     }
 
     fn observe_field(&mut self, field: &str, value: &Value, text_threshold: u32) {
