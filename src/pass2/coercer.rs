@@ -470,6 +470,7 @@ mod tests {
         assert_eq!(coerce_ok(&json!(true), &PgType::Array(Box::new(PgType::Boolean))), "{t}");
         // a number widened to TEXT[] is wrapped as text
         assert_eq!(coerce_ok(&json!(5), &text_arr), r#"{"5"}"#);
+        assert_eq!(coerce_ok(&json!([]), &text_arr), "{}");
     }
 
     #[test]

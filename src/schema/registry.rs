@@ -1449,4 +1449,45 @@ mod tests {
         assert_eq!(codes.len(), 1, "mixed field must appear once in the schema report: {codes:?}");
         assert_eq!(codes[0].pg_type, PgType::Array(Box::new(PgType::Text)), "report type must match the DDL");
     }
+
+    #[test]
+    fn pg_array_mixed_field_across_parallel_workers() {
+        // worker A sees only scalars, worker B only arrays: the decision is taken after merge.
+        let mut reg_a = pg_array_reg(usize::MAX);
+        let mut reg_b = pg_array_reg(usize::MAX);
+        reg_a.observe_root("products", make_root(&json!({"tags": "bio"})));
+        reg_b.observe_root("products", make_root(&json!({"tags": ["bio", "vegan"]})));
+        reg_a.merge(reg_b);
+        let schemas = reg_a.finalize();
+        assert_single_array_col(&schemas[0], "tags");
+    }
+
+    #[test]
+    fn pg_array_scalar_and_empty_array_stays_scalar() {
+        // `[]` is never observed: a field with only scalars and empty arrays stays a scalar column
+        // (Pass 2 writes NULL for `[]`) — no array column, no duplicate.
+        let mut reg = pg_array_reg(usize::MAX);
+        for v in [json!({"tags": "bio"}), json!({"tags": []})] {
+            reg.observe_root("products", make_root(&v));
+        }
+        let schemas = reg.finalize();
+        let cols: Vec<_> = schemas[0].columns.iter().filter(|c| c.original_name == "tags").collect();
+        assert_eq!(cols.len(), 1);
+        assert!(!matches!(cols[0].pg_type, PgType::Array(_)), "got {:?}", cols[0].pg_type);
+    }
+
+    #[test]
+    fn pg_array_scalar_and_object_array_unchanged() {
+        // array of objects keeps the ObjectArray child-table route, even with the flag on.
+        let mut reg = pg_array_reg(usize::MAX);
+        for v in [json!({"items": "none"}), json!({"items": [{"a": 1}, {"a": 2}]})] {
+            reg.observe_root("products", make_root(&v));
+        }
+        let schemas = reg.finalize();
+        let products = schemas.iter().find(|s| s.name == "products").unwrap();
+        let items = products.find_by_original("items").expect("scalar column kept");
+        assert!(!matches!(items.pg_type, PgType::Array(_)));
+        let child = schemas.iter().find(|s| s.name == "products_items").expect("ObjectArray child table");
+        assert_eq!(child.child_kind, Some(ChildKind::ObjectArray));
+    }
 }
