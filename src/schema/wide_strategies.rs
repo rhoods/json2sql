@@ -16,6 +16,7 @@
 //!   stratégie (Pivot/Jsonb/`StructuredPivot` appliqués ici ; les autres le sont ailleurs).
 //! - fn `apply_pivot_columns` — colonnes `(key, value)` avec type élargi.
 //! - fn `apply_structured_pivot_columns` — colonnes `(name, value, <suffixes>)`.
+//! - fn `widen_union_type` — `widen_pg_types` où un côté pg-array l'emporte (`Array(widen(elem, scalaire))`, #61).
 //! - fn `build_union_columns` — union des colonnes de données de plusieurs tables enfants (types élargis).
 //! - fn `classify_key_shape` — classe un ensemble de clés (Numeric/`IsoLang`/Mixed/Slug).
 //! - fn `find_object_child_indices` — résout les indices des enfants Object d'une table.
@@ -176,6 +177,17 @@ pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: S
     schema.inferred_strategy = InferredStrategy::StructuredPivot(suffix_schema);
 }
 
+/// Like `widen_pg_types`, but a pg-array side wins: sibling tables mixing a scalar and an
+/// `array_as_pg_array` field merge into one array column, scalars wrapped as `{x}` (issues #48, #61).
+fn widen_union_type(a: PgType, b: &PgType) -> PgType {
+    match (a, b) {
+        (PgType::Array(x), PgType::Array(y)) => PgType::Array(Box::new(widen_pg_types(*x, y))),
+        (PgType::Array(x), s) => PgType::Array(Box::new(widen_pg_types(*x, s))),
+        (s, PgType::Array(y)) => PgType::Array(Box::new(widen_pg_types(s, y))),
+        (a, b) => widen_pg_types(a, b),
+    }
+}
+
 #[must_use]
 pub fn build_union_columns(children: &[&TableSchema]) -> Vec<ColumnSchema> {
     let mut col_map: IndexMap<String, (String, PgType)> = IndexMap::new();
@@ -183,7 +195,7 @@ pub fn build_union_columns(children: &[&TableSchema]) -> Vec<ColumnSchema> {
         for col in child.data_columns() {
             col_map
                 .entry(col.original_name.clone())
-                .and_modify(|(_, t)| *t = widen_pg_types(t.clone(), &col.pg_type))
+                .and_modify(|(_, t)| *t = widen_union_type(t.clone(), &col.pg_type))
                 .or_insert((col.name.clone(), col.pg_type.clone()));
         }
     }
@@ -532,5 +544,14 @@ mod tests {
         assert!(names.contains(&"col_a"),         "union col must be added");
         assert!(names.contains(&"col_b"),         "union col must be added");
         assert!(!names.contains(&"old_data"),     "non-generated col must be dropped");
+    }
+
+    #[test]
+    fn widen_union_type_keeps_pg_arrays() {
+        let arr = |t: PgType| PgType::Array(Box::new(t));
+        assert_eq!(widen_union_type(PgType::Text, &arr(PgType::Integer)), arr(PgType::Text));
+        assert_eq!(widen_union_type(arr(PgType::Integer), &PgType::BigInt), arr(PgType::BigInt));
+        assert_eq!(widen_union_type(arr(PgType::Integer), &arr(PgType::DoublePrecision)), arr(PgType::DoublePrecision));
+        assert_eq!(widen_union_type(PgType::Integer, &PgType::BigInt), PgType::BigInt);
     }
 }
