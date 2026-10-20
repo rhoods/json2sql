@@ -32,7 +32,7 @@ users_tags               → tableau de scalaires ["rust", "sql"] → (value, j2
 users_orders_items       → imbrication profonde
 ```
 
-⚠️ Le flag `--array-as-pg-array` (qui devait transformer les tableaux de scalaires en colonnes `TEXT[]`, `INTEGER[]`, etc. au lieu de tables de jonction) est temporairement désactivé — voir [issue #48](https://github.com/rhoods/json2sql/issues/48) : perte de données silencieuse ou crash DDL sur hétérogénéité scalaire/array. Le comportement par défaut (table de jonction, décrit ci-dessus) n'est pas affecté.
+Avec `--array-as-pg-array`, les tableaux de scalaires deviennent des colonnes `TEXT[]`, `INTEGER[]`, etc. au lieu de tables de jonction. Un champ tantôt scalaire, tantôt tableau (`"bio"` puis `["bio", "vegan"]`) devient une seule colonne tableau : chaque valeur scalaire y est stockée comme un tableau à un élément (`{bio}`), et le type des éléments est élargi si besoin (entier + texte → `TEXT[]`).
 
 ### Clés générées (préfixe `j2s_`)
 
