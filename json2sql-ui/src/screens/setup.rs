@@ -665,6 +665,34 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
 
                                 div { class: "divider" }
 
+                                // ── Native PG arrays ──────────────────────
+                                h4 { style: "font-size:var(--fs-sm);margin:0 0 8px;color:var(--fg);", "Arrays" }
+                                p { style: "font-size:var(--fs-xs);color:var(--fg-3);margin:0 0 10px;line-height:1.5;",
+                                    "Store arrays of scalars as native PostgreSQL array columns instead of child tables. "
+                                    "A field that is sometimes a scalar and sometimes an array becomes a single array column; "
+                                    "its scalar values are stored as one-element arrays (\"bio\" → {{bio}}). "
+                                    "Applies at analysis time: re-run the analysis after changing it."
+                                }
+                                {
+                                    let pg_array_on = state.read().project.array_as_pg_array;
+                                    rsx! {
+                                        label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: pg_array_on,
+                                                onchange: move |e| {
+                                                    state.write().project.array_as_pg_array = e.value() == "true";
+                                                    crate::config::try_save(&state.read().project);
+                                                },
+                                            }
+                                            span { "Arrays as PG arrays " }
+                                            span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(--array-as-pg-array)" }
+                                        }
+                                    }
+                                }
+
+                                div { class: "divider" }
+
                                 // ── Sample import ─────────────────────────
                                 h4 { style: "font-size:var(--fs-sm);margin:0 0 8px;color:var(--fg);", "Sample import" }
                                 p { style: "font-size:var(--fs-xs);color:var(--fg-3);margin:0 0 10px;line-height:1.5;",

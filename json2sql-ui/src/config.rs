@@ -48,6 +48,9 @@ pub struct ProjectConfig {
     /// Skip the constraint phase at the end of Pass 2. Persisted for workflows that always skip.
     #[serde(default)]
     pub skip_constraints: bool,
+    /// Pass 1 only: native PG array columns for arrays of scalars.
+    #[serde(default)]
+    pub array_as_pg_array: bool,
 }
 
 impl Default for ProjectConfig {
@@ -69,6 +72,7 @@ impl Default for ProjectConfig {
             disabled_strategies: Vec::new(),
             import_limit: None,
             skip_constraints: false,
+            array_as_pg_array: false,
         }
     }
 }
@@ -90,6 +94,7 @@ impl ProjectConfig {
             disabled_strategies: p.disabled_strategies.iter().map(|s| s.as_str().to_string()).collect(),
             import_limit: p.import_limit,
             skip_constraints: p.skip_constraints,
+            array_as_pg_array: p.array_as_pg_array,
         }
     }
 
@@ -112,6 +117,7 @@ impl ProjectConfig {
             .collect::<HashSet<_>>();
         p.import_limit = self.import_limit;
         p.skip_constraints = self.skip_constraints;
+        p.array_as_pg_array = self.array_as_pg_array;
     }
 }
 
@@ -208,8 +214,8 @@ mod tests {
             workers: 2,
             pass2_parallel: 3,
             disabled_strategies: Vec::new(),
-            import_limit: None,
             skip_constraints: false,
+            ..ProjectConfig::default()
         };
         let mut p = ProjectState::default();
         p.pg.password = "original_password".to_string();
@@ -257,8 +263,8 @@ mod tests {
             workers: 3,
             pass2_parallel: 5,
             disabled_strategies: Vec::new(),
-            import_limit: None,
             skip_constraints: true,
+            ..ProjectConfig::default()
         };
 
         let toml_str = toml::to_string(&cfg).expect("serialize");
@@ -287,11 +293,23 @@ mod tests {
     }
 
     #[test]
+    fn array_as_pg_array_round_trips_toml() {
+        let p = ProjectState { array_as_pg_array: true, ..Default::default() };
+        let cfg = ProjectConfig::from_project(&p);
+        let toml_str = toml::to_string(&cfg).expect("serialize");
+        let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
+        let mut p2 = ProjectState::default();
+        parsed.apply_to(&mut p2);
+        assert!(p2.array_as_pg_array, "array_as_pg_array=true must survive project -> TOML -> project");
+    }
+
+    #[test]
     fn skip_constraints_defaults_to_false_when_absent_from_toml() {
         // Simulates loading an old TOML file that doesn't have skip_constraints
         let toml_str = "pg_host = \"localhost\"\npg_port = 5432\npg_database = \"\"\npg_username = \"\"\npg_schema = \"public\"\ndrop_existing = false\nworkers = 1\npass2_parallel = 4\n";
         let parsed: ProjectConfig = toml::from_str(toml_str).expect("deserialize");
         assert!(!parsed.skip_constraints, "skip_constraints must default to false for backward compat");
+        assert!(!parsed.array_as_pg_array, "array_as_pg_array must default to false for backward compat");
     }
 
     #[test]
