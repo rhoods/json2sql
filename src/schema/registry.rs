@@ -1362,5 +1362,132 @@ mod tests {
         assert!(!matches!(nutrients_disabled.inferred_strategy, InferredStrategy::StructuredPivot(_)),
             "structured_pivot disabled → no StructuredPivot, got: {:?}", nutrients_disabled.inferred_strategy);
     }
-}
 
+    // ── issue #48 : array_as_pg_array + occurrences mixtes scalaire/array ──
+
+    fn pg_array_reg(wide_column_threshold: usize) -> SchemaRegistry {
+        SchemaRegistry::new(RegistryConfig { array_as_pg_array: true, wide_column_threshold, ..Default::default() })
+    }
+
+    fn assert_single_array_col(schema: &crate::schema::table_schema::TableSchema, field: &str) {
+        let cols: Vec<_> = schema.columns.iter().filter(|c| c.original_name == field).collect();
+        assert_eq!(cols.len(), 1, "'{field}' must yield exactly one column in '{}', got {cols:?}", schema.name);
+        assert!(matches!(cols[0].pg_type, PgType::Array(_)), "'{field}' must be a PG array, got {:?}", cols[0].pg_type);
+    }
+
+    #[test]
+    fn pg_array_mixed_field_flat_table_single_array_column() {
+        let mut reg = pg_array_reg(usize::MAX);
+        for v in [json!({"id": 1, "tags": "bio"}), json!({"id": 2, "tags": ["bio", "vegan"]}), json!({"id": 3, "tags": "local"})] {
+            reg.observe_root("products", make_root(&v));
+        }
+        let schemas = reg.finalize();
+        let products = schemas.iter().find(|s| s.name == "products").unwrap();
+        assert_single_array_col(products, "tags");
+        assert!(reg.column_collisions().is_empty(), "no spurious collision: {:?}", reg.column_collisions());
+    }
+
+    #[test]
+    fn pg_array_mixed_field_widens_element_type() {
+        // scalar integer + text elements → TEXT[] (otherwise text elements would be NULLed)
+        let mut reg = pg_array_reg(usize::MAX);
+        for v in [json!({"codes": 5}), json!({"codes": ["a", "b"]})] {
+            reg.observe_root("products", make_root(&v));
+        }
+        let schemas = reg.finalize();
+        let col = schemas[0].find_by_original("codes").unwrap();
+        assert_eq!(col.pg_type, PgType::Array(Box::new(PgType::Text)));
+    }
+
+    #[test]
+    fn pg_array_autosplit_root_keeps_array_columns() {
+        // root wide (threshold 2) + object child → AutoSplit. Pure and mixed pg-array fields
+        // must stay as columns on the main table and never become medium (EAV) keys.
+        let mut reg = pg_array_reg(2);
+        for v in [
+            json!({"id": 1, "child": {"x": 1}, "pure": ["a"], "mixed": "s"}),
+            json!({"id": 2, "child": {"x": 2}, "pure": ["b", "c"], "mixed": ["t", "u"]}),
+            json!({"id": 3, "child": {"x": 3}, "pure": ["d"], "mixed": "v"}),
+        ] {
+            reg.observe_root("root", make_root(&v));
+        }
+        let schemas = reg.finalize();
+        let root = schemas.iter().find(|s| s.name == "root").unwrap();
+        let InferredStrategy::AutoSplit { medium_keys, .. } = &root.inferred_strategy else {
+            panic!("root must be AutoSplit, got {:?}", root.inferred_strategy);
+        };
+        assert_single_array_col(root, "pure");
+        assert_single_array_col(root, "mixed");
+        assert!(!medium_keys.contains("pure") && !medium_keys.contains("mixed"), "array fields leaked into medium_keys: {medium_keys:?}");
+    }
+
+    #[test]
+    fn pg_array_pivot_split_identity_keeps_array_columns() {
+        // non-root wide object → identity/companion split (retention zero): the pg-array field
+        // cannot live in the scalar EAV companion, it must stay on the identity table.
+        let mut reg = pg_array_reg(2);
+        let v = json!({"nutrients": {"vit_c": 10.5, "iron": 2.3, "calcium": 50.0, "tags": ["x", "y"]}});
+        reg.observe_root("item", make_root(&v));
+        let schemas = reg.finalize();
+        let identity = schemas.iter().find(|s| s.name == "item_nutrients").unwrap();
+        let InferredStrategy::AutoSplit { medium_keys, .. } = &identity.inferred_strategy else {
+            panic!("identity must be AutoSplit, got {:?}", identity.inferred_strategy);
+        };
+        assert_single_array_col(identity, "tags");
+        assert!(!medium_keys.contains("tags"), "array field leaked into companion keys: {medium_keys:?}");
+    }
+
+    #[test]
+    fn pg_array_mixed_field_schema_report_single_widened_entry() {
+        let mut reg = pg_array_reg(usize::MAX);
+        for v in [json!({"codes": 5}), json!({"codes": ["a", "b"]})] {
+            reg.observe_root("products", make_root(&v));
+        }
+        reg.finalize();
+        let stats = reg.collect_stats();
+        let codes: Vec<_> = stats.iter().filter(|s| s.column_name == "codes").collect();
+        assert_eq!(codes.len(), 1, "mixed field must appear once in the schema report: {codes:?}");
+        assert_eq!(codes[0].pg_type, PgType::Array(Box::new(PgType::Text)), "report type must match the DDL");
+    }
+
+    #[test]
+    fn pg_array_mixed_field_across_parallel_workers() {
+        // worker A sees only scalars, worker B only arrays: the decision is taken after merge.
+        let mut reg_a = pg_array_reg(usize::MAX);
+        let mut reg_b = pg_array_reg(usize::MAX);
+        reg_a.observe_root("products", make_root(&json!({"tags": "bio"})));
+        reg_b.observe_root("products", make_root(&json!({"tags": ["bio", "vegan"]})));
+        reg_a.merge(reg_b);
+        let schemas = reg_a.finalize();
+        assert_single_array_col(&schemas[0], "tags");
+    }
+
+    #[test]
+    fn pg_array_scalar_and_empty_array_stays_scalar() {
+        // `[]` is never observed: a field with only scalars and empty arrays stays a scalar column
+        // (Pass 2 writes NULL for `[]`) — no array column, no duplicate.
+        let mut reg = pg_array_reg(usize::MAX);
+        for v in [json!({"tags": "bio"}), json!({"tags": []})] {
+            reg.observe_root("products", make_root(&v));
+        }
+        let schemas = reg.finalize();
+        let cols: Vec<_> = schemas[0].columns.iter().filter(|c| c.original_name == "tags").collect();
+        assert_eq!(cols.len(), 1);
+        assert!(!matches!(cols[0].pg_type, PgType::Array(_)), "got {:?}", cols[0].pg_type);
+    }
+
+    #[test]
+    fn pg_array_scalar_and_object_array_unchanged() {
+        // array of objects keeps the ObjectArray child-table route, even with the flag on.
+        let mut reg = pg_array_reg(usize::MAX);
+        for v in [json!({"items": "none"}), json!({"items": [{"a": 1}, {"a": 2}]})] {
+            reg.observe_root("products", make_root(&v));
+        }
+        let schemas = reg.finalize();
+        let products = schemas.iter().find(|s| s.name == "products").unwrap();
+        let items = products.find_by_original("items").expect("scalar column kept");
+        assert!(!matches!(items.pg_type, PgType::Array(_)));
+        let child = schemas.iter().find(|s| s.name == "products_items").expect("ObjectArray child table");
+        assert_eq!(child.child_kind, Some(ChildKind::ObjectArray));
+    }
+}

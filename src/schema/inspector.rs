@@ -30,14 +30,14 @@ fn make_stat(table_name: &str, column_name: String, pg_type: PgType, tracker: &T
 fn collect_entry_stats(entry: &super::observer::TableEntry, table_name: &str) -> Vec<ColumnStats> {
     let mut stats = Vec::new();
     for (original_field, tracker) in &entry.columns {
-        if tracker.is_object_field() || tracker.is_array_field() { continue; }
+        if tracker.is_object_field() || tracker.is_array_field() || entry.array_columns.contains_key(original_field) { continue; }
         stats.push(make_stat(table_name, NamingRegistry::column_name(original_field), tracker.to_pg_type(), tracker));
     }
     if let Some(ref tracker) = entry.scalar_tracker {
         stats.push(make_stat(table_name, "value".to_string(), tracker.to_pg_type(), tracker));
     }
     for (original_field, tracker) in &entry.array_columns {
-        let pg_type = PgType::Array(Box::new(tracker.to_pg_type()));
+        let pg_type = entry.array_column_type(original_field, tracker);
         stats.push(make_stat(table_name, NamingRegistry::column_name(original_field), pg_type, tracker));
     }
     stats

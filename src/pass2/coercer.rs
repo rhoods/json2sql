@@ -78,10 +78,12 @@ pub fn coerce(value: &Value, pg_type: &PgType) -> CoerceResult {
         PgType::Text | PgType::Jsonb => coerce_text(value),
         PgType::Array(elem_type) => match value {
             Value::Array(arr) => coerce_pg_array(arr, elem_type),
-            _ => CoerceResult::Anomaly {
+            // Mixed scalar/array field (issue #48): a scalar occurrence becomes a one-element array.
+            Value::Object(_) => CoerceResult::Anomaly {
                 actual_value: value.to_string(),
                 actual_type: json_type_name(value),
             },
+            scalar => coerce_pg_array(std::slice::from_ref(scalar), elem_type),
         },
     }
 }
@@ -449,5 +451,30 @@ mod tests {
             matches!(coerce(&ok_float, &PgType::BigInt), CoerceResult::Ok(_)),
             "whole-number float within i64 range must coerce OK"
         );
+    }
+
+    // ── issue #48 : occurrence scalaire dans une colonne PG array → tableau à un élément ──
+
+    fn coerce_ok(value: &Value, pg_type: &PgType) -> String {
+        match coerce(value, pg_type) {
+            CoerceResult::Ok(s) => s.as_str().to_owned(),
+            _ => panic!("expected Ok for {value}"),
+        }
+    }
+
+    #[test]
+    fn test_coerce_scalar_into_pg_array_wraps() {
+        let text_arr = PgType::Array(Box::new(PgType::Text));
+        assert_eq!(coerce_ok(&json!("bio"), &text_arr), r#"{"bio"}"#);
+        assert_eq!(coerce_ok(&json!(5), &PgType::Array(Box::new(PgType::Integer))), "{5}");
+        assert_eq!(coerce_ok(&json!(true), &PgType::Array(Box::new(PgType::Boolean))), "{t}");
+        // a number widened to TEXT[] is wrapped as text
+        assert_eq!(coerce_ok(&json!(5), &text_arr), r#"{"5"}"#);
+        assert_eq!(coerce_ok(&json!([]), &text_arr), "{}");
+    }
+
+    #[test]
+    fn test_coerce_null_into_pg_array_stays_null() {
+        assert!(matches!(coerce(&Value::Null, &PgType::Array(Box::new(PgType::Text))), CoerceResult::Null));
     }
 }
