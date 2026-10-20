@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [master]
 
+# A new push on the same PR/branch cancels the run still in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -14,6 +19,7 @@ jobs:
   # ── Unit tests (no Docker required) ─────────────────────────────────────────
   unit:
     name: Unit tests — ${{ matrix.os }}
+    timeout-minutes: 30
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -44,6 +50,7 @@ jobs:
   # ── Clippy — Linux only (json2sql + json2sql-ui deny pedantic/nursery at crate root) ─
   clippy:
     name: Clippy
+    timeout-minutes: 30
     runs-on: ubuntu-latest
 
     steps:
@@ -77,6 +84,7 @@ jobs:
   # ── Integration tests — Linux only (testcontainers via Docker) ──────────────
   integration-docker:
     name: Integration tests (Docker) — ubuntu-latest
+    timeout-minutes: 30
     runs-on: ubuntu-latest
 
     steps:
@@ -95,11 +103,12 @@ jobs:
           key: ubuntu-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Integration tests (testcontainers)
-        run: cargo test --features integration-tests --test tc_flat_table --test tc_nested_fk --test tc_sibling_collapse --test tc_wide_table -- --nocapture
+        run: cargo test --features integration-tests --tests -- --nocapture
 
   # ── Integration tests — Ubuntu native PG (action-setup-postgres) ─────────────
   integration-ubuntu:
     name: Integration tests (native PG) — ubuntu-latest
+    timeout-minutes: 30
     runs-on: ubuntu-latest
 
     steps:
@@ -126,13 +135,14 @@ jobs:
           port: 5432
 
       - name: Integration tests (TEST_DATABASE_URL)
-        run: cargo test --no-fail-fast --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
+        run: cargo test --no-fail-fast --tests -- --nocapture
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
   # ── Integration tests — Windows (action-setup-postgres) ──────────────────────
   integration-windows:
     name: Integration tests (native PG) — windows-latest
+    timeout-minutes: 30
     runs-on: windows-latest
 
     steps:
@@ -159,13 +169,14 @@ jobs:
           port: 5432
 
       - name: Integration tests (TEST_DATABASE_URL)
-        run: cargo test --no-fail-fast --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
+        run: cargo test --no-fail-fast --tests -- --nocapture
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
   # ── Integration tests — macOS (action-setup-postgres) ────────────────────────
   integration-macos:
     name: Integration tests (native PG) — macos-latest
+    timeout-minutes: 30
     runs-on: macos-latest
 
     steps:
@@ -192,6 +203,6 @@ jobs:
           port: 5432
 
       - name: Integration tests (TEST_DATABASE_URL)
-        run: cargo test --no-fail-fast --test integration_pipeline --test integration_strategies --test integration_anomalies --test integration_schema --test integration_overrides --test integration_limit -- --nocapture
+        run: cargo test --no-fail-fast --tests -- --nocapture
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres

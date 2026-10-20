@@ -91,3 +91,39 @@ async fn test_pg_array_pivot_split_keeps_arrays_e2e() {
     })
     .await;
 }
+
+/// Issue #61 — `SiblingCollapse` where a field is scalar in some siblings and a pg array in
+/// another: the union column stays an array (scalars wrapped as `{x}`) instead of TEXT + NULLs.
+#[tokio::test]
+async fn test_pg_array_sibling_union_keeps_arrays_e2e() {
+    integration::with_pg_container(|client, schema, url| async move {
+        let result = run_pipeline(base_config(url, schema.clone(), "tc_pg_array_siblings.jsonl", 100)).await;
+        assert!(result.is_ok(), "pg_array_siblings pipeline failed: {result:?}");
+
+        let sql = format!(
+            "SELECT array_to_string(v.\"x\", ',') FROM \"{schema}\".\"products_variants\" v \
+             JOIN \"{schema}\".\"products\" p ON v.\"j2s_products_id\" = p.\"j2s_id\" ORDER BY p.\"id\", v.\"key\""
+        );
+        let xs: Vec<String> = client.query(&sql, &[]).await.unwrap().iter().map(|r| r.get(0)).collect();
+        assert_eq!(xs, vec!["s", "t,u", "v", "w", "y", "z"]);
+    })
+    .await;
+}
+
+/// Issue #61 — an object occurrence of a pg-array field is not lost: Pass 1 also creates the
+/// `products_tags` child table, which receives it.
+#[tokio::test]
+async fn test_pg_array_object_occurrence_goes_to_child_e2e() {
+    integration::with_pg_container(|client, schema, url| async move {
+        let result = run_pipeline(base_config(url, schema.clone(), "tc_pg_array_object.jsonl", 100)).await;
+        assert!(result.is_ok(), "pg_array_object pipeline failed: {result:?}");
+
+        let sql = format!(
+            "SELECT p.\"id\", t.\"x\" FROM \"{schema}\".\"products_tags\" t \
+             JOIN \"{schema}\".\"products\" p ON t.\"j2s_products_id\" = p.\"j2s_id\""
+        );
+        let rows: Vec<(i32, i32)> = client.query(&sql, &[]).await.unwrap().iter().map(|r| (r.get(0), r.get(1))).collect();
+        assert_eq!(rows, vec![(2, 1)]);
+    })
+    .await;
+}
