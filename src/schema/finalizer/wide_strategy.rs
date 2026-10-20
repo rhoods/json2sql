@@ -16,6 +16,7 @@
 //! - fn `build_wide_pivot_schema` — construit la table EAV compagnon (réutilisée par
 //!   `apply_autosplit_strategy` et `apply_pivot_split`, qui diffèrent seulement par la
 //!   politique de rétention et le jeu de clés envoyé en compagnon).
+//! - fn `is_pg_array` — vrai pour une colonne PG array, jamais envoyée en compagnon EAV (#48).
 //! - fn `collect_medium_keys` — sélectionne les clés de fréquence moyenne (`AutoSplit` racine
 //!   uniquement).
 //! - fn `infer_medium_value_type` — détermine le type de valeur commun d'un jeu de clés.
@@ -197,8 +198,8 @@ fn apply_pivot_split(
     existing_names: &std::collections::HashSet<String>,
 ) -> TableSchema {
     let all_keys: std::collections::HashSet<String> =
-        schema.data_columns().map(|c| c.original_name.clone()).collect();
-    schema.columns.retain(|c| c.is_generated);
+        schema.data_columns().filter(|c| !is_pg_array(c)).map(|c| c.original_name.clone()).collect();
+    schema.columns.retain(|c| c.is_generated || is_pg_array(c));
     let wide_name = unique_pivot_name(&schema.name, existing_names);
     let value_type = infer_medium_value_type(entry, &all_keys);
     build_wide_pivot_schema(schema, wide_name, value_type, all_keys, config)
@@ -219,6 +220,11 @@ fn unique_pivot_name(schema_name: &str, existing_names: &std::collections::HashS
     candidate
 }
 
+/// `array_as_pg_array` column — never routed to an EAV companion (issue #48).
+const fn is_pg_array(col: &ColumnSchema) -> bool {
+    matches!(col.pg_type, PgType::Array(_))
+}
+
 /// Apply the P5 `AutoSplit` strategy: retain stable columns on the main table,
 /// build a companion `_wide` EAV table for medium-frequency keys.
 fn collect_medium_keys(
@@ -228,7 +234,7 @@ fn collect_medium_keys(
     stable_threshold: f64,
 ) -> std::collections::HashSet<String> {
     entry.columns.iter()
-        .filter(|(_, t)| !t.is_object_field() && !t.is_array_field())
+        .filter(|(k, t)| !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k))
         .filter(|(_, t)| {
             let freq = t.total_count as f64 / row_count;
             freq >= rare_threshold && freq < stable_threshold
@@ -252,7 +258,7 @@ fn infer_medium_value_type(
 /// Rare keys are dropped by `AutoSplit` (data loss): name them on stderr so the drop is never silent.
 fn warn_rare_keys(entry: &TableEntry, row_count: f64, rare_threshold: f64, table: &str, wide_name: &str) {
     let mut rare_keys: Vec<&str> = entry.columns.iter()
-        .filter(|(_, t)| !t.is_object_field() && !t.is_array_field())
+        .filter(|(k, t)| !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k))
         .filter(|(_, t)| (t.total_count as f64 / row_count) < rare_threshold)
         .map(|(k, _)| k.as_str())
         .collect();
@@ -277,8 +283,10 @@ fn apply_autosplit_strategy(
     ratio_stable: f64,
 ) -> TableSchema {
     let medium_keys = collect_medium_keys(entry, row_count, config.rare_threshold, config.stable_threshold);
+    // pg-array columns are kept unconditionally: their tracker counts elements, not occurrences,
+    // and the scalar EAV companion cannot hold them (issue #48).
     schema.columns.retain(|c| {
-        c.is_generated || entry.columns.get(&c.original_name)
+        c.is_generated || is_pg_array(c) || entry.columns.get(&c.original_name)
             .is_some_and(|t| t.total_count as f64 / row_count >= config.stable_threshold)
     });
     let stable_col_count = schema.data_columns().count();
