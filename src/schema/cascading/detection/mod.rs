@@ -15,6 +15,8 @@
 //! Orchestration :
 //! - fn `finalize_cascading` — enchaîne wave 0, cascade waves 1+, wave 0-bis (tables
 //!   T créées par le cascade), et le post-pass keyed-pivot.
+//! - fn `drain_cascade_waves` — traite les groupes co-sibling vague par vague jusqu'à épuisement
+//!   (index parent→enfants reconstruits une fois par vague).
 //! - fn `run_sibling_wave` — une passe complète (maps → work items → détection → application).
 //! - fn `build_parent_child_maps` — index `parent_name → [enfants]` (Object/ObjectArray séparés).
 
