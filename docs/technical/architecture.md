@@ -151,10 +151,10 @@ Lecture de fichiers JSON, suivi de progression et communication avec l'IHM.
 
 Lecteur de fichiers JSON en streaming, sans charger tout le fichier en mémoire.
 
-- **`JsonFormat`** : détecte automatiquement le format (`Array` = `[...]` ou `Lines` = NDJSON)
-- **`JsonLinesReader`** : itérateur ligne par ligne pour le format NDJSON
+- **`JsonFormat`** : format détecté automatiquement (voir [usage.md](../functional/usage.md#formats-dentrée)) : `Array` (`[...]`), `Lines` (NDJSON), `RootWrapper` (`{"clé": [...], ...}`), `SingleObject` (un seul objet, éventuellement sur plusieurs lignes)
+- **`JsonLinesReader`** : itérateur ligne par ligne pour le format NDJSON (un objet par ligne)
 - **`JsonArrayReader`** : parseur de tableau JSON par profondeur de bracket. Extrait chaque objet sans charger tout le tableau.
-- **`JsonReader`** : enum unificateur exposant `Iterator<Item = serde_json::Value>` pour les deux formats
+- **`JsonReader`** : enum unificateur exposant `Iterator<Item = serde_json::Value>` pour les quatre formats. `SingleObject` lit le fichier en une fois (un objet = une ligne, il doit de toute façon être parsé entier)
 
 ### `progress.rs`
 

@@ -9,6 +9,19 @@ cargo build --release
 
 Variable d'environnement : `DATABASE_URL` est lue automatiquement si `--db-url` est absent.
 
+## Formats d'entrée
+
+Le format est détecté automatiquement :
+
+| Contenu | Interprétation |
+|---|---|
+| `[ {...}, {...} ]` | Tableau JSON : un objet = une ligne de la table racine |
+| `{...}` puis `{...}` … | NDJSON : **un objet par ligne** (les objets indentés sur plusieurs lignes ne sont pas supportés) |
+| `{"produits": [...], "magasins": [...]}` | Conteneur : chaque clé devient une table racine. **Toutes** les valeurs doivent être des tableaux |
+| `{...}` seul (même indenté) | Un seul enregistrement |
+
+Un objet unique qui mélange tableaux et autres valeurs (ex. `{"meta": {...}, "foods": [...]}`) est **refusé** car ambigu : conteneur ou enregistrement ? Pour l'importer comme un enregistrement, l'entourer de crochets : `[ {...} ]`.
+
 ---
 
 ## Sous-commandes

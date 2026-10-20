@@ -5,11 +5,13 @@
 //! [`JsonFormat`] is detected by scanning the first object of the file:
 //! - `[` → [`JsonFormat::Array`]
 //! - `{` whose root-level values are all arrays, no second root object → [`JsonFormat::RootWrapper`]
+//! - `{` with no array value, no second root object → [`JsonFormat::SingleObject`] (one record,
+//!   may span several lines)
 //! - `{` with a second root object following → [`JsonFormat::Lines`] (NDJSON)
 //!
 //! Fonctions :
 //! - fn `simd_err` — convertit une erreur `simd_json` en `J2sError`.
-//! - enum `JsonFormat` — format détecté du fichier d'entrée (Array, Lines, `RootWrapper`).
+//! - enum `JsonFormat` — format détecté du fichier d'entrée (Array, Lines, `RootWrapper`, `SingleObject`).
 //! - fn `detect_format` — scanne le premier octet significatif pour détecter le format.
 //!
 //! Détection de format (tokenizer minimal pour sauter les valeurs sans les parser) :
@@ -74,7 +76,7 @@
 //! - fn `JsonRootWrapperReader::next` — implémente `Iterator` (parse l'élément suivant en `Value`).
 //!
 //! `JsonReader` (point d'entrée unifié, dispatch vers l'une des 3 implémentations ci-dessus) :
-//! - enum `JsonReader` — enveloppe Lines/Array/RootWrapper selon le format détecté.
+//! - enum `JsonReader` — enveloppe Lines/Array/RootWrapper/SingleObject selon le format détecté.
 //! - fn `JsonReader::next_raw` — délègue au lecteur actif, octets bruts sans parser.
 //! - fn `JsonReader::open` — détecte le format puis ouvre le lecteur correspondant.
 //! - fn `JsonReader::open_with_format` — ouvre un lecteur pour un format déjà connu (skip la détection).
@@ -106,6 +108,8 @@ pub enum JsonFormat {
     /// Single root object whose values are all arrays: `{"K1": [{...}], "K2": [{...}]}`
     /// The `Vec<String>` holds the key names in order of discovery.
     RootWrapper(Vec<String>),
+    /// The whole file is one JSON object (one record), possibly pretty-printed over many lines.
+    SingleObject,
 }
 
 /// Detect the format by scanning the first root-level structure of the file.
@@ -311,8 +315,8 @@ fn fmt_skip_primitive_rest(reader: &mut impl BufRead) -> Result<()> {
 ///
 /// - If another root object follows → [`JsonFormat::Lines`] (NDJSON).
 /// - If all top-level values are arrays → [`JsonFormat::RootWrapper`].
-/// - If top-level values are mixed (some arrays, some not) → error.
-/// - If no arrays at all (single plain object) → [`JsonFormat::Lines`] (backward compat).
+/// - If top-level values are mixed (some arrays, some not) → error (wrapper or record: ambiguous).
+/// - If no arrays at all (single plain object) → [`JsonFormat::SingleObject`].
 #[allow(clippy::too_many_lines)] // cohesive parser state machine, not decomposable without hurting readability
 fn fmt_detect_root_object(reader: &mut impl BufRead) -> Result<JsonFormat> {
     let mut array_keys: Vec<String> = Vec::new();
@@ -371,15 +375,16 @@ fn fmt_detect_root_object(reader: &mut impl BufRead) -> Result<JsonFormat> {
                     None => {
                         if has_non_array && !array_keys.is_empty() {
                             Err(J2sError::InvalidInput(format!(
-                                "Root wrapper object contains non-array value for key '{}'. \
-                                 Only root objects where all values are arrays are supported.",
+                                "Ambiguous root object: key '{}' holds an array but key '{}' holds a \
+                                 non-array value. If the file is a single record, wrap it in brackets \
+                                 ([ {{...}} ]); if it is a wrapper {{\"name\": [...]}}, every value must be an array.",
+                                array_keys[0],
                                 first_non_array_key.as_deref().unwrap_or("?")
                             )))
                         } else if !array_keys.is_empty() {
                             Ok(JsonFormat::RootWrapper(array_keys))
                         } else {
-                            // Single root object with no array values — treat as NDJSON (single row).
-                            Ok(JsonFormat::Lines)
+                            Ok(JsonFormat::SingleObject)
                         }
                     }
                 };
@@ -950,6 +955,8 @@ pub enum JsonReader {
     Lines(JsonLinesReader),
     Array(JsonArrayReader),
     RootWrapper(JsonRootWrapperReader),
+    /// Whole file read at once: `pending` holds it until consumed, `size` is its length.
+    SingleObject { pending: Option<Vec<u8>>, size: u64 },
 }
 
 impl JsonReader {
@@ -960,6 +967,7 @@ impl JsonReader {
             Self::Lines(r) => r.next_raw(),
             Self::Array(r) => r.next_raw(),
             Self::RootWrapper(r) => r.next_raw(),
+            Self::SingleObject { pending, .. } => pending.take().map(Ok),
         }
     }
 
@@ -977,6 +985,11 @@ impl JsonReader {
             JsonFormat::Array => Ok(Self::Array(JsonArrayReader::open(path)?)),
             JsonFormat::RootWrapper(keys) => {
                 Ok(Self::RootWrapper(JsonRootWrapperReader::open(path, keys)?))
+            }
+            // shortcut: loads the file in RAM; fine since one object is one row and must be parsed whole anyway.
+            JsonFormat::SingleObject => {
+                let bytes = std::fs::read(path)?;
+                Ok(Self::SingleObject { size: bytes.len() as u64, pending: Some(bytes) })
             }
         }
     }
@@ -996,6 +1009,7 @@ impl JsonReader {
             Self::Lines(r) => r.bytes_read(),
             Self::Array(r) => r.bytes_read(),
             Self::RootWrapper(r) => r.bytes_read(),
+            Self::SingleObject { pending, size } => if pending.is_some() { 0 } else { *size },
         }
     }
 }
@@ -1008,6 +1022,9 @@ impl Iterator for JsonReader {
             Self::Lines(r) => r.next(),
             Self::Array(r) => r.next(),
             Self::RootWrapper(r) => r.next(),
+            Self::SingleObject { pending, .. } => {
+                pending.take().map(|mut bytes| simd_json::from_slice(&mut bytes).map_err(simd_err))
+            }
         }
     }
 }
@@ -1232,10 +1249,31 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_format_single_object_non_array_values_is_ndjson() {
-        // Single root object with no array values → treated as NDJSON (one row).
+    fn test_detect_format_single_object_non_array_values_is_single_object() {
         let f = tmp_file(b"{\"a\": 1}");
-        assert_eq!(detect_format(f.path()).unwrap(), JsonFormat::Lines);
+        assert_eq!(detect_format(f.path()).unwrap(), JsonFormat::SingleObject);
+    }
+
+    #[test]
+    fn test_single_pretty_printed_object_yields_one_record() {
+        // Regression: a multi-line single object was read line by line and failed on "{".
+        let f = tmp_file(b"{\n  \"a\": 1,\n  \"b\": {\"c\": 2}\n}\n");
+        let (reader, format) = JsonReader::open(f.path()).unwrap();
+        assert_eq!(format, JsonFormat::SingleObject);
+        let rows: Vec<Value> = reader.map(Result::unwrap).collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["b"]["c"], 2);
+    }
+
+    #[test]
+    fn test_single_object_next_raw_then_exhausted() {
+        let content = b"{\n  \"a\": 1\n}";
+        let f = tmp_file(content);
+        let (mut reader, _) = JsonReader::open(f.path()).unwrap();
+        assert_eq!(reader.bytes_read(), 0);
+        assert_eq!(reader.next_raw().unwrap().unwrap(), content);
+        assert_eq!(reader.bytes_read(), content.len() as u64);
+        assert!(reader.next_raw().is_none());
     }
 
     #[test]
@@ -1244,8 +1282,8 @@ mod tests {
         let f = tmp_file(b"{\"meta\": {\"v\": 1}, \"foods\": [{\"id\": 1}]}");
         let err = detect_format(f.path()).unwrap_err().to_string();
         assert!(
-            err.contains("meta") && err.contains("non-array"),
-            "error should name the key and say non-array, got: {err}"
+            err.contains("meta") && err.contains("non-array") && err.contains("wrap it in brackets"),
+            "error should name the key, say non-array and give the fix, got: {err}"
         );
     }
 
