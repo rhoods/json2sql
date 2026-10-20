@@ -824,7 +824,7 @@ mod tests {
         tables.insert("users".to_string(), cols);
         let config = SchemaConfig { tables, group: HashMap::new() };
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, []);
     }
 
     #[test]
@@ -1135,7 +1135,7 @@ mod tests {
 
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
 
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, []);
         assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::StructuredPivot(_)));
     }
 
@@ -1234,7 +1234,7 @@ mod tests {
         });
         let config = SchemaConfig { tables: HashMap::new(), group };
         let warnings = apply_group_overrides(&mut schemas, &config);
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, []);
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, "merged");
     }
@@ -1302,7 +1302,7 @@ mod tests {
         let mut schemas = vec![simple_table("users")];
         let config = SchemaConfig { tables: HashMap::new(), group: HashMap::new() };
         let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, []);
     }
 
     /// A `toml_override` applied via `apply_overrides_complete()`, after `finalize()` already ran,

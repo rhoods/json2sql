@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn test_disable_strategy_default_empty() {
         let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
-        assert!(cli.disable_strategy.is_empty());
+        assert_eq!(cli.disable_strategy, Vec::<String>::new());
     }
 
     #[test]

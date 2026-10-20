@@ -617,7 +617,7 @@ mod tests {
         assert!(s.column_collisions.is_empty());
         assert!(s.pass1_stats.is_empty());
         assert!(!s.pass1_progress.done);
-        assert!(s.config_warnings.is_empty());
+        assert_eq!(s.config_warnings, [] as [json2sql::schema::config::ConfigWarning; 0]);
     }
 
     #[test]
@@ -625,7 +625,7 @@ mod tests {
         use json2sql::schema::config::ConfigWarning;
         let mut s = SchemaState { config_warnings: vec![ConfigWarning::UnknownTable("t".to_string())], ..Default::default() };
         s.clear();
-        assert!(s.config_warnings.is_empty());
+        assert_eq!(s.config_warnings, [] as [json2sql::schema::config::ConfigWarning; 0]);
     }
 
     #[test]

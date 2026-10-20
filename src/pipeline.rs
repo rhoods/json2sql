@@ -617,7 +617,7 @@ mod tests {
         let mut pass1 = minimal_pass1(vec![]);
         let cfg = minimal_pipeline_cfg(None);
         let warnings = apply_schema_config(&mut pass1, &cfg).unwrap();
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, []);
     }
 
     #[test]
@@ -682,6 +682,6 @@ mod tests {
 
     #[test]
     fn test_aggregate_anomaly_stats_empty() {
-        assert!(aggregate_anomaly_stats(&[]).is_empty());
+        assert_eq!(aggregate_anomaly_stats(&[]), []);
     }
 }

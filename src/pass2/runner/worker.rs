@@ -264,7 +264,7 @@ mod tests {
     fn collect_above_threshold_empty_sinks_returns_empty() {
         let mut sinks: HashMap<String, crate::db::copy_sink::MemSink> = HashMap::new();
         let result = super::collect_above_threshold(&mut sinks, 10);
-        assert!(result.is_empty());
+        assert_eq!(result, []);
     }
 
     #[test]

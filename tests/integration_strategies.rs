@@ -226,7 +226,7 @@ async fn test_flatten_strategy() {
 
         assert_eq!(common::row_count(&client, &schema, "products").await, 3);
         assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
-        assert!(p2.rows_per_table.get("products_dims").is_none(),
+        assert!(!p2.rows_per_table.contains_key("products_dims"),
             "products_dims must not receive any rows after flatten");
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 

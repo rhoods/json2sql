@@ -321,14 +321,14 @@ mod tests {
     #[test]
     fn find_all_nonempty_buffers_empty_map_returns_empty() {
         let buffers: HashMap<String, bytes::BytesMut> = HashMap::new();
-        assert!(super::find_all_nonempty_buffers(&buffers).is_empty());
+        assert_eq!(super::find_all_nonempty_buffers(&buffers), Vec::<String>::new());
     }
 
     #[test]
     fn find_all_nonempty_buffers_skips_empty_entries() {
         let mut buffers = HashMap::new();
         buffers.insert("empty".to_string(), bytes::BytesMut::new());
-        assert!(super::find_all_nonempty_buffers(&buffers).is_empty());
+        assert_eq!(super::find_all_nonempty_buffers(&buffers), Vec::<String>::new());
     }
 
     #[test]

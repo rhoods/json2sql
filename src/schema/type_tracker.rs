@@ -417,7 +417,7 @@ fn is_timestamp(s: &str) -> bool {
     is_date_bytes(&b[..10]) && (b[10] == b'T' || b[10] == b' ') && is_digit(b[11]) && is_digit(b[12]) && b[13] == b':' && is_digit(b[14]) && is_digit(b[15])
 }
 
-fn is_date_bytes(b: &[u8]) -> bool {
+const fn is_date_bytes(b: &[u8]) -> bool {
     b.len() >= 10
         && is_digit(b[0]) && is_digit(b[1]) && is_digit(b[2]) && is_digit(b[3])
         && b[4] == b'-'

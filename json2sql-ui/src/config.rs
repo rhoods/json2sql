@@ -161,8 +161,8 @@ mod tests {
         assert_eq!(cfg.workers, 1);
         assert!(cfg.source_file.is_none());
         assert!(cfg.anomaly_dir.is_none());
-        assert!(cfg.pg_database.is_empty());
-        assert!(cfg.pg_username.is_empty());
+        assert_eq!(cfg.pg_database, "");
+        assert_eq!(cfg.pg_username, "");
     }
 
     #[test]

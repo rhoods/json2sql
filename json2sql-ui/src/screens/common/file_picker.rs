@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn parse_ext_empty_string() {
         let result = parse_ext("");
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [std::string::String; 0]);
     }
 
     #[test]

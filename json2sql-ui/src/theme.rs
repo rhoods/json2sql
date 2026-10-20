@@ -16,7 +16,7 @@ mod design_css_tests {
 
     #[test]
     fn design_css_is_non_empty() {
-        assert!(!design_css().is_empty());
+        assert_ne!(design_css(), "");
     }
 
     #[test]

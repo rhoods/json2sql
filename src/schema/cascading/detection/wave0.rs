@@ -506,7 +506,7 @@ fn build_sibling_ctx(
 }
 
 
-fn should_skip_parent(schemas: &[TableSchema], parent_idx: usize) -> bool {
+const fn should_skip_parent(schemas: &[TableSchema], parent_idx: usize) -> bool {
     !matches!(schemas[parent_idx].inferred_strategy, InferredStrategy::Columns | InferredStrategy::AutoSplit { .. })
 }
 
@@ -688,7 +688,7 @@ mod tests {
         obj_map.insert("p".to_string(), vec![0usize, 1]);
         let arr_map = std::collections::HashMap::new();
         let work = build_work_items(&schemas, 3, &obj_map, &arr_map);
-        assert!(work.is_empty());
+        assert_eq!(work, []);
         let work2 = build_work_items(&schemas, 2, &obj_map, &arr_map);
         assert_eq!(work2.len(), 1);
         assert_eq!(work2[0].0, "p");
