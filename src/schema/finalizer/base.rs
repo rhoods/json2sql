@@ -3,6 +3,7 @@
 //! - fn `build_base_schemas` — construit les schémas de base.
 //! - fn `build_entry_schema_base` — un `TableSchema` par `TableEntry`.
 //! - fn `build_data_columns` — colonnes de données + détection de collisions.
+//! - fn `is_scalar_column` — vrai si le champ produit une colonne scalaire (exclut les champs mixtes array, #48).
 //! - fn `push_array_columns` — colonnes array-as-column.
 //! - fn `push_generated_columns` — ajoute `j2s_id`/FK/`j2s_order`.
 
@@ -11,7 +12,7 @@ use rayon::prelude::*;
 use super::super::naming::{ColumnCollision, ColumnNameRegistry, NamingRegistry};
 use super::super::observer::TableEntry;
 use super::super::table_schema::{ColumnSchema, TableSchema};
-use super::super::type_tracker::PgType;
+use super::super::type_tracker::{widen_pg_types, PgType, TypeTracker};
 
 /// Phase 1: build base `TableSchema` per `TableEntry` WITHOUT wide-table strategies.
 /// Each table is processed independently (parallel). Returns schemas with initial dedup applied.
@@ -103,7 +104,7 @@ fn build_data_columns(
 ) -> Vec<ColumnCollision> {
     let mut col_registry = ColumnNameRegistry::new();
     for (original_field, tracker) in &entry.columns {
-        if !tracker.is_object_field() && !tracker.is_array_field() {
+        if is_scalar_column(entry, original_field, tracker) {
             col_registry.register(original_field);
         }
     }
@@ -114,7 +115,7 @@ fn build_data_columns(
     let local_collisions = col_registry.collisions().to_vec();
 
     for (original_field, tracker) in &entry.columns {
-        if tracker.is_object_field() || tracker.is_array_field() {
+        if !is_scalar_column(entry, original_field, tracker) {
             continue;
         }
         let col_name = col_registry.resolve(original_field);
@@ -132,9 +133,18 @@ fn build_data_columns(
     local_collisions
 }
 
+/// A field with mixed scalar/array occurrences (`array_as_pg_array`) is emitted only as its
+/// array column — its scalar occurrences are wrapped as one-element arrays in Pass 2 (issue #48).
+fn is_scalar_column(entry: &TableEntry, original_field: &str, tracker: &TypeTracker) -> bool {
+    !tracker.is_object_field() && !tracker.is_array_field() && !entry.array_columns.contains_key(original_field)
+}
+
 fn push_array_columns(schema: &mut TableSchema, entry: &TableEntry, col_registry: &ColumnNameRegistry) {
     for (original_field, elem_tracker) in &entry.array_columns {
-        let elem_type = elem_tracker.to_pg_type();
+        let elem_type = entry.columns.get(original_field).map_or_else(
+            || elem_tracker.to_pg_type(),
+            |scalar_tracker| widen_pg_types(elem_tracker.to_pg_type(), &scalar_tracker.to_pg_type()),
+        );
         schema.columns.push(ColumnSchema {
             name: col_registry.resolve(original_field),
             original_name: original_field.clone(),
