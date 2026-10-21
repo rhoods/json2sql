@@ -9,9 +9,10 @@
 //! - fn `WorkerKillHandle::new` — construit un handle actif à partir d'un `Child`
 //! - fn `WorkerKillHandle::is_some` — vrai si un process est associé au handle
 //! - fn `WorkerKillHandle::kill` — envoie SIGKILL au subprocess (idempotent)
+//! - fn `WorkerKillHandle::has_exited` — vrai si aucun process n'est associé ou s'il est terminé (`try_wait`)
 //! - struct `SocketEventReader` — lecteur asynchrone qui désérialise des `ProgressEvent` NDJSON depuis un socket Unix
 //! - fn `SocketEventReader::new` — construit le lecteur à partir de la moitié lecture du socket
-//! - fn `SocketEventReader::next_event` — lit et parse le prochain événement (`Ok(None)` sur EOF propre)
+//! - fn `SocketEventReader::next_event` — lit et parse le prochain événement (`Ok(None)` sur EOF propre) ; cancel-safe (utilisable dans `select!`)
 //! - fn `spawn_worker` — lance `json2sql-worker`, envoie la config sur stdin (password via `J2S_PG_PASSWORD`, jamais sérialisé), se connecte au socket
 //! - fn `connect_with_retry` — tente la connexion au socket avec ré-essais espacés
 //! - fn `is_lockfile_free` — vérifie (avisory) qu'aucun autre worker ne tient le lockfile global
@@ -80,6 +81,16 @@ impl WorkerKillHandle {
             }
         }
     }
+
+    /// True when no process is attached, or the attached process has terminated.
+    pub fn has_exited(&self) -> bool {
+        self.0.as_ref().is_none_or(|inner| {
+            inner
+                .child
+                .lock()
+                .map_or(true, |mut g| !matches!(g.try_wait(), Ok(None)))
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -90,31 +101,31 @@ impl WorkerKillHandle {
 /// Unix socket read half.
 #[cfg(unix)]
 pub struct SocketEventReader {
-    reader: tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    // `Lines::next_line` is cancel-safe (`read_line` is not): the UI polls it inside `select!` (#64).
+    lines: tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
 }
 
 #[cfg(unix)]
 impl SocketEventReader {
     pub fn new(read_half: tokio::net::unix::OwnedReadHalf) -> Self {
+        use tokio::io::AsyncBufReadExt as _;
         Self {
-            reader: tokio::io::BufReader::new(read_half),
+            lines: tokio::io::BufReader::new(read_half).lines(),
         }
     }
 
     /// Read and parse the next event.
     ///
     /// Returns `Ok(None)` on clean EOF (server closed the connection normally),
-    /// `Ok(Some(event))` on success, or `Err` if the line is not valid JSON.
+    /// `Ok(Some(event))` on success, or `Err(InvalidData)` if the line is not valid JSON
+    /// (the reader stays usable: the next call reads the next line). Cancel-safe.
     pub async fn next_event(
         &mut self,
     ) -> std::io::Result<Option<json2sql::io::progress_event::ProgressEvent>> {
-        use tokio::io::AsyncBufReadExt as _;
-        let mut line = String::new();
-        let n = self.reader.read_line(&mut line).await?;
-        if n == 0 {
+        let Some(line) = self.lines.next_line().await? else {
             return Ok(None);
-        }
-        let event = serde_json::from_str(line.trim_end())
+        };
+        let event = serde_json::from_str(&line)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         Ok(Some(event))
     }
@@ -427,6 +438,56 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Regression #64: the UI polls `next_event()` inside `select!` with a 200 ms tick, so a
+    /// read cancelled mid-line must not lose the bytes already consumed.
+    #[tokio::test]
+    async fn socket_event_reader_survives_cancel_mid_line() {
+        let path = temp_sock("reader-cancel");
+        let (mut write, read) = make_socket_pair(&path).await;
+        let mut reader = SocketEventReader::new(read);
+
+        let line = serde_json::to_string(&ProgressEvent::Pass1Log("split".to_string())).unwrap();
+        let (head, tail) = line.split_at(line.len() / 2);
+        write.write_all(head.as_bytes()).await.expect("write head");
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(20), reader.next_event()).await;
+        assert!(cancelled.is_err(), "no newline yet: the read must still be pending");
+
+        write.write_all(format!("{tail}\n").as_bytes()).await.expect("write tail");
+        let result = tokio::time::timeout(Duration::from_millis(200), reader.next_event())
+            .await
+            .expect("timeout");
+        assert!(
+            matches!(result, Ok(Some(ProgressEvent::Pass1Log(ref m))) if m == "split"),
+            "cancelled read must not drop the line head, got {result:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Issue #64: an unreadable line returns `InvalidData` but the next one is still read.
+    #[tokio::test]
+    async fn socket_event_reader_continues_after_invalid_line() {
+        let path = temp_sock("reader-invalid-then-ok");
+        let (mut write, read) = make_socket_pair(&path).await;
+        let mut reader = SocketEventReader::new(read);
+
+        let good = serde_json::to_string(&ProgressEvent::Pass1Log("after".to_string())).unwrap();
+        write.write_all(format!("garbage\n{good}\n").as_bytes()).await.expect("write");
+
+        let first = tokio::time::timeout(Duration::from_millis(200), reader.next_event())
+            .await
+            .expect("timeout");
+        assert!(
+            matches!(first, Err(ref e) if e.kind() == std::io::ErrorKind::InvalidData),
+            "garbage line must be InvalidData"
+        );
+        let second = tokio::time::timeout(Duration::from_millis(200), reader.next_event())
+            .await
+            .expect("timeout");
+        assert!(matches!(second, Ok(Some(ProgressEvent::Pass1Log(ref m))) if m == "after"));
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[tokio::test]
     async fn find_active_socket_returns_none_when_no_sockets() {
         // There should be no json2sql-*.sock files in temp dir under normal test conditions.
@@ -470,6 +531,11 @@ mod tests {
     fn worker_kill_handle_default_is_none() {
         let h = WorkerKillHandle::default();
         assert!(!h.is_some());
+    }
+
+    #[test]
+    fn worker_kill_handle_default_has_exited() {
+        assert!(WorkerKillHandle::default().has_exited());
     }
 
     #[test]
