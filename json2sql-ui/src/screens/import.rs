@@ -6,7 +6,7 @@
 //!   bottom  — overall progress bar + caption + action buttons
 //!
 //! Fonctions :
-//! - fn `ImportScreen` — composant Dioxus unique : lance/reprend le worker via socket, applique les `ProgressEvent` reçus (throttlés ~5 Hz), calcule les 4 barres de progression (tables/streaming/insertion/contraintes) et affiche logs + tableau par table
+//! - fn `ImportScreen` — composant Dioxus unique : lance/reprend le worker via socket, applique les `ProgressEvent` reçus (throttlés ~5 Hz ; ligne illisible ignorée, reconnexion au socket sur EOF/erreur tant que le worker écoute, en sautant l'historique déjà reçu), calcule les 4 barres de progression (tables/streaming/insertion/contraintes) et affiche logs + tableau par table
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 
 use dioxus::prelude::*;
@@ -35,14 +35,26 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     // ── Pass 2 runner — subprocess worker ────────────────────────────────
     let mut once = use_signal(|| false);
     let import_task = use_coroutine(move |mut rx: UnboundedReceiver<ImportMsg>| async move {
-        if *once.peek() { return; }
-        once.set(true);
-        if state.read().worker_kill.is_some() {
-            return; // already running
+        if *once.peek() {
+            eprintln!("json2sql-ui: import coroutine already started for this mount, skipping");
+            return;
         }
-        state.write().import.pass2_progress = crate::state::Pass2Progress::default();
+        once.set(true);
+        // Remount with a live worker: reconnect through `resume_socket` (set at spawn).
+        let remount = state.read().worker_kill.is_some();
+        if remount && state.read().resume_socket.is_none() {
+            eprintln!("json2sql-ui: worker running but its socket is unknown, not following it");
+            return;
+        }
+        {
+            // The socket replays the full history, so restart from empty progress.
+            let mut s = state.write();
+            let skipped = remount && s.import.pass2_progress.constraints_skipped;
+            s.import.pass2_progress = crate::state::Pass2Progress::default();
+            s.import.pass2_progress.constraints_skipped = skipped;
+        }
 
-        // Resume mode: connect to an existing worker socket found at startup.
+        // Resume mode: connect to an existing worker socket found at startup or on remount.
         let resume_path = state.read().resume_socket.clone();
 
         let (mut reader, mut write_half_opt, result_file) = if let Some(ref path) = resume_path {
@@ -168,7 +180,11 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 }
             };
 
-            state.write().worker_kill = WorkerKillHandle::new(handle.child);
+            {
+                let mut s = state.write();
+                s.worker_kill = WorkerKillHandle::new(handle.child);
+                s.resume_socket = Some(worker_cfg.socket_path.clone());
+            }
             (SocketEventReader::new(handle.read_half), Some(handle.write_half), result_file)
         };
 
@@ -177,11 +193,19 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending: Vec<ProgressEvent> = Vec::new();
         let mut finished = false;
+        let socket_path = result_file.with_extension("sock");
+        // Lines consumed on the current socket history: skipped after a reconnect (full replay).
+        let mut seen: usize = 0;
+        let mut skip: usize = 0;
+        let mut reconnects_left: u32 = 10;
+        // A closed channel returns Err on every poll, which would starve the socket under `biased;`.
+        let mut rx_open = true;
 
         loop {
             tokio::select! {
                 biased;
-                msg = rx.recv() => {
+                msg = rx.recv(), if rx_open => {
+                    if msg.is_err() { rx_open = false; }
                     if msg == Ok(ImportMsg::Cancel) {
                         // Send cancel command to the worker (graceful stop).
                         if let Some(ref mut wh) = write_half_opt {
@@ -193,14 +217,42 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                     }
                 }
                 result = reader.next_event() => match result {
+                    Ok(Some(_)) if skip > 0 => skip -= 1,
+                    Err(ref e) if skip > 0 && e.kind() == std::io::ErrorKind::InvalidData => skip -= 1,
                     Ok(Some(event)) => {
+                        seen += 1;
                         if matches!(event, ProgressEvent::Pass2Done { .. }) {
                             finished = true;
                         }
                         pending.push(event);
                     }
-                    // EOF (worker done / killed) or socket error → stop reading.
-                    Ok(None) | Err(_) => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                        seen += 1;
+                        eprintln!("json2sql-ui: skipping unreadable worker event: {e}");
+                    }
+                    // EOF or socket error: the worker replays its history on each connection,
+                    // so reconnect while it still listens; otherwise fall back to the result file.
+                    Ok(None) | Err(_) => {
+                        match &result {
+                            Ok(_) => eprintln!("json2sql-ui: worker socket EOF after {seen} events"),
+                            Err(e) => eprintln!("json2sql-ui: worker socket error after {seen} events: {:?}: {e}", e.kind()),
+                        }
+                        if finished || reconnects_left == 0 { break; }
+                        reconnects_left -= 1;
+                        match connect_with_retry(&socket_path, 3, std::time::Duration::from_millis(100)).await {
+                            Ok(stream) => {
+                                eprintln!("json2sql-ui: reconnected to worker socket, skipping {seen} replayed events");
+                                let (rh, wh) = stream.into_split();
+                                reader = SocketEventReader::new(rh);
+                                write_half_opt = Some(wh);
+                                skip = seen;
+                            }
+                            Err(e) => {
+                                eprintln!("json2sql-ui: worker socket gone ({e}), stop following");
+                                break;
+                            }
+                        }
+                    }
                 },
                 _ = interval.tick() => {
                     if !pending.is_empty() {
@@ -238,7 +290,10 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             }
         }
 
-        state.write().worker_kill = WorkerKillHandle::default();
+        // Keep the kill handle while the process lives, so Cancel still reaches it.
+        if state.read().worker_kill.has_exited() {
+            state.write().worker_kill = WorkerKillHandle::default();
+        }
     });
 
     // ── Derived values ────────────────────────────────────────────────────
