@@ -109,7 +109,9 @@ jobs:
   integration-ubuntu:
     name: Integration tests (native PG) — ubuntu-latest
     timeout-minutes: 30
-    runs-on: ubuntu-latest
+    # shortcut: ubuntu-latest is 26.04, where action-setup-postgres@v7/v8 fail (apt-key removed);
+    # move back to ubuntu-latest once a release registers the repo with signed-by.
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
@@ -127,10 +129,8 @@ jobs:
           key: ubuntu-native-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Setup PostgreSQL
-        uses: ikalnytskyi/action-setup-postgres@v8
+        uses: ikalnytskyi/action-setup-postgres@v7
         with:
-          # v7 calls apt-key, removed from Ubuntu 26.04 (ubuntu-latest); v8 defaults to PG 18.
-          postgres-version: "17"
           username: postgres
           password: postgres
           database: postgres
