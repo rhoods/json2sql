@@ -127,8 +127,10 @@ jobs:
           key: ubuntu-native-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Setup PostgreSQL
-        uses: ikalnytskyi/action-setup-postgres@v7
+        uses: ikalnytskyi/action-setup-postgres@v8
         with:
+          # v7 calls apt-key, removed from Ubuntu 26.04 (ubuntu-latest); v8 defaults to PG 18.
+          postgres-version: "17"
           username: postgres
           password: postgres
           database: postgres
