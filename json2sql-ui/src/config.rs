@@ -25,6 +25,7 @@ use crate::state::ProjectState;
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // flat TOML: each bool is an independent persisted option
 pub struct ProjectConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_file: Option<PathBuf>,
@@ -51,6 +52,9 @@ pub struct ProjectConfig {
     /// Pass 1 only: native PG array columns for arrays of scalars.
     #[serde(default)]
     pub array_as_pg_array: bool,
+    /// Pass 2: raise `max_wal_size` during the import (`--tune-wal`).
+    #[serde(default)]
+    pub tune_wal: bool,
 }
 
 impl Default for ProjectConfig {
@@ -73,6 +77,7 @@ impl Default for ProjectConfig {
             import_limit: None,
             skip_constraints: false,
             array_as_pg_array: false,
+            tune_wal: false,
         }
     }
 }
@@ -95,6 +100,7 @@ impl ProjectConfig {
             import_limit: p.import_limit,
             skip_constraints: p.skip_constraints,
             array_as_pg_array: p.array_as_pg_array,
+            tune_wal: p.tune_wal,
         }
     }
 
@@ -118,6 +124,7 @@ impl ProjectConfig {
         p.import_limit = self.import_limit;
         p.skip_constraints = self.skip_constraints;
         p.array_as_pg_array = self.array_as_pg_array;
+        p.tune_wal = self.tune_wal;
     }
 }
 
@@ -301,6 +308,16 @@ mod tests {
         let mut p2 = ProjectState::default();
         parsed.apply_to(&mut p2);
         assert!(p2.array_as_pg_array, "array_as_pg_array=true must survive project -> TOML -> project");
+    }
+
+    #[test]
+    fn tune_wal_round_trips_toml() {
+        let p = ProjectState { tune_wal: true, ..Default::default() };
+        let toml_str = toml::to_string(&ProjectConfig::from_project(&p)).expect("serialize");
+        let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
+        let mut p2 = ProjectState::default();
+        parsed.apply_to(&mut p2);
+        assert!(p2.tune_wal, "tune_wal=true must survive project -> TOML -> project");
     }
 
     #[test]

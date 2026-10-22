@@ -5,6 +5,7 @@
 //! - struct `LockfileGuard` — verrou exclusif RAII sur le lockfile (libéré au `Drop`).
 //! - fn `LockfileGuard::try_acquire_at` — tente le verrou exclusif sur un chemin donné.
 //! - fn `LockfileGuard::try_acquire` — tente le verrou exclusif sur le lockfile par défaut du worker.
+//! - fn `spawn_signal_cancel` — SIGTERM / SIGINT / SIGHUP déclenchent l'annulation propre de l'import.
 //! - fn `bind_socket` — lie un `UnixListener` (supprime un socket obsolète existant) ; variante non-Unix retourne une erreur `Unsupported`.
 //! - fn `write_result` — écrit le `WorkerResult` de façon atomique (fichier temporaire + rename).
 //! - fn `main` — parse la config, acquiert le lock, lance `serve::serve_connections` et `pipeline::run_pipeline` en parallèle, écrit le résultat, annule proprement à la fin.
@@ -48,6 +49,33 @@ impl LockfileGuard {
     pub fn try_acquire() -> std::io::Result<Option<Self>> {
         Self::try_acquire_at(&lockfile_path())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Signals
+// ---------------------------------------------------------------------------
+
+/// SIGTERM / SIGINT / SIGHUP → `cancel`: the UI's Cancel button and `kill <pid>` stop the import
+/// gracefully (PG settings put back) instead of leaving the server modified.
+#[cfg(unix)]
+fn spawn_signal_cancel(cancel: cancel::CancelToken) {
+    use tokio::signal::unix::{signal, SignalKind};
+    tokio::spawn(async move {
+        let (Ok(mut term), Ok(mut int), Ok(mut hup)) =
+            (signal(SignalKind::terminate()), signal(SignalKind::interrupt()), signal(SignalKind::hangup()))
+        else {
+            eprintln!("json2sql-worker: cannot install signal handlers — SIGTERM will kill without cleanup");
+            return;
+        };
+        // SIGHUP: the terminal that launched the UI closed (e.g. its host app crashed).
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+            _ = hup.recv() => {}
+        }
+        eprintln!("json2sql-worker: termination signal received — cancelling import");
+        cancel.cancel();
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +162,7 @@ async fn main() {
 
         let summary = Arc::new(tokio::sync::Mutex::new(summary::ImportSummary::new()));
         let cancel = cancel::CancelToken::new();
+        spawn_signal_cancel(cancel.clone());
 
         let serve_handle = tokio::spawn(serve::serve_connections(
             listener,
@@ -185,6 +214,7 @@ mod tests {
             verbose_logs: false,
             hint_format: None,
             skip_constraints: false,
+            tune_wal: false,
             socket_path,
             result_file,
         }
@@ -311,6 +341,7 @@ mod tests {
             pass2_parallel: 8,
             import_limit: Some(500),
             skip_constraints: true,
+            tune_wal: false,
             verbose_logs: true,
             pg_schema: "myschema".to_string(),
             root_table: "myroot".to_string(),

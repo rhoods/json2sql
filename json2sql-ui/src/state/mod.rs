@@ -266,6 +266,8 @@ pub struct ProjectState {
     pub skip_constraints: bool,
     /// Pass 1: map JSON arrays of scalars to native PG array columns (CLI `--array-as-pg-array`). Default false.
     pub array_as_pg_array: bool,
+    /// Pass 2: raise `max_wal_size` during the import (CLI `--tune-wal`). Default false.
+    pub tune_wal: bool,
 }
 
 impl Default for ProjectState {
@@ -289,6 +291,7 @@ impl Default for ProjectState {
             verbose_logs: false,
             skip_constraints: false,
             array_as_pg_array: false,
+            tune_wal: false,
         }
     }
 }
@@ -448,8 +451,9 @@ impl AppState {
         if let Some(handle) = self.abort_handle.take() {
             handle.abort();
         }
-        // Kill subprocess worker if one is active (Pass 2 / import)
-        self.worker_kill.kill();
+        // Stop the subprocess worker if one is active: SIGTERM lets it put back the PostgreSQL
+        // settings it changed (max_wal_size, autovacuum) before SIGKILL after the grace delay.
+        self.worker_kill.terminate(std::time::Duration::from_secs(15));
         self.worker_kill = WorkerKillHandle::default();
         self.resume_socket = None;
         self.schema.clear();

@@ -78,7 +78,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             // Extract all fields needed to build WorkerConfig (one locked read).
             let (source_file, root_table, pg_password, pg_host, pg_port, pg_database, pg_user,
                  schemas, drop_existing, anomaly_dir, pg_schema, pass2_parallel, import_limit,
-                 verbose_logs, hint_format, skip_constraints_flag) =
+                 verbose_logs, hint_format, skip_constraints_flag, tune_wal) =
             {
                 let source_file_opt = state.read().project.source_file.clone();
                 let Some(path) = source_file_opt else {
@@ -111,6 +111,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                     s.project.verbose_logs,
                     s.schema.detected_format.clone(),
                     s.project.skip_constraints,
+                    s.project.tune_wal,
                 )
             };
 
@@ -151,6 +152,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 verbose_logs,
                 hint_format,
                 skip_constraints: skip_constraints_flag,
+                tune_wal,
                 socket_path,
                 result_file: result_file.clone(),
             };

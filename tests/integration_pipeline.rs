@@ -50,6 +50,7 @@ fn base_config(root: &str, input: &str) -> PipelineConfig {
         schema_report: false,
         schema_report_output: None,
         skip_constraints: false,
+        tune_wal: false,
     }
 }
 

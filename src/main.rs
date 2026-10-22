@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
                 schema_report: cli.schema_report,
                 schema_report_output: cli.schema_report_output,
                 skip_constraints: cli.no_constraints,
+                tune_wal: cli.tune_wal,
             };
             pipeline::run_pipeline(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))
         }

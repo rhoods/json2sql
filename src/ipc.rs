@@ -34,6 +34,9 @@ pub struct WorkerConfig {
     pub verbose_logs: bool,
     pub hint_format: Option<JsonFormat>,
     pub skip_constraints: bool,
+    /// Raise `max_wal_size` to 16 GB for the duration of Pass 2, then restore it (see `Pass2Config::tune_wal`).
+    #[serde(default)]
+    pub tune_wal: bool,
     /// Full path to the Unix socket the worker will bind.
     pub socket_path: PathBuf,
     /// Full path where the worker writes the JSON result file.
@@ -56,6 +59,7 @@ impl WorkerConfig {
             verbose: self.verbose_logs,
             hint_format: self.hint_format,
             skip_constraints: self.skip_constraints,
+            tune_wal: self.tune_wal,
         }
     }
 }
@@ -116,6 +120,7 @@ mod tests {
             verbose_logs: false,
             hint_format: None,
             skip_constraints: false,
+            tune_wal: false,
             socket_path,
             result_file,
         }
@@ -173,6 +178,7 @@ mod tests {
             pass2_parallel: 8,
             import_limit: Some(500),
             skip_constraints: true,
+            tune_wal: false,
             pg_schema: "myschema".to_string(),
             root_table: "myroot".to_string(),
             ..minimal_config(socket, result)

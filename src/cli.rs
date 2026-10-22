@@ -192,6 +192,12 @@ pub struct Cli {
     /// No-op when combined with --dry-run (which exits before Pass 2).
     #[arg(long, default_value_t = false)]
     pub no_constraints: bool,
+
+    /// Raise `max_wal_size` to 16 GB for the duration of Pass 2 (fewer checkpoints during the
+    /// bulk load), then restore the previous value. Server-wide setting: needs a superuser role
+    /// (or `GRANT ALTER SYSTEM ON PARAMETER max_wal_size`); without it, a warning and no change.
+    #[arg(long, default_value_t = false)]
+    pub tune_wal: bool,
 }
 
 /// Re-exported from [`crate::anomaly::reporter`] so callers can use it via `cli::AnomalyFormat`.
@@ -319,5 +325,12 @@ mod tests {
         let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--dry-run", "--no-constraints"]).unwrap();
         assert!(cli.dry_run);
         assert!(cli.no_constraints);
+    }
+
+    #[test]
+    fn test_tune_wal_flag_parses() {
+        assert!(!Cli::try_parse_from(["json2sql", "--input", "d.json"]).unwrap().tune_wal);
+        let cli = Cli::try_parse_from(["json2sql", "--input", "d.json", "--tune-wal"]).unwrap();
+        assert!(cli.tune_wal);
     }
 }

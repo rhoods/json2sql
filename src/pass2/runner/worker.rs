@@ -90,8 +90,9 @@ pub(super) async fn run_worker_diskless(
             // Spin without draining: flusher has 512 MB+ of its own buffered data and needs to
             // COPY it down before accepting more. Adding more data via a drain would increase
             // total_buffered and delay the resume. Flusher controls the pause lifecycle.
+            // Sleep, not yield: N spinning workers burned ~1 core each while paused (#65 run).
             while pause_flag.load(Ordering::Relaxed) && !error_flag.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         }
         if error_flag.load(Ordering::Acquire) {

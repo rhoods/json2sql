@@ -52,6 +52,7 @@ async fn test_anomaly_dir_streaming() {
                 verbose: false,
                 hint_format: None,
                 skip_constraints: false,
+                tune_wal: false,
             },
             None,
         ).await.unwrap();

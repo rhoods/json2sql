@@ -8,13 +8,16 @@
 //! [`dispatch`] (the dispatch loop and progress/anomaly reporting).
 //!
 //! Fonctions :
-//! - struct `Pass2Timing` — répartition du temps d'exécution entre streaming et phase COPY.
+//! - struct `Pass2Timing` — répartition du temps : chargement (stream + COPY) et post-chargement.
 //! - fn `Pass2Timing::total_ms` — somme `streaming_ms` + `copy_ms`.
 //! - struct `Pass2Result` — résumé du résultat de Pass 2 (lignes par table, anomalies, warnings, timing).
 //! - fn `find_root_schema` — résout le schéma racine.
-//! - fn `schema_topo_order` — ordre topologique parents→enfants.
+//! - fn `schema_parent_map` — table enfant → table parente (ordre du drain final).
 //! - fn `build_copy_sql_map` — construit les requêtes COPY par table.
-//! - fn `run` — pipeline complet (dispatch → workers → flusher → contraintes).
+//! - fn `run` — `run_interruptible` sans interruption.
+//! - fn `run_interruptible` — pipeline complet, interruptible : réglages PG (autovacuum, `--tune-wal`) autour de `load_and_constrain`, remis en place dans tous les cas.
+//! - fn `put_back_autovacuum` — réactive l'autovacuum après un échec et efface son entrée du marqueur.
+//! - fn `load_and_constrain` — dispatch → workers → flusher → ANALYZE → contraintes.
 //! - fn `build_pass2_result` — assemble le résultat final.
 
 use std::collections::HashMap;
@@ -27,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::anomaly::collector::AnomalyCollector;
 use crate::schema::PATH_SEP;
-use crate::db::ddl::{add_constraints, ConstraintWarning};
+use crate::db::ddl::{add_constraints, set_tables_autovacuum, ConstraintWarning};
 use crate::error::{J2sError, Result};
 use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
@@ -42,12 +45,13 @@ mod flusher;
 mod worker;
 mod dispatch;
 
-/// Wall-clock breakdown of Pass 2 streaming and COPY phases.
+/// Wall-clock breakdown of Pass 2: load (stream + concurrent COPY) and post-load phases.
 #[allow(dead_code)]
 pub struct Pass2Timing {
-    /// Time spent streaming the JSON file and writing rows to temp files.
+    /// Time spent reading and dispatching the JSON file **and** in the COPYs that run
+    /// alongside it, up to the end of the flusher's final drain.
     pub streaming_ms: u64,
-    /// Time spent in the COPY-to-PostgreSQL phase (including constraints).
+    /// Time spent after the load: `ANALYZE` and constraints.
     pub copy_ms: u64,
 }
 
@@ -78,33 +82,14 @@ fn find_root_schema(schemas: &[TableSchema], root_table: &str, sep: &str) -> Res
         .ok_or_else(|| J2sError::Schema(format!("Root table '{root_table}' not found")))
 }
 
-/// Build the per-table COPY SQL map used by `run_flusher` to open COPY FROM STDIN sessions.
-/// Returns schema names in topological order (parents before children), using BFS from roots.
-/// Tables absent from the schemas list but present in buffers are appended after in arbitrary order.
-fn schema_topo_order(schemas: &[TableSchema]) -> Vec<String> {
-    let mut children_of: HashMap<String, Vec<String>> = HashMap::new();
-    let mut roots: Vec<String> = vec![];
-    for s in schemas {
-        match &s.parent_table {
-            None => roots.push(s.name.clone()),
-            Some(parent) if parent == &s.name => roots.push(s.name.clone()),
-            Some(parent) => children_of.entry(parent.clone()).or_default().push(s.name.clone()),
-        }
-    }
-    let mut result = Vec::with_capacity(schemas.len());
-    let mut queue = std::collections::VecDeque::from(roots);
-    let mut seen = std::collections::HashSet::new();
-    while let Some(name) = queue.pop_front() {
-        if seen.insert(name.clone()) {
-            result.push(name.clone());
-            if let Some(children) = children_of.get(&name) {
-                for child in children { queue.push_back(child.clone()); }
-            }
-        }
-    }
-    result
+/// Child table → parent table, used by the flusher to drain parents before children.
+fn schema_parent_map(schemas: &[TableSchema]) -> HashMap<String, String> {
+    schemas.iter()
+        .filter_map(|s| s.parent_table.as_ref().filter(|p| **p != s.name).map(|p| (s.name.clone(), p.clone())))
+        .collect()
 }
 
+/// Build the per-table COPY SQL map used by `run_flusher` to open COPY FROM STDIN sessions.
 fn build_copy_sql_map(schemas: &[TableSchema], pg_schema: &str) -> HashMap<String, String> {
     schemas.iter()
         .map(|s| {
@@ -119,7 +104,10 @@ fn build_copy_sql_map(schemas: &[TableSchema], pg_schema: &str) -> HashMap<Strin
 ///
 /// Phase D — `add_constraints()` adds PRIMARY KEY (fatal on error) then
 /// FOREIGN KEY (failures become `constraint_warnings`).
-#[allow(clippy::too_many_lines)] // top-level orchestrator — sequential stages, not splittable further
+///
+/// Around the load (#65): autovacuum is switched off on every table, and `max_wal_size` is
+/// raised when `tune_wal` is set. Both are put back whatever the outcome.
+#[allow(dead_code)] // library API (tests, examples); the CLI binary calls `run_interruptible`
 pub async fn run(
     path: &Path,
     schemas: &[TableSchema],
@@ -128,8 +116,85 @@ pub async fn run(
     config: &Pass2Config,
     progress_tx: Option<ProgressTx>,
 ) -> Result<Pass2Result> {
-    const WORKER_CHANNEL_CAP: usize = 256;
+    run_interruptible(path, schemas, client, pg_url, config, progress_tx, std::future::pending()).await
+}
+
+/// `run`, stopped early when `interrupt` resolves (worker cancel, SIGTERM, Ctrl-C): the load is
+/// dropped and the server settings are put back before returning `Err`.
+pub async fn run_interruptible(
+    path: &Path,
+    schemas: &[TableSchema],
+    client: &Client,
+    pg_url: &str,
+    config: &Pass2Config,
+    progress_tx: Option<ProgressTx>,
+    interrupt: impl std::future::Future<Output = ()>,
+) -> Result<Pass2Result> {
     config::validate_run_params(config.parallel)?;
+    let parallel = config.parallel.max(1);
+    let ptx = progress_tx.as_ref();
+    // Undo what an earlier, killed import left on this server, even without --tune-wal now.
+    crate::db::pg_tuning::restore_pending(client, pg_url, ptx).await;
+    crate::db::pg_tuning::warn_pg_tuning(client, config.tune_wal, ptx).await;
+    let wal_restore = if config.tune_wal {
+        crate::db::pg_tuning::raise_max_wal_size(client, ptx).await
+    } else {
+        None
+    };
+
+    // Recorded before switching autovacuum off: a killed import is undone by the next one.
+    let autovacuum_restore = crate::db::pg_tuning::record_autovacuum_restore(pg_url, schemas, &config.pg_schema, ptx);
+    let result = match set_tables_autovacuum(pg_url, schemas, &config.pg_schema, false, false, parallel).await {
+        Ok(()) => tokio::select! {
+            r = load_and_constrain(path, schemas, client, pg_url, config, progress_tx.clone()) => r,
+            () = interrupt => Err(J2sError::InvalidInput("Pass 2 interrupted".to_string())),
+        },
+        Err(e) => Err(e),
+    };
+    put_back_autovacuum(result.is_ok(), pg_url, schemas, &config.pg_schema, parallel, autovacuum_restore, ptx).await;
+    if let Some(restore) = wal_restore {
+        crate::db::pg_tuning::restore_max_wal_size(client, &restore, ptx).await;
+    }
+    result
+}
+
+/// After the load: on failure, re-enables autovacuum (no `ANALYZE`; on success
+/// `load_and_constrain` already did it with `ANALYZE`). Clears the marker entry once autovacuum
+/// is back; otherwise it stays for the next import to retry.
+async fn put_back_autovacuum(
+    load_ok: bool,
+    pg_url: &str,
+    schemas: &[TableSchema],
+    pg_schema: &str,
+    parallel: usize,
+    marker_key: Option<String>,
+    progress_tx: Option<&ProgressTx>,
+) {
+    let back = load_ok
+        || match set_tables_autovacuum(pg_url, schemas, pg_schema, true, false, parallel).await {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("WARNING: could not re-enable autovacuum on the imported tables — {e}; the next import retries");
+                false
+            }
+        };
+    if let (true, Some(key)) = (back, marker_key) {
+        crate::db::pg_tuning::forget_restore(&key, progress_tx);
+    }
+}
+
+/// Load phase of `run`: dispatch → workers → flusher, then autovacuum back on + `ANALYZE`,
+/// then constraints.
+#[allow(clippy::too_many_lines)] // sequential stages, not splittable further
+async fn load_and_constrain(
+    path: &Path,
+    schemas: &[TableSchema],
+    client: &Client,
+    pg_url: &str,
+    config: &Pass2Config,
+    progress_tx: Option<ProgressTx>,
+) -> Result<Pass2Result> {
+    const WORKER_CHANNEL_CAP: usize = 256;
 
     let mem_flush_threshold = config.mem_flush_threshold_bytes.unwrap_or(64 * 1024 * 1024);
     let ram_high = config.ram_high_watermark.unwrap_or(DEFAULT_RAM_HIGH_WATERMARK);
@@ -174,7 +239,7 @@ pub async fn run(
     let _cancel_guard = cancel.clone().drop_guard();
 
     let copy_sql_map = build_copy_sql_map(schemas, &config.pg_schema);
-    let topo_order = schema_topo_order(schemas);
+    let parent_of = schema_parent_map(schemas);
     let (flush_tx, flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(256);
     let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let error_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -189,7 +254,8 @@ pub async fn run(
         ram_high,
         ram_low,
         verbose,
-        topo_order,
+        parent_of,
+        parallel,
     ));
 
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
@@ -228,8 +294,7 @@ pub async fn run(
     drop(senders); // workers break their recv loops → drain local sinks → drop flush_tx + anomaly_tx
 
     dispatch::finalize_dispatch(progress_tx.as_ref(), progress.as_ref(), rows_processed, reader.bytes_read(), total_bytes);
-    #[allow(clippy::cast_possible_truncation)]
-    let streaming_ms = stream_start.elapsed().as_millis() as u64;
+    let drain_start = Instant::now();
     eprintln!("Pass 2 streaming done ({parallel} workers). Flushing remaining rows to PostgreSQL...");
 
     // Join all workers — accumulate first error; always drain all handles so channels are closed.
@@ -274,9 +339,16 @@ pub async fn run(
     };
 
     if let Some(err) = first_error { return Err(err); }
+    #[allow(clippy::cast_possible_truncation)]
+    let streaming_ms = stream_start.elapsed().as_millis() as u64;
+    #[allow(clippy::cast_possible_truncation)]
+    let drain_ms = drain_start.elapsed().as_millis() as u64;
 
-    eprintln!("Pass 2 flusher complete. Applying constraints...");
     let copy_start = Instant::now();
+    // Before constraints and outside the skip_constraints branch: stats are needed either way.
+    eprintln!("Pass 2 flusher complete. Re-enabling autovacuum + ANALYZE...");
+    set_tables_autovacuum(pg_url, schemas, &config.pg_schema, true, true, parallel).await?;
+    eprintln!("Pass 2 flusher complete. Applying constraints...");
     let constraint_warnings = if config.skip_constraints {
         eprintln!("Constraints skipped (skip_constraints = true).");
         vec![]
@@ -286,7 +358,7 @@ pub async fn run(
         warnings
     };
 
-    build_pass2_result(merged_anomalies, rows_per_table, constraint_warnings, progress_tx.as_ref(), copy_start, streaming_ms)
+    build_pass2_result(merged_anomalies, rows_per_table, constraint_warnings, progress_tx.as_ref(), copy_start, streaming_ms, drain_ms)
 }
 
 fn build_pass2_result(
@@ -296,6 +368,7 @@ fn build_pass2_result(
     progress_tx: Option<&ProgressTx>,
     copy_start: Instant,
     streaming_ms: u64,
+    drain_ms: u64,
 ) -> Result<Pass2Result> {
     if let Some(tx) = progress_tx {
         dispatch::emit_completion_events(tx, &merged_anomalies, &rows_per_table, &constraint_warnings);
@@ -303,7 +376,11 @@ fn build_pass2_result(
     merged_anomalies.finish()?;
     #[allow(clippy::cast_possible_truncation)]
     let copy_ms = copy_start.elapsed().as_millis() as u64;
-    eprintln!("Pass 2 timing: streaming={streaming_ms}ms, copy={copy_ms}ms, total={}ms", streaming_ms + copy_ms);
+    eprintln!(
+        "Pass 2 timing: stream+copy={streaming_ms}ms (incl. final_drain={drain_ms}ms), \
+         post_load(analyze+constraints)={copy_ms}ms, total={}ms",
+        streaming_ms + copy_ms
+    );
     Ok(Pass2Result {
         rows_per_table,
         anomaly_collector: merged_anomalies,

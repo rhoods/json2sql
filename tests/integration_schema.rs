@@ -672,6 +672,7 @@ async fn test_parallel_copy() {
                 verbose: false,
                 hint_format: None,
                 skip_constraints: false,
+                tune_wal: false,
             },
             None,
         ).await.unwrap();
@@ -741,6 +742,7 @@ async fn test_parallel_streaming_matches_sequential() {
                 verbose: false,
                 hint_format: None,
                 skip_constraints: false,
+                tune_wal: false,
             },
             None,
         ).await.unwrap();
@@ -790,6 +792,7 @@ async fn test_warn_on_nonempty_root_table_before_import() {
                 verbose: false,
                 hint_format: None,
                 skip_constraints: true, // constraints already added by first import
+                tune_wal: false,
             },
             Some(ptx),
         ).await;

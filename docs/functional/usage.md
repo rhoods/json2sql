@@ -186,8 +186,9 @@ json2sql \
 
 | Paramètre | Défaut | Description |
 |---|---|---|
-| `--parallel` | 1 | Workers de la Pass 2 (parse + formatage COPY) et connexions pour l'ajout des contraintes |
+| `--parallel` | 1 | Workers de la Pass 2 (parse + formatage COPY), connexions COPY du flusher et connexions pour l'ajout des contraintes |
 | `--no-constraints` | false | N'ajoute pas les PK/FK en fin d'import |
+| `--tune-wal` | false | Relève `max_wal_size` à 16 GB pendant la Pass 2 (moins de checkpoints), puis remet l'ancienne valeur. Réglage global au serveur : il faut un rôle superuser, sinon il est ignoré avec un warning |
 | `--batch-size` | 100 000 | ⚠️ Sans effet depuis le pipeline diskless (accepté pour compatibilité) |
 | `--transaction` | false | ⚠️ Sans effet actuellement (accepté mais non câblé) |
 | `--limit` | aucun | Arrête le dispatch Pass 2 après N objets racines. Pass 1 tourne toujours sur le fichier complet. `0` = créer les tables sans lignes. |

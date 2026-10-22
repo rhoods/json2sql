@@ -272,10 +272,19 @@ pub async fn run(
 - Quand le buffer d'une table dépasse le seuil par worker (`mem_flush_threshold / parallel`, 64 MiB / N par défaut), il est envoyé au flusher via un canal borné (256 messages) — la contre-pression du canal limite la RAM.
 
 **Flusher** :
-- Une tâche unique avec sa propre connexion PG. Elle reçoit les buffers, les agrège par table et exécute `COPY FROM STDIN` (`flush_mem_sink_to_pg`).
-- Si le volume en attente dépasse 512 MiB, il lève `pause_flag` : les workers attendent pendant que le flusher draine les plus gros buffers, jusqu'à repasser sous 128 MiB. Les watermarks RAM système (`ram_high_watermark`) ne servent qu'au log.
-- En fin de stream, il draine les buffers restants en **ordre topologique** (parents avant enfants).
-- En cas d'erreur PG, il lève `error_flag` (les workers s'arrêtent) et émet `Pass2Error` ; c'est son erreur — qui contient la table et le message PG — qui est remontée, pas l'erreur générique des workers.
+- Une tâche unique qui reçoit les buffers et les agrège par table. Les `COPY FROM STDIN` (`flush_mem_sink_to_pg`) partent en tâches sur un pool de `--parallel` connexions (#65), plusieurs COPY pouvant viser la même table en même temps (la table racine domine souvent le volume) ; la boucle continue de recevoir pendant les COPY.
+- Le volume en attente compte aussi les COPY en cours (décrémenté à la fin du COPY). S'il dépasse 512 MiB, il lève `pause_flag` : les workers attendent pendant que le flusher draine les plus gros buffers, jusqu'à repasser sous 128 MiB. Les watermarks RAM système (`ram_high_watermark`) ne servent qu'au log.
+- En fin de stream, il draine les buffers restants en parallèle, une table n'étant lancée qu'une fois son **parent** entièrement écrit (parents avant enfants).
+- En cas d'erreur PG, il lève `error_flag` (les workers s'arrêtent), émet `Pass2Error` et annule les autres COPY ; c'est son erreur — qui contient la table et le message PG — qui est remontée, pas l'erreur générique des workers.
+
+**Réglages PG autour du chargement** (#65, `db/pg_tuning.rs`) :
+- l'autovacuum est coupé sur toutes les tables pendant le chargement (`ALTER TABLE … SET (autovacuum_enabled = false)`, sans réécriture), puis rétabli avec un `ANALYZE` avant les contraintes. Il est aussi rétabli, sans `ANALYZE`, si l'import échoue. Sa réactivation est enregistrée dans le même marqueur que `max_wal_size` (voir ci-dessous), indexée par cible de connexion et schéma, sans mot de passe ;
+- `--tune-wal` (opt-in) relève `max_wal_size` à 16 GB pour la durée de la Pass 2 (`ALTER SYSTEM` + `pg_reload_conf()`), puis remet l'ancienne valeur, même en cas d'échec. Il faut un rôle superuser ; sinon, un warning et aucun changement. Le retour arrière est garanti de deux façons :
+  - **marqueur persistant** : la commande de retour arrière est écrite dans `$XDG_STATE_HOME/json2sql/pg_tuning_restore.json` (par défaut `~/.local/state`), indexée par serveur (`data_directory:port`), **avant** de modifier le serveur. Les mises à jour se font sous verrou de fichier. Chaque Pass 2 commence par appliquer tous les retours arrière en attente (`max_wal_size` et autovacuum), ce qui couvre `kill -9`, un crash ou une coupure de courant ;
+  - **interruption propre** : `run_interruptible` arrête la Pass 2 sur le Cancel du worker, SIGTERM/SIGINT/SIGHUP (worker ; SIGHUP = fermeture du terminal de lancement) ou Ctrl-C (CLI), puis remet `max_wal_size` et l'autovacuum avant de sortir. Le bouton Cancel de l'UI envoie SIGTERM et ne fait un SIGKILL qu'après 15 s ;
+- au démarrage, un avertissement est émis si `shared_buffers` < 1 GB (il ne change qu'au redémarrage de PG), ou si `max_wal_size` < 16 GB sans `--tune-wal`.
+
+Un essai `UNLOGGED` puis `SET LOGGED` a été retiré : la réécriture dans le WAL coûtait plus de 43 min sur OFF 70 GB, pour quelques minutes gagnées sur le COPY.
 
 **Annulation** : un `CancellationToken` + `DropGuard` est créé au début de `run()`. Si le caller avorte la tâche Tokio (bouton Cancel de l'IHM), tous les workers sortent proprement.
 

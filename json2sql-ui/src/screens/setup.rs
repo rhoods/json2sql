@@ -582,6 +582,27 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                         div { b { "Destructive" } " — all existing data in target tables will be deleted." }
                                     }
                                 }
+                                {
+                                    let tune_wal_on = state.read().project.tune_wal;
+                                    rsx! {
+                                        label { class: "mt-sm", style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: tune_wal_on,
+                                                onchange: move |e| {
+                                                    state.write().project.tune_wal = e.value() == "true";
+                                                    crate::config::try_save(&state.read().project);
+                                                },
+                                            }
+                                            span { "Raise max_wal_size during import " }
+                                            span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(--tune-wal)" }
+                                        }
+                                        p { style: "font-size:var(--fs-xs);color:var(--fg-3);margin:4px 0 0;line-height:1.5;",
+                                            "Sets max_wal_size to 16 GB while the import runs (fewer checkpoints), then restores it. "
+                                            "Server-wide setting: needs a superuser PostgreSQL role, otherwise it is skipped with a warning."
+                                        }
+                                    }
+                                }
 
                                 div { class: "divider" }
 

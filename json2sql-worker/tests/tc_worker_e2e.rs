@@ -143,6 +143,7 @@ async fn worker_e2e_small_import_streams_events_and_writes_result() {
         verbose_logs: false,
         hint_format: pass1_result.detected_format,
         skip_constraints: false,
+        tune_wal: false,
         socket_path: socket_path.clone(),
         result_file: result_file.clone(),
     };

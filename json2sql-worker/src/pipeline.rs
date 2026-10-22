@@ -92,13 +92,16 @@ pub async fn run_pipeline(
         }
 
         let pass2_cfg = cfg.clone().into_pass2_config();
-        json2sql::pass2::runner::run(
+        // Cancel (socket command or SIGTERM) stops Pass 2 through its cleanup path, which puts
+        // back max_wal_size and autovacuum before the worker exits.
+        json2sql::pass2::runner::run_interruptible(
             &cfg.source_file,
             &cfg.schemas,
             &client,
             &pg_url,
             &pass2_cfg,
             Some(tx),
+            cancel.cancelled(),
         )
         .await
         .map_err(|e| e.to_string())
@@ -152,6 +155,7 @@ mod tests {
             verbose_logs: false,
             hint_format: None,
             skip_constraints: false,
+            tune_wal: false,
             socket_path: PathBuf::from("/tmp/test.sock"),
             result_file: PathBuf::from("/tmp/result.json"),
         }

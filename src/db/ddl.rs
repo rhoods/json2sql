@@ -18,6 +18,7 @@
 //! - fn `generate_add_fk_sql` — ALTER TABLE ADD CONSTRAINT FOREIGN KEY (None pour une table racine).
 //! - fn `generate_ddl_preview` — aperçu lisible pour l'IHM (CREATE TABLE + FK inline, non exécuté tel quel).
 //! - fn `quote_ident` — échappe un identifiant PG entre guillemets doubles.
+//! - fn `generate_autovacuum_sql` — ALTER TABLE SET/RESET (`autovacuum_enabled`) (+ ANALYZE optionnel).
 //!
 //! Création des tables :
 //! - fn `build_batch_drop_sql` — construit le SQL de DROP batché.
@@ -31,6 +32,7 @@
 //! - fn `calc_maintenance_work_mem_mb` — calcule `maintenance_work_mem` depuis la RAM disponible.
 //! - fn `try_configure_constraints_conn` — configure `maintenance_work_mem`/`synchronous_commit` (best-effort).
 //! - fn `apply_constraints_chunk` — applique un lot de contraintes sur une connexion dédiée.
+//! - fn `set_tables_autovacuum` — coupe / rétablit l'autovacuum de toutes les tables en parallèle (chargement Pass 2).
 //! - fn `add_constraints` — orchestre PK+FK niveau par niveau (parents avant enfants), PK fatale / FK en warning.
 //! - fn `constraint_progress` — émet un événement de progression.
 //! - fn `to_fk_warning` — convertit une erreur `PostgreSQL` en `ConstraintWarning`.
@@ -397,6 +399,46 @@ pub fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
+/// Autovacuum off for the bulk load (#65), or back on with an optional `ANALYZE`.
+/// Storage-parameter change only: no table rewrite, even on a populated table.
+/// shortcut: `RESET` drops any per-table autovacuum setting a user put on a pre-existing table;
+/// remember and restore the previous reloptions if that case shows up.
+#[must_use]
+pub fn generate_autovacuum_sql(schema: &TableSchema, pg_schema: &str, enabled: bool, analyze: bool) -> String {
+    let table = format!("{}.{}", quote_ident(pg_schema), quote_ident(&schema.name));
+    let alter = if enabled {
+        format!("ALTER TABLE {table} RESET (autovacuum_enabled)")
+    } else {
+        format!("ALTER TABLE {table} SET (autovacuum_enabled = false)")
+    };
+    if analyze { format!("{alter};\nANALYZE {table}") } else { alter }
+}
+
+/// Runs `generate_autovacuum_sql` on every table, `parallel` tables at a time, one connection
+/// each (`ANALYZE` of large tables is the slow part, hence the parallelism).
+pub async fn set_tables_autovacuum(
+    db_url: &str,
+    schemas: &[TableSchema],
+    pg_schema: &str,
+    enabled: bool,
+    analyze: bool,
+    parallel: usize,
+) -> Result<()> {
+    use futures_util::StreamExt;
+    let results: Vec<Result<()>> = futures_util::stream::iter(schemas.iter().map(|s| {
+        let sql = generate_autovacuum_sql(s, pg_schema, enabled, analyze);
+        async move {
+            let client = crate::db::connection::connect(db_url).await?;
+            client.batch_execute(&sql).await
+                .map_err(|e| pg_err(&format!("autovacuum_enabled={enabled} {}", s.name), &e))
+        }
+    }))
+    .buffer_unordered(parallel.max(1))
+    .collect()
+    .await;
+    results.into_iter().collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -407,6 +449,23 @@ mod tests {
     use super::*;
     use crate::schema::table_schema::{ColumnSchema, TableSchema};
     use crate::schema::type_tracker::PgType;
+
+    #[test]
+    fn autovacuum_sql_off_quotes_identifiers() {
+        let schema = TableSchema::new("my\"t".to_string(), vec!["t".to_string()], 0);
+        let sql = generate_autovacuum_sql(&schema, "s", false, false);
+        assert_eq!(sql, r#"ALTER TABLE "s"."my""t" SET (autovacuum_enabled = false)"#);
+    }
+
+    #[test]
+    fn autovacuum_sql_on_resets_and_optionally_analyzes() {
+        let schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        assert_eq!(generate_autovacuum_sql(&schema, "s", true, false), r#"ALTER TABLE "s"."t" RESET (autovacuum_enabled)"#);
+        assert_eq!(
+            generate_autovacuum_sql(&schema, "s", true, true),
+            "ALTER TABLE \"s\".\"t\" RESET (autovacuum_enabled);\nANALYZE \"s\".\"t\""
+        );
+    }
 
     #[test]
     fn test_generate_create_table() {

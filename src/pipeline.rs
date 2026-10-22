@@ -10,7 +10,8 @@
 //!
 //! Pass 2 :
 //! - fn `connect_and_create_tables` — connecte PG et crée les tables (DDL sans contraintes).
-//! - fn `run_pass2` — lance l'insertion des données.
+//! - fn `run_pass2` — lance l'insertion des données (interruptible par Ctrl-C).
+//! - fn `ctrl_c_interrupt` — se résout sur Ctrl-C (arrêt propre de la Pass 2).
 //! - fn `finalize_pass2` — rapport final + vérification du taux d'anomalie max.
 //!
 //! Résolution d'entrée :
@@ -112,6 +113,8 @@ pub struct PipelineConfig {
     pub schema_report_output: Option<PathBuf>,
     /// Skip the `add_constraints` phase at the end of Pass 2.
     pub skip_constraints: bool,
+    /// Raise `max_wal_size` to 16 GB for the duration of Pass 2, then restore it (see `Pass2Config::tune_wal`).
+    pub tune_wal: bool,
 }
 
 /// Run the full json2sql import pipeline.
@@ -166,7 +169,7 @@ async fn run_pass2(
     cfg: &PipelineConfig,
 ) -> Result<crate::pass2::runner::Pass2Result> {
     eprintln!("\nPass 2: inserting data...");
-    crate::pass2::runner::run(
+    crate::pass2::runner::run_interruptible(
         input_path,
         &pass1.schemas,
         client,
@@ -183,10 +186,21 @@ async fn run_pass2(
             verbose: false,
             hint_format: pass1.detected_format.clone(),
             skip_constraints: cfg.skip_constraints,
+            tune_wal: cfg.tune_wal,
         },
         None,
+        ctrl_c_interrupt(),
     )
     .await
+}
+
+/// Resolves on Ctrl-C, so Pass 2 stops through its cleanup path (`max_wal_size`, autovacuum put
+/// back). Never resolves if the handler cannot be installed.
+async fn ctrl_c_interrupt() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+    eprintln!("\nInterrupted — restoring PostgreSQL settings before exit...");
 }
 
 fn finalize_pass2(
@@ -567,6 +581,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // flat struct literal, one line per field
     fn minimal_pipeline_cfg(schema_config: Option<std::path::PathBuf>) -> PipelineConfig {
         PipelineConfig {
             input: None,
@@ -597,6 +612,7 @@ mod tests {
             schema_report: false,
             schema_report_output: None,
             skip_constraints: false,
+            tune_wal: false,
         }
     }
 

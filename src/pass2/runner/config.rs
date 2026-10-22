@@ -40,6 +40,10 @@ pub struct Pass2Config {
     /// When `true`, skips the `add_constraints` phase entirely (Phase D).
     /// Useful for dev/exploration runs or pipelines that apply constraints in a separate step.
     pub skip_constraints: bool,
+    /// `--tune-wal` (#65): raise `max_wal_size` to 16 GB for the duration of Pass 2, then restore
+    /// it (also on failure). Best-effort: without the privilege, a warning and no change.
+    #[serde(default)]
+    pub tune_wal: bool,
 }
 
 /// Per-worker flush threshold: divides the global threshold by worker count so that
@@ -211,6 +215,7 @@ mod tests {
             verbose: false,
             hint_format: None,
             skip_constraints: false,
+            tune_wal: false,
         };
         assert!(cfg.limit.is_none());
     }
@@ -229,6 +234,7 @@ mod tests {
             verbose: false,
             hint_format: None,
             skip_constraints: false,
+            tune_wal: false,
         };
         assert_eq!(cfg.limit, Some(0));
     }
@@ -248,6 +254,7 @@ mod tests {
             verbose: false,
             hint_format: Some(JsonFormat::Array),
             skip_constraints: false,
+            tune_wal: false,
         };
         assert_eq!(cfg.hint_format, Some(JsonFormat::Array));
     }
@@ -266,6 +273,7 @@ mod tests {
             verbose: false,
             hint_format: None,
             skip_constraints: false,
+            tune_wal: false,
         };
         assert!(!cfg.skip_constraints, "skip_constraints: false means constraints must run");
     }
@@ -284,6 +292,7 @@ mod tests {
             verbose: false,
             hint_format: None,
             skip_constraints: true,
+            tune_wal: false,
         };
         assert!(cfg.skip_constraints, "skip_constraints: true means constraints must be skipped");
     }
@@ -302,6 +311,7 @@ mod tests {
             verbose: false,
             hint_format: None,
             skip_constraints: true,
+            tune_wal: false,
         };
         let json = serde_json::to_string(&cfg).expect("serialize Pass2Config");
         let back: Pass2Config = serde_json::from_str(&json).expect("deserialize Pass2Config");

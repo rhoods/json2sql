@@ -37,6 +37,7 @@ fn base_config(url: String, schema: String) -> PipelineConfig {
         schema_report: false,
         schema_report_output: None,
         skip_constraints: false,
+        tune_wal: false,
     }
 }
 
@@ -52,6 +53,49 @@ async fn test_nested_fk_e2e() {
 
         let items = integration::row_count(&client, &schema, "orders_items").await;
         assert_eq!(items, 5, "expected 5 items (2+1+2)");
+    })
+    .await;
+}
+
+/// #65 — parallel flusher (4 connections) + `--tune-wal`: same rows and FK as the default path,
+/// `max_wal_size` is back to its previous value and autovacuum is re-enabled on every table.
+#[tokio::test]
+async fn test_nested_fk_parallel_tune_wal() {
+    // Keep the restore marker out of the developer's real ~/.local/state. The other test in this
+    // binary never raises max_wal_size, so it is unaffected by where the marker lives.
+    let state = tempfile::TempDir::new().expect("tempdir");
+    std::env::set_var("XDG_STATE_HOME", state.path());
+    integration::with_pg_container(|client, schema, url| async move {
+        let wal_before: String = client.query_one("SHOW max_wal_size", &[]).await.expect("SHOW").get(0);
+        let cfg = PipelineConfig { parallel: 4, tune_wal: true, drop_existing: true, ..base_config(url, schema.clone()) };
+        let result = run_pipeline(cfg).await;
+        assert!(result.is_ok(), "parallel tune_wal pipeline failed: {result:?}");
+
+        assert_eq!(integration::row_count(&client, &schema, "orders").await, 3);
+        assert_eq!(integration::row_count(&client, &schema, "orders_items").await, 5);
+
+        // pg_reload_conf() is asynchronous: give the session a moment to see the restored value.
+        let mut wal_after = String::new();
+        for _ in 0..50 {
+            wal_after = client.query_one("SHOW max_wal_size", &[]).await.expect("SHOW").get(0);
+            if wal_after == wal_before { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(wal_after, wal_before, "max_wal_size must be restored after the import");
+
+        let autovacuum_off: i64 = client.query_one(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind = 'r' AND 'autovacuum_enabled=false' = ANY(c.reloptions)",
+            &[&schema],
+        ).await.expect("query reloptions").get(0);
+        assert_eq!(autovacuum_off, 0, "autovacuum must be re-enabled on every table");
+
+        let fks: i64 = client.query_one(
+            "SELECT count(*) FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace \
+             WHERE n.nspname = $1 AND c.contype = 'f'",
+            &[&schema],
+        ).await.expect("query FKs").get(0);
+        assert!(fks > 0, "FK constraints must be applied");
     })
     .await;
 }

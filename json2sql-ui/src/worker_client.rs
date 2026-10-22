@@ -9,6 +9,7 @@
 //! - fn `WorkerKillHandle::new` — construit un handle actif à partir d'un `Child`
 //! - fn `WorkerKillHandle::is_some` — vrai si un process est associé au handle
 //! - fn `WorkerKillHandle::kill` — envoie SIGKILL au subprocess (idempotent)
+//! - fn `WorkerKillHandle::terminate` — SIGTERM (arrêt propre, réglages PG remis), puis SIGKILL après un délai de grâce
 //! - fn `WorkerKillHandle::has_exited` — vrai si aucun process n'est associé ou s'il est terminé (`try_wait`)
 //! - struct `SocketEventReader` — lecteur asynchrone qui désérialise des `ProgressEvent` NDJSON depuis un socket Unix
 //! - fn `SocketEventReader::new` — construit le lecteur à partir de la moitié lecture du socket
@@ -70,6 +71,24 @@ impl WorkerKillHandle {
 
     pub const fn is_some(&self) -> bool {
         self.0.is_some()
+    }
+
+    /// Graceful stop: SIGTERM now — the worker cancels Pass 2 and puts back the `PostgreSQL`
+    /// settings it changed — then SIGKILL after `grace` if it is still running.
+    /// Goes through a signal, not the socket `cancel` command, so it works even when the
+    /// UI has lost its socket connection (#64).
+    pub fn terminate(&self, grace: std::time::Duration) {
+        let Some(inner) = self.0.as_ref() else { return };
+        let pid = inner.child.lock().ok().and_then(|c| c.id());
+        if let Some(pid) = pid {
+            // `kill` binary: the crate forbids unsafe code, so no direct libc::kill.
+            let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        }
+        let handle = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(grace);
+            handle.kill(); // idempotent: harmless if the worker already exited
+        });
     }
 
     /// Send SIGKILL to the subprocess. Idempotent — safe to call multiple times or

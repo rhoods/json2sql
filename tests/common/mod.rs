@@ -49,6 +49,7 @@ pub fn pass2_config(root_table: &str, pg_schema: &str) -> Pass2Config {
         verbose: false,
         hint_format: None,
         skip_constraints: false,
+        tune_wal: false,
     }
 }
 
