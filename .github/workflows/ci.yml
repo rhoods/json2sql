@@ -109,7 +109,9 @@ jobs:
   integration-ubuntu:
     name: Integration tests (native PG) — ubuntu-latest
     timeout-minutes: 30
-    runs-on: ubuntu-latest
+    # shortcut: ubuntu-latest is 26.04, where action-setup-postgres@v7/v8 fail (apt-key removed);
+    # move back to ubuntu-latest once a release registers the repo with signed-by.
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
