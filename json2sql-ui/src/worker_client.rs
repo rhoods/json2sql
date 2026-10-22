@@ -305,12 +305,15 @@ mod tests {
     use tokio::io::AsyncWriteExt as _;
     use tokio::net::UnixListener;
 
+    /// Outside `find_active_socket`'s `json2sql-*` pattern: parallel probes from the
+    /// `find_active_socket_*` tests would otherwise steal the accept or delete the file.
     fn temp_sock(tag: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "json2sql-ui-test-{}-{}.sock",
-            tag,
-            uuid::Uuid::now_v7()
-        ))
+        std::env::temp_dir().join(format!("j2s-ui-test-{}-{}.sock", tag, uuid::Uuid::now_v7()))
+    }
+
+    /// Matches `find_active_socket`'s pattern — only for tests that exercise the probe.
+    fn probed_sock(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("json2sql-ui-test-{}-{}.sock", tag, uuid::Uuid::now_v7()))
     }
 
     #[tokio::test]
@@ -516,11 +519,11 @@ mod tests {
 
     #[tokio::test]
     async fn find_active_socket_finds_listening_socket() {
-        let path = temp_sock("find-active");
+        let path = probed_sock("find-active");
         let listener = UnixListener::bind(&path).expect("bind");
-        // Keep the listener alive so connections are accepted
+        // Accept in a loop: a concurrent probe from another test must not close the listener.
         let _accept = tokio::spawn(async move {
-            let _ = listener.accept().await;
+            while listener.accept().await.is_ok() {}
         });
 
         let found = find_active_socket().await;
@@ -533,7 +536,7 @@ mod tests {
     #[tokio::test]
     async fn find_active_socket_deletes_orphan_socket_file() {
         // Create a socket *file* but don't bind a listener on it (so connection fails).
-        let path = temp_sock("orphan");
+        let path = probed_sock("orphan");
         // Write a dummy file at the path (not a bound socket).
         std::fs::write(&path, b"").expect("create orphan file");
 

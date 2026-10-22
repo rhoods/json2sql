@@ -323,38 +323,31 @@ mod tests {
     // pairwise_jaccard_min performance + correctness
     // -----------------------------------------------------------------------
 
-    /// 10 000 pure-container siblings (no data columns) must short-circuit immediately.
-    /// With O(N²) pairwise this would be ~50M iterations (~2s in debug) — must finish <500ms.
+    /// 10 000 pure-container siblings (no data columns) must short-circuit, not go pairwise.
+    /// Checked by scaling ratio (2.5k → 10k), not wall-clock, so slow CI runners don't flake:
+    /// O(N log N) grows ≈ ×4.7, O(N²) ≈ ×16.
     #[test]
     fn test_jaccard_large_pure_containers_fast() {
-        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_jaccard: 0.0, ..Default::default() });
-
-        // Build a single JSON root where "genomes" contains 10 000 pure-container children.
         // Each genome child has one contig sub-object (making the genome a pure container).
-        let mut genomes = serde_json::Map::new();
-        for i in 0..10_000usize {
-            let mut genome = serde_json::Map::new();
-            genome.insert(
-                format!("nc_{i:05}"),
-                json!({ "is_circular": false }),
-            );
-            genomes.insert(format!("gcf_{i:05}"), Value::Object(genome));
-        }
-        let root = json!({ "id": 1, "genomes": Value::Object(genomes) });
+        let run = |n: usize| {
+            let mut reg = SchemaRegistry::new(RegistryConfig { sibling_jaccard: 0.0, ..Default::default() });
+            let mut genomes = serde_json::Map::new();
+            for i in 0..n {
+                genomes.insert(format!("gcf_{i:05}"), json!({ format!("nc_{i:05}"): { "is_circular": false } }));
+            }
+            let root = json!({ "id": 1, "genomes": Value::Object(genomes) });
+            reg.observe_root("root", make_root(&root));
+            let start = std::time::Instant::now();
+            let schemas = reg.finalize();
+            (start.elapsed(), schemas)
+        };
 
-        reg.observe_root("root", make_root(&root));
-
-        let start = std::time::Instant::now();
-        let schemas = reg.finalize();
-        let elapsed = start.elapsed();
-
-        // O(N²) on 10k items ≈ 2 000ms in debug / 200ms release. O(N log N) is ≈ 800ms debug / 30ms release.
-        // Threshold is generous for debug builds (unoptimized code is ~10–20× slower).
-        let limit_ms: u128 = if cfg!(debug_assertions) { 2000 } else { 500 };
+        let (small, _) = run(2_500);
+        let (large, schemas) = run(10_000);
+        let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-6);
         assert!(
-            elapsed.as_millis() < limit_ms,
-            "finalize() with 10k pure-container siblings took {}ms — likely O(N²)",
-            elapsed.as_millis()
+            ratio < 9.0,
+            "finalize() grew ×{ratio:.1} from 2.5k to 10k pure-container siblings ({small:?} → {large:?}) — likely O(N²)"
         );
 
         // The genomes table must have become a SiblingCollapse

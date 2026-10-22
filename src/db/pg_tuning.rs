@@ -381,6 +381,6 @@ mod tests {
     #[test]
     fn hints_skip_wal_advice_with_tune_wal_and_stay_quiet_when_tuned() {
         assert_eq!(tuning_hints(128, 1024, true).len(), 1);
-        assert!(tuning_hints(4096, 16384, false).is_empty());
+        assert_eq!(tuning_hints(4096, 16384, false), Vec::<String>::new());
     }
 }
