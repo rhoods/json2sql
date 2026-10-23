@@ -425,6 +425,7 @@ mod tests {
     }
 
     /// `rank` of a plain load: every table goes to any connection.
+    #[allow(clippy::unnecessary_wraps)] // same signature as the `rank` of a FREEZE load
     fn any(_: &str) -> Option<bool> { Some(false) }
 
     #[test]
