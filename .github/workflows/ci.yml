@@ -66,6 +66,9 @@ jobs:
       # --workspace), so json2sql-ui is never compiled there.
       - name: Install Dioxus desktop system deps (Linux)
         run: |
+          # shortcut: azure.archive.ubuntu.com sometimes serves archives at ~50 kB/s and apt never fails over
+          # (actions/runner-images#14823), so go straight to archive.ubuntu.com; drop this line once that is fixed.
+          sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev
 
