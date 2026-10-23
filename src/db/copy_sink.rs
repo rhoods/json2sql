@@ -13,6 +13,7 @@
 //! - fn `RowBuilder::finish` — termine la ligne (ajoute le saut de ligne) et retourne le buffer.
 //! - fn `RowBuilder::default` — implémente `Default` en délégant à `new`.
 //! - struct `MemSink` — buffer en mémoire des lignes COPY d'une table (pipeline diskless).
+//! - fn `copy_sql` — requête `COPY ... FROM STDIN` d'une table, avec `FREEZE` en option.
 //! - fn `MemSink::new` — construit le sink et pré-génère la requête `COPY ... FROM STDIN`.
 //! - fn `MemSink::write_row` — accumule une ligne déjà formatée dans le buffer en mémoire.
 //! - fn `flush_mem_sink_to_pg` — envoie le buffer à `PostgreSQL` via COPY, par chunks de 4 MiB.
@@ -105,20 +106,28 @@ pub struct MemSink {
     pub copy_sql: String,
 }
 
+/// `COPY … FROM STDIN` for `schema`: text format, tab-separated, `\N` for NULL. `freeze` adds
+/// `FREEZE` (#68): rows are written already frozen, so their first read and the next `VACUUM` no
+/// longer rewrite the pages — only valid in the transaction that created or truncated the table.
+#[must_use]
+pub fn copy_sql(schema: &TableSchema, pg_schema: &str, freeze: bool) -> String {
+    let col_names: Vec<String> = schema
+        .columns
+        .iter()
+        .map(|c| format!("\"{}\"", c.name.replace('"', "\"\"")))
+        .collect();
+    format!(
+        "COPY \"{}\".\"{}\" ({}) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N'{})",
+        pg_schema.replace('"', "\"\""),
+        schema.name.replace('"', "\"\""),
+        col_names.join(", "),
+        if freeze { ", FREEZE" } else { "" },
+    )
+}
+
 impl MemSink {
     pub fn new(schema: &TableSchema, pg_schema: &str) -> Self {
-        let col_names: Vec<String> = schema
-            .columns
-            .iter()
-            .map(|c| format!("\"{}\"", c.name.replace('"', "\"\"")))
-            .collect();
-        let copy_sql = format!(
-            "COPY \"{}\".\"{}\" ({}) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')",
-            pg_schema.replace('"', "\"\""),
-            schema.name.replace('"', "\"\""),
-            col_names.join(", ")
-        );
-        Self { buf: BytesMut::new(), row_count: 0, copy_sql }
+        Self { buf: BytesMut::new(), row_count: 0, copy_sql: copy_sql(schema, pg_schema, false) }
     }
 
     pub fn write_row(&mut self, row: &[u8]) {
@@ -182,6 +191,16 @@ mod tests {
         );
         assert_eq!(sink.row_count, 0);
         assert!(sink.buf.is_empty());
+    }
+
+    #[test]
+    fn copy_sql_freeze_adds_the_option() {
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        schema.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        assert_eq!(
+            copy_sql(&schema, "public", true),
+            r#"COPY "public"."t" ("j2s_id") FROM STDIN WITH (FORMAT text, DELIMITER E'\t', NULL '\N', FREEZE)"#
+        );
     }
 
     #[test]

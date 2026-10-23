@@ -29,6 +29,8 @@
 //! - fn `restore_max_wal_size` — applique le retour arrière en fin d'import (best-effort).
 //! - fn `tuning_hints` — conseils selon `shared_buffers` / `max_wal_size` (pure).
 //! - fn `warn_pg_tuning` — lit les réglages du serveur et émet les conseils.
+//! - fn `wal_level_hint` — conseil `wal_level = minimal` quand les tables enfants sont chargées en `COPY FREEZE` (pure).
+//! - fn `warn_wal_level` — lit `wal_level` et émet ce conseil.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -50,7 +52,7 @@ pub struct WalRestore {
     key: String,
 }
 
-fn log(progress_tx: Option<&ProgressTx>, msg: String) {
+pub fn log(progress_tx: Option<&ProgressTx>, msg: String) {
     eprintln!("{msg}");
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Pass2Log(msg));
@@ -332,6 +334,26 @@ pub async fn warn_pg_tuning(client: &Client, tune_wal: bool, progress_tx: Option
     }
 }
 
+/// Advice for a `COPY FREEZE` load (#75): under `wal_level = minimal`, a table truncated in the load
+/// transaction is written without WAL; any other level writes every child row twice.
+#[must_use]
+pub fn wal_level_hint(wal_level: &str) -> Option<String> {
+    (wal_level != "minimal").then(|| format!(
+        "PG tuning: wal_level = {wal_level} writes the child tables twice (table + WAL) — on a local \
+         analysis server, consider ALTER SYSTEM SET wal_level = 'minimal' and ALTER SYSTEM SET \
+         max_wal_senders = 0 (archive_mode must stay off), then restart PostgreSQL. This disables \
+         replication and point-in-time recovery."
+    ))
+}
+
+/// Reads `wal_level` and logs `wal_level_hint`. Silent if the query fails.
+pub async fn warn_wal_level(client: &Client, progress_tx: Option<&ProgressTx>) {
+    let Ok(row) = client.query_one("SELECT current_setting('wal_level')", &[]).await else { return };
+    if let Some(hint) = wal_level_hint(row.get(0)) {
+        log(progress_tx, hint);
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
@@ -382,5 +404,12 @@ mod tests {
     fn hints_skip_wal_advice_with_tune_wal_and_stay_quiet_when_tuned() {
         assert_eq!(tuning_hints(128, 1024, true).len(), 1);
         assert_eq!(tuning_hints(4096, 16384, false), Vec::<String>::new());
+    }
+
+    #[test]
+    fn wal_level_hint_only_when_not_minimal() {
+        let hint = wal_level_hint("replica").unwrap();
+        assert!(hint.contains("wal_level = replica") && hint.contains("max_wal_senders = 0"), "{hint}");
+        assert_eq!(wal_level_hint("minimal"), None);
     }
 }

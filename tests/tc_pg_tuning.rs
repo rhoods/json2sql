@@ -66,7 +66,7 @@ async fn tune_wal_is_undone_after_interrupt_and_after_kill() {
         // 2. Killed import: raised + autovacuum off, then no cleanup at all (kill -9).
         assert!(raise_max_wal_size(&client, None).await.is_some(), "container role is superuser");
         assert!(record_autovacuum_restore(&url, &p1.schemas, &schema, None).is_some());
-        db::ddl::set_tables_autovacuum(&url, &p1.schemas, &schema, false, false, 2).await.unwrap();
+        db::ddl::set_tables_autovacuum(&url, &p1.schemas, &schema, false, 2).await.unwrap();
         assert_eq!(max_wal_size(&client, "16GB").await, "16GB");
         assert!(marker.exists(), "restore recorded before raising");
 

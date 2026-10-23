@@ -193,6 +193,16 @@ json2sql \
 | `--transaction` | false | ⚠️ Sans effet actuellement (accepté mais non câblé) |
 | `--limit` | aucun | Arrête le dispatch Pass 2 après N objets racines. Pass 1 tourne toujours sur le fichier complet. `0` = créer les tables sans lignes. |
 
+**Serveur d'analyse local : `wal_level = minimal`** (#75). Les tables enfants sont chargées en `COPY FREEZE` dans la transaction qui les vide. Avec `wal_level = minimal`, PostgreSQL ne les écrit pas dans le WAL. Sur OpenFoodFacts 70 GB, l'import passe de 64 à 55 min, et le WAL de 64,6 à 35,7 GiB. json2sql affiche un avertissement quand le serveur n'est pas réglé ainsi, mais ne change jamais ce réglage, qui demande un redémarrage :
+
+```sql
+ALTER SYSTEM SET wal_level = 'minimal';
+ALTER SYSTEM SET max_wal_senders = 0;
+-- puis redémarrer PostgreSQL
+```
+
+`max_wal_senders = 0`, `archive_mode = off` et, à partir de PG 17, `summarize_wal = off` sont obligatoires avec `minimal`, sinon PostgreSQL refuse de démarrer. À réserver à une base locale d'analyse : la réplication, la restauration à un instant donné (PITR) et `pg_basebackup` ne fonctionnent plus. Pour revenir en arrière : `ALTER SYSTEM RESET wal_level; ALTER SYSTEM RESET max_wal_senders;`, puis redémarrer.
+
 ### Paramètres d'anomalies
 
 | Paramètre | Défaut | Description |

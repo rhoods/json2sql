@@ -15,10 +15,12 @@
 //! - fn `generate_create_table` — CREATE TABLE avec PK inline.
 //! - fn `generate_create_table_no_constraints` — CREATE TABLE colonnes seules (IF NOT EXISTS).
 //! - fn `generate_add_pk_sql` — ALTER TABLE ADD CONSTRAINT PRIMARY KEY.
-//! - fn `generate_add_fk_sql` — ALTER TABLE ADD CONSTRAINT FOREIGN KEY (None pour une table racine).
+//! - fn `generate_add_fk_sql` — ALTER TABLE ADD CONSTRAINT FOREIGN KEY … NOT VALID (None pour une table racine).
+//! - fn `generate_validate_fk_sql` — ALTER TABLE VALIDATE CONSTRAINT de la FK parent (None pour une table racine).
 //! - fn `generate_ddl_preview` — aperçu lisible pour l'IHM (CREATE TABLE + FK inline, non exécuté tel quel).
 //! - fn `quote_ident` — échappe un identifiant PG entre guillemets doubles.
-//! - fn `generate_autovacuum_sql` — ALTER TABLE SET/RESET (`autovacuum_enabled`) (+ ANALYZE optionnel).
+//! - fn `generate_autovacuum_sql` — ALTER TABLE SET/RESET (`autovacuum_enabled`).
+//! - fn `generate_vacuum_analyze_sql` — `VACUUM (ANALYZE)` d'une table.
 //!
 //! Création des tables :
 //! - fn `build_batch_drop_sql` — construit le SQL de DROP batché.
@@ -28,21 +30,25 @@
 //! - enum `ConstraintKind` — type de contrainte concernée par un `ConstraintWarning` (PK ou FK).
 //!
 //! Contraintes post-chargement :
-//! - fn `group_schemas_by_depth` — regroupe les schémas par profondeur (parents avant enfants).
 //! - fn `calc_maintenance_work_mem_mb` — calcule `maintenance_work_mem` depuis la RAM disponible.
-//! - fn `try_configure_constraints_conn` — configure `maintenance_work_mem`/`synchronous_commit` (best-effort).
-//! - fn `apply_constraints_chunk` — applique un lot de contraintes sur une connexion dédiée.
+//! - fn `table_sizes` — lignes (`reltuples`) et octets de chaque table, lus dans le catalogue.
+//! - fn `largest_first` — tables triées de la plus grosse à la plus petite (taille catalogue).
+//! - fn `pk_mem_mb` — mémoire d'une construction de PK : ce que son tri demande, dans le budget commun.
+//! - fn `try_configure_constraints_conn` — configure `maintenance_work_mem`/`wal_compression`/index en série/`synchronous_commit` (best-effort).
+//! - fn `open_constraints_conn` — ouvre une connexion dédiée aux contraintes et la configure.
+//! - fn `add_pk` — pose la PK d'une table (fatal si échec).
+//! - fn `validate_fk` — valide la FK d'une table ; si échec, warning + DROP de la contrainte.
 //! - fn `set_tables_autovacuum` — coupe / rétablit l'autovacuum de toutes les tables en parallèle (chargement Pass 2).
-//! - fn `add_constraints` — orchestre PK+FK niveau par niveau (parents avant enfants), PK fatale / FK en warning.
+//! - fn `vacuum_analyze_tables` — `VACUUM (ANALYZE)` non bridé de toutes les tables en parallèle, avant les PK.
+//! - fn `add_constraints` — toutes les PK, puis FK `NOT VALID`, puis `VALIDATE` en parallèle ; PK fatale / FK en warning.
 //! - fn `constraint_progress` — émet un événement de progression.
 //! - fn `to_fk_warning` — convertit une erreur `PostgreSQL` en `ConstraintWarning`.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
-use futures_util::future::try_join_all;
+use futures_util::{StreamExt, TryStreamExt};
 use tokio_postgres::Client;
 
 use crate::db::error::pg_err;
@@ -105,17 +111,20 @@ pub fn generate_create_table_no_constraints(schema: &TableSchema, pg_schema: &st
 }
 
 /// Generate ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY for a single schema.
+/// `fillfactor = 100`: `UUIDv7` keys only ever append at the right end, so the 10 % free space of
+/// the default would never be used — it would only make the index (and its WAL) bigger (#68).
 #[must_use]
 pub fn generate_add_pk_sql(schema: &TableSchema, pg_schema: &str) -> String {
     format!(
-        "ALTER TABLE {}.{} ADD CONSTRAINT {} PRIMARY KEY (j2s_id)",
+        "ALTER TABLE {}.{} ADD CONSTRAINT {} PRIMARY KEY (j2s_id) WITH (fillfactor = 100)",
         quote_ident(pg_schema),
         quote_ident(&schema.name),
         quote_ident(&format!("pk_{}", schema.name)),
     )
 }
 
-/// Generate ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY for a child schema.
+/// Generate ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY … NOT VALID for a child schema: instant,
+/// existing rows are checked later by [`generate_validate_fk_sql`] (#68).
 /// Returns None for root tables (no parent).
 #[must_use]
 pub fn generate_add_fk_sql(schema: &TableSchema, pg_schema: &str) -> Option<String> {
@@ -129,12 +138,25 @@ pub fn generate_add_fk_sql(schema: &TableSchema, pg_schema: &str) -> Option<Stri
         "ALTER TABLE {schema_q}.{table_q} \
          ADD CONSTRAINT {constraint_q} \
          FOREIGN KEY ({fk_col_q}) \
-         REFERENCES {schema_q}.{parent_q} (j2s_id)",
+         REFERENCES {schema_q}.{parent_q} (j2s_id) NOT VALID",
         schema_q = quote_ident(pg_schema),
         table_q = quote_ident(&schema.name),
         constraint_q = quote_ident(&format!("fk_{}_parent", schema.name)),
         fk_col_q = quote_ident(fk_col),
         parent_q = quote_ident(parent_name),
+    ))
+}
+
+/// Generate ALTER TABLE … VALIDATE CONSTRAINT for a child's parent FK. Returns None for root tables.
+/// Takes only `ROW SHARE` on the parent, so validations against one parent run concurrently (#68).
+#[must_use]
+pub fn generate_validate_fk_sql(schema: &TableSchema, pg_schema: &str) -> Option<String> {
+    schema.parent_table.as_ref()?;
+    Some(format!(
+        "ALTER TABLE {}.{} VALIDATE CONSTRAINT {}",
+        quote_ident(pg_schema),
+        quote_ident(&schema.name),
+        quote_ident(&format!("fk_{}_parent", schema.name)),
     ))
 }
 
@@ -208,38 +230,77 @@ pub enum ConstraintKind {
     ForeignKey,
 }
 
-/// Group schemas by depth level (`BTreeMap` preserves ascending order → parents before children).
-fn group_schemas_by_depth(schemas: &[TableSchema]) -> BTreeMap<usize, Vec<&TableSchema>> {
-    let mut map: BTreeMap<usize, Vec<&TableSchema>> = BTreeMap::new();
-    for schema in schemas {
-        map.entry(schema.depth).or_default().push(schema);
+/// Compute per-connection `maintenance_work_mem` in MB: half the available RAM, shared by `conns`
+/// concurrent connections (#68). Floor: 256 MB. Cap: `cap_mb` (default 4096 = 4 GB).
+/// shortcut: the 256 MB floor is per connection, so `conns` × 256 MB can still exceed RAM on a
+/// small machine; lower the floor or `parallel` if that shows up.
+fn calc_maintenance_work_mem_mb(available_bytes: u64, cap_mb: u64, conns: usize) -> u64 {
+    (available_bytes / 1024 / 1024 / 2 / conns.max(1) as u64).max(256).min(cap_mb)
+}
+
+/// `maintenance_work_mem` one row needs for a PK sort to stay in memory: ~24 B index tuple
+/// (uuid key) + 24 B `SortTuple`, plus slack for the tuple array growing by doubling (#68).
+const PK_SORT_BYTES_PER_ROW: u64 = 72;
+
+/// `maintenance_work_mem` (MB) for one PK build: what its sort needs to stay in memory (a spilled
+/// sort writes and re-reads its data), at least 64 MB, at most the whole `budget_mb`.
+/// `rows == 0` means unknown (table never vacuumed or analyzed): falls back to `unknown_mb`.
+fn pk_mem_mb(rows: u64, budget_mb: u64, unknown_mb: u64) -> u64 {
+    if rows == 0 {
+        return unknown_mb.min(budget_mb);
     }
-    map
+    (rows.saturating_mul(PK_SORT_BYTES_PER_ROW) / 1024 / 1024).clamp(64, budget_mb.max(64))
 }
 
-/// Pre-built work item for one table's constraints: (`table_name`, `pk_sql`, `fk_sql_opt`).
-type ConstraintWork = (String, String, Option<String>);
-
-
-/// Compute `maintenance_work_mem` in MB from available RAM.
-/// Floor: 256 MB (protects low-memory machines). Cap: `cap_mb` (default 4096 = 4 GB).
-fn calc_maintenance_work_mem_mb(available_bytes: u64, cap_mb: u64) -> u64 {
-    (available_bytes / 1024 / 1024 / 2).max(256).min(cap_mb)
+/// Rows and bytes (TOAST included) of every table of `pg_schema`, from the catalog. Rows come from
+/// `reltuples`: exact right after `VACUUM`, 0 when unknown. The Pass 1 `row_count` is no substitute:
+/// it counts JSON objects, not the rows an array or a pivot expands into (#68: a table with
+/// 53.6 M rows was counted 4.3 M).
+async fn table_sizes(client: &Client, pg_schema: &str) -> Result<HashMap<String, (u64, u64)>> {
+    let rows = client.query(
+        "SELECT c.relname::text, greatest(c.reltuples, 0)::bigint, pg_table_size(c.oid) \
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relkind = 'r'",
+        &[&pg_schema],
+    ).await.map_err(|e| pg_err("table sizes", &e))?;
+    Ok(rows.iter().map(|r| {
+        let n = |i: usize| u64::try_from(r.get::<_, i64>(i)).unwrap_or(0);
+        (r.get::<_, String>(0), (n(1), n(2)))
+    }).collect())
 }
 
-/// Add PRIMARY KEY + FOREIGN KEY constraints after data has been loaded.
-///
-/// Processes schemas level-by-level (grouped by `depth`): all tables at depth N
-/// are constrained in parallel before moving to depth N+1.  Within each level,
-/// each worker applies PK then FK for its assigned tables on a dedicated connection.
-/// Configure a fresh constraints connection: set `maintenance_work_mem` (non-fatal) and
-/// `synchronous_commit = off` (non-fatal on `INSUFFICIENT_PRIVILEGE`, fatal otherwise).
+/// `schemas` largest first by catalog size, so a late giant does not stall the end of a phase.
+fn largest_first<'a>(schemas: &'a [TableSchema], sizes: &HashMap<String, (u64, u64)>) -> Vec<&'a TableSchema> {
+    let mut by_size: Vec<&TableSchema> = schemas.iter().collect();
+    by_size.sort_by_key(|s| std::cmp::Reverse(sizes.get(&s.name).map_or(0, |&(_, bytes)| bytes)));
+    by_size
+}
+
+/// Configure a fresh constraints connection: set `maintenance_work_mem`, `wal_compression = lz4`,
+/// serial index builds (all non-fatal) and `synchronous_commit = off` (non-fatal on
+/// `INSUFFICIENT_PRIVILEGE`, fatal otherwise).
 async fn try_configure_constraints_conn(client: &Client, maintenance_work_mem_mb: u64) -> Result<()> {
     if let Err(e) = client.execute(
         &format!("SET maintenance_work_mem = '{maintenance_work_mem_mb}MB'"),
         &[],
     ).await {
         eprintln!("WARNING: SET maintenance_work_mem failed — {e}");
+    }
+    // Index builds WAL-log every page they write: compress those images (#68). Superuser only,
+    // like --tune-wal: silently skipped without the privilege; other failures (PG < 15, server
+    // built without lz4) are reported.
+    if let Err(e) = client.execute("SET wal_compression = lz4", &[]).await {
+        if !e.as_db_error().is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE) {
+            eprintln!("WARNING: SET wal_compression = lz4 failed — {e}");
+        }
+    }
+    // Serial index builds: a parallel build always writes its workers' sorted runs to temp files
+    // for the leader to merge (#68: ~1 GB of temp for a 1.1 GB index, even with 4 GB of memory),
+    // which costs more than the CPU it saves on a write-bound disk. With `pk_mem_mb` sized for the
+    // sort, a serial build writes no temp file at all.
+    // shortcut: on fast storage with idle CPU a parallel build may win back; make it configurable then.
+    if let Err(e) = client.execute("SET max_parallel_maintenance_workers = 0", &[]).await {
+        eprintln!("WARNING: SET max_parallel_maintenance_workers = 0 failed — {e}");
     }
     match client.execute("SET synchronous_commit = off", &[]).await {
         Ok(_) => Ok(()),
@@ -253,39 +314,81 @@ async fn try_configure_constraints_conn(client: &Client, maintenance_work_mem_mb
     }
 }
 
-async fn apply_constraints_chunk(
-    chunk: Vec<ConstraintWork>,
-    db_url: String,
-    done: Arc<AtomicUsize>,
-    total: usize,
-    ptx: Option<ProgressTx>,
-    maintenance_work_mem_mb: u64,
-) -> Result<Vec<ConstraintWarning>> {
-    let (client, connection) = tokio_postgres::connect(&db_url, tokio_postgres::NoTls)
+/// Opens a dedicated constraints connection configured with `maintenance_work_mem_mb`.
+async fn open_constraints_conn(db_url: &str, maintenance_work_mem_mb: u64) -> Result<Client> {
+    let (client, connection) = tokio_postgres::connect(db_url, tokio_postgres::NoTls)
         .await
         .map_err(|e| J2sError::DbContext(format!("constraints connection: {e}")))?;
     tokio::spawn(async move { let _ = connection.await; });
     try_configure_constraints_conn(&client, maintenance_work_mem_mb).await?;
-
-    let mut warnings: Vec<ConstraintWarning> = Vec::new();
-    for (table_name, pk_sql, fk_sql_opt) in &chunk {
-        let pk_start = Instant::now();
-        client.execute(pk_sql.as_str(), &[]).await
-            .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {table_name}"), &e))?;
-        eprintln!("[CONSTRAINTS] PK {table_name}: {}ms", pk_start.elapsed().as_millis());
-        constraint_progress(&done, total, ptx.as_ref());
-        if let Some(fk_sql) = fk_sql_opt {
-            if let Err(e) = client.execute(fk_sql.as_str(), &[]).await {
-                warnings.push(to_fk_warning(&e, table_name));
-            }
-            constraint_progress(&done, total, ptx.as_ref());
-        }
-    }
-    Ok(warnings)
+    Ok(client)
 }
 
-/// PK failures are fatal.  FK failures become warnings.
-#[allow(clippy::too_many_lines)] // sequential async pipeline: early-return → setup → level-by-level parallel constraints
+/// Adds one table's PRIMARY KEY on its own connection. Failure is fatal.
+async fn add_pk(
+    schema: &TableSchema,
+    pg_schema: &str,
+    db_url: &str,
+    maintenance_work_mem_mb: u64,
+    done: &AtomicUsize,
+    total: usize,
+    ptx: Option<&ProgressTx>,
+) -> Result<()> {
+    let client = open_constraints_conn(db_url, maintenance_work_mem_mb).await?;
+    let start = Instant::now();
+    client.execute(generate_add_pk_sql(schema, pg_schema).as_str(), &[]).await
+        .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {}", schema.name), &e))?;
+    eprintln!("[CONSTRAINTS] PK {}: {}ms ({maintenance_work_mem_mb} MB)", schema.name, start.elapsed().as_millis());
+    constraint_progress(done, total, ptx);
+    Ok(())
+}
+
+/// Validates one table's `NOT VALID` parent FK on its own connection. On failure the constraint is
+/// dropped and a warning returned, so violating data ends up without FK, as before #68.
+async fn validate_fk(
+    schema: &TableSchema,
+    pg_schema: &str,
+    db_url: &str,
+    maintenance_work_mem_mb: u64,
+    done: &AtomicUsize,
+    total: usize,
+    ptx: Option<&ProgressTx>,
+) -> Result<Option<ConstraintWarning>> {
+    let Some(sql) = generate_validate_fk_sql(schema, pg_schema) else { return Ok(None) };
+    let client = open_constraints_conn(db_url, maintenance_work_mem_mb).await?;
+    let start = Instant::now();
+    let warning = match client.execute(sql.as_str(), &[]).await {
+        Ok(_) => None,
+        Err(e) => {
+            let drop_sql = format!(
+                "ALTER TABLE {}.{} DROP CONSTRAINT IF EXISTS {}",
+                quote_ident(pg_schema),
+                quote_ident(&schema.name),
+                quote_ident(&format!("fk_{}_parent", schema.name)),
+            );
+            if let Err(drop_e) = client.execute(drop_sql.as_str(), &[]).await {
+                eprintln!("WARNING: could not drop unvalidated FK on {} — {drop_e}", schema.name);
+            }
+            Some(to_fk_warning(&e, &schema.name))
+        }
+    };
+    eprintln!("[CONSTRAINTS] FK {}: {}ms", schema.name, start.elapsed().as_millis());
+    constraint_progress(done, total, ptx);
+    Ok(warning)
+}
+
+/// Add PRIMARY KEY + FOREIGN KEY constraints after data has been loaded (#68).
+///
+/// 1. Every PK, largest tables first, `parallel.min(4)` connections. Each build gets the
+///    `maintenance_work_mem` its sort needs (catalog row count, exact after the import's `VACUUM`)
+///    out of a shared budget of half the available RAM, so big sorts stay in memory.
+/// 2. Every FK added `NOT VALID` on one connection: no scan, so the self-conflicting
+///    `SHARE ROW EXCLUSIVE` lock it takes on the parent is held only for an instant.
+/// 3. Every FK validated, `parallel` connections, smaller memory each: `VALIDATE` takes only
+///    `ROW SHARE` on the parent, so checks against the same parent run concurrently.
+///
+/// PK failures are fatal.  FK failures become warnings (and leave no FK behind).
+#[allow(clippy::too_many_lines)] // three sequential phases sharing setup: PK → FK NOT VALID → VALIDATE
 pub async fn add_constraints(
     db_url: &str,
     schemas: &[TableSchema],
@@ -301,43 +404,67 @@ pub async fn add_constraints(
 
     let fk_count = schemas.iter().filter(|s| s.parent_table.is_some()).count();
     let total = schemas.len() + fk_count;
-    let done = Arc::new(AtomicUsize::new(0));
-    let ptx: Option<ProgressTx> = progress_tx.cloned();
+    let done = AtomicUsize::new(0);
 
     emit(progress_tx, ProgressEvent::ConstraintsStart { table_count: schemas.len() });
 
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
-    let maintenance_work_mem_mb = calc_maintenance_work_mem_mb(sys.available_memory(), 4096);
+    let available = sys.available_memory();
+    let parallel = parallel.max(1);
+    let pk_conns = parallel.min(4);
+    let pk_budget_mb = calc_maintenance_work_mem_mb(available, u64::MAX, 1);
+    let pk_unknown_mb = pk_budget_mb / pk_conns as u64;
+    let fk_mem_mb = calc_maintenance_work_mem_mb(available, 1024, parallel);
 
-    let levels = group_schemas_by_depth(schemas);
+    // One connection for the catalog lookup now and the FK NOT VALID phase later.
+    let client = open_constraints_conn(db_url, fk_mem_mb).await?;
+    let sizes = table_sizes(&client, pg_schema).await?;
+    let by_size = largest_first(schemas, &sizes);
+
+    // Phase 1 — PK. Dynamic queue; first error aborts. Each build holds its memory (in MB permits)
+    // while it runs. shortcut: the semaphore is FIFO, so a big build waiting for memory holds back
+    // the small ones queued behind it; fine while the disk is the bottleneck, revisit if a lone
+    // big build leaves the disk idle.
+    let pk_memory = tokio::sync::Semaphore::new(
+        usize::try_from(pk_budget_mb).unwrap_or(tokio::sync::Semaphore::MAX_PERMITS),
+    );
+    futures_util::stream::iter(by_size.iter().map(|s| {
+        let mem_mb = pk_mem_mb(sizes.get(&s.name).map_or(0, |&(rows, _)| rows), pk_budget_mb, pk_unknown_mb);
+        let (pk_memory, done) = (&pk_memory, &done);
+        async move {
+            let _permit = pk_memory.acquire_many(u32::try_from(mem_mb).unwrap_or(u32::MAX)).await
+                .map_err(|e| J2sError::DbContext(format!("PK memory budget: {e}")))?;
+            add_pk(s, pg_schema, db_url, mem_mb, done, total, progress_tx).await
+        }
+    }))
+    .buffer_unordered(pk_conns)
+    .try_collect::<Vec<()>>()
+    .await?;
+
+    // Phase 2 — FK NOT VALID, sequential on one connection (instant each).
     let mut all_warnings: Vec<ConstraintWarning> = Vec::new();
-
-    for schemas_at_level in levels.values() {
-        // Pre-build owned SQL so async move blocks have no lifetime issues.
-        let work: Vec<ConstraintWork> = schemas_at_level.iter().map(|s| (
-            s.name.clone(),
-            generate_add_pk_sql(s, pg_schema),
-            generate_add_fk_sql(s, pg_schema),
-        )).collect();
-
-        let conn_count = parallel.min(work.len()).max(1);
-        let chunk_size = work.len().div_ceil(conn_count);
-
-        let futures: Vec<_> = work.chunks(chunk_size).map(|chunk| {
-            apply_constraints_chunk(
-                chunk.to_vec(),
-                db_url.to_string(),
-                Arc::clone(&done),
-                total,
-                ptx.clone(),
-                maintenance_work_mem_mb,
-            )
-        }).collect();
-
-        let results = try_join_all(futures).await?;
-        for w in results { all_warnings.extend(w); }
+    let mut to_validate: Vec<&TableSchema> = Vec::new();
+    for s in &by_size {
+        let Some(sql) = generate_add_fk_sql(s, pg_schema) else { continue };
+        match client.execute(sql.as_str(), &[]).await {
+            Ok(_) => to_validate.push(s),
+            Err(e) => {
+                all_warnings.push(to_fk_warning(&e, &s.name));
+                constraint_progress(&done, total, progress_tx);
+            }
+        }
     }
+    drop(client);
+
+    // Phase 3 — VALIDATE, in parallel.
+    let validated: Vec<Option<ConstraintWarning>> = futures_util::stream::iter(to_validate.iter().map(|s| {
+        validate_fk(s, pg_schema, db_url, fk_mem_mb, &done, total, progress_tx)
+    }))
+    .buffer_unordered(parallel)
+    .try_collect()
+    .await?;
+    all_warnings.extend(validated.into_iter().flatten());
 
     emit(progress_tx, ProgressEvent::ConstraintsDone);
     Ok(all_warnings)
@@ -399,34 +526,30 @@ pub fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
-/// Autovacuum off for the bulk load (#65), or back on with an optional `ANALYZE`.
+/// Autovacuum off for the bulk load and the constraints (#65, #68), or back on.
 /// Storage-parameter change only: no table rewrite, even on a populated table.
 /// shortcut: `RESET` drops any per-table autovacuum setting a user put on a pre-existing table;
 /// remember and restore the previous reloptions if that case shows up.
 #[must_use]
-pub fn generate_autovacuum_sql(schema: &TableSchema, pg_schema: &str, enabled: bool, analyze: bool) -> String {
+pub fn generate_autovacuum_sql(schema: &TableSchema, pg_schema: &str, enabled: bool) -> String {
     let table = format!("{}.{}", quote_ident(pg_schema), quote_ident(&schema.name));
-    let alter = if enabled {
+    if enabled {
         format!("ALTER TABLE {table} RESET (autovacuum_enabled)")
     } else {
         format!("ALTER TABLE {table} SET (autovacuum_enabled = false)")
-    };
-    if analyze { format!("{alter};\nANALYZE {table}") } else { alter }
+    }
 }
 
-/// Runs `generate_autovacuum_sql` on every table, `parallel` tables at a time, one connection
-/// each (`ANALYZE` of large tables is the slow part, hence the parallelism).
+/// Runs `generate_autovacuum_sql` on every table, `parallel` tables at a time, one connection each.
 pub async fn set_tables_autovacuum(
     db_url: &str,
     schemas: &[TableSchema],
     pg_schema: &str,
     enabled: bool,
-    analyze: bool,
     parallel: usize,
 ) -> Result<()> {
-    use futures_util::StreamExt;
     let results: Vec<Result<()>> = futures_util::stream::iter(schemas.iter().map(|s| {
-        let sql = generate_autovacuum_sql(s, pg_schema, enabled, analyze);
+        let sql = generate_autovacuum_sql(s, pg_schema, enabled);
         async move {
             let client = crate::db::connection::connect(db_url).await?;
             client.batch_execute(&sql).await
@@ -437,6 +560,41 @@ pub async fn set_tables_autovacuum(
     .collect()
     .await;
     results.into_iter().collect()
+}
+
+/// Generate `VACUUM (ANALYZE)` for one table.
+#[must_use]
+pub fn generate_vacuum_analyze_sql(schema: &TableSchema, pg_schema: &str) -> String {
+    format!("VACUUM (ANALYZE) {}.{}", quote_ident(pg_schema), quote_ident(&schema.name))
+}
+
+/// `VACUUM (ANALYZE)` every table right after the load, before the PKs (#68), largest first,
+/// `parallel` at a time, one connection each. The first full read of freshly loaded rows rewrites
+/// every page (hint bits, then "all visible"): done here once, unthrottled (`vacuum_cost_delay = 0`),
+/// the PK builds no longer rewrite the pages they read, and autovacuum has nothing left to do once
+/// the import reports it is done (measured: PK + VACUUM 10.4 GB written vs 6.8 GB the other way).
+pub async fn vacuum_analyze_tables(
+    db_url: &str,
+    schemas: &[TableSchema],
+    pg_schema: &str,
+    parallel: usize,
+) -> Result<()> {
+    let sizes = table_sizes(&crate::db::connection::connect(db_url).await?, pg_schema).await?;
+    futures_util::stream::iter(largest_first(schemas, &sizes).into_iter().map(|s| async move {
+        let client = crate::db::connection::connect(db_url).await?;
+        // Two round trips: VACUUM cannot run inside a multi-statement (implicit transaction) string.
+        client.batch_execute("SET vacuum_cost_delay = 0").await
+            .map_err(|e| pg_err(&format!("VACUUM {}", s.name), &e))?;
+        let start = Instant::now();
+        client.batch_execute(&generate_vacuum_analyze_sql(s, pg_schema)).await
+            .map_err(|e| pg_err(&format!("VACUUM (ANALYZE) {}", s.name), &e))?;
+        eprintln!("[VACUUM] {}: {}ms", s.name, start.elapsed().as_millis());
+        Ok::<(), J2sError>(())
+    }))
+    .buffer_unordered(parallel.max(1))
+    .try_collect::<Vec<()>>()
+    .await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -453,18 +611,20 @@ mod tests {
     #[test]
     fn autovacuum_sql_off_quotes_identifiers() {
         let schema = TableSchema::new("my\"t".to_string(), vec!["t".to_string()], 0);
-        let sql = generate_autovacuum_sql(&schema, "s", false, false);
+        let sql = generate_autovacuum_sql(&schema, "s", false);
         assert_eq!(sql, r#"ALTER TABLE "s"."my""t" SET (autovacuum_enabled = false)"#);
     }
 
     #[test]
-    fn autovacuum_sql_on_resets_and_optionally_analyzes() {
+    fn autovacuum_sql_on_resets() {
         let schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
-        assert_eq!(generate_autovacuum_sql(&schema, "s", true, false), r#"ALTER TABLE "s"."t" RESET (autovacuum_enabled)"#);
-        assert_eq!(
-            generate_autovacuum_sql(&schema, "s", true, true),
-            "ALTER TABLE \"s\".\"t\" RESET (autovacuum_enabled);\nANALYZE \"s\".\"t\""
-        );
+        assert_eq!(generate_autovacuum_sql(&schema, "s", true), r#"ALTER TABLE "s"."t" RESET (autovacuum_enabled)"#);
+    }
+
+    #[test]
+    fn vacuum_analyze_sql_quotes_identifiers() {
+        let schema = TableSchema::new("my\"t".to_string(), vec!["t".to_string()], 0);
+        assert_eq!(generate_vacuum_analyze_sql(&schema, "s"), r#"VACUUM (ANALYZE) "s"."my""t""#);
     }
 
     #[test]
@@ -566,6 +726,7 @@ mod tests {
         assert!(sql.contains("PRIMARY KEY"), "PRIMARY KEY");
         assert!(sql.contains("\"pk_products\""), "constraint name");
         assert!(sql.contains("\"products\""), "table name");
+        assert!(sql.ends_with("WITH (fillfactor = 100)"), "UUIDv7 keys append only (#68)");
     }
 
     #[test]
@@ -583,6 +744,16 @@ mod tests {
         assert!(sql.contains("REFERENCES"), "REFERENCES");
         assert!(sql.contains("\"products\""), "references parent");
         assert!(sql.contains("\"tags\""), "on child table");
+        assert!(sql.ends_with("NOT VALID"), "validated later, in parallel (#68)");
+    }
+
+    #[test]
+    fn validate_fk_sql_child_and_root() {
+        assert!(generate_validate_fk_sql(&make_root_schema(), "public").is_none(), "root has no parent");
+        assert_eq!(
+            generate_validate_fk_sql(&make_child_schema(), "public").as_deref(),
+            Some(r#"ALTER TABLE "public"."tags" VALIDATE CONSTRAINT "fk_tags_parent""#),
+        );
     }
 
     #[test]
@@ -646,55 +817,36 @@ mod tests {
     }
 
     #[test]
-    fn group_schemas_by_depth_splits_levels_correctly() {
-        let root = make_root_schema();   // depth 0
-        let child = make_child_schema(); // depth 1
-        let schemas = vec![root, child];
-        let groups = group_schemas_by_depth(&schemas);
-        assert_eq!(groups.len(), 2, "two distinct levels");
-        assert_eq!(groups[&0].len(), 1, "one root at depth 0");
-        assert_eq!(groups[&1].len(), 1, "one child at depth 1");
-        assert_eq!(groups[&0][0].name, "products");
-        assert_eq!(groups[&1][0].name, "tags");
-    }
-
-    #[test]
-    fn group_schemas_by_depth_sibling_tables_same_level() {
-        let root = make_root_schema();
-        let child1 = make_child_schema();
-        let mut child2 = make_child_schema();
-        child2.name = "tags2".to_string();
-        let schemas = vec![root, child1, child2];
-        let groups = group_schemas_by_depth(&schemas);
-        assert_eq!(groups[&1].len(), 2, "sibling tables grouped at same depth");
-    }
-
-    #[test]
-    fn group_schemas_by_depth_keys_sorted_ascending() {
-        // BTreeMap ensures level 0 processed before level 1 (parents before children)
-        let root = make_root_schema();
-        let child = make_child_schema();
-        let schemas = vec![child, root]; // intentionally reversed input order
-        let groups = group_schemas_by_depth(&schemas);
-        let levels: Vec<usize> = groups.keys().copied().collect();
-        assert_eq!(levels, vec![0, 1], "BTreeMap preserves ascending order");
+    fn pk_mem_mb_sized_from_row_count_within_budget() {
+        assert_eq!(pk_mem_mb(1_000, 4096, 1024), 64, "small table: 64 MB floor");
+        // 53.6 M rows × 72 B = 3679 MB: the biggest OFF table sorts in memory under a 4 GB budget
+        assert_eq!(pk_mem_mb(53_588_448, 4096, 1024), 3679);
+        assert_eq!(pk_mem_mb(1_000_000_000, 4096, 1024), 4096, "capped at the whole budget");
+        assert_eq!(pk_mem_mb(0, 4096, 1024), 1024, "unknown row count: fallback share");
+        assert_eq!(pk_mem_mb(0, 512, 1024), 512, "fallback never exceeds the budget");
     }
 
     #[test]
     fn maintenance_work_mem_mb_floor_on_zero_available() {
-        assert_eq!(calc_maintenance_work_mem_mb(0, 4096), 256);
+        assert_eq!(calc_maintenance_work_mem_mb(0, 4096, 1), 256);
     }
 
     #[test]
     fn maintenance_work_mem_mb_cap_on_large_ram() {
         // 32 GB available → raw = 16384 MB → capped at 4096
-        assert_eq!(calc_maintenance_work_mem_mb(32 * 1024 * 1024 * 1024, 4096), 4096);
+        assert_eq!(calc_maintenance_work_mem_mb(32 * 1024 * 1024 * 1024, 4096, 1), 4096);
     }
 
     #[test]
     fn maintenance_work_mem_mb_nominal_2gb() {
         // 2 GB available → raw = 1024 MB → no floor, no cap
-        assert_eq!(calc_maintenance_work_mem_mb(2 * 1024 * 1024 * 1024, 4096), 1024);
+        assert_eq!(calc_maintenance_work_mem_mb(2 * 1024 * 1024 * 1024, 4096, 1), 1024);
+    }
+
+    #[test]
+    fn maintenance_work_mem_mb_split_across_connections() {
+        // 8 GB available, 8 connections → 4096 MB budget / 8 = 512 MB each
+        assert_eq!(calc_maintenance_work_mem_mb(8 * 1024 * 1024 * 1024, 4096, 8), 512);
     }
 
 }

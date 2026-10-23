@@ -3,6 +3,7 @@
 //! Fonctions :
 //! - fn `spawn_anomaly_writer` — spawns the anomaly-writing task.
 //! - fn `preflight_warn_nonempty` — warns if root tables already contain rows.
+//! - fn `freeze_load_allowed` — whether child tables can be loaded with `COPY FREEZE` (no FK on the targets).
 //! - fn `finalize_dispatch` — final progress bar update at the end of dispatch.
 //! - fn `emit_completion_events` — sends the end-of-run events.
 //! - fn `log_constraint_warnings` — logs unapplied FK constraint warnings.
@@ -70,6 +71,28 @@ pub(super) async fn preflight_warn_nonempty(
         eprintln!("{msg}");
         if let Some(tx) = progress_tx {
             let _ = tx.send(ProgressEvent::Pass2Log(msg));
+        }
+    }
+}
+
+/// Whether the load can use `COPY FREEZE` on child tables (#68): no FK from or to the target tables.
+/// A FREEZE load keeps one transaction per connection for the whole load, so rows loaded by one
+/// connection stay invisible to the others until the end (an existing FK would reject them), and
+/// it truncates empty child tables (refused when an FK references them). Any doubt → plain load.
+pub(super) async fn freeze_load_allowed(
+    schemas: &[crate::schema::table_schema::TableSchema],
+    client: &Client,
+    pg_schema: &str,
+) -> bool {
+    let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+    let sql = "SELECT NOT EXISTS (SELECT 1 FROM pg_constraint k JOIN pg_class c ON c.oid IN (k.conrelid, k.confrelid) \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+               WHERE k.contype = 'f' AND n.nspname = $1 AND c.relname::text = ANY($2))";
+    match client.query_one(sql, &[&pg_schema, &names]).await {
+        Ok(row) => row.get(0),
+        Err(e) => {
+            eprintln!("WARNING: could not check existing foreign keys ({e}) — loading without COPY FREEZE");
+            false
         }
     }
 }

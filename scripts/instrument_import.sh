@@ -45,7 +45,11 @@ if [[ -n "${DATABASE_URL:-}" ]]; then
                        now() - query_start AS query_age, left(query, 80) AS query
                 FROM pg_stat_activity
                 WHERE datname = current_database() AND pid <> pg_backend_pid();" \
-                -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size;" 2>&1
+                -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size;" \
+                -c "SELECT pg_current_wal_lsn() AS wal_lsn,
+                       (SELECT temp_bytes FROM pg_stat_database WHERE datname = current_database()) AS temp_bytes,
+                       (SELECT sum(writes * op_bytes) FROM pg_stat_io WHERE context = 'bulkread') AS scan_rewrite_bytes,
+                       (SELECT sum(writes * op_bytes) FROM pg_stat_io) AS buffer_write_bytes;" 2>&1
             df -h / | tail -1
             sleep 60
         done
