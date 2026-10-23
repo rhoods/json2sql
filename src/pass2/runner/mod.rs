@@ -253,6 +253,7 @@ async fn load_and_constrain(
     if freeze {
         crate::db::pg_tuning::log(progress_tx.as_ref(),
             "Child tables loaded with COPY FREEZE: rows are committed at the end of the load.".to_string());
+        crate::db::pg_tuning::warn_wal_level(client, progress_tx.as_ref()).await;
     }
 
     let cancel = CancellationToken::new();
