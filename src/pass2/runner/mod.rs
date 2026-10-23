@@ -14,10 +14,11 @@
 //! - fn `find_root_schema` — résout le schéma racine.
 //! - fn `schema_parent_map` — table enfant → table parente (ordre du drain final).
 //! - fn `build_copy_sql_map` — construit les requêtes COPY par table.
+//! - fn `build_freeze_targets` — cibles `COPY FREEZE` des tables enfants (nom qualifié + requête).
 //! - fn `run` — `run_interruptible` sans interruption.
 //! - fn `run_interruptible` — pipeline complet, interruptible : réglages PG (autovacuum, `--tune-wal`) autour de `load_and_constrain`, remis en place dans tous les cas.
 //! - fn `put_back_autovacuum` — réactive l'autovacuum après les contraintes (ou un échec) et efface son entrée du marqueur.
-//! - fn `load_and_constrain` — dispatch → workers → flusher → ANALYZE → contraintes.
+//! - fn `load_and_constrain` — dispatch → workers → flusher (`COPY FREEZE` des tables enfants si possible) → COMMIT → `VACUUM (ANALYZE)` → contraintes.
 //! - fn `build_pass2_result` — assemble le résultat final.
 
 use std::collections::HashMap;
@@ -96,6 +97,19 @@ fn build_copy_sql_map(schemas: &[TableSchema], pg_schema: &str) -> HashMap<Strin
             let sink = crate::db::copy_sink::MemSink::new(s, pg_schema);
             (s.name.clone(), sink.copy_sql)
         })
+        .collect()
+}
+
+/// `COPY FREEZE` target of every child table (#68). Root tables are never FREEZE: they carry most
+/// of the volume and need several connections at once.
+fn build_freeze_targets(schemas: &[TableSchema], pg_schema: &str) -> HashMap<String, flusher::FreezeTarget> {
+    use crate::db::ddl::quote_ident;
+    schemas.iter()
+        .filter(|s| !s.is_root())
+        .map(|s| (s.name.clone(), flusher::FreezeTarget {
+            table: format!("{}.{}", quote_ident(pg_schema), quote_ident(&s.name)),
+            copy_sql: crate::db::copy_sink::copy_sql(s, pg_schema, true),
+        }))
         .collect()
 }
 
@@ -232,6 +246,14 @@ async fn load_and_constrain(
     }
     let (anomaly_tx, anomaly_writer_handle) = dispatch::spawn_anomaly_writer(config.anomaly_dir.clone());
     dispatch::preflight_warn_nonempty(schemas, client, &config.pg_schema, progress_tx.as_ref()).await;
+    // Child tables loaded with COPY FREEZE when no FK can trip over the load transactions (#68).
+    let freeze_sql = dispatch::freeze_load_allowed(schemas, client, &config.pg_schema).await
+        .then(|| build_freeze_targets(schemas, &config.pg_schema));
+    let freeze = freeze_sql.is_some();
+    if freeze {
+        crate::db::pg_tuning::log(progress_tx.as_ref(),
+            "Child tables loaded with COPY FREEZE: rows are committed at the end of the load.".to_string());
+    }
 
     let cancel = CancellationToken::new();
     let _cancel_guard = cancel.clone().drop_guard();
@@ -244,6 +266,7 @@ async fn load_and_constrain(
     let flusher_handle = tokio::spawn(flusher::run_flusher(
         flush_rx,
         copy_sql_map,
+        freeze_sql,
         pg_url.to_string(),
         progress_tx.clone(),
         Arc::clone(&pause_flag),
@@ -330,13 +353,21 @@ async fn load_and_constrain(
     // "flusher reported a fatal error" message that workers emit when they see error_flag.
     let flusher_result = flusher_handle.await;
 
-    let rows_per_table = match flusher_result {
-        Ok(Ok(rows)) => rows,
+    let (rows_per_table, flusher_clients) = match flusher_result {
+        Ok(Ok(done)) => done,
         Ok(Err(e)) => return Err(e),
         Err(e) => return Err(J2sError::InvalidInput(format!("flusher task panicked: {e}"))),
     };
 
     if let Some(err) = first_error { return Err(err); }
+    if freeze {
+        // Only now is it known that no worker failed: commit the load transactions. Any earlier
+        // return drops the connections, which rolls the whole load back (#68).
+        for c in &flusher_clients {
+            c.batch_execute("COMMIT").await.map_err(|e| crate::db::error::pg_err("COMMIT of the load", &e))?;
+        }
+    }
+    drop(flusher_clients);
     #[allow(clippy::cast_possible_truncation)]
     let streaming_ms = stream_start.elapsed().as_millis() as u64;
     #[allow(clippy::cast_possible_truncation)]

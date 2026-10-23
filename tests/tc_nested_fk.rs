@@ -118,6 +118,26 @@ async fn test_nested_fk_parallel_tune_wal() {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         assert_eq!(never_vacuumed, 0, "every imported table must be vacuumed by the import");
+
+        // #68: with no FK before the load, child tables are loaded with COPY FREEZE, the root is
+        // not. A plain VACUUM never freezes rows this young, so all-frozen pages prove COPY FREEZE.
+        client.batch_execute("CREATE EXTENSION IF NOT EXISTS pg_visibility").await.expect("pg_visibility");
+        let frozen_pages = |table: &'static str| {
+            let (client, schema) = (&client, &schema);
+            async move {
+                let row = client.query_one(
+                    "SELECT v.all_frozen, pg_relation_size(c.oid) / current_setting('block_size')::bigint \
+                     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace, \
+                     LATERAL pg_visibility_map_summary(c.oid) v WHERE n.nspname = $1 AND c.relname = $2",
+                    &[schema, &table],
+                ).await.expect("visibility map summary");
+                (row.get::<_, i64>(0), row.get::<_, i64>(1))
+            }
+        };
+        let (child_frozen, child_pages) = frozen_pages("orders_items").await;
+        assert!(child_pages > 0 && child_frozen == child_pages, "child loaded with COPY FREEZE: {child_frozen}/{child_pages} pages frozen");
+        let (root_frozen, _) = frozen_pages("orders").await;
+        assert_eq!(root_frozen, 0, "the root (several connections) is loaded without FREEZE");
     })
     .await;
 }
