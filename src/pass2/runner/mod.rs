@@ -16,7 +16,7 @@
 //! - fn `build_copy_sql_map` — construit les requêtes COPY par table.
 //! - fn `run` — `run_interruptible` sans interruption.
 //! - fn `run_interruptible` — pipeline complet, interruptible : réglages PG (autovacuum, `--tune-wal`) autour de `load_and_constrain`, remis en place dans tous les cas.
-//! - fn `put_back_autovacuum` — réactive l'autovacuum après un échec et efface son entrée du marqueur.
+//! - fn `put_back_autovacuum` — réactive l'autovacuum après les contraintes (ou un échec) et efface son entrée du marqueur.
 //! - fn `load_and_constrain` — dispatch → workers → flusher → ANALYZE → contraintes.
 //! - fn `build_pass2_result` — assemble le résultat final.
 
@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::anomaly::collector::AnomalyCollector;
 use crate::schema::PATH_SEP;
-use crate::db::ddl::{add_constraints, set_tables_autovacuum, ConstraintWarning};
+use crate::db::ddl::{add_constraints, set_tables_autovacuum, vacuum_analyze_tables, ConstraintWarning};
 use crate::error::{J2sError, Result};
 use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
@@ -105,8 +105,8 @@ fn build_copy_sql_map(schemas: &[TableSchema], pg_schema: &str) -> HashMap<Strin
 /// Phase D — `add_constraints()` adds PRIMARY KEY (fatal on error) then
 /// FOREIGN KEY (failures become `constraint_warnings`).
 ///
-/// Around the load (#65): autovacuum is switched off on every table, and `max_wal_size` is
-/// raised when `tune_wal` is set. Both are put back whatever the outcome.
+/// Around the load and the constraints (#65, #68): autovacuum is switched off on every table, and
+/// `max_wal_size` is raised when `tune_wal` is set. Both are put back whatever the outcome.
 #[allow(dead_code)] // library API (tests, examples); the CLI binary calls `run_interruptible`
 pub async fn run(
     path: &Path,
@@ -144,25 +144,24 @@ pub async fn run_interruptible(
 
     // Recorded before switching autovacuum off: a killed import is undone by the next one.
     let autovacuum_restore = crate::db::pg_tuning::record_autovacuum_restore(pg_url, schemas, &config.pg_schema, ptx);
-    let result = match set_tables_autovacuum(pg_url, schemas, &config.pg_schema, false, false, parallel).await {
+    let result = match set_tables_autovacuum(pg_url, schemas, &config.pg_schema, false, parallel).await {
         Ok(()) => tokio::select! {
             r = load_and_constrain(path, schemas, client, pg_url, config, progress_tx.clone()) => r,
             () = interrupt => Err(J2sError::InvalidInput("Pass 2 interrupted".to_string())),
         },
         Err(e) => Err(e),
     };
-    put_back_autovacuum(result.is_ok(), pg_url, schemas, &config.pg_schema, parallel, autovacuum_restore, ptx).await;
+    put_back_autovacuum(pg_url, schemas, &config.pg_schema, parallel, autovacuum_restore, ptx).await;
     if let Some(restore) = wal_restore {
         crate::db::pg_tuning::restore_max_wal_size(client, &restore, ptx).await;
     }
     result
 }
 
-/// After the load: on failure, re-enables autovacuum (no `ANALYZE`; on success
-/// `load_and_constrain` already did it with `ANALYZE`). Clears the marker entry once autovacuum
+/// After the load and the constraints, whatever the outcome: re-enables autovacuum (nothing left
+/// for it on success: `load_and_constrain` ran `VACUUM (ANALYZE)` before the constraints). Clears the marker entry once autovacuum
 /// is back; otherwise it stays for the next import to retry.
 async fn put_back_autovacuum(
-    load_ok: bool,
     pg_url: &str,
     schemas: &[TableSchema],
     pg_schema: &str,
@@ -170,21 +169,20 @@ async fn put_back_autovacuum(
     marker_key: Option<String>,
     progress_tx: Option<&ProgressTx>,
 ) {
-    let back = load_ok
-        || match set_tables_autovacuum(pg_url, schemas, pg_schema, true, false, parallel).await {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("WARNING: could not re-enable autovacuum on the imported tables — {e}; the next import retries");
-                false
-            }
-        };
+    let back = match set_tables_autovacuum(pg_url, schemas, pg_schema, true, parallel).await {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("WARNING: could not re-enable autovacuum on the imported tables — {e}; the next import retries");
+            false
+        }
+    };
     if let (true, Some(key)) = (back, marker_key) {
         crate::db::pg_tuning::forget_restore(&key, progress_tx);
     }
 }
 
-/// Load phase of `run`: dispatch → workers → flusher, then autovacuum back on + `ANALYZE`,
-/// then constraints.
+/// Load phase of `run`: dispatch → workers → flusher, then `VACUUM (ANALYZE)` (autovacuum still
+/// off), then constraints.
 #[allow(clippy::too_many_lines)] // sequential stages, not splittable further
 async fn load_and_constrain(
     path: &Path,
@@ -345,9 +343,12 @@ async fn load_and_constrain(
     let drain_ms = drain_start.elapsed().as_millis() as u64;
 
     let copy_start = Instant::now();
-    // Before constraints and outside the skip_constraints branch: stats are needed either way.
-    eprintln!("Pass 2 flusher complete. Re-enabling autovacuum + ANALYZE...");
-    set_tables_autovacuum(pg_url, schemas, &config.pg_schema, true, true, parallel).await?;
+    // Before constraints and outside the skip_constraints branch: stats are needed either way, and
+    // the import only reports done once nothing is left for autovacuum (#68).
+    let vacuum_start = Instant::now();
+    crate::db::pg_tuning::log(progress_tx.as_ref(), format!("Pass 2 flusher complete. VACUUM (ANALYZE) of {} tables...", schemas.len()));
+    vacuum_analyze_tables(pg_url, schemas, &config.pg_schema, parallel).await?;
+    crate::db::pg_tuning::log(progress_tx.as_ref(), format!("VACUUM (ANALYZE) done in {} s.", vacuum_start.elapsed().as_secs()));
     eprintln!("Pass 2 flusher complete. Applying constraints...");
     let constraint_warnings = if config.skip_constraints {
         eprintln!("Constraints skipped (skip_constraints = true).");

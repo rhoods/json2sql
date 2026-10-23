@@ -50,7 +50,7 @@ pub struct WalRestore {
     key: String,
 }
 
-fn log(progress_tx: Option<&ProgressTx>, msg: String) {
+pub fn log(progress_tx: Option<&ProgressTx>, msg: String) {
     eprintln!("{msg}");
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Pass2Log(msg));
