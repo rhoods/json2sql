@@ -23,6 +23,7 @@ use futures_util::SinkExt;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
+use crate::db::connection::cancel_on_drop;
 use crate::db::copy_text::CopyEscaped;
 use crate::db::error::pg_err;
 use crate::schema::table_schema::TableSchema;
@@ -145,7 +146,8 @@ pub async fn flush_mem_sink_to_pg(buf: Bytes, copy_sql: &str, client: &Client) -
     if buf.is_empty() {
         return Ok(());
     }
-    let sink = client.copy_in::<_, Bytes>(copy_sql).await
+    // Opening the COPY can wait on a table lock; once data flows, a dropped sink sends CopyFail.
+    let sink = cancel_on_drop(client, client.copy_in::<_, Bytes>(copy_sql)).await
         .map_err(|e| pg_err("COPY FROM STDIN (MemSink)", &e))?;
     let mut pinned = Box::pin(sink);
     let mut offset = 0;

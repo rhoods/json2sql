@@ -453,7 +453,8 @@ impl AppState {
         }
         // Stop the subprocess worker if one is active: SIGTERM lets it put back the PostgreSQL
         // settings it changed (max_wal_size, autovacuum) before SIGKILL after the grace delay.
-        self.worker_kill.terminate(std::time::Duration::from_secs(15));
+        // 2 min: a cancel during the load COMMITs waits for them first (~50 s on OFF 70 GB, #80).
+        self.worker_kill.terminate(std::time::Duration::from_mins(2));
         self.worker_kill = WorkerKillHandle::default();
         self.resume_socket = None;
         self.schema.clear();

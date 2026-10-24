@@ -138,7 +138,9 @@ pub async fn run(
 }
 
 /// `run`, stopped early when `interrupt` resolves (worker cancel, SIGTERM, Ctrl-C): the load is
-/// dropped and the server settings are put back before returning `Err`.
+/// dropped, flusher included, so its transactions roll back and free their locks at once. A
+/// statement `PostgreSQL` still runs is cancelled server side, except the load COMMITs: once started,
+/// they all finish first. The server settings are then put back before returning `Err`.
 pub async fn run_interruptible(
     path: &Path,
     schemas: &[TableSchema],
@@ -162,10 +164,13 @@ pub async fn run_interruptible(
 
     // Recorded before switching autovacuum off: a killed import is undone by the next one.
     let autovacuum_restore = crate::db::pg_tuning::record_autovacuum_restore(pg_url, schemas, &config.pg_schema, ptx);
+    // Held by `load_and_constrain` during the load COMMITs: an interrupt lets them all finish, as
+    // committing some connections and rolling back the others would leave a partial load.
+    let commits = tokio::sync::Mutex::new(());
     let result = match set_tables_autovacuum(pg_url, schemas, &config.pg_schema, false, parallel).await {
         Ok(()) => tokio::select! {
-            r = load_and_constrain(path, schemas, client, pg_url, config, progress_tx.clone()) => r,
-            () = interrupt => Err(J2sError::InvalidInput("Pass 2 interrupted".to_string())),
+            r = load_and_constrain(path, schemas, client, pg_url, config, progress_tx.clone(), &commits) => r,
+            () = async { interrupt.await; drop(commits.lock().await); } => Err(J2sError::InvalidInput("Pass 2 interrupted".to_string())),
         },
         Err(e) => Err(e),
     };
@@ -209,6 +214,7 @@ async fn load_and_constrain(
     pg_url: &str,
     config: &Pass2Config,
     progress_tx: Option<ProgressTx>,
+    commits: &tokio::sync::Mutex<()>,
 ) -> Result<Pass2Result> {
     const WORKER_CHANNEL_CAP: usize = 256;
 
@@ -271,7 +277,9 @@ async fn load_and_constrain(
     let (flush_tx, flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(256);
     let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let error_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flusher_handle = tokio::spawn(flusher::run_flusher(
+    // Aborted when the load is dropped (interrupt): detached, it kept COPYing and holding its FREEZE
+    // locks, which the settings restore waits behind (#80).
+    let flusher_handle = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(flusher::run_flusher(
         flush_rx,
         copy_sql_map,
         freeze_sql,
@@ -285,7 +293,7 @@ async fn load_and_constrain(
         verbose,
         parent_of,
         parallel,
-    ));
+    )));
 
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
     let root_schema_arc: Arc<TableSchema> = Arc::new(root_schema);
@@ -370,10 +378,12 @@ async fn load_and_constrain(
     if let Some(err) = first_error { return Err(err); }
     if freeze {
         // Only now is it known that no worker failed: commit the load transactions. Any earlier
-        // return drops the connections, which rolls the whole load back (#68).
-        for c in &flusher_clients {
-            c.batch_execute("COMMIT").await.map_err(|e| crate::db::error::pg_err("COMMIT of the load", &e))?;
-        }
+        // return drops the connections, which rolls the whole load back (#68). From here on, an
+        // interrupt waits for the COMMITs, all sent at once: PostgreSQL finishes them even if the
+        // worker is killed meanwhile (e.g. by the UI's fallback SIGKILL).
+        let _commits = commits.lock().await;
+        futures_util::future::try_join_all(flusher_clients.iter().map(|c| c.batch_execute("COMMIT"))).await
+            .map_err(|e| crate::db::error::pg_err("COMMIT of the load", &e))?;
     }
     drop(flusher_clients);
     #[allow(clippy::cast_possible_truncation)]

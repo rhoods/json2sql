@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use tokio_postgres::Client;
 
+use crate::db::connection::cancel_on_drop;
 use crate::db::copy_sink::flush_mem_sink_to_pg;
 use crate::db::error::pg_err;
 use crate::error::{J2sError, Result};
@@ -148,7 +149,7 @@ async fn open_pool(pg_url: &str, size: usize, freeze: bool) -> Result<Vec<(usize
 /// table, then truncates it if it is empty, which makes `COPY FREEZE` valid in this transaction.
 /// A table that already has rows is never truncated: returns `false`, and it gets a plain COPY.
 async fn claim_for_freeze(client: &Client, table: &str) -> Result<bool> {
-    client.batch_execute(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")).await
+    cancel_on_drop(client, client.batch_execute(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"))).await
         .map_err(|e| pg_err(&format!("LOCK {table}"), &e))?;
     let empty: bool = client.query_one(&format!("SELECT NOT EXISTS (SELECT 1 FROM {table})"), &[]).await
         .map_err(|e| pg_err(&format!("emptiness check {table}"), &e))?

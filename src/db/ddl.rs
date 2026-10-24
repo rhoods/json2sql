@@ -51,6 +51,7 @@ use std::time::Instant;
 use futures_util::{StreamExt, TryStreamExt};
 use tokio_postgres::Client;
 
+use crate::db::connection::cancel_on_drop;
 use crate::db::error::pg_err;
 use crate::error::{J2sError, Result};
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
@@ -336,7 +337,7 @@ async fn add_pk(
 ) -> Result<()> {
     let client = open_constraints_conn(db_url, maintenance_work_mem_mb).await?;
     let start = Instant::now();
-    client.execute(generate_add_pk_sql(schema, pg_schema).as_str(), &[]).await
+    cancel_on_drop(&client, client.execute(generate_add_pk_sql(schema, pg_schema).as_str(), &[])).await
         .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {}", schema.name), &e))?;
     eprintln!("[CONSTRAINTS] PK {}: {}ms ({maintenance_work_mem_mb} MB)", schema.name, start.elapsed().as_millis());
     constraint_progress(done, total, ptx);
@@ -357,7 +358,7 @@ async fn validate_fk(
     let Some(sql) = generate_validate_fk_sql(schema, pg_schema) else { return Ok(None) };
     let client = open_constraints_conn(db_url, maintenance_work_mem_mb).await?;
     let start = Instant::now();
-    let warning = match client.execute(sql.as_str(), &[]).await {
+    let warning = match cancel_on_drop(&client, client.execute(sql.as_str(), &[])).await {
         Ok(_) => None,
         Err(e) => {
             let drop_sql = format!(
@@ -366,7 +367,7 @@ async fn validate_fk(
                 quote_ident(&schema.name),
                 quote_ident(&format!("fk_{}_parent", schema.name)),
             );
-            if let Err(drop_e) = client.execute(drop_sql.as_str(), &[]).await {
+            if let Err(drop_e) = cancel_on_drop(&client, client.execute(drop_sql.as_str(), &[])).await {
                 eprintln!("WARNING: could not drop unvalidated FK on {} — {drop_e}", schema.name);
             }
             Some(to_fk_warning(&e, &schema.name))
@@ -447,7 +448,7 @@ pub async fn add_constraints(
     let mut to_validate: Vec<&TableSchema> = Vec::new();
     for s in &by_size {
         let Some(sql) = generate_add_fk_sql(s, pg_schema) else { continue };
-        match client.execute(sql.as_str(), &[]).await {
+        match cancel_on_drop(&client, client.execute(sql.as_str(), &[])).await {
             Ok(_) => to_validate.push(s),
             Err(e) => {
                 all_warnings.push(to_fk_warning(&e, &s.name));
@@ -586,7 +587,7 @@ pub async fn vacuum_analyze_tables(
         client.batch_execute("SET vacuum_cost_delay = 0").await
             .map_err(|e| pg_err(&format!("VACUUM {}", s.name), &e))?;
         let start = Instant::now();
-        client.batch_execute(&generate_vacuum_analyze_sql(s, pg_schema)).await
+        cancel_on_drop(&client, client.batch_execute(&generate_vacuum_analyze_sql(s, pg_schema))).await
             .map_err(|e| pg_err(&format!("VACUUM (ANALYZE) {}", s.name), &e))?;
         eprintln!("[VACUUM] {}: {}ms", s.name, start.elapsed().as_millis());
         Ok::<(), J2sError>(())
