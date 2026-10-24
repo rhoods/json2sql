@@ -13,7 +13,11 @@
 //! Fonctions :
 //! - struct `SampleSource` — où lire : fichier, table racine, chemin vers la table, chemins des colonnes, bornes.
 //! - fn `sample_presence` — présence des colonnes dans un échantillon à pas régulier des lignes de la table.
-//! - fn `add_row` — analyse une ligne échantillonnée et ajoute l'objet de la table à la présence.
+//! - struct `TableSample` — présence et valeurs des colonnes, issues d'un seul passage.
+//! - fn `sample_table` — présence et valeurs en un seul passage sur le même échantillon.
+//! - fn `effective_rows` — lignes racine qui comptent : toutes, ou les `limit` premières.
+//! - fn `visit_sampled_objects` — appelle une fonction sur l'objet de la table de chaque ligne échantillonnée.
+//! - fn `cells` — valeur de chaque colonne dans l'objet de la table, dans l'ordre des colonnes.
 //! - fn `check` — refuse un nombre de lignes racine inconnu ou un budget nul.
 //! - fn `check_root` — refuse une table racine qui n'est pas une clé du fichier enveloppe.
 //! - fn `stride` — pas d'échantillonnage : une ligne sur `ceil(lignes / budget)`.
@@ -30,6 +34,7 @@ use crate::error::{J2sError, Result};
 use crate::io::reader::{simd_err, JsonFormat, JsonReader};
 
 use super::presence::Presence;
+use super::values::{ValueProfile, RANK_SAMPLE};
 
 /// Most rows sampled by default.
 #[allow(dead_code)] // shortcut: the binary re-includes `schema` and nothing calls this until the proposal command (T1e); drop then.
@@ -54,6 +59,13 @@ pub struct SampleSource<'a> {
     pub budget: usize,
 }
 
+/// What one pass over the sample yields: which columns are present, and what they hold.
+#[allow(dead_code)] // shortcut: see `DEFAULT_BUDGET`
+pub struct TableSample {
+    pub presence: Presence,
+    pub values: ValueProfile,
+}
+
 /// Presence of `source.columns` in a regular-stride sample of the table's rows.
 ///
 /// # Errors
@@ -61,15 +73,53 @@ pub struct SampleSource<'a> {
 /// of a wrapper file, or an array on the path from the root to the table.
 #[allow(dead_code)] // shortcut: see `DEFAULT_BUDGET`
 pub fn sample_presence(source: &SampleSource<'_>) -> Result<Presence> {
-    check(source)?;
-    let rows = source
+    let mut presence = Presence::new(source.columns.len());
+    visit_sampled_objects(source, |object| {
+        presence.push_row(cells(object, source.columns).map(|cell| cell.is_some_and(is_present)));
+    })?;
+    Ok(presence)
+}
+
+/// Presence and values of `source.columns` from ONE pass over the same sample, so that the input is read once.
+/// The rank correlation looks at about [`RANK_SAMPLE`] of the sampled rows.
+///
+/// # Errors
+/// The same as [`sample_presence`].
+#[allow(dead_code)] // shortcut: see `DEFAULT_BUDGET`
+pub fn sample_table(source: &SampleSource<'_>) -> Result<TableSample> {
+    let rows = effective_rows(source);
+    let sampled = rows
+        .div_ceil(stride(rows, source.budget))
+        .min(u64::try_from(source.budget).unwrap_or(u64::MAX));
+    let rank_step = usize::try_from(sampled).unwrap_or(usize::MAX) / RANK_SAMPLE;
+    let mut presence = Presence::new(source.columns.len());
+    let mut values = ValueProfile::new(source.columns.len(), rank_step);
+    visit_sampled_objects(source, |object| {
+        presence.push_row(cells(object, source.columns).map(|cell| cell.is_some_and(is_present)));
+        values.observe_row(cells(object, source.columns));
+    })?;
+    Ok(TableSample { presence, values })
+}
+
+/// Rows of the root table that take part: all of them, or the first `limit`.
+fn effective_rows(source: &SampleSource<'_>) -> u64 {
+    source
         .limit
-        .map_or(source.root_rows, |limit| limit.min(source.root_rows));
+        .map_or(source.root_rows, |limit| limit.min(source.root_rows))
+}
+
+/// Calls `visit` on the table's object of every sampled row (a row without one is skipped), at most `budget`
+/// times: root rows at a regular stride, only those parsed, the ones of other wrapper keys not counted.
+fn visit_sampled_objects(
+    source: &SampleSource<'_>,
+    mut visit: impl FnMut(&Map<String, Value>),
+) -> Result<()> {
+    check(source)?;
+    let rows = effective_rows(source);
     let step = stride(rows, source.budget);
     let (mut reader, format) = JsonReader::open(source.input)?;
     check_root(&format, source.root)?;
-    let mut presence = Presence::new(source.columns.len());
-    let mut seen = 0_u64;
+    let (mut seen, mut visited) = (0_u64, 0_usize);
     while seen < rows {
         let Some(raw) = reader.next_raw() else { break };
         let mut bytes = raw?;
@@ -77,28 +127,26 @@ pub fn sample_presence(source: &SampleSource<'_>) -> Result<Presence> {
             continue;
         }
         if seen.is_multiple_of(step) {
-            add_row(&mut presence, &mut bytes, source)?;
-            if presence.rows() >= source.budget {
+            let row: Value = simd_json::from_slice(&mut bytes).map_err(simd_err)?;
+            if let Some(object) = object_at(&row, source.path)? {
+                visit(object);
+                visited += 1;
+            }
+            if visited >= source.budget {
                 break;
             }
         }
         seen += 1;
     }
-    Ok(presence)
+    Ok(())
 }
 
-/// Parses one sampled root row and adds the table's object to the presence, when the row has one.
-fn add_row(presence: &mut Presence, bytes: &mut [u8], source: &SampleSource<'_>) -> Result<()> {
-    let row: Value = simd_json::from_slice(bytes).map_err(simd_err)?;
-    if let Some(object) = object_at(&row, source.path)? {
-        presence.push_row(
-            source
-                .columns
-                .iter()
-                .map(|column| value_at(object, column).is_some_and(is_present)),
-        );
-    }
-    Ok(())
+/// The value of every column in the table's object, in column order.
+fn cells<'v>(
+    object: &'v Map<String, Value>,
+    columns: &'v [Vec<String>],
+) -> impl Iterator<Item = Option<&'v Value>> {
+    columns.iter().map(move |column| value_at(object, column))
 }
 
 /// A stride cannot be computed without the root row count, and a sample needs room for one row.
@@ -166,7 +214,7 @@ fn value_at<'v>(object: &'v Map<String, Value>, key_path: &[String]) -> Option<&
 }
 
 /// The spike's "non-empty value" rule: null, `""`, `[]` and `{}` are absent; `0` and `false` are present.
-fn is_present(value: &Value) -> bool {
+pub fn is_present(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::String(text) => !text.is_empty(),
@@ -435,6 +483,61 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("budget"));
+    }
+
+    #[test]
+    fn one_pass_fills_the_presence_and_the_values() {
+        let rows: Vec<Value> = (0..100)
+            .map(|i| json!({"city": format!("c{}", i % 7), "pop": i * 10, "gap": (i % 2 == 0).then_some("x")}))
+            .collect();
+        let f = jsonl(&rows);
+        let columns = keys(&["city", "pop", "gap"]);
+        let source = SampleSource {
+            input: f.path(),
+            root: "t",
+            path: &[],
+            columns: &columns,
+            root_rows: 100,
+            limit: None,
+            budget: 100,
+        };
+        let sample = sample_table(&source).unwrap();
+        assert_eq!(
+            counts(&sample.presence, 3),
+            counts(&sample_presence(&source).unwrap(), 3),
+            "same rows as presence alone"
+        );
+        assert_eq!(sample.values.rows(), 100);
+        assert_eq!(
+            sample
+                .values
+                .vocabulary(0)
+                .map(std::collections::BTreeSet::len),
+            Some(7)
+        );
+        assert_eq!(sample.values.numbers(1).map(|n| n.max), Some(990.0));
+        assert_eq!(sample.values.ranked(1).len(), 100);
+    }
+
+    #[test]
+    fn the_rank_sample_stays_near_two_thousand_rows() {
+        let rows: Vec<Value> = (0..4400).map(|i| json!({"n": i})).collect();
+        let f = jsonl(&rows);
+        let columns = keys(&["n"]);
+        let source = SampleSource {
+            input: f.path(),
+            root: "t",
+            path: &[],
+            columns: &columns,
+            root_rows: 4400,
+            limit: None,
+            budget: 20_000,
+        };
+        assert_eq!(
+            sample_table(&source).unwrap().values.ranked(0).len(),
+            2200,
+            "every 2nd of 4400 rows"
+        );
     }
 
     #[test]

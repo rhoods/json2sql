@@ -10,19 +10,23 @@
 //!
 //! The presence signal needs row data, which is not in the repository: put `<dataset>.jsonl` files (the rows of
 //! each tuning dataset) in a directory and run `J2S_BENCH_DATA=<dir> cargo test --test bench_column_groups
-//! presence_signal_report -- --nocapture`. Without the variable that report does nothing.
+//! data_signals_report -- --nocapture`. Without the variable that report does nothing.
 #![allow(clippy::disallowed_methods)]
 
 mod column_groups;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use column_groups::{first_word, fixtures, only_tuning, prefix_baseline, score, Dataset, Role};
 use json2sql::io::reader::JsonReader;
 use json2sql::schema::grouping::lexical::{lexical_groups, LexicalParams};
 use json2sql::schema::grouping::names::normalize;
-use json2sql::schema::grouping::presence::{PhiMatrix, Presence};
-use json2sql::schema::grouping::sample::{sample_presence, SampleSource, DEFAULT_BUDGET};
+use json2sql::schema::grouping::numeric::{rank_correlations, shape, Shape};
+use json2sql::schema::grouping::presence::PhiMatrix;
+use json2sql::schema::grouping::sample::{sample_table, SampleSource, TableSample, DEFAULT_BUDGET};
+use json2sql::schema::grouping::shared::shared_value_pairs;
+use json2sql::schema::grouping::values::ValueProfile;
 
 fn cols(names: &[&str]) -> Vec<String> {
     names.iter().map(|n| (*n).to_string()).collect()
@@ -593,8 +597,8 @@ fn count_rows(file: &Path) -> u64 {
     std::iter::from_fn(|| reader.next_raw()).count() as u64
 }
 
-/// Presence of the dataset's columns in a regular-stride sample of the rows in `file`.
-fn presence_of(ds: &Dataset, file: &Path) -> Presence {
+/// Presence and values of the dataset's columns in one regular-stride sample of the rows in `file`.
+fn sample_of(ds: &Dataset, file: &Path) -> TableSample {
     let columns: Vec<Vec<String>> = ds.columns.iter().map(|c| vec![c.clone()]).collect();
     let source = SampleSource {
         input: file,
@@ -605,7 +609,7 @@ fn presence_of(ds: &Dataset, file: &Path) -> Presence {
         limit: None,
         budget: DEFAULT_BUDGET,
     };
-    sample_presence(&source).unwrap()
+    sample_table(&source).unwrap()
 }
 
 /// Of a relation's pairs: how many have both columns informative, their mean phi, how many reach 0.3.
@@ -623,9 +627,86 @@ fn phi_stats(relation: &column_groups::Relation, phi: &PhiMatrix) -> (usize, f64
     )
 }
 
-/// Not an assertion: how well the presence signal tells linked pairs from separated ones, on local data only.
+/// Shared-value similarity from which a pair counts as backed (the spike's cut for grouping by values).
+const VALUES_CUT: f64 = 0.5;
+
+/// The column pairs `(a, b)`, `a < b`, that each data signal backs.
+struct Backing {
+    values: HashSet<(usize, usize)>,
+    rank: HashSet<(usize, usize)>,
+    shape: HashSet<(usize, usize)>,
+}
+
+fn backing(values: &ValueProfile) -> Backing {
+    let shapes: Vec<Option<Shape>> = (0..values.columns()).map(|c| shape(values, c)).collect();
+    Backing {
+        values: shared_value_pairs(values)
+            .into_iter()
+            .filter(|p| p.score >= VALUES_CUT)
+            .map(|p| (p.a, p.b))
+            .collect(),
+        rank: rank_correlations(values)
+            .into_iter()
+            .map(|p| (p.a, p.b))
+            .collect(),
+        shape: (0..shapes.len())
+            .flat_map(|a| (a + 1..shapes.len()).map(move |b| (a, b)))
+            .filter(|&(a, b)| shapes[a].is_some() && shapes[a] == shapes[b])
+            .collect(),
+    }
+}
+
+/// How many of a relation's pairs a set of backed pairs contains.
+fn backed(relation: &column_groups::Relation, pairs: &HashSet<(usize, usize)>) -> usize {
+    relation.pairs.iter().filter(|p| pairs.contains(p)).count()
+}
+
+/// Every pair `(a, b)`, `a < b`, of columns the lexical method puts in one group.
+fn lexical_pairs(ds: &Dataset) -> HashSet<(usize, usize)> {
+    let stems = normalize(&ds.columns).stems;
+    let groups = lexical_groups(&stems, &LexicalParams::default()).unwrap();
+    groups
+        .iter()
+        .flat_map(|g| {
+            g.iter()
+                .enumerate()
+                .flat_map(|(i, &a)| g[i + 1..].iter().map(move |&b| (a, b)))
+        })
+        .collect()
+}
+
+/// Columns that appear in any relation of the truth, linked or separated.
+fn labeled_columns(ds: &Dataset) -> HashSet<usize> {
+    ds.linked
+        .iter()
+        .chain(&ds.separated)
+        .flat_map(|r| r.pairs.iter().flat_map(|&(a, b)| [a, b]))
+        .collect()
+}
+
+/// Up to `n` best-scored pairs between columns of different first words, none of them in the truth, as text.
+fn top_unlabeled(ds: &Dataset, scored: Vec<(usize, usize, f64)>, n: usize) -> String {
+    let labeled = labeled_columns(ds);
+    let mut free: Vec<_> = scored
+        .into_iter()
+        .filter(|&(a, b, _)| !labeled.contains(&a) && !labeled.contains(&b))
+        .filter(|&(a, b, _)| first_word(&ds.columns[a]) != first_word(&ds.columns[b]))
+        .collect();
+    free.sort_by(|x, y| {
+        y.2.abs()
+            .total_cmp(&x.2.abs())
+            .then((x.0, x.1).cmp(&(y.0, y.1)))
+    });
+    free.iter()
+        .take(n)
+        .map(|&(a, b, v)| format!("{} ~ {} ({v:.2})", ds.columns[a], ds.columns[b]))
+        .collect::<Vec<_>>()
+        .join(" ; ")
+}
+
+/// Not an assertion: how well the data signals tell linked pairs from separated ones, on local data only.
 #[test]
-fn presence_signal_report() {
+fn data_signals_report() {
     let Some(dir) = std::env::var_os(DATA_ENV).map(PathBuf::from) else {
         eprintln!("[SKIP] {DATA_ENV} is not set");
         return;
@@ -636,7 +717,8 @@ fn presence_signal_report() {
             eprintln!("[SKIP] {} not found", file.display());
             continue;
         }
-        let presence = presence_of(&ds, &file);
+        let TableSample { presence, values } = sample_of(&ds, &file);
+        let support = backing(&values);
         let phi = presence.phi_matrix();
         let inf = phi.informative();
         let all: Vec<f64> = inf
@@ -654,10 +736,14 @@ fn presence_signal_report() {
             inf.len(),
             ds.columns.len()
         );
+        let lexical = lexical_pairs(&ds);
         for (kind, relations) in [("linked   ", &ds.linked), ("separated", &ds.separated)] {
-            let line: Vec<String> = relations
-                .iter()
-                .map(|r| {
+            let line = |text: &dyn Fn(&column_groups::Relation) -> String| {
+                relations.iter().map(text).collect::<Vec<_>>().join(" | ")
+            };
+            println!(
+                "   {kind} presence: {}",
+                line(&|r| {
                     let (n, mean, strong) = phi_stats(r, &phi);
                     format!(
                         "{} {n}/{} pairs, mean {mean:+.2}, >=0.3: {strong}",
@@ -665,9 +751,60 @@ fn presence_signal_report() {
                         r.pairs.len()
                     )
                 })
-                .collect();
-            println!("   {kind}: {}", line.join(" | "));
+            );
+            println!(
+                "   {kind} data    : {}",
+                line(&|r| {
+                    // for a linked relation only the pairs lexical leaves apart can be won by a data signal
+                    let rest = column_groups::Relation {
+                        name: r.name.clone(),
+                        pairs: r
+                            .pairs
+                            .iter()
+                            .copied()
+                            .filter(|p| kind.starts_with("sep") || !lexical.contains(p))
+                            .collect(),
+                    };
+                    format!(
+                        "{}: {} pairs, {} to win; backed among those: values {}, rank {}, shape {}",
+                        r.name,
+                        r.pairs.len(),
+                        rest.pairs.len(),
+                        backed(&rest, &support.values),
+                        backed(&rest, &support.rank),
+                        backed(&rest, &support.shape)
+                    )
+                })
+            );
         }
+        let by_values = shared_value_pairs(&values)
+            .into_iter()
+            .filter(|p| p.score >= VALUES_CUT)
+            .map(|p| (p.a, p.b, p.score))
+            .collect();
+        let by_rank = rank_correlations(&values)
+            .into_iter()
+            .map(|p| (p.a, p.b, p.rho))
+            .collect();
+        println!(
+            "   unlabeled cross-prefix, values: {}",
+            top_unlabeled(&ds, by_values, 5)
+        );
+        println!(
+            "   unlabeled cross-prefix, rank  : {}",
+            top_unlabeled(&ds, by_rank, 5)
+        );
+        let shapes: Vec<String> = [Shape::Year, Shape::EpochSeconds, Shape::Degrees]
+            .iter()
+            .map(|&wanted| {
+                let names: Vec<&str> = (0..ds.columns.len())
+                    .filter(|&c| shape(&values, c) == Some(wanted))
+                    .map(|c| ds.columns[c].as_str())
+                    .collect();
+                format!("{wanted:?} [{}]", names.join(", "))
+            })
+            .collect();
+        println!("   shapes: {}", shapes.join(" ; "));
     }
 }
 
