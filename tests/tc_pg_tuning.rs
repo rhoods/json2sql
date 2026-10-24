@@ -1,5 +1,5 @@
 //! #65, #80 — PG tuning survives interruptions: an interrupted Pass 2 puts `max_wal_size` and
-//! autovacuum back without waiting for its flusher or for the statements running after the load
+//! autovacuum back without waiting for its flusher or for a statement PostgreSQL still runs for it
 //! (an interrupt during the load COMMITs lets them all finish), and a killed one (no cleanup at
 //! all) is undone by the next import.
 //! Own test binary: it points `XDG_STATE_HOME` (restore marker location) at a temp dir.
@@ -147,8 +147,8 @@ async fn tune_wal_is_undone_after_interrupt_and_after_kill() {
         assert_eq!(autovacuum_off, 0, "next import must re-enable autovacuum left off by the killed one");
         assert!(!marker.exists(), "both restores applied and cleared");
 
-        // 3-5. Interrupted after the load. Each statement below waits on a lock held by `reader`, so
-        // the interrupt always lands while it runs server side.
+        // 3-6. Interrupted while PostgreSQL runs a statement for Pass 2. Each one below waits on a
+        // lock held by `reader`, so the interrupt always lands while it runs server side.
         let thirty_s = std::time::Duration::from_secs(30);
 
         // 3. During the load COMMITs, held by a deferred trigger waiting on an advisory lock: they all
@@ -218,6 +218,16 @@ async fn tune_wal_is_undone_after_interrupt_and_after_kill() {
         reader.batch_execute("ROLLBACK").await.unwrap();
         assert_interrupted(result, "PRIMARY KEY");
         assert_restored(&client, &schema, &before, &marker, "PRIMARY KEY").await;
+
+        // 6. During the load, the LOCK that claims the grandchild for COPY FREEZE waiting on a read
+        // lock: cancelled with the flusher, else the restore's ALTER TABLE queues behind it.
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, true, None).await.unwrap();
+        reader.batch_execute(&format!("BEGIN; LOCK TABLE \"{schema}\".users_orders_items IN ACCESS SHARE MODE")).await.unwrap();
+        let result = tokio::time::timeout(thirty_s, pass2::runner::run_interruptible(
+            &path, &p1.schemas, &client, &url, &cfg, None, waits_on_lock(&client, "LOCK TABLE%"))).await;
+        reader.batch_execute("ROLLBACK").await.unwrap();
+        assert_interrupted(result, "claim LOCK");
+        assert_restored(&client, &schema, &before, &marker, "claim LOCK").await;
     })
     .await;
 }

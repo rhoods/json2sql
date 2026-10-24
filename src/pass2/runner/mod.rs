@@ -138,8 +138,8 @@ pub async fn run(
 }
 
 /// `run`, stopped early when `interrupt` resolves (worker cancel, SIGTERM, Ctrl-C): the load is
-/// dropped, flusher included, so its transactions roll back and free their locks at once. After the
-/// load, the statement running is cancelled server side, except the load COMMITs: once started,
+/// dropped, flusher included, so its transactions roll back and free their locks at once. A
+/// statement `PostgreSQL` still runs is cancelled server side, except the load COMMITs: once started,
 /// they all finish first. The server settings are then put back before returning `Err`.
 pub async fn run_interruptible(
     path: &Path,
@@ -380,7 +380,7 @@ async fn load_and_constrain(
         // Only now is it known that no worker failed: commit the load transactions. Any earlier
         // return drops the connections, which rolls the whole load back (#68). From here on, an
         // interrupt waits for the COMMITs, all sent at once: PostgreSQL finishes them even if the
-        // worker is killed meanwhile (the UI sends SIGKILL 15 s after SIGTERM).
+        // worker is killed meanwhile (e.g. by the UI's fallback SIGKILL).
         let _commits = commits.lock().await;
         futures_util::future::try_join_all(flusher_clients.iter().map(|c| c.batch_execute("COMMIT"))).await
             .map_err(|e| crate::db::error::pg_err("COMMIT of the load", &e))?;
