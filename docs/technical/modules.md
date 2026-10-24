@@ -81,6 +81,7 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | `observer.rs` | `SchemaObserver` : accumule les observations row-by-row via `observe_root()` et `merge()`. Contient `TableEntry` (privé) |
 | `finalizer/` | `SchemaFinalizer` : transformations post-stream — construit les `TableSchema`, applique les stratégies, trie topologiquement — voir sous-section dédiée ci-dessous |
 | `cascading/` | Détection et fusion des tables sœurs (BFS cascade) — voir sous-section dédiée ci-dessous |
+| `grouping/` | Découpage thématique des tables larges (#78) : propose des groupes de colonnes qui deviendront des tables 1:1 — voir sous-section dédiée ci-dessous |
 | `wide_strategies.rs` | Fonctions d'application des stratégies wide : `apply_wide_strategy_columns`, `apply_flatten`, `apply_jsonb_flatten`, `apply_normalize_dynamic_keys`, `build_union_columns`, `classify_key_shape` |
 | `strategies.rs` | `StrategyName` (enum des stratégies optionnelles désactivables : `Sibling`, `Pivot`, `StructuredPivot`), `StrategyError`, `parse_disabled_strategies()`. Utilisé par `Pass1Config` et `SchemaRegistry` pour gater les stratégies via `--disable-strategy`. |
 | `inspector.rs` | Statistiques d'inspection : `collect_stats()` construit les `ColumnStats` (histogramme de types) pour le mode `--inspect` |
@@ -114,6 +115,15 @@ BFS cascade — détection des groupes de tables sœurs (*siblings*) et fusion (
 | `scoring.rs` | Jaccard (`pairwise_jaccard_min`), clustering glouton — fonctions pures sur `&[TableSchema]` et indices |
 | `merge.rs` | `build_sibling_collapse_from_siblings()` — API publique pour la fusion manuelle depuis l'IHM |
 | `mod.rs` | Déclare les sous-modules, ré-exporte `finalize_cascading` |
+
+### `src/schema/grouping/`
+
+Découpage thématique des tables larges (#78) : propose des groupes de colonnes qui deviendront des tables 1:1. En construction : aucun appelant dans le binaire tant que la commande de proposition n'existe pas.
+
+| Fichier | Rôle |
+|---|---|
+| `names.rs` | Normalisation des `original_name` d'une table en radicaux : coupe `snake_case` / `camelCase` / chiffres, puis retire les jetons de format (`tags`, `lc`…), la clé des familles (`NAME_FR`) et les mots de bruit (> 40 % des colonnes). `normalize()` renvoie un `NameStems` |
+| `mod.rs` | Déclare les sous-modules |
 
 ---
 

@@ -12,6 +12,7 @@
 mod column_groups;
 
 use column_groups::{first_word, fixtures, only_tuning, prefix_baseline, score, Dataset, Role};
+use json2sql::schema::grouping::names::normalize;
 
 fn cols(names: &[&str]) -> Vec<String> {
     names.iter().map(|n| (*n).to_string()).collect()
@@ -339,6 +340,126 @@ fn every_fixture_is_labeled_and_names_its_source() {
             "{} does not say where it comes from",
             ds.name
         );
+    }
+}
+
+// ---------------------------------------------------------------- T1a: name normalization
+
+struct StemReference {
+    name: &'static str,
+    format_tokens: &'static [&'static str],
+    noise_words: &'static [&'static str],
+    /// columns whose family key was removed
+    keyed: usize,
+    samples: &'static [(&'static str, &'static [&'static str])],
+}
+
+/// `schema::grouping::names::normalize` on the committed fixtures (original names). Computed on 2026-10-24
+/// by replaying the spike code (`generic_v2.build_v2`) on the same columns; the Rust output matched it on all
+/// 597 columns, stem by stem.
+const STEM_REFERENCE: &[StemReference] = &[
+    StemReference {
+        // `A2`/`A3` codes lose their digit and leave a lone `a` behind many prefixes: a format token
+        name: "ne_countries",
+        format_tokens: &["a"],
+        noise_words: &[],
+        keyed: 94,
+        samples: &[
+            ("FCLASS_IT", &["fclass"]),
+            ("NAME_FR", &["name"]),
+            ("ADM0_A3_US", &["adm"]),
+            ("NAME_LONG", &["name", "long"]),
+            ("POP_EST", &["pop", "est"]),
+            ("ISO_A3", &["iso"]),
+        ],
+    },
+    StemReference {
+        name: "ne_places",
+        format_tokens: &[],
+        noise_words: &[],
+        keyed: 59,
+        samples: &[
+            ("FCLASS_US", &["fclass"]),
+            ("NAME_EN", &["name"]),
+            ("POP1950", &["pop"]),
+            ("MAX_AREAKM", &["max", "areakm"]),
+            ("NAMEPAR", &["namepar"]),
+        ],
+    },
+    StemReference {
+        name: "openfoodfacts",
+        format_tokens: &["debug", "hierarchy", "lc", "n", "prev", "tags"],
+        noise_words: &[],
+        keyed: 0,
+        samples: &[
+            ("ingredients_text_fr", &["ingredients", "text", "fr"]),
+            ("additives_tags", &["additives"]),
+            ("_keywords", &["keywords"]),
+            ("last_modified_t", &["last", "modified", "t"]),
+        ],
+    },
+    StemReference {
+        // `str` is in 52 of 54 names; the numbering of strIngredient1..20 is dropped
+        name: "themealdb",
+        format_tokens: &[],
+        noise_words: &["str"],
+        keyed: 0,
+        samples: &[
+            ("strIngredient7", &["ingredient"]),
+            ("strMeasure12", &["measure"]),
+            ("strMealThumb", &["meal", "thumb"]),
+            ("idMeal", &["id", "meal"]),
+            ("strInstructions", &["instructions"]),
+        ],
+    },
+];
+
+fn strs(set: &std::collections::BTreeSet<String>) -> Vec<&str> {
+    set.iter().map(String::as_str).collect()
+}
+
+#[test]
+fn name_stems_match_the_reference_on_every_tuning_fixture() {
+    // method output is read on tuning sets only: a held-out set must not be looked at while tuning
+    let all = only_tuning(fixtures());
+    assert_eq!(
+        all.len(),
+        STEM_REFERENCE.len(),
+        "a tuning fixture was added or removed: update STEM_REFERENCE"
+    );
+    for want in STEM_REFERENCE {
+        let ds = all
+            .iter()
+            .find(|d| d.name == want.name)
+            .unwrap_or_else(|| panic!("fixture {} missing", want.name));
+        let got = normalize(&ds.columns);
+        assert_eq!(got.stems.len(), ds.columns.len(), "{}", want.name);
+        assert_eq!(
+            strs(&got.format_tokens),
+            want.format_tokens,
+            "{} format tokens",
+            want.name
+        );
+        assert_eq!(
+            strs(&got.noise_words),
+            want.noise_words,
+            "{} noise words",
+            want.name
+        );
+        assert_eq!(
+            got.keyed.iter().filter(|&&k| k).count(),
+            want.keyed,
+            "{} keyed columns",
+            want.name
+        );
+        for (column, stem) in want.samples {
+            let i = ds
+                .columns
+                .iter()
+                .position(|c| c == column)
+                .unwrap_or_else(|| panic!("{}: no column {column}", want.name));
+            assert_eq!(got.stems[i], *stem, "{}: {column}", want.name);
+        }
     }
 }
 
