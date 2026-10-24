@@ -7,13 +7,22 @@
 //! thresholds: `only_tuning` is the only way the tuning bench reads the fixtures.
 //!
 //! Print the table: `cargo test --test bench_column_groups report -- --nocapture`
+//!
+//! The presence signal needs row data, which is not in the repository: put `<dataset>.jsonl` files (the rows of
+//! each tuning dataset) in a directory and run `J2S_BENCH_DATA=<dir> cargo test --test bench_column_groups
+//! presence_signal_report -- --nocapture`. Without the variable that report does nothing.
 #![allow(clippy::disallowed_methods)]
 
 mod column_groups;
 
+use std::path::{Path, PathBuf};
+
 use column_groups::{first_word, fixtures, only_tuning, prefix_baseline, score, Dataset, Role};
+use json2sql::io::reader::JsonReader;
 use json2sql::schema::grouping::lexical::{lexical_groups, LexicalParams};
 use json2sql::schema::grouping::names::normalize;
+use json2sql::schema::grouping::presence::{PhiMatrix, Presence};
+use json2sql::schema::grouping::sample::{sample_presence, SampleSource, DEFAULT_BUDGET};
 
 fn cols(names: &[&str]) -> Vec<String> {
     names.iter().map(|n| (*n).to_string()).collect()
@@ -206,6 +215,30 @@ fn loader_rejects_bad_dataset_headers() {
     assert!(Dataset::from_toml(unlabeled)
         .unwrap_err()
         .contains("[[relation]]"));
+}
+
+#[test]
+fn rows_path_says_where_the_columns_are_below_a_root_row() {
+    assert!(
+        tiny("").unwrap().rows_path.is_empty(),
+        "default: the columns are the root rows' keys"
+    );
+    let nested = TINY.replace(
+        "source = \"unit test\"",
+        "source = \"unit test\"\nrows_path = [\"properties\"]",
+    );
+    assert_eq!(
+        Dataset::from_toml(&nested).unwrap().rows_path,
+        ["properties"]
+    );
+    for ds in fixtures() {
+        let want: &[&str] = if ds.name.starts_with("ne_") {
+            &["properties"]
+        } else {
+            &[]
+        };
+        assert_eq!(ds.rows_path, want, "{}", ds.name);
+    }
 }
 
 #[test]
@@ -545,6 +578,96 @@ fn lexical_groups_match_the_reference_on_every_tuning_fixture() {
     for want in LEXICAL_REFERENCE {
         let ds = dataset(&all, want.name);
         assert_reference(want, &score(ds, &lexical_method(ds)).unwrap());
+    }
+}
+
+// ---------------------------------------------------------------- T1c: presence signal (local data only)
+
+/// Directory holding `<dataset>.jsonl`, the rows of each tuning dataset (Natural Earth: one GeoJSON Feature per
+/// line). Unset in CI, where the row data is not available.
+const DATA_ENV: &str = "J2S_BENCH_DATA";
+
+/// Rows of the root table in `file`: one pass over the raw bytes, nothing parsed.
+fn count_rows(file: &Path) -> u64 {
+    let (mut reader, _) = JsonReader::open(file).unwrap();
+    std::iter::from_fn(|| reader.next_raw()).count() as u64
+}
+
+/// Presence of the dataset's columns in a regular-stride sample of the rows in `file`.
+fn presence_of(ds: &Dataset, file: &Path) -> Presence {
+    let columns: Vec<Vec<String>> = ds.columns.iter().map(|c| vec![c.clone()]).collect();
+    let source = SampleSource {
+        input: file,
+        root: &ds.name,
+        path: &ds.rows_path,
+        columns: &columns,
+        root_rows: count_rows(file),
+        limit: None,
+        budget: DEFAULT_BUDGET,
+    };
+    sample_presence(&source).unwrap()
+}
+
+/// Of a relation's pairs: how many have both columns informative, their mean phi, how many reach 0.3.
+fn phi_stats(relation: &column_groups::Relation, phi: &PhiMatrix) -> (usize, f64, usize) {
+    let values: Vec<f64> = relation
+        .pairs
+        .iter()
+        .filter_map(|&(i, j)| phi.get(i, j))
+        .collect();
+    let mean = values.iter().fold(0.0, |sum, v| sum + v) / values.len().max(1) as f64;
+    (
+        values.len(),
+        mean,
+        values.iter().filter(|&&v| v >= 0.3).count(),
+    )
+}
+
+/// Not an assertion: how well the presence signal tells linked pairs from separated ones, on local data only.
+#[test]
+fn presence_signal_report() {
+    let Some(dir) = std::env::var_os(DATA_ENV).map(PathBuf::from) else {
+        eprintln!("[SKIP] {DATA_ENV} is not set");
+        return;
+    };
+    for ds in only_tuning(fixtures()) {
+        let file = dir.join(format!("{}.jsonl", ds.name));
+        if !file.exists() {
+            eprintln!("[SKIP] {} not found", file.display());
+            continue;
+        }
+        let presence = presence_of(&ds, &file);
+        let phi = presence.phi_matrix();
+        let inf = phi.informative();
+        let all: Vec<f64> = inf
+            .iter()
+            .enumerate()
+            .flat_map(|(x, &a)| inf[x + 1..].iter().map(move |&b| (a, b)))
+            .filter_map(|(a, b)| phi.get(a, b))
+            .collect();
+        let background =
+            100.0 * all.iter().filter(|&&v| v >= 0.3).count() as f64 / all.len().max(1) as f64;
+        println!(
+            "== {} : {} rows sampled, {}/{} informative columns, {background:.1}% of their pairs reach phi 0.3",
+            ds.name,
+            presence.rows(),
+            inf.len(),
+            ds.columns.len()
+        );
+        for (kind, relations) in [("linked   ", &ds.linked), ("separated", &ds.separated)] {
+            let line: Vec<String> = relations
+                .iter()
+                .map(|r| {
+                    let (n, mean, strong) = phi_stats(r, &phi);
+                    format!(
+                        "{} {n}/{} pairs, mean {mean:+.2}, >=0.3: {strong}",
+                        r.name,
+                        r.pairs.len()
+                    )
+                })
+                .collect();
+            println!("   {kind}: {}", line.join(" | "));
+        }
     }
 }
 

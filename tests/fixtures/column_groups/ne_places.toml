@@ -5,6 +5,8 @@
 name = "ne_places"
 role = "tuning"
 source = "https://naturalearth.s3.amazonaws.com/10m_cultural/ne_10m_populated_places.geojson (19 Mo, domaine public)"
+# où sont les colonnes sous une ligne racine du fichier (GeoJSON : les propriétés de chaque Feature)
+rows_path = ["properties"]
 columns = [
   "SCALERANK", "NATSCALE", "LABELRANK", "FEATURECLA", "NAME", "NAMEPAR", "NAMEALT",
   "NAMEASCII", "ADM0CAP", "CAPIN", "WORLDCITY", "MEGACITY", "SOV0NAME", "SOV_A3", "ADM0NAME",

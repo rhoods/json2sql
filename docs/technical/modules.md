@@ -124,6 +124,8 @@ Découpage thématique des tables larges (#78) : propose des groupes de colonnes
 |---|---|
 | `names.rs` | Normalisation des `original_name` d'une table en radicaux : coupe `snake_case` / `camelCase` / chiffres, puis retire les jetons de format (`tags`, `lc`…), la clé des familles (`NAME_FR`) et les mots de bruit (> 40 % des colonnes). `normalize()` renvoie un `NameStems` |
 | `lexical.rs` | Regroupement lexical des radicaux : vecteurs de trigrammes TF-IDF, liaison moyenne coupée à 0,20, groupes d'au moins 4 colonnes, puis les colonnes restées seules entre elles (minimum 3). `lexical_groups()` renvoie des listes d'indices ; refuse plus de 2 000 colonnes (matrice n×n) |
+| `presence.rs` | Co-présence des colonnes dans un échantillon de lignes (« taux de correspondance ») : bitsets de présence, cinq strates de richesse de fiche, φ de présence ajusté par strate et signé, colonnes informatives (présentes dans 2 % à 98 % des lignes). `Presence`, `PhiMatrix` |
+| `sample.rs` | Échantillon borné relu dans le fichier d'entrée après finalisation : une ligne racine sur `ceil(lignes racine / budget)` (20 000 par défaut), `--limit` respecté, une table enfant atteinte par un chemin d'objets (un tableau sur le chemin est refusé). `sample_presence()` renvoie une `Presence` |
 | `mod.rs` | Déclare les sous-modules |
 
 ---

@@ -42,6 +42,9 @@ struct RawDataset {
     name: String,
     role: Role,
     source: String,
+    /// Keys to follow below a root row of the data file to reach the columns (GeoJSON: `properties`).
+    #[serde(default)]
+    rows_path: Vec<String>,
     columns: Vec<String>,
     #[serde(default)]
     relation: Vec<RawRelation>,
@@ -61,6 +64,8 @@ pub struct Dataset {
     pub name: String,
     pub role: Role,
     pub source: String,
+    /// Keys to follow below a root row of the data file to reach the columns; empty when they are its keys.
+    pub rows_path: Vec<String>,
     pub columns: Vec<String>,
     /// Pairs that must end up in the same group.
     pub linked: Vec<Relation>,
@@ -90,6 +95,7 @@ impl Dataset {
             name: raw.name,
             role: raw.role,
             source: raw.source,
+            rows_path: raw.rows_path,
             columns: raw.columns,
             linked,
             separated,
