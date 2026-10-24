@@ -69,7 +69,8 @@ pub(super) struct WorkerDisklessConfig {
 
 /// Diskless worker: local `MemSink` accumulation, sends batches to `run_flusher` via channel.
 /// Checks `error_flag` each iteration (flusher fatal error) and yields on `pause_flag`
-/// (flusher buffer pressure). Workers spin without draining — flusher controls when to resume.
+/// (flusher buffer pressure). Workers spin without draining — flusher controls when to resume,
+/// unless the load is cancelled.
 /// For wrapper-format files, `key` carries the raw wrapper key and the worker resolves the
 /// correct root schema via `path_map`; for regular formats `key` is `None` and `root_schema`
 /// is used directly.
@@ -91,7 +92,8 @@ pub(super) async fn run_worker_diskless(
             // COPY it down before accepting more. Adding more data via a drain would increase
             // total_buffered and delay the resume. Flusher controls the pause lifecycle.
             // Sleep, not yield: N spinning workers burned ~1 core each while paused (#65 run).
-            while pause_flag.load(Ordering::Relaxed) && !error_flag.load(Ordering::Acquire) {
+            // `cancel`: an aborted flusher never clears the pause (#80).
+            while pause_flag.load(Ordering::Relaxed) && !error_flag.load(Ordering::Acquire) && !cancel.is_cancelled() {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         }
@@ -137,55 +139,56 @@ mod tests {
     use crate::pass2::runner::test_support::make_schema_with_rows;
     use crate::schema::table_schema::TableSchema;
 
-    /// Verifies that the worker exits its pause spin when `error_flag` is set externally,
-    /// even if `pause_flag` is never cleared. This test FAILS on the old code (infinite spin)
-    /// and PASSES after the fix (spin checks `error_flag`).
+    /// Verifies that the worker exits its pause spin when `error_flag` is set externally (Err), or
+    /// when the load is cancelled (Ok, #80: an aborted flusher never clears the pause), even if
+    /// `pause_flag` is never cleared. Each case FAILS on a spin that does not check it.
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // single test case with verbose setup
-    async fn worker_exits_pause_spin_when_error_flag_set_while_spinning() {
+    async fn worker_exits_pause_spin_on_error_flag_or_cancel() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let schema = make_schema_with_rows("root", 0);
-        let sep = crate::schema::PATH_SEP.to_string();
-        let path_map = Arc::new(HashMap::from([
-            (schema.path.join(&sep), schema.clone()),
-        ]));
-        let root_schema = Arc::new(schema);
-        let (anomaly_tx, _) = tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
-        let (flush_tx, _flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(1);
-        let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<(Option<String>, Vec<u8>)>(1);
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let error_flag = Arc::new(AtomicBool::new(false)); // starts false
-        let pause_flag = Arc::new(AtomicBool::new(true));  // starts true → worker enters spin
+        for cancelled in [false, true] {
+            let schema = make_schema_with_rows("root", 0);
+            let sep = crate::schema::PATH_SEP.to_string();
+            let path_map = Arc::new(HashMap::from([
+                (schema.path.join(&sep), schema.clone()),
+            ]));
+            let root_schema = Arc::new(schema);
+            let (anomaly_tx, _) = tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
+            let (flush_tx, _flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(1);
+            let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<(Option<String>, Vec<u8>)>(1);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let error_flag = Arc::new(AtomicBool::new(false)); // starts false
+            let pause_flag = Arc::new(AtomicBool::new(true));  // starts true → worker enters spin
 
-        let ef = Arc::clone(&error_flag);
-        let worker_handle = tokio::spawn(super::run_worker_diskless(
-            item_rx,
-            HashMap::new(),
-            super::WorkerDisklessConfig {
-                anomaly_tx,
-                path_map,
-                root_schema,
-                cancel,
-                flush_tx,
-                pause_flag,
-                error_flag: Arc::clone(&error_flag),
-                mem_flush_threshold: 64 * 1024 * 1024,
-            },
-        ));
-        // Give the worker enough time to enter the pause spin loop.
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-        // Set error_flag without clearing pause_flag — the fix makes the worker exit.
-        ef.store(true, Ordering::Release);
+            let worker_handle = tokio::spawn(super::run_worker_diskless(
+                item_rx,
+                HashMap::new(),
+                super::WorkerDisklessConfig {
+                    anomaly_tx,
+                    path_map,
+                    root_schema,
+                    cancel: cancel.clone(),
+                    flush_tx,
+                    pause_flag,
+                    error_flag: Arc::clone(&error_flag),
+                    mem_flush_threshold: 64 * 1024 * 1024,
+                },
+            ));
+            // Give the worker enough time to enter the pause spin loop.
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            // Neither clears pause_flag: the spin itself must check both.
+            if cancelled { cancel.cancel(); } else { error_flag.store(true, Ordering::Release); }
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            worker_handle,
-        ).await;
-        assert!(result.is_ok(), "worker must not hang when error_flag set while in pause spin");
-        assert!(result.unwrap().unwrap().is_err(), "worker must return Err");
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                worker_handle,
+            ).await;
+            assert!(result.is_ok(), "worker must not hang in the pause spin (cancelled: {cancelled})");
+            assert_eq!(result.unwrap().unwrap().is_ok(), cancelled, "error_flag → Err, cancel → Ok");
+        }
     }
 
     #[tokio::test]

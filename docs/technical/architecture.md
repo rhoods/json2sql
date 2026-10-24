@@ -287,7 +287,7 @@ pub async fn run(
 
 Un essai `UNLOGGED` puis `SET LOGGED` a été retiré : la réécriture dans le WAL coûtait plus de 43 min sur OFF 70 GB, pour quelques minutes gagnées sur le COPY.
 
-**Annulation** : un `CancellationToken` + `DropGuard` est créé au début de `run()`. Si le caller avorte la tâche Tokio (bouton Cancel de l'IHM), tous les workers sortent proprement.
+**Annulation** : une interruption abandonne `load_and_constrain`. Son `DropGuard` annule le `CancellationToken` des workers, y compris ceux en pause, et le flusher, tenu par un `AbortOnDropHandle`, s'arrête avec ses COPY. Ses connexions se ferment : PostgreSQL annule les transactions de chargement et libère leurs verrous, et la remise en place des réglages part aussitôt (#80). Une interruption pendant le `VACUUM (ANALYZE)` ou les contraintes attend encore la fin des requêtes en cours.
 
 **Contraintes** : `add_constraints()` ajoute les PK (fatal en cas d'erreur) puis les FK (échecs → `constraint_warnings`), sur `parallel` connexions. Sauté avec `--no-constraints`.
 

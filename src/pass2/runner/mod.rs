@@ -138,7 +138,8 @@ pub async fn run(
 }
 
 /// `run`, stopped early when `interrupt` resolves (worker cancel, SIGTERM, Ctrl-C): the load is
-/// dropped and the server settings are put back before returning `Err`.
+/// dropped, flusher included, so its transactions roll back and free their locks at once; the
+/// server settings are then put back before returning `Err`.
 pub async fn run_interruptible(
     path: &Path,
     schemas: &[TableSchema],
@@ -271,7 +272,9 @@ async fn load_and_constrain(
     let (flush_tx, flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(256);
     let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let error_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flusher_handle = tokio::spawn(flusher::run_flusher(
+    // Aborted when the load is dropped (interrupt): detached, it kept COPYing and holding its FREEZE
+    // locks, which the settings restore waits behind (#80).
+    let flusher_handle = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(flusher::run_flusher(
         flush_rx,
         copy_sql_map,
         freeze_sql,
@@ -285,7 +288,7 @@ async fn load_and_constrain(
         verbose,
         parent_of,
         parallel,
-    ));
+    )));
 
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
     let root_schema_arc: Arc<TableSchema> = Arc::new(root_schema);
