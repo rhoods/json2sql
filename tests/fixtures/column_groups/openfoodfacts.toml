@@ -1,0 +1,192 @@
+# Open Food Facts, table racine `products` (ODbL), importée par json2sql : 238 colonnes de données (hors `j2s_id`).
+# `columns` = clés JSON d'origine (`original_name`), ce que reçoit la détection ; 8 noms PG diffèrent :
+#   id_ca5e613 = _id
+#   id_55c3ac0 = id
+#   ingredients_text_en_c4e62f3 = ingredients_text_en
+#   nutrition_score_warning_fruits_vegetables_legumes_estim_77f5c08 = nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients
+#   nutrition_score_warning_fruits_vegetables_legumes_estim_1b0f8ba = nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients_value
+#   nutrition_score_warning_fruits_vegetables_nuts_estimate_e481040 = nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients
+#   nutrition_score_warning_fruits_vegetables_nuts_estimate_d229192 = nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients_value
+#   keywords = _keywords
+# Vérité PARTIELLE : les `relation` sont celles de l'issue #78 ; les `separate` sont une PROPOSITION de Claude, à corriger.
+# Aucune donnée de lignes n'est versionnée ici.
+
+name = "openfoodfacts"
+role = "tuning"
+source = "Open Food Facts (ODbL), racine products ; snapshot de schéma json2sql du 2026-10-20 (4 402 679 lignes lues)"
+columns = [
+  "_id", "allergens", "allergens_from_ingredients", "allergens_from_user", "allergens_lc",
+  "brands", "brands_lc", "brands_old", "categories", "categories_lc", "categories_old", "code",
+  "compared_to_category", "complete", "completeness", "countries", "countries_lc", "created_t",
+  "creator", "data_sources", "emb_codes", "environmental_score_grade",
+  "environmental_score_score", "expiration_date", "food_groups", "generic_name", "id",
+  "ingredients_text", "ingredients_text_debug", "ingredients_text_fr",
+  "ingredients_text_with_allergens_fr", "interface_version_created",
+  "interface_version_modified", "labels", "labels_lc", "labels_old", "lang", "last_editor",
+  "last_image_t", "last_modified_by", "last_modified_t", "last_updated_t", "lc", "link",
+  "manufacturing_places", "max_imgid", "no_nutrition_data", "nova_group_debug",
+  "nova_group_error", "nutriscore_grade", "nutriscore_score", "nutriscore_score_opposite",
+  "nutriscore_version", "nutrition_data", "nutrition_data_per", "nutrition_data_prepared",
+  "nutrition_data_prepared_per", "nutrition_grade_fr", "nutrition_grades",
+  "nutrition_score_beverage", "nutrition_score_debug", "nutrition_score_warning_no_fiber",
+  "origin", "origins", "origins_lc", "packaging", "packaging_lc", "packaging_old",
+  "packaging_text", "packagings_complete", "pnns_groups_1", "pnns_groups_2", "popularity_key",
+  "product_name", "product_name_fr", "product_quantity", "product_quantity_unit",
+  "product_type", "purchase_places", "quantity", "rev", "scans_n", "schema_version", "states",
+  "stores", "traces", "traces_from_ingredients", "traces_from_user", "traces_lc",
+  "unique_scans_n", "update_key", "additives_n",
+  "ingredients_from_or_that_may_be_from_palm_oil_n", "ingredients_from_palm_oil_n",
+  "ingredients_lc", "ingredients_n", "ingredients_non_nutritive_sweeteners_n",
+  "ingredients_percent_analysis", "ingredients_sweeteners_n", "ingredients_text_en",
+  "ingredients_text_with_allergens", "ingredients_text_with_allergens_en",
+  "ingredients_that_may_be_from_palm_oil_n", "ingredients_with_specified_percent_n",
+  "ingredients_with_specified_percent_sum", "ingredients_with_unspecified_percent_n",
+  "ingredients_with_unspecified_percent_sum", "ingredients_without_ciqual_codes_n",
+  "ingredients_without_ecobalyse_ids_n", "known_ingredients_n", "nova_group", "nova_groups",
+  "nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients",
+  "nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients_value",
+  "nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients",
+  "nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients_value",
+  "product_name_en", "serving_quantity", "serving_quantity_unit", "serving_size",
+  "unknown_ingredients_n", "ecoscore_grade",
+  "nutrition_score_warning_no_fruits_vegetables_nuts", "teams", "sortkey", "_keywords",
+  "allergens_hierarchy", "allergens_tags", "brands_hierarchy", "brands_tags",
+  "categories_hierarchy", "categories_properties_tags", "categories_tags",
+  "ciqual_food_name_tags", "codes_tags", "correctors_tags", "countries_hierarchy",
+  "countries_tags", "data_quality_info_tags", "data_quality_tags",
+  "data_quality_warnings_tags", "data_sources_tags", "debug_param_sorted_langs",
+  "ecoscore_tags", "editors_tags", "entry_dates_tags", "environmental_score_tags",
+  "food_groups_tags", "informers_tags", "labels_hierarchy", "labels_tags",
+  "languages_hierarchy", "languages_tags", "last_edit_dates_tags", "last_image_dates_tags",
+  "misc_tags", "nova_groups_tags", "nutrient_levels_tags", "nutriscore_2021_tags",
+  "nutriscore_2023_tags", "nutriscore_tags", "nutrition_grades_tags",
+  "packaging_materials_tags", "packaging_recycling_tags", "packaging_shapes_tags",
+  "photographers_tags", "pnns_groups_1_tags", "pnns_groups_2_tags", "popularity_tags",
+  "states_hierarchy", "states_tags", "ingredients_analysis_tags", "ingredients_hierarchy",
+  "ingredients_n_tags", "ingredients_original_tags", "ingredients_tags",
+  "ingredients_without_ciqual_codes", "ingredients_without_ecobalyse_ids",
+  "additives_original_tags", "additives_tags", "data_quality_errors_tags",
+  "ingredients_that_may_be_from_palm_oil_tags", "minerals_tags", "additives_debug_tags",
+  "additives_old_tags", "additives_prev_original_tags", "vitamins_tags",
+  "manufacturing_places_tags", "packaging_hierarchy", "packaging_tags", "purchase_places_tags",
+  "stores_tags", "traces_hierarchy", "traces_tags", "unknown_nutrients_tags",
+  "data_quality_completeness_tags", "teams_tags", "vitamins_prev_tags", "editors",
+  "minerals_prev_tags", "origins_hierarchy", "origins_tags", "emb_codes_tags",
+  "labels_prev_hierarchy", "labels_prev_tags", "taxonomies_enhancer_tags", "amino_acids_tags",
+  "ingredients_from_palm_oil_tags", "cities_tags", "ingredients_debug",
+  "ingredients_ids_debug", "checkers_tags", "last_check_dates_tags", "debug_tags",
+  "weighers_tags", "other_nutritional_substances_tags",
+  "other_nutritional_substances_prev_tags", "informers", "photographers",
+  "data_quality_warning_tags", "amino_acids_prev_tags", "correctors", "weighters_tags",
+  "not_names_tags", "periods_after_opening_hierarchy", "periods_after_opening_tags",
+  "nucleotides_tags", "environment_impact_level_tags", "nova_group_tags",
+  "categories_debug_tags", "categories_prev_hierarchy", "categories_prev_tags", "quality_tags",
+  "additives_prev_tags", "data_quality_bugs_tags", "improvements_tags",
+  "unknown_nutriments_tags", "labels_debug_tags",
+]
+
+# Relations de l'issue #78 (« ce que le regroupement par préfixe rate »).
+[[relation]]
+name = "orphelines → nutrition"
+left = [
+  "vitamins_tags", "minerals_tags", "serving_size", "no_nutrition_data",
+  "nutrient_levels_tags",
+]
+right = [
+  "nutrition_data", "nutrition_data_per", "nutrition_data_prepared",
+  "nutrition_data_prepared_per", "nutrition_grade_fr", "nutrition_grades",
+  "nutrition_score_beverage", "nutrition_score_debug", "nutrition_score_warning_no_fiber",
+  "nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients",
+  "nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients_value",
+  "nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients",
+  "nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients_value",
+  "nutrition_score_warning_no_fruits_vegetables_nuts", "nutrition_grades_tags",
+]
+
+[[relation]]
+name = "nutrition ↔ nutriscore"
+left = [
+  "nutrition_data", "nutrition_data_per", "nutrition_data_prepared",
+  "nutrition_data_prepared_per", "nutrition_grade_fr", "nutrition_grades",
+  "nutrition_score_beverage", "nutrition_score_debug", "nutrition_score_warning_no_fiber",
+  "nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients",
+  "nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients_value",
+  "nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients",
+  "nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients_value",
+  "nutrition_score_warning_no_fruits_vegetables_nuts", "nutrition_grades_tags",
+]
+right = [
+  "nutriscore_grade", "nutriscore_score", "nutriscore_score_opposite", "nutriscore_version",
+  "nutriscore_2021_tags", "nutriscore_2023_tags", "nutriscore_tags",
+]
+
+[[relation]]
+name = "ecoscore ↔ environmental_score (alias)"
+left = [
+  "ecoscore_grade", "ecoscore_tags",
+]
+right = [
+  "environmental_score_grade", "environmental_score_score", "environmental_score_tags",
+]
+
+[[relation]]
+name = "contributeurs"
+left = [
+  "editors", "photographers", "correctors", "creator",
+]
+
+[[relation]]
+name = "historique"
+left = [
+  "created_t", "last_modified_t",
+]
+
+# Thèmes distincts qui ne doivent pas fusionner quand les orphelines rejoignent la nutrition.
+[[separate]]
+name = "nutrition et nutriscore ≠ ingrédients"
+left = [
+  "nutrition_data", "nutrition_data_per", "nutrition_data_prepared",
+  "nutrition_data_prepared_per", "nutrition_grade_fr", "nutrition_grades",
+  "nutrition_score_beverage", "nutrition_score_debug", "nutrition_score_warning_no_fiber",
+  "nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients",
+  "nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients_value",
+  "nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients",
+  "nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients_value",
+  "nutrition_score_warning_no_fruits_vegetables_nuts", "nutrition_grades_tags",
+  "nutriscore_grade", "nutriscore_score", "nutriscore_score_opposite", "nutriscore_version",
+  "nutriscore_2021_tags", "nutriscore_2023_tags", "nutriscore_tags",
+]
+right = [
+  "ingredients_text", "ingredients_text_debug", "ingredients_text_fr",
+  "ingredients_text_with_allergens_fr", "ingredients_from_or_that_may_be_from_palm_oil_n",
+  "ingredients_from_palm_oil_n", "ingredients_lc", "ingredients_n",
+  "ingredients_non_nutritive_sweeteners_n", "ingredients_percent_analysis",
+  "ingredients_sweeteners_n", "ingredients_text_en", "ingredients_text_with_allergens",
+  "ingredients_text_with_allergens_en", "ingredients_that_may_be_from_palm_oil_n",
+  "ingredients_with_specified_percent_n", "ingredients_with_specified_percent_sum",
+  "ingredients_with_unspecified_percent_n", "ingredients_with_unspecified_percent_sum",
+  "ingredients_without_ciqual_codes_n", "ingredients_without_ecobalyse_ids_n",
+  "ingredients_analysis_tags", "ingredients_hierarchy", "ingredients_n_tags",
+  "ingredients_original_tags", "ingredients_tags", "ingredients_without_ciqual_codes",
+  "ingredients_without_ecobalyse_ids", "ingredients_that_may_be_from_palm_oil_tags",
+  "ingredients_from_palm_oil_tags", "ingredients_debug", "ingredients_ids_debug",
+]
+
+[[separate]]
+name = "nutrition et nutriscore ≠ emballage"
+left = [
+  "nutrition_data", "nutrition_data_per", "nutrition_data_prepared",
+  "nutrition_data_prepared_per", "nutrition_grade_fr", "nutrition_grades",
+  "nutrition_score_beverage", "nutrition_score_debug", "nutrition_score_warning_no_fiber",
+  "nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients",
+  "nutrition_score_warning_fruits_vegetables_legumes_estimate_from_ingredients_value",
+  "nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients",
+  "nutrition_score_warning_fruits_vegetables_nuts_estimate_from_ingredients_value",
+  "nutrition_score_warning_no_fruits_vegetables_nuts", "nutrition_grades_tags",
+  "nutriscore_grade", "nutriscore_score", "nutriscore_score_opposite", "nutriscore_version",
+  "nutriscore_2021_tags", "nutriscore_2023_tags", "nutriscore_tags",
+]
+right = [
+  "packaging", "packaging_lc", "packaging_old", "packaging_text", "packaging_materials_tags",
+  "packaging_recycling_tags", "packaging_shapes_tags", "packaging_hierarchy", "packaging_tags",
+]
