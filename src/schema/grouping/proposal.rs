@@ -19,6 +19,7 @@
 //! - enum `FamilyKind` — famille à clé ou numérotée.
 //! - struct `FamilyNote` — une famille à clé ou numérotée, signalée sans être transformée.
 //! - enum `DataStatus` — ce que les signaux de données ont regardé, ou pourquoi ils sont éteints.
+//! - struct `Placement` — une colonne laissée dans la table et les groupes les plus proches de son nom, avec leur score.
 //! - struct `TableProposal` — la proposition pour une table.
 //! - struct `DataSignals` — les signaux de données d'une table, prêts à être interrogés par paires.
 //! - fn `DataSignals::new` — signaux de données à partir d'un échantillon.
@@ -165,16 +166,30 @@ pub enum DataStatus {
     On { rows: usize, informative: usize },
 }
 
+/// A column left in the table and the groups whose centre is nearest to its name in a static embedding. A hint:
+/// nothing is moved or merged on this signal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placement {
+    /// Index of the column in the table.
+    pub column: usize,
+    /// `(index in the proposal's groups, cosine)`, best first.
+    pub nearest: Vec<(usize, f64)>,
+}
+
 /// The proposal for one table.
 #[derive(Debug, Clone)]
 pub struct TableProposal {
     pub table: String,
     pub columns: Vec<ColumnName>,
+    /// Name stems of the columns, as the names signal and the embeddings read them.
+    pub stems: Vec<Vec<String>>,
     pub groups: Vec<Group>,
     /// Columns in no confirmed group: they stay in the table.
     pub ungrouped: Vec<usize>,
     pub families: Vec<FamilyNote>,
     pub data: DataStatus,
+    /// Where the columns left in the table might go; empty without an embedding model.
+    pub placements: Vec<Placement>,
 }
 
 /// The data signals of one table, ready to be asked about pairs of columns.
@@ -321,10 +336,12 @@ pub fn propose(
     Ok(TableProposal {
         table: table.to_string(),
         columns,
+        stems: names.stems,
         groups,
         ungrouped,
         families,
         data: data_status(data),
+        placements: Vec::new(),
     })
 }
 

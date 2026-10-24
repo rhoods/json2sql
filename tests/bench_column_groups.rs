@@ -11,6 +11,9 @@
 //! The presence signal needs row data, which is not in the repository: put `<dataset>.jsonl` files (the rows of
 //! each tuning dataset) in a directory and run `J2S_BENCH_DATA=<dir> cargo test --test bench_column_groups
 //! data_signals_report -- --nocapture`. Without the variable that report does nothing.
+//!
+//! The static embeddings (T2) need a Model2Vec folder with a WordPiece tokenizer, which is not in the repository
+//! either (`potion-base-8M`, 30 MB): `J2S_BENCH_MODEL=<dir> cargo test --test bench_column_groups embeddings`.
 #![allow(clippy::disallowed_methods)]
 
 mod column_groups;
@@ -20,9 +23,11 @@ use std::path::{Path, PathBuf};
 
 use column_groups::{first_word, fixtures, only_tuning, prefix_baseline, score, Dataset, Role};
 use json2sql::io::reader::JsonReader;
+use json2sql::schema::grouping::embedding::StaticEmbedder;
 use json2sql::schema::grouping::lexical::{lexical_groups, LexicalParams};
 use json2sql::schema::grouping::names::normalize;
 use json2sql::schema::grouping::numeric::{rank_correlations, shape, Shape};
+use json2sql::schema::grouping::placement::placements;
 use json2sql::schema::grouping::presence::PhiMatrix;
 use json2sql::schema::grouping::proposal::{
     propose, ColumnName, DataSignals, Status, TableProposal,
@@ -1016,6 +1021,149 @@ fn data_proposal_report() {
                 g.columns.len(),
                 g.families,
                 g.evidence
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------- T2: static embeddings (local model only)
+
+/// Folder of a Model2Vec model with a WordPiece tokenizer. Unset in CI, where the model is not available.
+const MODEL_ENV: &str = "J2S_BENCH_MODEL";
+
+fn local_model() -> Option<StaticEmbedder> {
+    let Some(dir) = std::env::var_os(MODEL_ENV).map(PathBuf::from) else {
+        eprintln!("[SKIP] {MODEL_ENV} is not set");
+        return None;
+    };
+    Some(StaticEmbedder::load(&dir).unwrap())
+}
+
+/// The first components of the vectors the independent Python implementation gives for a list of texts
+/// (accents, punctuation, long and unknown words), written with `oracle_embed.py --cases`.
+#[test]
+fn embeddings_match_the_python_oracle_on_the_real_model() {
+    let Some(embedder) = local_model() else {
+        return;
+    };
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/column_groups/embedding_cases.json")).unwrap();
+    assert!(cases.len() >= 30, "{} cases", cases.len());
+    for case in &cases {
+        let text = case["text"].as_str().unwrap();
+        let head: Vec<f64> = case["head"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect();
+        let got = embedder.embed(text);
+        for (i, want) in head.iter().enumerate() {
+            assert!(
+                (got[i] - want).abs() < 1e-8,
+                "{text:?}[{i}]: {} against {want}",
+                got[i]
+            );
+        }
+    }
+}
+
+/// Where the independent Python implementation (`oracle_embed.py --placements`) puts the nine columns the issue
+/// cites, from the confirmed groups of the names-only proposal of the OpenFoodFacts fixture: for each column, its two
+/// nearest groups as (a member of the group, cosine). `created_t` has the right group (history, `last_*`) second;
+/// `photographers` and `creator` have no group to go to, and their scores say so.
+const SPIKE_PLACEMENTS: &[(&str, [(&str, f64); 2])] = &[
+    (
+        "vitamins_tags",
+        [
+            ("nutrition_data", 0.492_101),
+            ("ingredients_text", 0.293_544),
+        ],
+    ),
+    (
+        "minerals_tags",
+        [
+            ("nutrition_data", 0.349_369),
+            ("ingredients_text", 0.323_576),
+        ],
+    ),
+    (
+        "serving_size",
+        [
+            ("nutrition_data", 0.251_839),
+            ("ingredients_text", 0.160_234),
+        ],
+    ),
+    (
+        "nutrient_levels_tags",
+        [
+            ("nutrition_data", 0.644_355),
+            ("unknown_ingredients_n", 0.443_447),
+        ],
+    ),
+    (
+        "created_t",
+        [("origins", 0.319_125), ("last_image_t", 0.224_729)],
+    ),
+    (
+        "photographers",
+        [("countries", 0.150_392), ("brands", 0.146_558)],
+    ),
+    (
+        "creator",
+        [("origins", 0.316_548), ("allergens", 0.145_393)],
+    ),
+    (
+        "ecoscore_grade",
+        [
+            ("environmental_score_grade", 0.405_939),
+            ("nutrition_data", 0.281_539),
+        ],
+    ),
+    (
+        "ecoscore_tags",
+        [
+            ("environmental_score_grade", 0.241_066),
+            ("product_name", 0.208_904),
+        ],
+    ),
+];
+
+#[test]
+fn placements_match_the_python_oracle_on_the_columns_of_the_spike() {
+    let Some(embedder) = local_model() else {
+        return;
+    };
+    let all = only_tuning(fixtures());
+    let ds = dataset(&all, "openfoodfacts");
+    let mut proposal = proposal_of(ds);
+    proposal.placements = placements(&proposal, &embedder);
+    let index = |name: &str| {
+        ds.columns
+            .iter()
+            .position(|c| c == name)
+            .unwrap_or_else(|| panic!("no column {name}"))
+    };
+    let group_of = |member: &str| {
+        let member = index(member);
+        proposal
+            .groups
+            .iter()
+            .position(|g| g.status == Status::Confirmed && g.columns.contains(&member))
+            .unwrap_or_else(|| panic!("no confirmed group holds {member}"))
+    };
+    for (column, want) in SPIKE_PLACEMENTS {
+        let got = proposal
+            .placements
+            .iter()
+            .find(|p| p.column == index(column))
+            .unwrap_or_else(|| panic!("{column}"));
+        assert_eq!(got.nearest.len(), 2, "{column}: {:?}", got.nearest);
+        for (&(group, score), &(member, cosine)) in got.nearest.iter().zip(want) {
+            assert_eq!(group, group_of(member), "{column}: {:?}", got.nearest);
+            assert!(
+                (score - cosine).abs() < 1e-5,
+                "{column}: {score} against {cosine}"
             );
         }
     }

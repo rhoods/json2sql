@@ -54,6 +54,7 @@ use crate::error::{J2sError, Result};
 use crate::pass1::runner::{Pass1Config, Pass1Result};
 use crate::schema::config::SkipCascadeWarning;
 use crate::schema::finalizer::OverflowWarning;
+use crate::schema::grouping::embedding::StaticEmbedder;
 use crate::schema::grouping::suggest::{suggest, Suggestion};
 use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::strategies::StrategyName;
@@ -147,10 +148,13 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
 
 /// Propose a split of every wide table instead of importing (`--suggest-groups`, #78): the same Pass 1 (or
 /// snapshot) and overrides as an import, then ONE sample of the input's rows and a proposal for each eligible
-/// table. `cfg.limit` bounds the sampled root rows. No database is touched.
-pub fn suggest_groups(mut cfg: PipelineConfig) -> Result<Suggestion> {
+/// table. `cfg.limit` bounds the sampled root rows. With the folder of a static embedding `model`, the columns left
+/// in a table also get the two groups nearest to their name; the model is read first, so a bad folder fails before
+/// the long Pass 1. No database is touched.
+pub fn suggest_groups(mut cfg: PipelineConfig, model: Option<&Path>) -> Result<Suggestion> {
+    let embedder = model.map(StaticEmbedder::load).transpose()?;
     let (_stdin_temp, input_path, pass1) = finalized_schema(&mut cfg)?;
-    suggest(&pass1.schemas, &input_path, cfg.limit)
+    suggest(&pass1.schemas, &input_path, cfg.limit, embedder.as_ref())
 }
 
 async fn connect_and_create_tables(
@@ -676,7 +680,7 @@ mod tests {
     #[test]
     fn suggest_groups_runs_pass_1_then_reads_the_rows_of_the_wide_table() {
         let file = wide_jsonl(60);
-        let s = suggest_groups(cfg_for(&file)).unwrap();
+        let s = suggest_groups(cfg_for(&file), None).unwrap();
         assert_eq!(s.tables, ["root"]);
         let parsed: toml::Table = toml::from_str(&s.toml).unwrap_or_else(|e| panic!("{e}\n{}", s.toml));
         let groups = parsed["root"]["column_groups"].as_table().unwrap();
@@ -688,7 +692,7 @@ mod tests {
     fn suggest_groups_limit_bounds_the_sampled_root_rows() {
         let file = wide_jsonl(60);
         let cfg = PipelineConfig { limit: Some(25), ..cfg_for(&file) };
-        let s = suggest_groups(cfg).unwrap();
+        let s = suggest_groups(cfg, None).unwrap();
         assert!(s.report.contains("Data signals: on, 25 rows sampled"), "{}", s.report);
     }
 
@@ -708,7 +712,7 @@ mod tests {
             object.insert("props".to_string(), serde_json::Value::Object(wide(i)));
             writeln!(file, "{}", serde_json::Value::Object(object)).unwrap();
         }
-        let s = suggest_groups(cfg_for(&file)).unwrap();
+        let s = suggest_groups(cfg_for(&file), None).unwrap();
         assert_eq!(s.tables, ["root", "root_props"]);
         assert_eq!(
             s.report.matches("Data signals: on, 60 rows sampled").count(),
@@ -718,11 +722,45 @@ mod tests {
         );
     }
 
+    /// A model folder with the words `kiwi`, `zulu` and `quartz` as rows of two dimensions.
+    fn toy_model() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let vocab = serde_json::json!({"[UNK]": 0, "kiwi": 1, "zulu": 2, "quartz": 3});
+        let tokenizer = serde_json::json!({
+            "normalizer": {"type": "BertNormalizer", "lowercase": true, "strip_accents": null},
+            "pre_tokenizer": {"type": "BertPreTokenizer"},
+            "model": {"type": "WordPiece", "vocab": vocab}
+        });
+        std::fs::write(dir.path().join("tokenizer.json"), tokenizer.to_string()).unwrap();
+        let rows: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let header = serde_json::json!({"embeddings": {"dtype": "F32", "shape": [4, 2], "data_offsets": [0, 32]}}).to_string();
+        let mut file = (header.len() as u64).to_le_bytes().to_vec();
+        file.extend(header.bytes());
+        file.extend(rows.iter().flatten().flat_map(|x| x.to_le_bytes()));
+        std::fs::write(dir.path().join("model.safetensors"), file).unwrap();
+        dir
+    }
+
+    #[test]
+    fn suggest_groups_with_a_model_suggests_groups_for_the_columns_that_stay() {
+        let (file, model) = (wide_jsonl(60), toy_model());
+        let s = suggest_groups(cfg_for(&file), Some(model.path())).unwrap();
+        assert!(s.report.contains("- `quartz` → `kiwi` (0.71), `zulu` (0.71)"), "{}", s.report);
+    }
+
+    #[test]
+    fn suggest_groups_reads_the_model_before_the_long_pass_1() {
+        let missing = std::path::Path::new("/nonexistent/model");
+        let cfg = PipelineConfig { input: Some("/nonexistent/input.json".into()), ..minimal_pipeline_cfg(None) };
+        let err = suggest_groups(cfg, Some(missing)).unwrap_err().to_string();
+        assert!(err.contains("/nonexistent/model"), "the model fails first: {err}");
+    }
+
     #[test]
     fn suggest_groups_without_a_wide_table_says_what_is_needed() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), "{\"id\": 1}\n{\"id\": 2}\n").unwrap();
-        let err = suggest_groups(cfg_for(&file)).unwrap_err().to_string();
+        let err = suggest_groups(cfg_for(&file), None).unwrap_err().to_string();
         assert!(err.contains("at least 20 data columns"), "{err}");
     }
 

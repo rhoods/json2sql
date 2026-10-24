@@ -203,6 +203,11 @@ pub struct Cli {
     /// into 1:1 thematic tables: write the `column_groups` TOML to FILE and print the report. No database is needed.
     #[arg(long, value_name = "FILE", conflicts_with = "dry_run")]
     pub suggest_groups: Option<PathBuf>,
+
+    /// With --suggest-groups: folder of a static embedding model (`Model2Vec`, `WordPiece` tokenizer, for example
+    /// `potion-base-8M`) used to suggest the two nearest groups for each column left in a table. Never downloaded.
+    #[arg(long, value_name = "DIR", requires = "suggest_groups")]
+    pub embedding_model: Option<PathBuf>,
 }
 
 /// Re-exported from [`crate::anomaly::reporter`] so callers can use it via `cli::AnomalyFormat`.
@@ -293,6 +298,16 @@ mod tests {
     fn test_suggest_groups_parses_a_file() {
         let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--suggest-groups", "groups.toml"]).unwrap();
         assert_eq!(cli.suggest_groups, Some(PathBuf::from("groups.toml")));
+    }
+
+    #[test]
+    fn test_embedding_model_goes_with_suggest_groups() {
+        let with = Cli::try_parse_from([
+            "json2sql", "--input", "data.json", "--suggest-groups", "groups.toml", "--embedding-model", "models/potion",
+        ])
+        .unwrap();
+        assert_eq!(with.embedding_model, Some(PathBuf::from("models/potion")));
+        assert!(Cli::try_parse_from(["json2sql", "--input", "data.json", "--embedding-model", "models/potion"]).is_err());
     }
 
     #[test]

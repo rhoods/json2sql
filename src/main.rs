@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
             let disabled_strategies = parse_disabled_strategies(&cli.disable_strategy)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let root_table = cli.root_table_name();
-            let suggest_groups = cli.suggest_groups;
+            let (suggest_groups, embedding_model) = (cli.suggest_groups, cli.embedding_model);
             let cfg = pipeline::PipelineConfig {
                 input: cli.input,
                 root_table,
@@ -80,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
                 tune_wal: cli.tune_wal,
             };
             let result = match suggest_groups {
-                Some(ref out) => run_suggest_groups(cfg, out),
+                Some(ref out) => run_suggest_groups(cfg, out, embedding_model.as_deref()),
                 None => pipeline::run_pipeline(cfg).await,
             };
             result.map_err(|e| anyhow::anyhow!("{e}"))
@@ -88,8 +88,12 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn run_suggest_groups(cfg: pipeline::PipelineConfig, out: &std::path::Path) -> Result<()> {
-    let suggestion = pipeline::suggest_groups(cfg)?;
+fn run_suggest_groups(
+    cfg: pipeline::PipelineConfig,
+    out: &std::path::Path,
+    model: Option<&std::path::Path>,
+) -> Result<()> {
+    let suggestion = pipeline::suggest_groups(cfg, model)?;
     std::fs::write(out, &suggestion.toml).map_err(error::J2sError::Io)?;
     eprintln!("Column groups of {} table(s) written → {}", suggestion.tables.len(), out.display());
     println!("{}", suggestion.report);

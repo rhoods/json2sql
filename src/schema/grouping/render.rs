@@ -16,6 +16,8 @@
 //! - fn `to_markdown` — rapport Markdown de toutes les tables.
 //! - fn `table_markdown` — section du rapport pour une table.
 //! - fn `table_summary` — titre, taille de la table et état des signaux de données.
+//! - fn `placements_markdown` — où les colonnes laissées dans la table iraient, d'après les embeddings ; rien sans eux.
+//! - fn `placement_line` — une colonne laissée dans la table et ses groupes les plus proches.
 //! - fn `families_markdown` — familles à clé ou numérotées que la proposition laisse telles quelles.
 //! - fn `family_bullet` — une famille à clé ou numérotée dans le rapport.
 //! - fn `group_markdown` — description d'un groupe dans le rapport.
@@ -24,7 +26,7 @@
 //! - fn `column_list` — noms PG de colonnes entre apostrophes inverses, séparés par des virgules.
 
 use super::proposal::{
-    DataStatus, Evidence, FamilyKind, FamilyNote, Group, Signal, Status, TableProposal,
+    DataStatus, Evidence, FamilyKind, FamilyNote, Group, Placement, Signal, Status, TableProposal,
 };
 
 /// Widest line of the TOML.
@@ -125,7 +127,7 @@ fn table_markdown(proposal: &TableProposal) -> String {
         );
     }
     format!(
-        "{}### Groups\n\n{}\n### Columns that stay in the table ({})\n\n{}\n{}",
+        "{}### Groups\n\n{}\n### Columns that stay in the table ({})\n\n{}\n{}{}",
         table_summary(proposal),
         proposal
             .groups
@@ -134,6 +136,7 @@ fn table_markdown(proposal: &TableProposal) -> String {
             .collect::<String>(),
         proposal.ungrouped.len(),
         column_list(proposal, &proposal.ungrouped),
+        placements_markdown(proposal),
         families_markdown(proposal)
     )
 }
@@ -158,6 +161,38 @@ fn table_summary(proposal: &TableProposal) -> String {
         proposal.table,
         proposal.columns.len(),
         proposal.groups.len() - confirmed
+    )
+}
+
+/// The columns that stay in the table with the groups nearest to their name, the surest first; nothing without
+/// placements.
+fn placements_markdown(proposal: &TableProposal) -> String {
+    if proposal.placements.is_empty() {
+        return String::new();
+    }
+    let best = |p: &Placement| p.nearest.first().map_or(0.0, |n| n.1);
+    let mut placements: Vec<&Placement> = proposal.placements.iter().collect();
+    placements.sort_by(|a, b| best(b).total_cmp(&best(a)).then(a.column.cmp(&b.column)));
+    let lines: String = placements
+        .iter()
+        .map(|p| placement_line(proposal, p))
+        .collect();
+    format!(
+        "\n### Where the other columns might go\n\nNearest groups by the meaning of the column name (static embeddings): a hint, never applied.\n\n{lines}"
+    )
+}
+
+/// `- `column` → `group` (0.62), `other` (0.55)`.
+fn placement_line(proposal: &TableProposal, placement: &Placement) -> String {
+    let groups: Vec<String> = placement
+        .nearest
+        .iter()
+        .map(|&(group, score)| format!("`{}` ({score:.2})", proposal.groups[group].name))
+        .collect();
+    format!(
+        "- `{}` → {}\n",
+        proposal.columns[placement.column].name,
+        groups.join(", ")
     )
 }
 
@@ -248,7 +283,7 @@ fn column_list(proposal: &TableProposal, columns: &[usize]) -> String {
 #[cfg(test)]
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
-    use super::super::proposal::ColumnName;
+    use super::super::proposal::{ColumnName, Placement};
     use super::*;
     use crate::schema::config::SchemaConfig;
 
@@ -306,6 +341,8 @@ mod tests {
                 ),
             ],
             ungrouped: vec![7, 8, 9, 10, 11],
+            stems: Vec::new(),
+            placements: Vec::new(),
             families: vec![FamilyNote {
                 kind: FamilyKind::Numbered,
                 label: "item".to_string(),
@@ -457,6 +494,34 @@ mod tests {
                 && md.matches("### Columns that stay").count() == 1,
             "only the table with groups gets the long form:\n{md}"
         );
+    }
+
+    #[test]
+    fn the_report_lists_the_nearest_groups_of_the_columns_left_in_the_table_best_first() {
+        let mut p = proposal("products");
+        p.placements = vec![
+            Placement {
+                column: 8,
+                nearest: vec![(0, 0.62), (1, 0.551)],
+            },
+            Placement {
+                column: 7,
+                nearest: vec![(1, 0.914)],
+            },
+        ];
+        let md = to_markdown(&[p]);
+        assert!(md.contains("### Where the other columns might go"), "{md}");
+        let (seven, eight) = (
+            md.find("- `col_7` → `beta` (0.91)\n").expect("col_7"),
+            md.find("- `col_8` → `alpha` (0.62), `beta` (0.55)\n")
+                .expect("col_8"),
+        );
+        assert!(seven < eight, "the best score comes first:\n{md}");
+    }
+
+    #[test]
+    fn without_placements_the_report_has_no_such_section() {
+        assert!(!to_markdown(&[proposal("products")]).contains("Where the other columns"));
     }
 
     #[test]

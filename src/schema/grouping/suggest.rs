@@ -25,7 +25,9 @@
 
 use std::path::Path;
 
+use super::embedding::StaticEmbedder;
 use super::lexical::LexicalParams;
+use super::placement::placements;
 use super::proposal::TableProposal;
 use super::proposal::{propose, ColumnName, DataSignals};
 use super::render::{to_markdown, to_toml};
@@ -69,12 +71,18 @@ pub struct Suggestion {
 }
 
 /// A proposal for every eligible table of the finalized `schemas`, from the rows of `input`; `limit` is
-/// `--limit`: only the first rows of the root table take part in the sample.
+/// `--limit`: only the first rows of the root table take part in the sample. With an `embedder`, the columns left
+/// in a table also get the two groups nearest to their name.
 ///
 /// # Errors
 /// No table is eligible, or a table has more columns than the lexical grouping accepts. Problems with the data
 /// signals are not errors: they turn them off, with a reason.
-pub fn suggest(schemas: &[TableSchema], input: &Path, limit: Option<u64>) -> Result<Suggestion> {
+pub fn suggest(
+    schemas: &[TableSchema],
+    input: &Path,
+    limit: Option<u64>,
+    embedder: Option<&StaticEmbedder>,
+) -> Result<Suggestion> {
     let tables: Vec<&TableSchema> = schemas.iter().filter(|s| eligible(s)).collect();
     if tables.is_empty() {
         return Err(J2sError::InvalidInput(format!(
@@ -85,7 +93,7 @@ pub fn suggest(schemas: &[TableSchema], input: &Path, limit: Option<u64>) -> Res
     let proposals = tables
         .iter()
         .zip(&signals)
-        .map(|(table, data)| proposal_for(table, data))
+        .map(|(table, data)| proposal_for(table, data, embedder))
         .collect::<Result<Vec<_>>>()?;
     Ok(Suggestion {
         tables: tables.iter().map(|t| t.name.clone()).collect(),
@@ -94,8 +102,13 @@ pub fn suggest(schemas: &[TableSchema], input: &Path, limit: Option<u64>) -> Res
     })
 }
 
-/// The proposal for one table: its columns, and its data signals or why they are off.
-fn proposal_for(table: &TableSchema, data: &Signals) -> Result<TableProposal> {
+/// The proposal for one table: its columns, its data signals or why they are off, and where its other columns
+/// might go when there is an `embedder`.
+fn proposal_for(
+    table: &TableSchema,
+    data: &Signals,
+    embedder: Option<&StaticEmbedder>,
+) -> Result<TableProposal> {
     let columns = table
         .data_columns()
         .map(|c| ColumnName {
@@ -103,12 +116,16 @@ fn proposal_for(table: &TableSchema, data: &Signals) -> Result<TableProposal> {
             original: c.original_name.clone(),
         })
         .collect();
-    propose(
+    let mut proposal = propose(
         &table.name,
         columns,
         data.as_ref().map_err(String::as_str),
         &LexicalParams::default(),
-    )
+    )?;
+    if let Some(embedder) = embedder {
+        proposal.placements = placements(&proposal, embedder);
+    }
+    Ok(proposal)
 }
 
 /// A `Columns` or `AutoSplit` table with enough data columns.
@@ -253,6 +270,10 @@ mod tests {
     use super::*;
     use crate::schema::type_tracker::PgType;
 
+    fn run(schemas: &[TableSchema], input: &Path, limit: Option<u64>) -> Result<Suggestion> {
+        suggest(schemas, input, limit, None)
+    }
+
     const KIWI: [&str; 6] = ["kiwi_a", "kiwi_b", "kiwi_c", "kiwi_d", "kiwi_e", "kiwi_f"];
     const ZULU: [&str; 6] = ["zulu_a", "zulu_b", "zulu_c", "zulu_d", "zulu_e", "zulu_f"];
     const OTHER: [&str; 12] = [
@@ -349,7 +370,7 @@ mod tests {
         let mut schemas = schemas(60, ChildKind::Object);
         schemas.push(wide_child("more", ChildKind::Object));
         let f = jsonl(60);
-        let s = suggest(&schemas, f.path(), None).unwrap();
+        let s = run(&schemas, f.path(), None).unwrap();
         assert_eq!(s.tables, ["items_props", "items_more"]);
         let toml = parsed(&s.toml);
         for table in &s.tables {
@@ -375,7 +396,7 @@ mod tests {
         let mut schemas = schemas(60, ChildKind::Object);
         schemas.push(wide_child("more", ChildKind::Object));
         let f = jsonl_with(60, 30);
-        let report = suggest(&schemas, f.path(), None).unwrap().report;
+        let report = run(&schemas, f.path(), None).unwrap().report;
         let (props, more) = (
             report.find("Table `items_props`").unwrap(),
             report.find("Table `items_more`").unwrap(),
@@ -393,7 +414,7 @@ mod tests {
         let mut schemas = schemas(60, ChildKind::Object);
         schemas.insert(1, wide_child("more", ChildKind::ObjectArray));
         let f = jsonl(60);
-        let s = suggest(&schemas, f.path(), None).unwrap();
+        let s = run(&schemas, f.path(), None).unwrap();
         assert_eq!(s.tables, ["items_more", "items_props"]);
         assert_eq!(
             s.report
@@ -431,7 +452,7 @@ mod tests {
     fn scalar_arrays_kept_as_junction_tables_are_reported_as_left_out() {
         let mut schemas = schemas(60, ChildKind::Object);
         let f = jsonl(60);
-        let none = suggest(&schemas, f.path(), None).unwrap().report;
+        let none = run(&schemas, f.path(), None).unwrap().report;
         assert!(
             !none.contains("array-as-pg-array"),
             "nothing to say: {none}"
@@ -440,10 +461,30 @@ mod tests {
         schemas.push(child_of("items_props", "labels", ChildKind::ScalarArray));
         schemas.push(child_of("items", "ids", ChildKind::ScalarArray)); // another table's
         schemas.push(child_of("items_props", "sub", ChildKind::Object)); // not an array
-        let report = suggest(&schemas, f.path(), None).unwrap().report;
+        let report = run(&schemas, f.path(), None).unwrap().report;
         assert!(
             report.contains("`items_props`: scalar arrays: 2")
                 && report.contains("--array-as-pg-array"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn with_a_model_the_columns_left_in_the_table_get_their_nearest_groups() {
+        let embedder = StaticEmbedder::from_rows(&[
+            ("kiwi", &[1.0, 0.0]),
+            ("zulu", &[0.0, 1.0]),
+            ("quartz", &[1.0, 1.0]),
+        ]);
+        let f = jsonl(60);
+        let schemas = schemas(60, ChildKind::Object);
+        let plain = suggest(&schemas, f.path(), None, None).unwrap().report;
+        assert!(!plain.contains("Where the other columns"), "{plain}");
+        let report = suggest(&schemas, f.path(), None, Some(&embedder))
+            .unwrap()
+            .report;
+        assert!(
+            report.contains("- `quartz` → `kiwi` (0.71), `zulu` (0.71)"),
             "{report}"
         );
     }
@@ -459,14 +500,12 @@ mod tests {
     fn no_eligible_table_is_an_error_that_says_what_is_needed() {
         let f = jsonl(5);
         let only_narrow = vec![table("items", &["items"], None, &["id".to_string()], 5)];
-        let err = suggest(&only_narrow, f.path(), None)
-            .unwrap_err()
-            .to_string();
+        let err = run(&only_narrow, f.path(), None).unwrap_err().to_string();
         assert!(err.contains("at least 20"), "{err}");
         let mut jsonb = schemas(5, ChildKind::Object);
         jsonb[1].inferred_strategy = InferredStrategy::Jsonb;
         assert!(
-            suggest(&jsonb, f.path(), None).is_err(),
+            run(&jsonb, f.path(), None).is_err(),
             "a Jsonb table has no columns to split"
         );
     }
@@ -476,7 +515,7 @@ mod tests {
         let mut schemas = schemas(0, ChildKind::Object);
         schemas.push(wide_child("more", ChildKind::Object));
         let f = jsonl(60);
-        let s = suggest(&schemas, f.path(), None).unwrap();
+        let s = run(&schemas, f.path(), None).unwrap();
         assert_eq!(
             s.report.matches("snapshot without row counts").count(),
             2,
@@ -488,7 +527,7 @@ mod tests {
     #[test]
     fn an_unreadable_input_turns_the_data_signals_off_with_the_reason_and_still_proposes() {
         let missing = Path::new("/nonexistent/dir/input.json");
-        let s = suggest(&schemas(60, ChildKind::Object), missing, None).unwrap();
+        let s = run(&schemas(60, ChildKind::Object), missing, None).unwrap();
         assert!(s.report.contains("Data signals: off ("), "{}", s.report);
         assert!(
             !s.report.contains("Data signals: off ()"),
@@ -501,7 +540,7 @@ mod tests {
     #[test]
     fn a_zero_limit_turns_the_data_signals_off_and_says_so() {
         let f = jsonl(60);
-        let s = suggest(&schemas(60, ChildKind::Object), f.path(), Some(0)).unwrap();
+        let s = run(&schemas(60, ChildKind::Object), f.path(), Some(0)).unwrap();
         assert!(
             s.report.contains("Data signals: off") && s.report.contains("--limit 0"),
             "{}",
@@ -512,7 +551,7 @@ mod tests {
     #[test]
     fn a_limit_bounds_the_rows_of_every_table() {
         let f = jsonl(60);
-        let s = suggest(&schemas(60, ChildKind::Object), f.path(), Some(25)).unwrap();
+        let s = run(&schemas(60, ChildKind::Object), f.path(), Some(25)).unwrap();
         assert!(
             s.report.contains("Data signals: on, 25 rows sampled"),
             "{}",
@@ -525,7 +564,7 @@ mod tests {
         let mut schemas = schemas(60, ChildKind::Object);
         schemas[1].path = vec!["items".to_string(), "absent".to_string()];
         let f = jsonl(60);
-        let s = suggest(&schemas, f.path(), None).unwrap();
+        let s = run(&schemas, f.path(), None).unwrap();
         assert!(
             s.report.contains("Data signals: off") && s.report.contains("no sampled row"),
             "{}",
