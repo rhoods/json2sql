@@ -1,6 +1,7 @@
 //! #65, #80 — PG tuning survives interruptions: an interrupted Pass 2 puts `max_wal_size` and
-//! autovacuum back without waiting for its flusher, and a killed one (no cleanup at all) is undone
-//! by the next import.
+//! autovacuum back without waiting for its flusher or for the statements running after the load
+//! (an interrupt during the load COMMITs lets them all finish), and a killed one (no cleanup at
+//! all) is undone by the next import.
 //! Own test binary: it points `XDG_STATE_HOME` (restore marker location) at a temp dir.
 #![cfg(feature = "integration-tests")]
 #![allow(clippy::disallowed_methods)]
@@ -21,6 +22,45 @@ async fn max_wal_size(client: &tokio_postgres::Client, expected: &str) -> String
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     value
+}
+
+/// Resolves once a backend running a statement that matches `pattern` (`LIKE`) waits on a lock.
+/// Panics after 20 s.
+async fn waits_on_lock(client: &tokio_postgres::Client, pattern: &str) {
+    let sql = "SELECT count(*) FROM pg_stat_activity WHERE query LIKE $1 AND wait_event_type = 'Lock'";
+    for _ in 0..400 {
+        if client.query_one(sql, &[&pattern]).await.unwrap().get::<_, i64>(0) > 0 { return; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no statement matching {pattern} waited on a lock within 20 s");
+}
+
+/// Whether a backend still runs a statement that matches `pattern` (`LIKE`) after 10 s.
+async fn still_running(client: &tokio_postgres::Client, pattern: &str) -> bool {
+    let sql = "SELECT count(*) FROM pg_stat_activity WHERE query LIKE $1 AND state = 'active'";
+    for _ in 0..100 {
+        if client.query_one(sql, &[&pattern]).await.unwrap().get::<_, i64>(0) == 0 { return false; }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    true
+}
+
+/// Pass 2 returned within its time budget, stopped by the interrupt and not by an error.
+fn assert_interrupted(result: Result<json2sql::error::Result<pass2::runner::Pass2Result>, tokio::time::error::Elapsed>, step: &str) {
+    let Ok(Err(e)) = result else { panic!("{step}: the interrupt must stop Pass 2 within 30 s") };
+    assert!(e.to_string().contains("interrupted"), "{step}: stopped by an error, not by the interrupt: {e}");
+}
+
+/// `max_wal_size` back to `before`, autovacuum back on every table of `schema`, nothing pending.
+async fn assert_restored(client: &tokio_postgres::Client, schema: &str, before: &str, marker: &std::path::Path, step: &str) {
+    assert_eq!(max_wal_size(client, before).await, before, "{step}: max_wal_size not restored");
+    let autovacuum_off: i64 = client.query_one(
+        "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND 'autovacuum_enabled=false' = ANY(c.reloptions)",
+        &[&schema],
+    ).await.unwrap().get(0);
+    assert_eq!(autovacuum_off, 0, "{step}: autovacuum not re-enabled");
+    assert!(!marker.exists(), "{step}: restore left pending");
 }
 
 #[tokio::test]
@@ -106,6 +146,78 @@ async fn tune_wal_is_undone_after_interrupt_and_after_kill() {
         ).await.unwrap().get(0);
         assert_eq!(autovacuum_off, 0, "next import must re-enable autovacuum left off by the killed one");
         assert!(!marker.exists(), "both restores applied and cleared");
+
+        // 3-5. Interrupted after the load. Each statement below waits on a lock held by `reader`, so
+        // the interrupt always lands while it runs server side.
+        let thirty_s = std::time::Duration::from_secs(30);
+
+        // 3. During the load COMMITs, held by a deferred trigger waiting on an advisory lock: they all
+        // finish, so the load is kept whole, never partly rolled back.
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, true, None).await.unwrap();
+        client.batch_execute(&format!(
+            "CREATE FUNCTION \"{schema}\".hold() RETURNS trigger LANGUAGE plpgsql \
+             AS $$ BEGIN PERFORM pg_advisory_xact_lock_shared(80); RETURN NULL; END $$"
+        )).await.unwrap();
+        for s in &p1.schemas {
+            client.batch_execute(&format!(
+                "CREATE CONSTRAINT TRIGGER hold AFTER INSERT ON \"{schema}\".\"{}\" \
+                 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION \"{schema}\".hold()",
+                s.name
+            )).await.unwrap();
+        }
+        reader.batch_execute("SELECT pg_advisory_lock(80)").await.unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let release = async {
+            waits_on_lock(&client, "COMMIT").await;
+            stop.send(()).unwrap();
+            reader.batch_execute("SELECT pg_advisory_unlock(80)").await.unwrap();
+        };
+        let (result, ()) = tokio::join!(
+            tokio::time::timeout(thirty_s, pass2::runner::run_interruptible(
+                &path, &p1.schemas, &client, &url, &cfg, None, async { let _ = stopped.await; })),
+            release,
+        );
+        assert_interrupted(result, "COMMIT");
+        for s in &p1.schemas {
+            assert!(integration::row_count(&client, &schema, &s.name).await > 0, "{} rolled back, other tables committed", s.name);
+        }
+        assert_restored(&client, &schema, &before, &marker, "COMMIT").await;
+
+        // 4. During the VACUUM, which waits on a lock taken on the root once its rows are loaded
+        // (earlier, autovacuum could not be switched off): cancelled, not left waiting server side.
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, true, None).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let hold = async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, ProgressEvent::Pass2Flush { ref table_name, .. } if table_name == "users") { break; }
+            }
+            reader.batch_execute(&format!("BEGIN; LOCK TABLE \"{schema}\".users IN SHARE UPDATE EXCLUSIVE MODE")).await.unwrap();
+            waits_on_lock(&client, "VACUUM%").await;
+            stop.send(()).unwrap();
+            // The restore waits on this lock too: released once the VACUUM is gone, or after 10 s.
+            let left = still_running(&client, "VACUUM%").await;
+            reader.batch_execute("ROLLBACK").await.unwrap();
+            left
+        };
+        let (result, left) = tokio::join!(
+            tokio::time::timeout(thirty_s, pass2::runner::run_interruptible(
+                &path, &p1.schemas, &client, &url, &cfg, Some(tx), async { let _ = stopped.await; })),
+            hold,
+        );
+        assert!(!left, "the interrupted VACUUM must be cancelled, not left waiting for the lock");
+        assert_interrupted(result, "VACUUM");
+        assert_restored(&client, &schema, &before, &marker, "VACUUM").await;
+
+        // 5. During the PRIMARY KEY builds, the root's waiting on a read lock: cancelled too, else the
+        // restore's ALTER TABLE queues behind it.
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, true, None).await.unwrap();
+        reader.batch_execute(&format!("BEGIN; LOCK TABLE \"{schema}\".users IN ACCESS SHARE MODE")).await.unwrap();
+        let result = tokio::time::timeout(thirty_s, pass2::runner::run_interruptible(
+            &path, &p1.schemas, &client, &url, &cfg, None, waits_on_lock(&client, "%PRIMARY KEY%"))).await;
+        reader.batch_execute("ROLLBACK").await.unwrap();
+        assert_interrupted(result, "PRIMARY KEY");
+        assert_restored(&client, &schema, &before, &marker, "PRIMARY KEY").await;
     })
     .await;
 }
