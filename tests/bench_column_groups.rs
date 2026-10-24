@@ -12,6 +12,7 @@
 mod column_groups;
 
 use column_groups::{first_word, fixtures, only_tuning, prefix_baseline, score, Dataset, Role};
+use json2sql::schema::grouping::lexical::{lexical_groups, LexicalParams};
 use json2sql::schema::grouping::names::normalize;
 
 fn cols(names: &[&str]) -> Vec<String> {
@@ -225,9 +226,9 @@ struct Reference {
     coverage: usize,
     largest: usize,
     capped: usize,
-    /// per `[[relation]]`: (pairs the prefix puts together, pairs in the relation)
+    /// per `[[relation]]`: (pairs the method puts together, pairs in the relation)
     linked: &'static [(usize, usize)],
-    /// per `[[separate]]`: (pairs the prefix wrongly puts together, pairs in the relation)
+    /// per `[[separate]]`: (pairs the method wrongly puts together, pairs in the relation)
     separated: &'static [(usize, usize)],
 }
 
@@ -285,6 +286,40 @@ const PREFIX_REFERENCE: &[Reference] = &[
     },
 ];
 
+fn assert_reference(want: &Reference, got: &column_groups::Score) {
+    let shape = (
+        got.columns,
+        got.groups,
+        got.coverage,
+        got.largest,
+        got.capped,
+    );
+    let expected = (
+        want.columns,
+        want.groups,
+        want.coverage,
+        want.largest,
+        want.capped,
+    );
+    assert_eq!(shape, expected, "{}", want.name);
+    let pairs = |rs: &[column_groups::RelationScore]| {
+        rs.iter().map(|r| (r.hit, r.total)).collect::<Vec<_>>()
+    };
+    assert_eq!(pairs(&got.linked), want.linked, "{} linked", want.name);
+    assert_eq!(
+        pairs(&got.separated),
+        want.separated,
+        "{} separated",
+        want.name
+    );
+}
+
+fn dataset<'a>(all: &'a [Dataset], name: &str) -> &'a Dataset {
+    all.iter()
+        .find(|d| d.name == name)
+        .unwrap_or_else(|| panic!("fixture {name} missing"))
+}
+
 #[test]
 fn prefix_baseline_matches_the_reference_on_every_fixture() {
     let all = fixtures();
@@ -294,40 +329,8 @@ fn prefix_baseline_matches_the_reference_on_every_fixture() {
         "a fixture was added or removed: update PREFIX_REFERENCE"
     );
     for want in PREFIX_REFERENCE {
-        let ds = all
-            .iter()
-            .find(|d| d.name == want.name)
-            .unwrap_or_else(|| panic!("fixture {} missing", want.name));
-        let got = score(ds, &prefix_baseline(&ds.columns)).unwrap();
-        let shape = (
-            got.columns,
-            got.groups,
-            got.coverage,
-            got.largest,
-            got.capped,
-        );
-        assert_eq!(
-            shape,
-            (
-                want.columns,
-                want.groups,
-                want.coverage,
-                want.largest,
-                want.capped
-            ),
-            "{}",
-            want.name
-        );
-        let pairs = |rs: &[column_groups::RelationScore]| {
-            rs.iter().map(|r| (r.hit, r.total)).collect::<Vec<_>>()
-        };
-        assert_eq!(pairs(&got.linked), want.linked, "{} linked", want.name);
-        assert_eq!(
-            pairs(&got.separated),
-            want.separated,
-            "{} separated",
-            want.name
-        );
+        let ds = dataset(&all, want.name);
+        assert_reference(want, &score(ds, &prefix_baseline(&ds.columns)).unwrap());
     }
 }
 
@@ -463,11 +466,97 @@ fn name_stems_match_the_reference_on_every_tuning_fixture() {
     }
 }
 
+// ---------------------------------------------------------------- T1b: lexical grouping
+
+/// The lexical method end to end on one dataset: names, stems, trigram clusters, then the left-out columns.
+fn lexical_method(ds: &Dataset) -> Vec<Vec<String>> {
+    let stems = normalize(&ds.columns).stems;
+    let groups = lexical_groups(&stems, &LexicalParams::default()).unwrap();
+    groups
+        .iter()
+        .map(|g| g.iter().map(|&i| ds.columns[i].clone()).collect())
+        .collect()
+}
+
+/// `lexical_method` on the tuning sets. Computed on 2026-10-24 in Python: pass 1 is the spike code replayed on
+/// the verified stems; pass 2 (the left-out columns) is a lexical reimplementation of the spike's loner step,
+/// which used embeddings. The Rust groups matched it member by member on all four datasets. A regression
+/// guard, not an acceptance threshold: the group cap and the criterion against the prefix are still to be agreed.
+const LEXICAL_REFERENCE: &[Reference] = &[
+    Reference {
+        name: "ne_countries",
+        columns: 168,
+        groups: 11,
+        coverage: 136,
+        largest: 38,
+        capped: 0,
+        linked: &[(3, 21), (3, 6), (10, 15), (3, 21)],
+        separated: &[(0, 858)],
+    },
+    Reference {
+        name: "ne_places",
+        columns: 137,
+        groups: 7,
+        coverage: 113,
+        largest: 36,
+        capped: 0,
+        linked: &[
+            (191, 231),
+            (40, 153),
+            (10, 15),
+            (0, 10),
+            (0, 6),
+            (0, 15),
+            (0, 1),
+        ],
+        separated: &[(0, 858)],
+    },
+    Reference {
+        name: "openfoodfacts",
+        columns: 238,
+        groups: 24,
+        coverage: 196,
+        largest: 33,
+        capped: 0,
+        linked: &[(15, 75), (105, 105), (0, 6), (0, 6), (0, 1)],
+        separated: &[(0, 704), (0, 198)],
+    },
+    Reference {
+        name: "themealdb",
+        columns: 54,
+        groups: 3,
+        coverage: 44,
+        largest: 20,
+        capped: 0,
+        linked: &[(190, 190), (190, 190), (0, 10), (0, 6), (3, 3)],
+        separated: &[(0, 200)],
+    },
+];
+
+#[test]
+fn lexical_groups_match_the_reference_on_every_tuning_fixture() {
+    // method output is read on tuning sets only: a held-out set must not be looked at while tuning
+    let all = only_tuning(fixtures());
+    assert_eq!(
+        all.len(),
+        LEXICAL_REFERENCE.len(),
+        "a tuning fixture was added or removed: update LEXICAL_REFERENCE"
+    );
+    for want in LEXICAL_REFERENCE {
+        let ds = dataset(&all, want.name);
+        assert_reference(want, &score(ds, &lexical_method(ds)).unwrap());
+    }
+}
+
 /// Not an assertion: prints the bench table (`-- --nocapture`); each method adds a row per dataset.
 #[test]
 fn report() {
     for ds in only_tuning(fixtures()) {
-        let s = score(&ds, &prefix_baseline(&ds.columns)).unwrap();
-        println!("== {} ({:?})\n   prefix: {s}", ds.name, ds.role);
+        let prefix = score(&ds, &prefix_baseline(&ds.columns)).unwrap();
+        let lexical = score(&ds, &lexical_method(&ds)).unwrap();
+        println!(
+            "== {} ({:?})\n   prefix : {prefix}\n   lexical: {lexical}",
+            ds.name, ds.role
+        );
     }
 }

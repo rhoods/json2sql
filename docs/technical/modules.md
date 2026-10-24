@@ -123,6 +123,7 @@ Découpage thématique des tables larges (#78) : propose des groupes de colonnes
 | Fichier | Rôle |
 |---|---|
 | `names.rs` | Normalisation des `original_name` d'une table en radicaux : coupe `snake_case` / `camelCase` / chiffres, puis retire les jetons de format (`tags`, `lc`…), la clé des familles (`NAME_FR`) et les mots de bruit (> 40 % des colonnes). `normalize()` renvoie un `NameStems` |
+| `lexical.rs` | Regroupement lexical des radicaux : vecteurs de trigrammes TF-IDF, liaison moyenne coupée à 0,20, groupes d'au moins 4 colonnes, puis les colonnes restées seules entre elles (minimum 3). `lexical_groups()` renvoie des listes d'indices ; refuse plus de 2 000 colonnes (matrice n×n) |
 | `mod.rs` | Déclare les sous-modules |
 
 ---
