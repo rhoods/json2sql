@@ -30,7 +30,7 @@
 //! - fn `tuning_hints` — conseils selon `shared_buffers` / `max_wal_size` (pure).
 //! - fn `warn_pg_tuning` — lit les réglages du serveur et émet les conseils.
 //! - fn `wal_level_hint` — conseil `wal_level = minimal` quand les tables enfants sont chargées en `COPY FREEZE` (pure).
-//! - fn `warn_wal_level` — lit `wal_level` et émet ce conseil.
+//! - fn `warn_wal_level` — lit `wal_level`, émet ce conseil et dit s'il vaut `minimal`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -335,23 +335,27 @@ pub async fn warn_pg_tuning(client: &Client, tune_wal: bool, progress_tx: Option
 }
 
 /// Advice for a `COPY FREEZE` load (#75): under `wal_level = minimal`, a table truncated in the load
-/// transaction is written without WAL; any other level writes every child row twice.
+/// transaction is written without WAL; any other level writes every row twice.
 #[must_use]
 pub fn wal_level_hint(wal_level: &str) -> Option<String> {
     (wal_level != "minimal").then(|| format!(
-        "PG tuning: wal_level = {wal_level} writes the child tables twice (table + WAL) — on a local \
+        "PG tuning: wal_level = {wal_level} writes the imported tables twice (table + WAL) and loads the root \
+         without COPY FREEZE — on a local \
          analysis server, consider ALTER SYSTEM SET wal_level = 'minimal' and ALTER SYSTEM SET \
          max_wal_senders = 0 (archive_mode must stay off), then restart PostgreSQL. This disables \
          replication and point-in-time recovery."
     ))
 }
 
-/// Reads `wal_level` and logs `wal_level_hint`. Silent if the query fails.
-pub async fn warn_wal_level(client: &Client, progress_tx: Option<&ProgressTx>) {
-    let Ok(row) = client.query_one("SELECT current_setting('wal_level')", &[]).await else { return };
-    if let Some(hint) = wal_level_hint(row.get(0)) {
+/// Reads `wal_level`, logs `wal_level_hint` and returns whether it is `minimal`. Silent (and
+/// `false`) if the query fails.
+pub async fn warn_wal_level(client: &Client, progress_tx: Option<&ProgressTx>) -> bool {
+    let Ok(row) = client.query_one("SELECT current_setting('wal_level')", &[]).await else { return false };
+    let level: &str = row.get(0);
+    if let Some(hint) = wal_level_hint(level) {
         log(progress_tx, hint);
     }
+    level == "minimal"
 }
 
 #[cfg(test)]
