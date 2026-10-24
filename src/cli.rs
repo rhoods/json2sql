@@ -198,6 +198,11 @@ pub struct Cli {
     /// (or `GRANT ALTER SYSTEM ON PARAMETER max_wal_size`); without it, a warning and no change.
     #[arg(long, default_value_t = false)]
     pub tune_wal: bool,
+
+    /// Instead of importing, propose a split of every wide table (`Columns` or `AutoSplit`, at least 20 data columns)
+    /// into 1:1 thematic tables: write the `column_groups` TOML to FILE and print the report. No database is needed.
+    #[arg(long, value_name = "FILE", conflicts_with = "dry_run")]
+    pub suggest_groups: Option<PathBuf>,
 }
 
 /// Re-exported from [`crate::anomaly::reporter`] so callers can use it via `cli::AnomalyFormat`.
@@ -276,6 +281,26 @@ mod tests {
     fn test_disable_strategy_default_empty() {
         let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
         assert_eq!(cli.disable_strategy, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_suggest_groups_default_is_off() {
+        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
+        assert!(cli.suggest_groups.is_none());
+    }
+
+    #[test]
+    fn test_suggest_groups_parses_a_file() {
+        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--suggest-groups", "groups.toml"]).unwrap();
+        assert_eq!(cli.suggest_groups, Some(PathBuf::from("groups.toml")));
+    }
+
+    #[test]
+    fn test_suggest_groups_excludes_dry_run() {
+        assert!(Cli::try_parse_from([
+            "json2sql", "--input", "data.json", "--suggest-groups", "groups.toml", "--dry-run",
+        ])
+        .is_err());
     }
 
     #[test]

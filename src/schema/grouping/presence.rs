@@ -35,7 +35,6 @@ const STRATA: usize = 5;
 
 /// Presence of each column in the sampled rows, one bit per row.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // shortcut: the binary re-includes `schema` and nothing calls this until the proposal command (T1e); drop then.
 pub struct Presence {
     columns: usize,
     /// `bits[column]`: bit `row % 64` of word `row / 64` is set when the column is present in `row`.
@@ -44,7 +43,6 @@ pub struct Presence {
     richness: Vec<u32>,
 }
 
-#[allow(dead_code)] // shortcut: see `Presence`
 impl Presence {
     /// Empty presence for a table of `columns` columns.
     pub fn new(columns: usize) -> Self {
@@ -134,7 +132,6 @@ impl Presence {
 
 /// Adjusted phi between the informative columns, signed.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // shortcut: see `Presence`
 pub struct PhiMatrix {
     informative: Vec<usize>,
     /// Flat `k * k` matrix over `informative`, `k = informative.len()`.
@@ -143,7 +140,6 @@ pub struct PhiMatrix {
     position: HashMap<usize, usize>,
 }
 
-#[allow(dead_code)] // shortcut: see `Presence`
 impl PhiMatrix {
     /// The informative columns, in column order.
     pub fn informative(&self) -> &[usize] {

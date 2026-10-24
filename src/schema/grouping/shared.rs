@@ -29,7 +29,6 @@ const MIN_WEIGHT: f64 = 1e-9;
 
 /// Two text columns with enough values in common.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)] // shortcut: the binary re-includes `schema` and nothing calls this until the proposal command (T1e); drop then.
 pub struct SharedPair {
     /// Index of the first column (smaller than `b`).
     pub a: usize,
@@ -41,7 +40,6 @@ pub struct SharedPair {
 }
 
 /// Every pair of text columns sharing at least [`MIN_COMMON`] values, ordered by `(a, b)`.
-#[allow(dead_code)] // shortcut: see `SharedPair`
 pub fn shared_value_pairs(profile: &ValueProfile) -> Vec<SharedPair> {
     let vocabularies: Vec<(usize, &BTreeSet<u64>)> = (0..profile.columns())
         .filter_map(|column| {

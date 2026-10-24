@@ -1,22 +1,24 @@
-//! Bounded sample of the rows of one table, reread from the input after finalization (#78, T1c).
+//! Bounded sample of the rows of the tables of a file, reread from the input after finalization (#78, T1c).
 //!
 //! The presence signal (see [`super::presence`]) needs the values, which Pass 1 does not keep. The input is
 //! therefore read a second time: rows of the root table are taken at a regular stride computed from the root
 //! row count, up to a budget, so that the sample spans a sorted file instead of reading its first rows. Same
 //! file and same arguments give the same sample. Only the sampled rows are parsed; the others are skipped
 //! as raw bytes. A value counts as present unless it is null, `""`, `[]` or `{}` (the rule the spike measured).
+//! Every table to analyse is read from the SAME sampled rows in one pass, so the cost of the input does not grow
+//! with the number of tables.
 //!
-//! Limits, on purpose: the path from the root to the table goes through objects only (an array on the way is
+//! Limits, on purpose: the path from the root to a table goes through objects only (an array on the way is
 //! refused, so no silent mis-sampling of array tables), and a column is one key path inside the table's
 //! object, which the caller derives from the schema.
 //!
 //! Fonctions :
-//! - struct `SampleSource` — où lire : fichier, table racine, chemin vers la table, chemins des colonnes, bornes.
-//! - fn `sample_presence` — présence des colonnes dans un échantillon à pas régulier des lignes de la table.
-//! - struct `TableSample` — présence et valeurs des colonnes, issues d'un seul passage.
-//! - fn `sample_table` — présence et valeurs en un seul passage sur le même échantillon.
+//! - struct `SampleSource` — où lire : fichier, table racine, nombre de lignes racine, bornes.
+//! - struct `SampleTarget` — où sont les colonnes d'une table : chemin vers son objet et chemins des colonnes.
+//! - struct `TableSample` — présence et valeurs des colonnes d'une table, issues d'un seul passage.
+//! - fn `sample_tables` — présence et valeurs des colonnes de plusieurs tables, en un seul passage sur un échantillon à pas régulier.
 //! - fn `effective_rows` — lignes racine qui comptent : toutes, ou les `limit` premières.
-//! - fn `visit_sampled_objects` — appelle une fonction sur l'objet de la table de chaque ligne échantillonnée.
+//! - fn `visit_sampled_rows` — appelle une fonction sur chaque ligne racine échantillonnée.
 //! - fn `cells` — valeur de chaque colonne dans l'objet de la table, dans l'ordre des colonnes.
 //! - fn `check` — refuse un nombre de lignes racine inconnu ou un budget nul.
 //! - fn `check_root` — refuse une table racine qui n'est pas une clé du fichier enveloppe.
@@ -37,20 +39,14 @@ use super::presence::Presence;
 use super::values::{ValueProfile, RANK_SAMPLE};
 
 /// Most rows sampled by default.
-#[allow(dead_code)] // shortcut: the binary re-includes `schema` and nothing calls this until the proposal command (T1e); drop then.
 pub const DEFAULT_BUDGET: usize = 20_000;
 
-/// What to read and where the table's columns are.
-#[allow(dead_code)] // shortcut: see `DEFAULT_BUDGET`
+/// What to read: the input and which rows of the root table to take. The same rows serve every table.
 pub struct SampleSource<'a> {
     /// Input file, read again from its start.
     pub input: &'a Path,
     /// Name of the root table: the wrapper key for a multi-key wrapper file, whose other keys are ignored.
     pub root: &'a str,
-    /// Keys to follow below a root row to reach the table's object (empty for the root table itself).
-    pub path: &'a [String],
-    /// One key path per column, from the table's object (two keys for a column flattened from a child).
-    pub columns: &'a [Vec<String>],
     /// Rows of the ROOT table (Pass 1 `row_count`), even when sampling a child: the stride is computed from it.
     pub root_rows: u64,
     /// `--limit`: only the first rows of the root table take part.
@@ -59,46 +55,55 @@ pub struct SampleSource<'a> {
     pub budget: usize,
 }
 
-/// What one pass over the sample yields: which columns are present, and what they hold.
-#[allow(dead_code)] // shortcut: see `DEFAULT_BUDGET`
+/// Where the columns of one table are inside a root row.
+pub struct SampleTarget<'a> {
+    /// Keys to follow below a root row to reach the table's object (empty for the root table itself).
+    pub path: &'a [String],
+    /// One key path per column, from the table's object (two keys for a column flattened from a child).
+    pub columns: &'a [Vec<String>],
+}
+
+/// What one pass over the sample yields for a table: which columns are present, and what they hold.
 pub struct TableSample {
     pub presence: Presence,
     pub values: ValueProfile,
 }
 
-/// Presence of `source.columns` in a regular-stride sample of the table's rows.
+/// Presence and values of the columns of every target, from ONE pass over the input: a regular-stride sample of
+/// the root rows, each target reading its own object in them (a row without it is skipped for that target). The
+/// rank correlation looks at about [`RANK_SAMPLE`] of the sampled rows. The samples come in the order of `targets`.
 ///
 /// # Errors
 /// An unknown (zero) root row count, a null budget, an unreadable or malformed input, a root that is not a key
-/// of a wrapper file, or an array on the path from the root to the table.
-#[allow(dead_code)] // shortcut: see `DEFAULT_BUDGET`
-pub fn sample_presence(source: &SampleSource<'_>) -> Result<Presence> {
-    let mut presence = Presence::new(source.columns.len());
-    visit_sampled_objects(source, |object| {
-        presence.push_row(cells(object, source.columns).map(|cell| cell.is_some_and(is_present)));
-    })?;
-    Ok(presence)
-}
-
-/// Presence and values of `source.columns` from ONE pass over the same sample, so that the input is read once.
-/// The rank correlation looks at about [`RANK_SAMPLE`] of the sampled rows.
-///
-/// # Errors
-/// The same as [`sample_presence`].
-#[allow(dead_code)] // shortcut: see `DEFAULT_BUDGET`
-pub fn sample_table(source: &SampleSource<'_>) -> Result<TableSample> {
+/// of a wrapper file, or an array on the path from the root to one of the tables.
+pub fn sample_tables(
+    source: &SampleSource<'_>,
+    targets: &[SampleTarget<'_>],
+) -> Result<Vec<TableSample>> {
     let rows = effective_rows(source);
     let sampled = rows
         .div_ceil(stride(rows, source.budget))
         .min(u64::try_from(source.budget).unwrap_or(u64::MAX));
     let rank_step = usize::try_from(sampled).unwrap_or(usize::MAX) / RANK_SAMPLE;
-    let mut presence = Presence::new(source.columns.len());
-    let mut values = ValueProfile::new(source.columns.len(), rank_step);
-    visit_sampled_objects(source, |object| {
-        presence.push_row(cells(object, source.columns).map(|cell| cell.is_some_and(is_present)));
-        values.observe_row(cells(object, source.columns));
+    let mut tables: Vec<TableSample> = targets
+        .iter()
+        .map(|target| TableSample {
+            presence: Presence::new(target.columns.len()),
+            values: ValueProfile::new(target.columns.len(), rank_step),
+        })
+        .collect();
+    visit_sampled_rows(source, |row| {
+        for (target, sample) in targets.iter().zip(&mut tables) {
+            if let Some(object) = object_at(row, target.path)? {
+                sample.presence.push_row(
+                    cells(object, target.columns).map(|cell| cell.is_some_and(is_present)),
+                );
+                sample.values.observe_row(cells(object, target.columns));
+            }
+        }
+        Ok(())
     })?;
-    Ok(TableSample { presence, values })
+    Ok(tables)
 }
 
 /// Rows of the root table that take part: all of them, or the first `limit`.
@@ -108,18 +113,18 @@ fn effective_rows(source: &SampleSource<'_>) -> u64 {
         .map_or(source.root_rows, |limit| limit.min(source.root_rows))
 }
 
-/// Calls `visit` on the table's object of every sampled row (a row without one is skipped), at most `budget`
-/// times: root rows at a regular stride, only those parsed, the ones of other wrapper keys not counted.
-fn visit_sampled_objects(
+/// Calls `visit` on every sampled root row, at most `budget` of them (see [`stride`]): rows at a regular stride, only
+/// those parsed, the ones of other wrapper keys not counted.
+fn visit_sampled_rows(
     source: &SampleSource<'_>,
-    mut visit: impl FnMut(&Map<String, Value>),
+    mut visit: impl FnMut(&Value) -> Result<()>,
 ) -> Result<()> {
     check(source)?;
     let rows = effective_rows(source);
     let step = stride(rows, source.budget);
     let (mut reader, format) = JsonReader::open(source.input)?;
     check_root(&format, source.root)?;
-    let (mut seen, mut visited) = (0_u64, 0_usize);
+    let mut seen = 0_u64;
     while seen < rows {
         let Some(raw) = reader.next_raw() else { break };
         let mut bytes = raw?;
@@ -128,13 +133,7 @@ fn visit_sampled_objects(
         }
         if seen.is_multiple_of(step) {
             let row: Value = simd_json::from_slice(&mut bytes).map_err(simd_err)?;
-            if let Some(object) = object_at(&row, source.path)? {
-                visit(object);
-                visited += 1;
-            }
-            if visited >= source.budget {
-                break;
-            }
+            visit(&row)?;
         }
         seen += 1;
     }
@@ -266,15 +265,30 @@ mod tests {
         root_rows: u64,
         budget: usize,
     ) -> Result<Presence> {
-        sample_presence(&SampleSource {
+        let source = SampleSource {
             input,
             root: "t",
-            path,
-            columns,
             root_rows,
             limit: None,
             budget,
-        })
+        };
+        sample_tables(&source, &[SampleTarget { path, columns }])
+            .map(|mut samples| samples.remove(0).presence)
+    }
+
+    /// A source over `input` with no limit and room for every row.
+    fn source(input: &Path, root_rows: u64) -> SampleSource<'_> {
+        SampleSource {
+            input,
+            root: "t",
+            root_rows,
+            limit: None,
+            budget: 100,
+        }
+    }
+
+    fn target<'a>(path: &'a [String], columns: &'a [Vec<String>]) -> SampleTarget<'a> {
+        SampleTarget { path, columns }
     }
 
     fn counts(p: &Presence, columns: usize) -> Vec<usize> {
@@ -353,16 +367,21 @@ mod tests {
             .collect();
         let f = jsonl(&rows);
         let cols = keys(&["late", "early"]);
-        let limited = sample_presence(&SampleSource {
+        let source = SampleSource {
             input: f.path(),
             root: "t",
-            path: &[],
-            columns: &cols,
             root_rows: 100,
             limit: Some(30),
             budget: 100,
-        })
-        .unwrap();
+        };
+        let target = SampleTarget {
+            path: &[],
+            columns: &cols,
+        };
+        let limited = sample_tables(&source, &[target])
+            .unwrap()
+            .remove(0)
+            .presence;
         assert_eq!(
             (limited.rows(), counts(&limited, 2)),
             (30, vec![0, 30]),
@@ -495,19 +514,16 @@ mod tests {
         let source = SampleSource {
             input: f.path(),
             root: "t",
-            path: &[],
-            columns: &columns,
             root_rows: 100,
             limit: None,
             budget: 100,
         };
-        let sample = sample_table(&source).unwrap();
-        assert_eq!(
-            counts(&sample.presence, 3),
-            counts(&sample_presence(&source).unwrap(), 3),
-            "same rows as presence alone"
-        );
-        assert_eq!(sample.values.rows(), 100);
+        let target = SampleTarget {
+            path: &[],
+            columns: &columns,
+        };
+        let sample = sample_tables(&source, &[target]).unwrap().remove(0);
+        assert_eq!(counts(&sample.presence, 3), [100, 100, 50]);
         assert_eq!(
             sample
                 .values
@@ -520,6 +536,44 @@ mod tests {
     }
 
     #[test]
+    fn several_tables_are_sampled_in_one_pass_each_with_its_own_rows() {
+        let f = jsonl(&[
+            json!({"id": 1, "props": {"a": 1}}),
+            json!({"id": 2, "props": null}),
+            json!({"id": 3, "props": {"a": ""}}),
+            json!({"id": 4, "props": {"a": 4}}),
+        ]);
+        let (root_columns, child_columns) = (keys(&["id"]), keys(&["a"]));
+        let child_path = strings(&["props"]);
+        let targets = [
+            target(&[], &root_columns),
+            target(&child_path, &child_columns),
+        ];
+        let samples = sample_tables(&source(f.path(), 4), &targets).unwrap();
+        let got: Vec<(usize, Vec<usize>)> = samples
+            .iter()
+            .map(|s| (s.presence.rows(), counts(&s.presence, 1)))
+            .collect();
+        assert_eq!(
+            got,
+            [(4, vec![4]), (3, vec![2])],
+            "the root sees every sampled row, the child the rows that hold its object"
+        );
+    }
+
+    #[test]
+    fn one_table_that_cannot_be_read_fails_the_pass() {
+        let f = jsonl(&[json!({"id": 1, "items": [{"a": 1}], "props": {"a": 1}})]);
+        let (columns, items) = (keys(&["a"]), strings(&["items"]));
+        let props = strings(&["props"]);
+        let targets = [target(&props, &columns), target(&items, &columns)];
+        let err = sample_tables(&source(f.path(), 1), &targets)
+            .err()
+            .map(|e| e.to_string());
+        assert!(err.is_some_and(|e| e.contains("array")));
+    }
+
+    #[test]
     fn the_rank_sample_stays_near_two_thousand_rows() {
         let rows: Vec<Value> = (0..4400).map(|i| json!({"n": i})).collect();
         let f = jsonl(&rows);
@@ -527,14 +581,19 @@ mod tests {
         let source = SampleSource {
             input: f.path(),
             root: "t",
-            path: &[],
-            columns: &columns,
             root_rows: 4400,
             limit: None,
             budget: 20_000,
         };
+        let target = SampleTarget {
+            path: &[],
+            columns: &columns,
+        };
         assert_eq!(
-            sample_table(&source).unwrap().values.ranked(0).len(),
+            sample_tables(&source, &[target]).unwrap()[0]
+                .values
+                .ranked(0)
+                .len(),
             2200,
             "every 2nd of 4400 rows"
         );

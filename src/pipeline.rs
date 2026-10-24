@@ -14,6 +14,10 @@
 //! - fn `ctrl_c_interrupt` — se résout sur Ctrl-C (arrêt propre de la Pass 2).
 //! - fn `finalize_pass2` — rapport final + vérification du taux d'anomalie max.
 //!
+//! Proposition de groupes de colonnes (#78) :
+//! - fn `suggest_groups` — schéma finalisé puis proposition `column_groups` de toutes les tables larges, au lieu d'un import.
+//! - fn `finalized_schema` — stdin → Pass 1 ou snapshot → surcharges : le schéma que partagent import et proposition.
+//!
 //! Résolution d'entrée :
 //! - fn `resolve_input` — bufferise stdin dans un fichier temporaire si aucun chemin n'est fourni.
 //!
@@ -50,6 +54,7 @@ use crate::error::{J2sError, Result};
 use crate::pass1::runner::{Pass1Config, Pass1Result};
 use crate::schema::config::SkipCascadeWarning;
 use crate::schema::finalizer::OverflowWarning;
+use crate::schema::grouping::suggest::{suggest, Suggestion};
 use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::strategies::StrategyName;
 use crate::schema::table_schema::TableSchema;
@@ -122,13 +127,7 @@ pub struct PipelineConfig {
 /// Orchestrates stdin buffering → Pass 1 (schema inference or snapshot load) →
 /// schema override application → DDL creation → Pass 2 (data insertion) → reporting.
 pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
-    let (_stdin_temp, input_path) = resolve_input(std::mem::take(&mut cfg.input))?;
-    let mut pass1 = load_or_infer_schema(&cfg, &input_path)?;
-    report_pass1_warnings(&pass1, cfg.depth_limit);
-    let config_warnings = post_process_schema(&mut pass1, &cfg)?;
-    for w in &config_warnings {
-        eprintln!("WARNING: {}", w.to_message());
-    }
+    let (_stdin_temp, input_path, pass1) = finalized_schema(&mut cfg)?;
 
     if cfg.dry_run {
         print_dry_run_ddl(&pass1.schemas, &cfg.pg_schema, cfg.drop_existing);
@@ -144,6 +143,14 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
     let client = connect_and_create_tables(db_url, &pass1.schemas, &cfg.pg_schema, cfg.drop_existing).await?;
     let pass2 = run_pass2(&input_path, &pass1, &client, db_url, &cfg).await?;
     finalize_pass2(&pass2, &cfg)
+}
+
+/// Propose a split of every wide table instead of importing (`--suggest-groups`, #78): the same Pass 1 (or
+/// snapshot) and overrides as an import, then ONE sample of the input's rows and a proposal for each eligible
+/// table. `cfg.limit` bounds the sampled root rows. No database is touched.
+pub fn suggest_groups(mut cfg: PipelineConfig) -> Result<Suggestion> {
+    let (_stdin_temp, input_path, pass1) = finalized_schema(&mut cfg)?;
+    suggest(&pass1.schemas, &input_path, cfg.limit)
 }
 
 async fn connect_and_create_tables(
@@ -236,6 +243,20 @@ fn finalize_pass2(
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/// Stdin buffering, Pass 1 (or snapshot) and schema overrides: the finalized schema, with the input path it was
+/// read from. The guard keeps a buffered stdin alive.
+fn finalized_schema(
+    cfg: &mut PipelineConfig,
+) -> Result<(Option<tempfile::NamedTempFile>, PathBuf, Pass1Result)> {
+    let (stdin_temp, input_path) = resolve_input(std::mem::take(&mut cfg.input))?;
+    let mut pass1 = load_or_infer_schema(cfg, &input_path)?;
+    report_pass1_warnings(&pass1, cfg.depth_limit);
+    for w in post_process_schema(&mut pass1, cfg)? {
+        eprintln!("WARNING: {}", w.to_message());
+    }
+    Ok((stdin_temp, input_path, pass1))
+}
 
 /// Buffer stdin to a named temp file when no explicit input path is given.
 /// Returns `(temp_file_guard, resolved_path)`. The guard must stay alive for
@@ -626,6 +647,83 @@ mod tests {
     fn pipeline_config_skip_constraints_true_propagates() {
         let cfg = PipelineConfig { skip_constraints: true, ..minimal_pipeline_cfg(None) };
         assert!(cfg.skip_constraints, "skip_constraints must be settable to true");
+    }
+
+    /// Objects with two families of six columns and twelve unrelated ones, all filled.
+    fn wide_jsonl(rows: usize) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        const OTHER: [&str; 12] = [
+            "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow", "oyster", "pebble",
+            "saddle", "thimble",
+        ];
+        let names: Vec<String> = ('a'..='f')
+            .flat_map(|c| [format!("kiwi_{c}"), format!("zulu_{c}")])
+            .chain(OTHER.iter().map(|n| (*n).to_string()))
+            .collect();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for i in 0..rows {
+            let object: serde_json::Map<String, serde_json::Value> =
+                names.iter().map(|n| (n.clone(), serde_json::json!(format!("v{}", i % 5)))).collect();
+            writeln!(file, "{}", serde_json::Value::Object(object)).unwrap();
+        }
+        file
+    }
+
+    fn cfg_for(file: &tempfile::NamedTempFile) -> PipelineConfig {
+        PipelineConfig { input: Some(file.path().to_path_buf()), ..minimal_pipeline_cfg(None) }
+    }
+
+    #[test]
+    fn suggest_groups_runs_pass_1_then_reads_the_rows_of_the_wide_table() {
+        let file = wide_jsonl(60);
+        let s = suggest_groups(cfg_for(&file)).unwrap();
+        assert_eq!(s.tables, ["root"]);
+        let parsed: toml::Table = toml::from_str(&s.toml).unwrap_or_else(|e| panic!("{e}\n{}", s.toml));
+        let groups = parsed["root"]["column_groups"].as_table().unwrap();
+        assert!(groups.contains_key("kiwi") && groups.contains_key("zulu"), "{:?}", groups.keys().collect::<Vec<_>>());
+        assert!(s.report.contains("Data signals: on, 60 rows sampled"), "{}", s.report);
+    }
+
+    #[test]
+    fn suggest_groups_limit_bounds_the_sampled_root_rows() {
+        let file = wide_jsonl(60);
+        let cfg = PipelineConfig { limit: Some(25), ..cfg_for(&file) };
+        let s = suggest_groups(cfg).unwrap();
+        assert!(s.report.contains("Data signals: on, 25 rows sampled"), "{}", s.report);
+    }
+
+    #[test]
+    fn suggest_groups_proposes_every_wide_table_of_the_file_from_one_sample() {
+        use std::io::Write;
+        let wide = |i: usize| -> serde_json::Map<String, serde_json::Value> {
+            ('a'..='f')
+                .flat_map(|c| [format!("kiwi_{c}"), format!("zulu_{c}")])
+                .chain((0..12).map(|n| format!("filler{}", char::from(b'a' + n))))
+                .map(|name| (name, serde_json::json!(format!("v{}", i % 5))))
+                .collect()
+        };
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for i in 0..60 {
+            let mut object = wide(i);
+            object.insert("props".to_string(), serde_json::Value::Object(wide(i)));
+            writeln!(file, "{}", serde_json::Value::Object(object)).unwrap();
+        }
+        let s = suggest_groups(cfg_for(&file)).unwrap();
+        assert_eq!(s.tables, ["root", "root_props"]);
+        assert_eq!(
+            s.report.matches("Data signals: on, 60 rows sampled").count(),
+            2,
+            "{}",
+            s.report
+        );
+    }
+
+    #[test]
+    fn suggest_groups_without_a_wide_table_says_what_is_needed() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "{\"id\": 1}\n{\"id\": 2}\n").unwrap();
+        let err = suggest_groups(cfg_for(&file)).unwrap_err().to_string();
+        assert!(err.contains("at least 20 data columns"), "{err}");
     }
 
     #[test]

@@ -48,6 +48,8 @@ Séquence de `run_pipeline()` :
 8. Sinon : se connecte à PostgreSQL, crée les tables, lance la Pass 2
 9. Affiche le résumé d'import et les anomalies
 
+Avec `--suggest-groups`, `main.rs` appelle `pipeline::suggest_groups()` à la place : les étapes 1 à 6 (partagées via `finalized_schema()`), puis la proposition de découpage de toutes les tables larges, depuis un seul échantillon du fichier (`schema::grouping::suggest`) ; aucune base n'est touchée (#78).
+
 ---
 
 ## `src/ipc.rs`

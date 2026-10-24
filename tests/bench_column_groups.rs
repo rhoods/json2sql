@@ -24,7 +24,12 @@ use json2sql::schema::grouping::lexical::{lexical_groups, LexicalParams};
 use json2sql::schema::grouping::names::normalize;
 use json2sql::schema::grouping::numeric::{rank_correlations, shape, Shape};
 use json2sql::schema::grouping::presence::PhiMatrix;
-use json2sql::schema::grouping::sample::{sample_table, SampleSource, TableSample, DEFAULT_BUDGET};
+use json2sql::schema::grouping::proposal::{
+    propose, ColumnName, DataSignals, Status, TableProposal,
+};
+use json2sql::schema::grouping::sample::{
+    sample_tables, SampleSource, SampleTarget, TableSample, DEFAULT_BUDGET,
+};
 use json2sql::schema::grouping::shared::shared_value_pairs;
 use json2sql::schema::grouping::values::ValueProfile;
 
@@ -603,13 +608,15 @@ fn sample_of(ds: &Dataset, file: &Path) -> TableSample {
     let source = SampleSource {
         input: file,
         root: &ds.name,
-        path: &ds.rows_path,
-        columns: &columns,
         root_rows: count_rows(file),
         limit: None,
         budget: DEFAULT_BUDGET,
     };
-    sample_table(&source).unwrap()
+    let target = SampleTarget {
+        path: &ds.rows_path,
+        columns: &columns,
+    };
+    sample_tables(&source, &[target]).unwrap().remove(0)
 }
 
 /// Of a relation's pairs: how many have both columns informative, their mean phi, how many reach 0.3.
@@ -808,15 +815,208 @@ fn data_signals_report() {
     }
 }
 
+// ---------------------------------------------------------------- T1e: proposal (rule of two signals)
+
+/// The proposal for a dataset, from the names alone (no row data: every fusion stays to confirm).
+fn proposal_of(ds: &Dataset) -> TableProposal {
+    proposal_with(ds, Err("bench: names only"))
+}
+
+/// The proposal for a dataset with the given data signals, or the reason they are off.
+fn proposal_with(ds: &Dataset, data: Result<&DataSignals, &str>) -> TableProposal {
+    let columns = ds
+        .columns
+        .iter()
+        .map(|c| ColumnName {
+            name: c.clone(),
+            original: c.clone(),
+        })
+        .collect();
+    propose(&ds.name, columns, data, &LexicalParams::default()).unwrap()
+}
+
+/// The groups a proposal applies, as column names: the confirmed ones, or, with `accept_fusions`, the fusions to
+/// confirm in place of the families they replace.
+fn applied(ds: &Dataset, proposal: &TableProposal, accept_fusions: bool) -> Vec<Vec<String>> {
+    let replaced: HashSet<&str> = if accept_fusions {
+        proposal
+            .groups
+            .iter()
+            .flat_map(|g| g.replaces.iter().map(String::as_str))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    proposal
+        .groups
+        .iter()
+        .filter(|g| {
+            if g.status == Status::Confirmed {
+                !replaced.contains(g.name.as_str())
+            } else {
+                accept_fusions
+            }
+        })
+        .map(|g| g.columns.iter().map(|&c| ds.columns[c].clone()).collect())
+        .collect()
+}
+
+/// The proposal from names alone, fusions left to confirm, on the tuning sets: what a first run applies. Computed
+/// 2026-10-24 by an independent Python rule (lexical groups split by the first word of the stem, families of
+/// three or more columns kept), then the same scorer as the other references.
+const PROPOSAL_REFERENCE: &[Reference] = &[
+    Reference {
+        name: "ne_countries",
+        columns: 168,
+        groups: 6,
+        coverage: 114,
+        largest: 36,
+        capped: 0,
+        linked: &[(0, 21), (0, 6), (0, 15), (3, 21)],
+        separated: &[(0, 858)],
+    },
+    Reference {
+        name: "ne_places",
+        columns: 137,
+        groups: 7,
+        coverage: 97,
+        largest: 33,
+        capped: 0,
+        linked: &[
+            (190, 231),
+            (12, 153),
+            (3, 15),
+            (0, 10),
+            (0, 6),
+            (0, 15),
+            (0, 1),
+        ],
+        separated: &[(0, 858)],
+    },
+    Reference {
+        name: "openfoodfacts",
+        columns: 238,
+        groups: 21,
+        coverage: 145,
+        largest: 29,
+        capped: 0,
+        linked: &[(0, 75), (0, 105), (0, 6), (0, 6), (0, 1)],
+        separated: &[(0, 704), (0, 198)],
+    },
+    Reference {
+        name: "themealdb",
+        columns: 54,
+        groups: 3,
+        coverage: 43,
+        largest: 20,
+        capped: 0,
+        linked: &[(190, 190), (190, 190), (0, 10), (0, 6), (1, 3)],
+        separated: &[(0, 200)],
+    },
+];
+
+#[test]
+fn applying_every_fusion_gives_back_the_lexical_groups() {
+    for ds in only_tuning(fixtures()) {
+        let mut want = lexical_method(&ds);
+        let mut got = applied(&ds, &proposal_of(&ds), true);
+        want.sort();
+        got.sort();
+        assert_eq!(got, want, "{}", ds.name);
+    }
+}
+
+#[test]
+fn the_confirmed_proposal_never_joins_a_separated_pair_on_the_tuning_sets() {
+    for ds in only_tuning(fixtures()) {
+        let score = score(&ds, &applied(&ds, &proposal_of(&ds), false)).unwrap();
+        assert!(
+            score.separated.iter().all(|r| r.hit == 0),
+            "{}: {:?}",
+            ds.name,
+            score.separated
+        );
+    }
+}
+
+#[test]
+fn the_confirmed_proposal_matches_the_reference_on_every_tuning_fixture() {
+    let all = only_tuning(fixtures());
+    assert_eq!(
+        all.len(),
+        PROPOSAL_REFERENCE.len(),
+        "a tuning fixture was added or removed: update PROPOSAL_REFERENCE"
+    );
+    for want in PROPOSAL_REFERENCE {
+        let ds = dataset(&all, want.name);
+        assert_reference(
+            want,
+            &score(ds, &applied(ds, &proposal_of(ds), false)).unwrap(),
+        );
+    }
+}
+
 /// Not an assertion: prints the bench table (`-- --nocapture`); each method adds a row per dataset.
 #[test]
 fn report() {
     for ds in only_tuning(fixtures()) {
         let prefix = score(&ds, &prefix_baseline(&ds.columns)).unwrap();
         let lexical = score(&ds, &lexical_method(&ds)).unwrap();
+        let proposal = proposal_of(&ds);
+        let confirmed = score(&ds, &applied(&ds, &proposal, false)).unwrap();
+        let fusions = proposal
+            .groups
+            .iter()
+            .filter(|g| g.status == Status::ToConfirm)
+            .count();
         println!(
-            "== {} ({:?})\n   prefix : {prefix}\n   lexical: {lexical}",
+            "== {} ({:?})\n   prefix  : {prefix}\n   lexical : {lexical}\n   proposal: {confirmed}\n   ({fusions} fusions to confirm)",
             ds.name, ds.role
         );
+    }
+}
+
+/// Not an assertion: the proposal with the data signals on, on local data only. For each tuning set: what a first
+/// run applies without and with the data, and the fusions the data confirmed.
+#[test]
+fn data_proposal_report() {
+    let Some(dir) = std::env::var_os(DATA_ENV).map(PathBuf::from) else {
+        eprintln!("[SKIP] {DATA_ENV} is not set");
+        return;
+    };
+    for ds in only_tuning(fixtures()) {
+        let file = dir.join(format!("{}.jsonl", ds.name));
+        if !file.exists() {
+            eprintln!("[SKIP] {} not found", file.display());
+            continue;
+        }
+        let signals = DataSignals::new(&sample_of(&ds, &file));
+        let names_only = proposal_of(&ds);
+        let with_data = proposal_with(&ds, Ok(&signals));
+        let count = |p: &TableProposal, status: Status| {
+            p.groups.iter().filter(|g| g.status == status).count()
+        };
+        println!(
+            "== {}\n   names only: {}\n   with data : {}\n   {:?}; fusions to confirm {} -> {}",
+            ds.name,
+            score(&ds, &applied(&ds, &names_only, false)).unwrap(),
+            score(&ds, &applied(&ds, &with_data, false)).unwrap(),
+            with_data.data,
+            count(&names_only, Status::ToConfirm),
+            count(&with_data, Status::ToConfirm),
+        );
+        for g in with_data
+            .groups
+            .iter()
+            .filter(|g| g.families > 1 && g.status == Status::Confirmed)
+        {
+            println!(
+                "   confirmed fusion {} ({} columns, {} families): {:?}",
+                g.name,
+                g.columns.len(),
+                g.families,
+                g.evidence
+            );
+        }
     }
 }

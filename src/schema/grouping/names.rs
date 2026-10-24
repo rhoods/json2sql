@@ -17,6 +17,7 @@
 //! - fn `noise_words` — mots présents dans plus de 40 % des colonnes.
 //! - fn `keyed_columns` — colonnes membres d'une famille à clé (`NAME_FR`, `NAME_DE`…).
 //! - fn `is_key` — vrai pour un mot de trois lettres au plus (code de langue ou de pays).
+//! - fn `numbered_families` — familles de colonnes qui ne diffèrent que par leur numéro (`strIngredient1..20`).
 //! - fn `stem` — radical d'une colonne : mots du thème une fois clé, jetons de format et bruit retirés.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,28 +26,27 @@ use std::collections::{BTreeMap, BTreeSet};
 const FORMAT_SPREAD: usize = 6;
 /// A keyed family (`NAME_FR`, `NAME_DE`…: same words, one short key) has at least this many columns.
 const KEYED_FAMILY_MIN: usize = 8;
+/// A numbered family (`strIngredient1`, `strIngredient2`…) has at least this many columns.
+const NUMBERED_FAMILY_MIN: usize = 8;
 /// The key of a keyed family has at most this many letters.
 const KEY_MAX_LEN: usize = 3;
 /// A word in more than this percentage of the columns carries no theme.
 const NOISE_SHARE_PERCENT: usize = 40;
 
 /// Stems of one table's columns, with what was removed to get them.
-#[allow(dead_code)]
-// shortcut: the binary re-includes `schema` and nothing calls this until the proposal command (T1e); drop then.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameStems {
     /// Stem of each input name, same order: the words that carry the theme (empty if the name has no word).
     pub stems: Vec<Vec<String>>,
-    /// Words that follow the first word behind at least [`FORMAT_SPREAD`] different first words.
+    /// Words that follow the first word behind at least `FORMAT_SPREAD` different first words.
     pub format_tokens: BTreeSet<String>,
-    /// Words present in more than [`NOISE_SHARE_PERCENT`] % of the columns.
+    /// Words present in more than `NOISE_SHARE_PERCENT` % of the columns.
     pub noise_words: BTreeSet<String>,
     /// `true` for the members of a keyed family, whose key was removed from the stem.
     pub keyed: Vec<bool>,
 }
 
 /// Stem of every column of a table, from their `original_name`s.
-#[allow(dead_code)] // shortcut: the binary re-includes `schema` and nothing calls this until the proposal command (T1e); drop then.
 pub fn normalize<S: AsRef<str>>(names: &[S]) -> NameStems {
     let words: Vec<Vec<String>> = names.iter().map(|n| words(n.as_ref())).collect();
     let format_tokens = format_tokens(&words);
@@ -112,7 +112,7 @@ fn starts_new_word(prev: char, ch: char) -> bool {
     camel || letter_digit
 }
 
-/// Words found after the first word behind at least [`FORMAT_SPREAD`] different first words.
+/// Words found after the first word behind at least `FORMAT_SPREAD` different first words.
 fn format_tokens(words: &[Vec<String>]) -> BTreeSet<String> {
     let mut firsts_before: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for w in words {
@@ -129,7 +129,7 @@ fn format_tokens(words: &[Vec<String>]) -> BTreeSet<String> {
         .collect()
 }
 
-/// Words that occur in more than [`NOISE_SHARE_PERCENT`] % of the columns.
+/// Words that occur in more than `NOISE_SHARE_PERCENT` % of the columns.
 fn noise_words(words: &[Vec<String>]) -> BTreeSet<String> {
     let mut columns_with: BTreeMap<&str, usize> = BTreeMap::new();
     for w in words {
@@ -173,6 +173,28 @@ fn keyed_columns(words: &[Vec<String>]) -> Vec<bool> {
 /// True for a word short enough, and alphabetic, to be a language or country code.
 fn is_key(word: &str) -> bool {
     word.chars().count() <= KEY_MAX_LEN && word.chars().all(char::is_alphabetic)
+}
+
+/// Families of columns whose names differ only by a number (`strIngredient1..20`, `POP1950..POP2050`): the
+/// indexes of each family of at least `NUMBERED_FAMILY_MIN` columns, families and members in column order.
+pub fn numbered_families<S: AsRef<str>>(names: &[S]) -> Vec<Vec<usize>> {
+    let mut families: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
+    for (index, name) in names.iter().enumerate() {
+        let tokens = split_words(name.as_ref());
+        let is_number = |token: &String| token.chars().all(char::is_numeric);
+        if tokens.iter().any(is_number) && !tokens.iter().all(is_number) {
+            families
+                .entry(words(name.as_ref()))
+                .or_default()
+                .push(index);
+        }
+    }
+    let mut kept: Vec<Vec<usize>> = families
+        .into_values()
+        .filter(|members| members.len() >= NUMBERED_FAMILY_MIN)
+        .collect();
+    kept.sort_by_key(|members| members[0]);
+    kept
 }
 
 /// Stem of one column: its words without the key of its family, the format tokens (except the first
@@ -316,6 +338,26 @@ mod tests {
         assert_eq!(got.stems[0], ["item"]);
         assert_eq!(got.stems[0], got.stems[1]);
         assert_eq!(got.stems[1], got.stems[2]);
+    }
+
+    #[test]
+    fn columns_that_differ_only_by_a_number_form_a_numbered_family() {
+        let mut names: Vec<String> = (1..=8).map(|i| format!("strIngredient{i}")).collect();
+        names.extend((1..=9).map(|i| format!("strMeasure{i}")));
+        names.extend(["idMeal".to_string(), "strMeal".into(), "strTags".into()]);
+        names.extend((1..=7).map(|i| format!("POP{}", 1950 + i * 5))); // seven only: below the minimum
+        let got = numbered_families(&names);
+        assert_eq!(
+            got,
+            [(0..8).collect::<Vec<_>>(), (8..17).collect::<Vec<_>>()]
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_only_a_number_or_has_no_number_is_not_numbered() {
+        let mut names: Vec<String> = (0..10).map(|i| format!("{}", 2000 + i)).collect();
+        names.extend((0..10).map(|i| format!("plain{}", char::from(b'a' + i))));
+        assert!(numbered_families(&names).is_empty());
     }
 
     #[test]

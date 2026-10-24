@@ -13,7 +13,6 @@
 //! - fn `ValueProfile::new` — profil vide pour un nombre de colonnes et un pas de sous-échantillon des rangs.
 //! - fn `ValueProfile::observe_row` — ajoute une ligne : la valeur de chaque colonne, dans l'ordre.
 //! - fn `ValueProfile::columns` — nombre de colonnes.
-//! - fn `ValueProfile::rows` — nombre de lignes observées.
 //! - fn `ValueProfile::nature` — nature d'une colonne.
 //! - fn `ValueProfile::vocabulary` — valeurs distinctes d'une colonne texte, si elles tiennent dans la borne.
 //! - fn `ValueProfile::numbers` — résumé des nombres d'une colonne.
@@ -34,7 +33,6 @@ use serde_json::Value;
 use super::sample::is_present;
 
 /// Rows kept for the rank correlation.
-#[allow(dead_code)] // shortcut: the binary re-includes `schema` and nothing calls this until the proposal command (T1e); drop then.
 pub const RANK_SAMPLE: usize = 2_000;
 /// Strings longer than this (bytes) are free text, not vocabulary.
 const MAX_STRING_LEN: usize = 128;
@@ -47,7 +45,6 @@ const MIN_CELLS: usize = 20;
 
 /// What a column holds, judged on its non-empty cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // shortcut: see `RANK_SAMPLE`
 pub enum Nature {
     /// At least 90 % strings.
     Text,
@@ -59,7 +56,6 @@ pub enum Nature {
 
 /// Range and shape of the numbers of a column.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)] // shortcut: see `RANK_SAMPLE`
 pub struct NumberSummary {
     pub min: f64,
     pub max: f64,
@@ -71,7 +67,6 @@ pub struct NumberSummary {
 
 /// The sampled values of every column of a table.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // shortcut: see `RANK_SAMPLE`
 pub struct ValueProfile {
     columns: Vec<ColumnValues>,
     rank_step: usize,
@@ -154,7 +149,6 @@ impl ColumnValues {
     }
 }
 
-#[allow(dead_code)] // shortcut: see `RANK_SAMPLE`
 impl ValueProfile {
     /// Empty profile of `columns` columns; every `rank_step`-th row feeds the rank sample.
     pub fn new(columns: usize, rank_step: usize) -> Self {
@@ -178,11 +172,6 @@ impl ValueProfile {
     /// Number of columns.
     pub const fn columns(&self) -> usize {
         self.columns.len()
-    }
-
-    /// Number of rows observed.
-    pub const fn rows(&self) -> usize {
-        self.rows
     }
 
     /// Text, numeric or other, judged on the non-empty cells.
@@ -361,7 +350,6 @@ mod tests {
         assert_eq!(ranked.len(), 4, "rows 0, 3, 6, 9");
         assert_eq!((ranked[0], ranked[2], ranked[3]), (0.0, 6.0, 9.0));
         assert!(ranked[1].is_nan(), "row 3 is a string");
-        assert_eq!(p.rows(), 10);
     }
 
     #[test]
@@ -369,7 +357,7 @@ mod tests {
         let mut p = ValueProfile::new(3, 1);
         p.observe_row([Some(&json!(1))]);
         p.observe_row([Some(&json!(2)), Some(&json!(3)), Some(&json!(4))]);
-        assert_eq!((p.columns(), p.rows()), (3, 2));
+        assert_eq!(p.columns(), 3);
         assert_eq!(p.ranked(2).len(), 2);
         assert!(p.ranked(2)[0].is_nan() && (p.ranked(2)[1] - 4.0).abs() < 1e-12);
     }

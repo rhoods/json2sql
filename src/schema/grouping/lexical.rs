@@ -12,6 +12,8 @@
 //! - struct `Sparse` — vecteur creux de trigrammes pondérés, normalisé.
 //! - struct `Merge` — une fusion du dendrogramme (similarité, groupe conservé, groupe absorbé).
 //! - fn `lexical_groups` — groupes de colonnes (indices) à partir des radicaux : passe 1, puis colonnes seules.
+//! - fn `group_cohesion` — similarité moyenne entre les colonnes de chaque groupe, sous les poids de toute la table.
+//! - fn `mean_similarity` — similarité moyenne des paires d'une liste de colonnes.
 //! - fn `cluster` — regroupe une liste de radicaux : vecteurs, similarités, liaison moyenne, coupe.
 //! - fn `trigrams` — trigrammes de caractères d'un mot entouré de `#`.
 //! - fn `term_counts` — trigrammes d'un radical avec leur nombre d'occurrences, dans l'ordre d'apparition.
@@ -68,7 +70,6 @@ struct Merge {
 }
 
 /// Groups of column indices (into `stems`), each sorted, the groups sorted by their first member.
-#[allow(dead_code)] // shortcut: the binary re-includes `schema` and nothing calls this until the proposal command (T1e); drop then.
 pub fn lexical_groups(stems: &[Vec<String>], params: &LexicalParams) -> Result<Vec<Vec<usize>>> {
     if stems.len() > MAX_COLUMNS {
         return Err(J2sError::InvalidInput(format!(
@@ -86,6 +87,34 @@ pub fn lexical_groups(stems: &[Vec<String>], params: &LexicalParams) -> Result<V
     }
     groups.sort_by_key(|g| g[0]);
     Ok(groups)
+}
+
+/// Mean pairwise cosine similarity inside each group of column indices, with the trigram weights of the whole
+/// table (so the groups of the second pass are scored on the same scale, and may fall below the cut).
+pub fn group_cohesion(stems: &[Vec<String>], groups: &[Vec<usize>]) -> Vec<f64> {
+    let all: Vec<&[String]> = stems.iter().map(Vec::as_slice).collect();
+    let vectors = tfidf_vectors(&all);
+    groups
+        .iter()
+        .map(|members| mean_similarity(&vectors, members))
+        .collect()
+}
+
+/// Mean cosine over the pairs of `members`; 0 below two members.
+#[allow(clippy::cast_precision_loss)] // pair counts are far below 2^52
+fn mean_similarity(vectors: &[Sparse], members: &[usize]) -> f64 {
+    let (mut total, mut pairs) = (0.0, 0_usize);
+    for (i, &a) in members.iter().enumerate() {
+        for &b in &members[i + 1..] {
+            total += dot(&vectors[a], &vectors[b]);
+            pairs += 1;
+        }
+    }
+    if pairs == 0 {
+        0.0
+    } else {
+        total / pairs as f64
+    }
 }
 
 /// Clusters `stems` and keeps the groups of at least `min_size` columns (never fewer than two).
@@ -308,6 +337,30 @@ mod tests {
             "qqq",
             "www",
         ])
+    }
+
+    #[test]
+    fn cohesion_is_the_mean_similarity_inside_a_group() {
+        let s = stems(&["kiwi_red", "kiwi_red", "zulu_aaa", "zulu_bbb"]);
+        let got = group_cohesion(&s, &[vec![0, 1], vec![2, 3], vec![0, 2]]);
+        assert!((got[0] - 1.0).abs() < EPS, "identical stems: {}", got[0]);
+        assert!(
+            got[1] > 0.2 && got[1] < 1.0,
+            "a shared first word, different second words: {}",
+            got[1]
+        );
+        assert!(got[2].abs() < EPS, "no trigram in common: {}", got[2]);
+    }
+
+    #[test]
+    fn the_groups_found_by_the_first_pass_are_at_least_as_cohesive_as_the_cut() {
+        let s = two_themes();
+        let params = LexicalParams::default();
+        let groups = lexical_groups(&s, &params).unwrap();
+        assert!(
+            group_cohesion(&s, &groups).iter().all(|&c| c >= params.cut),
+            "{groups:?}"
+        );
     }
 
     #[test]

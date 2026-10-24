@@ -24,7 +24,6 @@ pub const MIN_ABS_RHO: f64 = 0.9;
 
 /// What the numbers of a column look like, when it is specific enough to hint at a theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // shortcut: the binary re-includes `schema` and nothing calls this until the proposal command (T1e); drop then.
 pub enum Shape {
     /// Integers from 1800 to 2100.
     Year,
@@ -36,7 +35,6 @@ pub enum Shape {
 
 /// Two numeric columns whose ranks move together.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)] // shortcut: see `Shape`
 pub struct RankPair {
     /// Index of the first column (smaller than `b`).
     pub a: usize,
@@ -48,7 +46,6 @@ pub struct RankPair {
 }
 
 /// The precise shape of a numeric column that varies, `None` for any other column.
-#[allow(dead_code)] // shortcut: see `Shape`
 pub fn shape(profile: &ValueProfile, column: usize) -> Option<Shape> {
     if profile.nature(column) != Nature::Numeric {
         return None;
@@ -71,7 +68,6 @@ pub fn shape(profile: &ValueProfile, column: usize) -> Option<Shape> {
 
 /// Every pair of numeric columns with at least [`MIN_COMMON_ROWS`] common numbers and a rank correlation of at
 /// least [`MIN_ABS_RHO`] in absolute value, ordered by `(a, b)`.
-#[allow(dead_code)] // shortcut: see `Shape`
 pub fn rank_correlations(profile: &ValueProfile) -> Vec<RankPair> {
     let columns: Vec<usize> = (0..profile.columns())
         .filter(|&c| profile.nature(c) == Nature::Numeric)
