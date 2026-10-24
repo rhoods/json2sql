@@ -119,8 +119,9 @@ async fn test_nested_fk_parallel_tune_wal() {
         }
         assert_eq!(never_vacuumed, 0, "every imported table must be vacuumed by the import");
 
-        // #68: with no FK before the load, child tables are loaded with COPY FREEZE, the root is
-        // not. A plain VACUUM never freezes rows this young, so all-frozen pages prove COPY FREEZE.
+        // #68, #77: with no FK before the load, child tables are loaded with COPY FREEZE, the root
+        // only under wal_level = minimal. A plain VACUUM never freezes rows this young, so
+        // all-frozen pages prove COPY FREEZE.
         client.batch_execute("CREATE EXTENSION IF NOT EXISTS pg_visibility").await.expect("pg_visibility");
         let frozen_pages = |table: &'static str| {
             let (client, schema) = (&client, &schema);
@@ -134,10 +135,12 @@ async fn test_nested_fk_parallel_tune_wal() {
                 (row.get::<_, i64>(0), row.get::<_, i64>(1))
             }
         };
-        let (child_frozen, child_pages) = frozen_pages("orders_items").await;
-        assert!(child_pages > 0 && child_frozen == child_pages, "child loaded with COPY FREEZE: {child_frozen}/{child_pages} pages frozen");
-        let (root_frozen, _) = frozen_pages("orders").await;
-        assert_eq!(root_frozen, 0, "the root (several connections) is loaded without FREEZE");
+        let wal_level: String = client.query_one("SHOW wal_level", &[]).await.expect("SHOW").get(0);
+        for (table, freeze) in [("orders_items", true), ("orders", wal_level == "minimal")] {
+            let (frozen, pages) = frozen_pages(table).await;
+            assert!(pages > 0 && (frozen == pages) == freeze,
+                "{table}: {frozen}/{pages} pages frozen, COPY FREEZE expected: {freeze} (wal_level = {wal_level})");
+        }
     })
     .await;
 }

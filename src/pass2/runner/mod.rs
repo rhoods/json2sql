@@ -14,11 +14,11 @@
 //! - fn `find_root_schema` — résout le schéma racine.
 //! - fn `schema_parent_map` — table enfant → table parente (ordre du drain final).
 //! - fn `build_copy_sql_map` — construit les requêtes COPY par table.
-//! - fn `build_freeze_targets` — cibles `COPY FREEZE` des tables enfants (nom qualifié + requête).
+//! - fn `build_freeze_targets` — cibles `COPY FREEZE` : tables enfants, et racine en `wal_level = minimal` (nom qualifié + requête).
 //! - fn `run` — `run_interruptible` sans interruption.
 //! - fn `run_interruptible` — pipeline complet, interruptible : réglages PG (autovacuum, `--tune-wal`) autour de `load_and_constrain`, remis en place dans tous les cas.
 //! - fn `put_back_autovacuum` — réactive l'autovacuum après les contraintes (ou un échec) et efface son entrée du marqueur.
-//! - fn `load_and_constrain` — dispatch → workers → flusher (`COPY FREEZE` des tables enfants si possible) → COMMIT → `VACUUM (ANALYZE)` → contraintes.
+//! - fn `load_and_constrain` — dispatch → workers → flusher (`COPY FREEZE` si possible) → COMMIT → `VACUUM (ANALYZE)` → contraintes.
 //! - fn `build_pass2_result` — assemble le résultat final.
 
 use std::collections::HashMap;
@@ -100,12 +100,16 @@ fn build_copy_sql_map(schemas: &[TableSchema], pg_schema: &str) -> HashMap<Strin
         .collect()
 }
 
-/// `COPY FREEZE` target of every child table (#68). Root tables are never FREEZE: they carry most
-/// of the volume and need several connections at once.
-fn build_freeze_targets(schemas: &[TableSchema], pg_schema: &str) -> HashMap<String, flusher::FreezeTarget> {
+/// `COPY FREEZE` target of every child table (#68), and of the root tables when `with_root`
+/// (`wal_level = minimal`, #77). Each target is loaded on a single connection, the one that
+/// truncates it: under any other `wal_level`, the root's WAL caps that connection below the
+/// multi-connection plain load (OFF 70 GB, replica: load +10 min).
+/// shortcut: a non-empty root (append into a schema without FK) is pinned to one connection with a
+/// plain COPY; leave non-empty roots out of the targets if appending big files matters.
+fn build_freeze_targets(schemas: &[TableSchema], pg_schema: &str, with_root: bool) -> HashMap<String, flusher::FreezeTarget> {
     use crate::db::ddl::quote_ident;
     schemas.iter()
-        .filter(|s| !s.is_root())
+        .filter(|s| with_root || !s.is_root())
         .map(|s| (s.name.clone(), flusher::FreezeTarget {
             table: format!("{}.{}", quote_ident(pg_schema), quote_ident(&s.name)),
             copy_sql: crate::db::copy_sink::copy_sql(s, pg_schema, true),
@@ -246,15 +250,18 @@ async fn load_and_constrain(
     }
     let (anomaly_tx, anomaly_writer_handle) = dispatch::spawn_anomaly_writer(config.anomaly_dir.clone());
     dispatch::preflight_warn_nonempty(schemas, client, &config.pg_schema, progress_tx.as_ref()).await;
-    // Child tables loaded with COPY FREEZE when no FK can trip over the load transactions (#68).
-    let freeze_sql = dispatch::freeze_load_allowed(schemas, client, &config.pg_schema).await
-        .then(|| build_freeze_targets(schemas, &config.pg_schema));
-    let freeze = freeze_sql.is_some();
-    if freeze {
-        crate::db::pg_tuning::log(progress_tx.as_ref(),
-            "Child tables loaded with COPY FREEZE: rows are committed at the end of the load.".to_string());
-        crate::db::pg_tuning::warn_wal_level(client, progress_tx.as_ref()).await;
-    }
+    // Child tables loaded with COPY FREEZE when no FK can trip over the load transactions (#68), the
+    // root too under wal_level = minimal (#77).
+    let freeze = dispatch::freeze_load_allowed(schemas, client, &config.pg_schema).await;
+    let freeze_sql = if freeze {
+        let minimal = crate::db::pg_tuning::warn_wal_level(client, progress_tx.as_ref()).await;
+        crate::db::pg_tuning::log(progress_tx.as_ref(), format!(
+            "{} loaded with COPY FREEZE: rows are committed at the end of the load.",
+            if minimal { "Tables, root included," } else { "Child tables" }));
+        Some(build_freeze_targets(schemas, &config.pg_schema, minimal))
+    } else {
+        None
+    };
 
     let cancel = CancellationToken::new();
     let _cancel_guard = cancel.clone().drop_guard();
@@ -627,6 +634,20 @@ mod tests {
         assert!(map.contains_key("orders"), "orders must be in the map");
         assert!(map.contains_key("items"), "items must be in the map");
         assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn build_freeze_targets_takes_the_root_only_when_asked() {
+        let mut child = make_schema_with_rows("orders_items", 0);
+        child.parent_table = Some("orders".to_string());
+        let schemas = vec![make_schema_with_rows("orders", 0), child];
+        let names = |with_root| {
+            let mut n: Vec<String> = super::build_freeze_targets(&schemas, "public", with_root).into_keys().collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names(false), ["orders_items"], "root left to several connections outside wal_level = minimal");
+        assert_eq!(names(true), ["orders", "orders_items"]);
     }
 
     #[test]

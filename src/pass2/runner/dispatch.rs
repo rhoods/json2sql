@@ -3,7 +3,7 @@
 //! Fonctions :
 //! - fn `spawn_anomaly_writer` — spawns the anomaly-writing task.
 //! - fn `preflight_warn_nonempty` — warns if root tables already contain rows.
-//! - fn `freeze_load_allowed` — whether child tables can be loaded with `COPY FREEZE` (no FK on the targets).
+//! - fn `freeze_load_allowed` — whether the tables can be loaded with `COPY FREEZE` (no FK on the targets).
 //! - fn `finalize_dispatch` — final progress bar update at the end of dispatch.
 //! - fn `emit_completion_events` — sends the end-of-run events.
 //! - fn `log_constraint_warnings` — logs unapplied FK constraint warnings.
@@ -75,10 +75,10 @@ pub(super) async fn preflight_warn_nonempty(
     }
 }
 
-/// Whether the load can use `COPY FREEZE` on child tables (#68): no FK from or to the target tables.
+/// Whether the load can use `COPY FREEZE` on its tables (#68, #77): no FK from or to the target tables.
 /// A FREEZE load keeps one transaction per connection for the whole load, so rows loaded by one
 /// connection stay invisible to the others until the end (an existing FK would reject them), and
-/// it truncates empty child tables (refused when an FK references them). Any doubt → plain load.
+/// it truncates empty tables (refused when an FK references them). Any doubt → plain load.
 pub(super) async fn freeze_load_allowed(
     schemas: &[crate::schema::table_schema::TableSchema],
     client: &Client,

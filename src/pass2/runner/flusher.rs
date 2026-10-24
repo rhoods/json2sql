@@ -4,14 +4,14 @@
 //! Fonctions :
 //! - enum `FlushMode` — scheduling mode: normal, paused (RAM pressure) or final drain.
 //! - struct `CopyOutcome` — result of one COPY task, carrying its connection (and pool slot) back to the pool.
-//! - struct `FreezeTarget` — child table loadable with `COPY FREEZE`: quoted name + `COPY … FREEZE` statement.
+//! - struct `FreezeTarget` — table loadable with `COPY FREEZE`: quoted name + `COPY … FREEZE` statement.
 //! - fn `next_flush_candidate` — picks the next table to COPY for the current mode and connection.
 //! - fn `ram_used_ratio` — used RAM / total RAM ratio.
 //! - fn `format_flusher_pause_log` — formats the flusher pause log (high RAM pressure).
 //! - fn `format_flusher_resume_log` — formats the flusher resume log (low RAM pressure).
 //! - fn `format_copy_start_log` — formats the COPY start log for a table.
 //! - fn `format_copy_done_log` — formats the COPY done log for a table.
-//! - fn `claim_for_freeze` — locks a child table in the load transaction and truncates it if empty.
+//! - fn `claim_for_freeze` — locks a table in the load transaction and truncates it if empty.
 //! - fn `copy_task` — one COPY, claiming the table first on its first FREEZE COPY.
 //! - fn `open_pool` — opens the flusher's PG connections (`synchronous_commit = off`, load transaction for a FREEZE load).
 //! - fn `run_flusher` — main loop: buffers worker batches and runs COPYs in parallel.
@@ -41,7 +41,7 @@ enum FlushMode {
 }
 
 /// Result of one COPY task. The client goes back to the idle pool (slot `conn_id`) once joined.
-/// `result` carries the claim outcome of a FREEZE child table's first COPY (`Some(truncated)`).
+/// `result` carries the claim outcome of a FREEZE table's first COPY (`Some(truncated)`).
 struct CopyOutcome {
     table_id: String,
     conn_id: usize,
@@ -52,7 +52,7 @@ struct CopyOutcome {
     result: Result<Option<bool>>,
 }
 
-/// A child table loadable with `COPY FREEZE` (#68): `table` is its quoted qualified name (to lock,
+/// A table loadable with `COPY FREEZE` (#68, #77): `table` is its quoted qualified name (to lock,
 /// check and truncate it), `copy_sql` its `COPY … FREEZE` statement.
 pub(super) struct FreezeTarget {
     pub(super) table: String,
@@ -144,7 +144,7 @@ async fn open_pool(pg_url: &str, size: usize, freeze: bool) -> Result<Vec<(usize
     })).await
 }
 
-/// First COPY of a child table on its owner connection, inside the load transaction: locks the
+/// First COPY of a table on its owner connection, inside the load transaction: locks the
 /// table, then truncates it if it is empty, which makes `COPY FREEZE` valid in this transaction.
 /// A table that already has rows is never truncated: returns `false`, and it gets a plain COPY.
 async fn claim_for_freeze(client: &Client, table: &str) -> Result<bool> {
@@ -160,7 +160,7 @@ async fn claim_for_freeze(client: &Client, table: &str) -> Result<bool> {
     Ok(empty)
 }
 
-/// One COPY task. `claim` (`FreezeTarget` of a child table's first COPY in a FREEZE load) claims
+/// One COPY task. `claim` (`FreezeTarget` of a table's first COPY in a FREEZE load) claims
 /// the table first and switches to `COPY FREEZE` when it could be truncated. Returns the claim
 /// outcome, if any.
 async fn copy_task(client: &Client, buf: bytes::Bytes, copy_sql: &str, claim: Option<(String, String)>) -> Result<Option<bool>> {
@@ -188,11 +188,12 @@ async fn copy_task(client: &Client, buf: bytes::Bytes, copy_sql: &str, claim: Op
 /// and returns `Err`. Returns total row count per table after draining all remaining buffers,
 /// and the pool's connections.
 ///
-/// FREEZE load (`freeze_sql` is `Some`, #68): every connection keeps one transaction for the whole
-/// load. A child table (key of `freeze_sql`) belongs to the connection that COPYs it first: that
+/// FREEZE load (`freeze_sql` is `Some`, #68, #77): every connection keeps one transaction for the
+/// whole load. A table (key of `freeze_sql`) belongs to the connection that COPYs it first: that
 /// connection claims it (`claim_for_freeze`) and loads every batch of it, with `COPY FREEZE` once
-/// truncated. Root tables keep using any connection. Nothing is committed here: the caller commits
-/// the returned connections once it knows no worker failed; dropping them rolls the load back.
+/// truncated. Other tables (the root, unless `wal_level = minimal`) keep using any connection.
+/// Nothing is committed here: the caller commits the returned connections once it knows no worker
+/// failed; dropping them rolls the load back.
 #[allow(clippy::too_many_lines)] // tokio::select! event loop over rx; do not split — would move rx across fn boundaries
 #[allow(clippy::too_many_arguments)] // each param is distinct flusher config/state, not groupable without an artificial struct
 pub(super) async fn run_flusher(
@@ -212,7 +213,7 @@ pub(super) async fn run_flusher(
 ) -> Result<(HashMap<String, u64>, Vec<Client>)> {
     let mut idle = open_pool(&pg_url, parallel.max(1), freeze_sql.is_some()).await?;
     let copy_sql_map = Arc::new(copy_sql_map);
-    // FREEZE load: child table → owner slot, bytes COPYed into its pinned tables per slot (new
+    // FREEZE load: table → owner slot, bytes COPYed into its pinned tables per slot (new
     // tables go to the lightest idle slot), and the tables their owner managed to truncate.
     let mut owner: HashMap<String, usize> = HashMap::new();
     let mut owned_bytes: Vec<u64> = vec![0; idle.len()];
@@ -257,7 +258,7 @@ pub(super) async fn run_flusher(
         } else {
             FlushMode::Normal
         };
-        // Lightest slots pick first (`pop` takes the last), so new child tables spread over the pool.
+        // Lightest slots pick first (`pop` takes the last), so new tables spread over the pool.
         idle.sort_by_key(|(id, _)| std::cmp::Reverse(owned_bytes[*id]));
         let mut no_work: Vec<(usize, Client)> = Vec::new();
         while let Some((conn_id, client)) = idle.pop() {
@@ -488,13 +489,15 @@ mod tests {
 
     /// Creates a scratch schema with tables `a`, `b` (a = parent of b), runs `run_flusher` with
     /// 3 connections over `batches`, then drops the schema. `bad` COPYs into a missing table.
-    /// `freeze`: FREEZE load (`b` is the FREEZE child), committed on success like the runner does.
+    /// `freeze`: FREEZE targets of a FREEZE load, committed on success like the runner does —
+    /// `["b"]` as under `replica` (children only), `["a", "b"]` as under `wal_level = minimal`.
+    /// Empty: plain load.
     /// `prefill_b`: `b` already holds one row before the load.
     #[allow(clippy::too_many_lines)] // linear setup → run → count → teardown
     async fn run_flusher_on_scratch_schema(
         batches: &[(&str, &str)],
         threshold: u64,
-        freeze: bool,
+        freeze: &[&str],
         prefill_b: bool,
     ) -> Option<(crate::error::Result<HashMap<String, u64>>, bool, bool, i64)> {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -511,10 +514,10 @@ mod tests {
         if prefill_b {
             admin.batch_execute(&format!("INSERT INTO {schema}.b VALUES (42)")).await.expect("prefill b");
         }
-        let freeze_sql = freeze.then(|| HashMap::from([("b".to_string(), super::FreezeTarget {
-            table: format!("{schema}.b"),
-            copy_sql: format!("COPY {schema}.b (n) FROM STDIN (FREEZE)"),
-        })]));
+        let freeze_sql = (!freeze.is_empty()).then(|| freeze.iter().map(|t| (t.to_string(), super::FreezeTarget {
+            table: format!("{schema}.{t}"),
+            copy_sql: format!("COPY {schema}.{t} (n) FROM STDIN (FREEZE)"),
+        })).collect::<HashMap<_, _>>());
 
         let copy_sql_map: HashMap<String, String> = ["a", "b", "bad"].iter()
             .map(|t| (t.to_string(), format!("COPY {schema}.{} (n) FROM STDIN", if *t == "bad" { "missing" } else { t })))
@@ -533,7 +536,7 @@ mod tests {
         )).await.expect("run_flusher must not hang");
         let result = match result {
             Ok((counts, clients)) => {
-                for c in clients.iter().filter(|_| freeze) {
+                for c in clients.iter().filter(|_| !freeze.is_empty()) {
                     c.batch_execute("COMMIT").await.expect("commit the FREEZE load");
                 }
                 Ok(counts)
@@ -549,7 +552,7 @@ mod tests {
     #[tokio::test]
     async fn run_flusher_parallel_drain_copies_every_table() {
         let Some((result, errored, paused, rows)) =
-            run_flusher_on_scratch_schema(&[("a", "1\n"), ("b", "2\n"), ("a", "3\n")], 1 << 30, false, false).await else { return };
+            run_flusher_on_scratch_schema(&[("a", "1\n"), ("b", "2\n"), ("a", "3\n")], 1 << 30, &[], false).await else { return };
         let counts = result.expect("drain must succeed");
         assert_eq!(counts.get("a"), Some(&2));
         assert_eq!(counts.get("b"), Some(&1));
@@ -562,7 +565,7 @@ mod tests {
         // threshold = 1: every batch triggers a Normal-mode COPY while rx is still open, so a
         // table regularly receives data while its own COPY is in flight.
         let batches: Vec<(&str, &str)> = (0..20).map(|i| (if i % 3 == 0 { "b" } else { "a" }, "1\n")).collect();
-        let Some((result, errored, paused, rows)) = run_flusher_on_scratch_schema(&batches, 1, false, false).await else { return };
+        let Some((result, errored, paused, rows)) = run_flusher_on_scratch_schema(&batches, 1, &[], false).await else { return };
         let counts = result.expect("streaming flushes must succeed");
         assert_eq!(counts.get("a"), Some(&13));
         assert_eq!(counts.get("b"), Some(&7));
@@ -573,7 +576,7 @@ mod tests {
     #[tokio::test]
     async fn run_flusher_copy_error_returns_err_and_releases_workers() {
         let Some((result, errored, paused, _)) =
-            run_flusher_on_scratch_schema(&[("a", "1\n"), ("bad", "2\n"), ("b", "3\n")], 1 << 30, false, false).await else { return };
+            run_flusher_on_scratch_schema(&[("a", "1\n"), ("bad", "2\n"), ("b", "3\n")], 1 << 30, &[], false).await else { return };
         let err = result.expect_err("COPY into a missing table must fail the flusher");
         assert!(err.to_string().contains("missing"), "error must carry the PG cause: {err}");
         assert!(errored, "error_flag must be set so workers stop");
@@ -582,20 +585,23 @@ mod tests {
 
     #[tokio::test]
     async fn run_flusher_freeze_load_commits_every_row() {
-        // threshold = 1: `b` gets many COPYs while `a` (root) spreads over the connections.
+        // threshold = 1: many COPYs per table. `["b"]`: the root `a` spreads over the connections
+        // (replica); `["a", "b"]`: each table stays on the connection that claimed it (minimal).
         let batches: Vec<(&str, &str)> = (0..20).map(|i| (if i % 3 == 0 { "b" } else { "a" }, "1\n")).collect();
-        let Some((result, errored, _, rows)) = run_flusher_on_scratch_schema(&batches, 1, true, false).await else { return };
-        let counts = result.expect("FREEZE load must succeed");
-        assert_eq!(counts.get("a"), Some(&13));
-        assert_eq!(counts.get("b"), Some(&7));
-        assert_eq!(rows, 20, "every row must be committed exactly once");
-        assert!(!errored);
+        for targets in [&["b"][..], &["a", "b"]] {
+            let Some((result, errored, _, rows)) = run_flusher_on_scratch_schema(&batches, 1, targets, false).await else { return };
+            let counts = result.expect("FREEZE load must succeed");
+            assert_eq!(counts.get("a"), Some(&13), "{targets:?}");
+            assert_eq!(counts.get("b"), Some(&7), "{targets:?}");
+            assert_eq!(rows, 20, "every row must be committed exactly once ({targets:?})");
+            assert!(!errored);
+        }
     }
 
     #[tokio::test]
     async fn run_flusher_freeze_never_truncates_a_table_with_rows() {
         let Some((result, _, _, rows)) =
-            run_flusher_on_scratch_schema(&[("a", "1\n"), ("b", "2\n"), ("b", "3\n")], 1 << 30, true, true).await else { return };
+            run_flusher_on_scratch_schema(&[("a", "1\n"), ("b", "2\n"), ("b", "3\n")], 1 << 30, &["a", "b"], true).await else { return };
         result.expect("a non-empty child falls back to a plain COPY");
         assert_eq!(rows, 4, "the row already in `b` must survive next to the 3 loaded ones");
     }
@@ -603,7 +609,7 @@ mod tests {
     #[tokio::test]
     async fn run_flusher_freeze_error_rolls_the_whole_load_back() {
         let Some((result, errored, _, rows)) =
-            run_flusher_on_scratch_schema(&[("a", "1\n"), ("b", "2\n"), ("bad", "3\n")], 1, true, false).await else { return };
+            run_flusher_on_scratch_schema(&[("a", "1\n"), ("b", "2\n"), ("bad", "3\n")], 1, &["a", "b"], false).await else { return };
         result.expect_err("COPY into a missing table must fail the flusher");
         assert!(errored);
         assert_eq!(rows, 0, "a failed FREEZE load must leave nothing behind");
