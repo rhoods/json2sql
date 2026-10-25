@@ -238,7 +238,7 @@ mod tests {
             [1.0, 2.5, 2.5, 4.0]
         );
         assert_eq!(average_ranks(&[f64::NAN, 5.0, f64::NAN]), [1.5, 3.0, 1.5]);
-        assert!(average_ranks(&[]).is_empty());
+        assert_eq!(average_ranks(&[]).len(), 0);
     }
 
     #[test]

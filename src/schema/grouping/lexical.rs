@@ -265,7 +265,7 @@ fn average_linkage(mut sim: Vec<f64>, n: usize, stop_below: f64) -> Vec<Merge> {
 }
 
 /// Root of `x` in the merge forest, flattening the path on the way.
-fn find(parent: &mut [usize], x: usize) -> usize {
+const fn find(parent: &mut [usize], x: usize) -> usize {
     let mut root = x;
     while parent[root] != root {
         root = parent[root];
@@ -367,7 +367,7 @@ mod tests {
     fn trigrams_pad_the_token_with_hashes() {
         assert_eq!(trigrams("pop"), ["#po", "pop", "op#"]);
         assert_eq!(trigrams("a"), ["#a#"]);
-        assert!(trigrams("").is_empty());
+        assert_eq!(trigrams("").len(), 0);
     }
 
     #[test]
@@ -396,7 +396,7 @@ mod tests {
     fn an_empty_stem_has_an_empty_vector() {
         let s = vec![vec![], vec!["kiwi".to_string()]];
         let v = tfidf_vectors(&refs(&s));
-        assert!(v[0].terms.is_empty());
+        assert_eq!(v[0].terms.len(), 0);
         assert!(dot(&v[0], &v[1]).abs() < EPS);
     }
 
@@ -446,8 +446,8 @@ mod tests {
 
     #[test]
     fn a_group_always_has_at_least_two_columns() {
-        assert!(groups_from_merges(&[], 3, 0).is_empty());
-        assert!(groups_from_merges(&[], 3, 1).is_empty());
+        assert_eq!(groups_from_merges(&[], 3, 0).len(), 0);
+        assert_eq!(groups_from_merges(&[], 3, 1).len(), 0);
     }
 
     #[test]
@@ -493,7 +493,7 @@ mod tests {
         );
         let merges = average_linkage(m, 4, 0.3);
         assert_eq!(groups_from_merges(&merges, 4, 2), [vec![0, 1], vec![2, 3]]);
-        assert!(groups_from_merges(&merges, 4, 3).is_empty());
+        assert_eq!(groups_from_merges(&merges, 4, 3).len(), 0);
     }
 
     #[test]
@@ -552,13 +552,10 @@ mod tests {
 
     #[test]
     fn fewer_than_two_columns_give_no_group() {
-        assert!(lexical_groups(&[], &LexicalParams::default())
-            .unwrap()
-            .is_empty());
-        assert!(
-            lexical_groups(&stems(&["kiwi_red"]), &LexicalParams::default())
-                .unwrap()
-                .is_empty()
+        assert_eq!(lexical_groups(&[], &LexicalParams::default()).unwrap().len(), 0);
+        assert_eq!(
+            lexical_groups(&stems(&["kiwi_red"]), &LexicalParams::default()).unwrap().len(),
+            0
         );
     }
 

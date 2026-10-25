@@ -1596,7 +1596,7 @@ mod tests {
         apply_overrides_complete(&mut schemas, &normalize).unwrap();
         let names: Vec<&str> = schemas[0].columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["j2s_id", "key_id", "q1"], "only the real child gives columns");
-        assert!(schemas[0].column_groups.is_empty());
+        assert_eq!(schemas[0].column_groups.len(), 0);
     }
 
     #[test]
@@ -1608,7 +1608,7 @@ mod tests {
         let pivot = HashMap::from([("items".to_string(), UserOverride::Pivot)]);
         apply_user_overrides(&mut schemas, &pivot);
         assert_eq!(schemas.len(), 1, "a Pivot parent has no group tables");
-        assert!(schemas[0].column_groups.is_empty());
+        assert_eq!(schemas[0].column_groups.len(), 0);
     }
 
     #[test]

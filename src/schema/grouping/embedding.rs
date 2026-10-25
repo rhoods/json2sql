@@ -324,8 +324,10 @@ fn read_floats(file: &mut File, bytes: usize) -> std::io::Result<Vec<f32>> {
         file.read_exact(chunk)?;
         table.extend(
             chunk
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b)),
         );
         left -= chunk.len();
     }
@@ -716,7 +718,7 @@ mod tests {
         let text = folder(&tok, &[&5_u64.to_le_bytes()[..], b"not j"].concat());
         assert!(load_error(text.path()).contains("bad header"));
         let tiny = folder(&tok, b"abc");
-        assert!(!load_error(tiny.path()).is_empty());
+        assert_ne!(load_error(tiny.path()).len(), 0);
     }
 
     #[test]

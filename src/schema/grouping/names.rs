@@ -357,7 +357,7 @@ mod tests {
     fn a_name_that_is_only_a_number_or_has_no_number_is_not_numbered() {
         let mut names: Vec<String> = (0..10).map(|i| format!("{}", 2000 + i)).collect();
         names.extend((0..10).map(|i| format!("plain{}", char::from(b'a' + i))));
-        assert!(numbered_families(&names).is_empty());
+        assert_eq!(numbered_families(&names).len(), 0);
     }
 
     #[test]

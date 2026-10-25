@@ -478,7 +478,7 @@ fn split_off(schemas: &mut Vec<TableSchema>, parent_at: usize, name: String, col
 
 /// The name of the strategy of a table without its details: `Pivot`, `SiblingCollapse`...
 fn strategy_name(table: &TableSchema) -> String {
-    let debug = format!("{:?}", &*table.effective_strategy());
+    let debug = format!("{:?}", *table.effective_strategy());
     debug
         .split(['(', ' ', '{'])
         .next()
@@ -772,7 +772,7 @@ mod tests {
             }]
         );
         assert_eq!(schemas.len(), 1);
-        assert!(schemas[0].column_groups.is_empty());
+        assert_eq!(schemas[0].column_groups.len(), 0);
     }
 
     #[test]
@@ -911,7 +911,7 @@ mod tests {
             restored,
             ["j2s_id", "x1", "x2", "x3", "y1", "y2", "y3", "y4"]
         );
-        assert!(schemas[0].column_groups.is_empty());
+        assert_eq!(schemas[0].column_groups.len(), 0);
         assert_eq!(
             schemas[0].flatten_sources.get("x2").map(String::as_str),
             Some("nutrients")

@@ -196,7 +196,7 @@ mod tests {
     fn two_common_values_are_not_a_pair() {
         let a = words("a", 8);
         let b: Vec<String> = a.iter().take(2).cloned().chain(words("b", 6)).collect();
-        assert!(shared_value_pairs(&texts(&[a, b])).is_empty());
+        assert_eq!(shared_value_pairs(&texts(&[a, b])).len(), 0);
     }
 
     #[test]
@@ -221,7 +221,7 @@ mod tests {
         for row in &numeric {
             p.observe_row(row.iter().map(Some));
         }
-        assert!(shared_value_pairs(&p).is_empty());
+        assert_eq!(shared_value_pairs(&p).len(), 0);
     }
 
     #[test]
@@ -234,7 +234,7 @@ mod tests {
             words("b", 5),
         ]);
         let pairs = shared_value_pairs(&p);
-        assert!(!pairs.is_empty());
+        assert_ne!(pairs.len(), 0);
         assert!(pairs
             .windows(2)
             .all(|w| (w[0].a, w[0].b) < (w[1].a, w[1].b)));

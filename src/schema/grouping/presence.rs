@@ -281,7 +281,7 @@ mod tests {
         );
         // seven rows: strata of 2, 1, 2, 1, 1 rows
         assert_eq!(strata(&[0, 0, 0, 0, 0, 0, 0]), [0, 0, 1, 2, 2, 3, 4]);
-        assert!(strata(&[]).is_empty());
+        assert_eq!(strata(&[]).len(), 0);
     }
 
     #[test]
@@ -471,11 +471,11 @@ mod tests {
 
     #[test]
     fn no_rows_or_no_variation_give_an_empty_matrix() {
-        assert!(Presence::new(4).phi_matrix().informative().is_empty());
+        assert_eq!(Presence::new(4).phi_matrix().informative().len(), 0);
         let mut flat = Presence::new(2);
         for _ in 0..10 {
             flat.push_row([true, false]);
         }
-        assert!(flat.phi_matrix().informative().is_empty());
+        assert_eq!(flat.phi_matrix().informative().len(), 0);
     }
 }
