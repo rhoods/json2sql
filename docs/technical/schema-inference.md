@@ -110,7 +110,7 @@ Les colonnes tableau ne sont ni médiums ni rares : elles restent dans la table 
 
 Pour les tables larges non-racines dont les colonnes suivent un pattern `{base}_{suffixe}` (ex. `calcium_100g`, `calcium_unit`, `calcium_serving`), un pivot structuré est auto-détecté.
 
-> ⚠️ **Limite connue.** Une table qui prend cette stratégie ne conserve pas ses colonnes tableau : elles disparaissent du schéma et des données. Sur les 10 000 premières lignes d'OpenFoodFacts, aucune des tables concernées n'a de tableau.
+> ⚠️ **Limite connue.** Une table qui prend cette stratégie ne conserve pas ses colonnes tableau : elles disparaissent du schéma et des données. Sur OpenFoodFacts complet (70 Go), `nutriscore_2023_data` en était victime avant #84 (37 colonnes dont 2 tableaux, 3 tables filles perdues) ; elle y échappe désormais parce que les colonnes tableau ne comptent plus dans le ratio de stabilité (51 % au lieu de 49 %, seuil à 50 %). La décision reste fragile : #85.
 
 ### Algorithme
 
