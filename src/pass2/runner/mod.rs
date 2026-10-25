@@ -151,7 +151,6 @@ pub async fn run_interruptible(
     interrupt: impl std::future::Future<Output = ()>,
 ) -> Result<Pass2Result> {
     config::validate_run_params(config.parallel)?;
-    crate::schema::column_groups::reject_column_groups(schemas)?;
     let parallel = config.parallel.max(1);
     let ptx = progress_tx.as_ref();
     // Undo what an earlier, killed import left on this server, even without --tune-wal now.

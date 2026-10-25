@@ -62,7 +62,7 @@ Pass 2 : relecture du fichier pour insérer les données.
 | Fichier | Rôle |
 |---|---|
 | `runner/` | Pipeline diskless : `mod.rs` (`run()`), `dispatch.rs` (dispatcher round-robin), `worker.rs` (parse + `MemSink` par table), `flusher.rs` (COPY vers PG, pause sous pression mémoire), `config.rs` (`Pass2Config`) |
-| `insert.rs` | `insert_object()` — orchestrateur (~50 lignes). Construit les colonnes générées et délègue à `traversal.rs` selon la `WideStrategy` |
+| `insert.rs` | `insert_object()` — orchestrateur. Écrit la ligne de la table (`write_row_of`), puis la ligne 1:1 de chaque table de groupe de colonnes (`write_group_rows`, #78 : même `j2s_id` et même clé étrangère que la ligne d'origine, seulement si une colonne du groupe a une valeur au sens de `is_present`), puis délègue à `traversal.rs` selon la `WideStrategy` |
 | `traversal.rs` | Toutes les fonctions `insert_*` privées : traversal du graphe JSON selon les stratégies (`insert_pivot_object`, `insert_jsonb_object`, `insert_flatten`, `insert_array`…) |
 | `sink.rs` | `trait RowSink { write_row() }` — abstraction sur l'écriture de lignes. `MemSink` (dans `db/copy_sink.rs`) en est l'implémentation concrète |
 | `coercer.rs` | Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cible. Produit `Ok(CopyEscaped)`, `Null` ou `Anomaly` |
@@ -119,7 +119,7 @@ BFS cascade — détection des groupes de tables sœurs (*siblings*) et fusion (
 
 ### `src/schema/grouping/`
 
-Découpage thématique des tables larges (#78) : propose des groupes de colonnes qui deviendront des tables 1:1. Appelé par `--suggest-groups` (`pipeline::suggest_groups`). Le TOML `column_groups` qu'il produit n'est pas encore appliqué par l'import (T3a, T3b).
+Découpage thématique des tables larges (#78) : propose des groupes de colonnes qui deviendront des tables 1:1. Appelé par `--suggest-groups` (`pipeline::suggest_groups`). Le TOML `column_groups` qu'il produit s'applique avec `--schema-config` (`schema/column_groups.rs`) et Pass 2 écrit les tables de groupe (`pass2/insert.rs`).
 
 | Fichier | Rôle |
 |---|---|

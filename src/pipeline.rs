@@ -135,7 +135,6 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
         return Ok(());
     }
 
-    crate::schema::column_groups::reject_column_groups(&pass1.schemas)?;
     let db_url = cfg.db_url.as_deref().ok_or_else(|| {
         J2sError::InvalidInput(
             "No database URL provided. Use --db-url or set DATABASE_URL, or pass dry_run=true."
@@ -816,24 +815,6 @@ mod tests {
         let stats: Vec<(&str, &str)> =
             pass1.stats.iter().map(|s| (s.table_name.as_str(), s.column_name.as_str())).collect();
         assert_eq!(stats, [("items", "y1"), ("items_alpha", "x1")]);
-    }
-
-    #[test]
-    fn an_import_refuses_column_groups_until_pass_2_writes_the_group_tables() {
-        let (file, config) = (wide_jsonl(30), tempfile::NamedTempFile::new().unwrap());
-        std::fs::write(
-            config.path(),
-            "[root.column_groups]\nalpha = [\"kiwi_a\", \"kiwi_b\", \"kiwi_c\"]\n",
-        )
-        .unwrap();
-        let cfg = PipelineConfig {
-            schema_config: Some(config.path().to_path_buf()),
-            db_url: Some("postgres://nobody@localhost/none".to_string()),
-            ..cfg_for(&file)
-        };
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        let err = runtime.block_on(run_pipeline(cfg)).unwrap_err().to_string();
-        assert!(err.contains("column_groups") && err.contains("Pass 2"), "{err}");
     }
 
     #[test]

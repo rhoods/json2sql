@@ -21,7 +21,6 @@
 //!
 //! Fonctions :
 //! - fn `apply_column_groups` — applique les `column_groups` d'une config ; avertissements pour les groupes invalides.
-//! - fn `reject_column_groups` — refuse un schéma qui a des groupes de colonnes, tant que Pass 2 n'écrit pas leurs tables (T3b).
 //! - fn `dissolve_column_groups` — remet les colonnes des groupes d'une table dans la table et retire les tables de groupe.
 //! - fn `prune_missing_groups` — retire des tables les noms de groupes dont la table n'existe plus.
 //! - fn `reindex_stats` — rattache les statistiques d'une colonne déplacée à la table de son groupe.
@@ -93,23 +92,6 @@ pub fn apply_column_groups(
         warnings.extend(apply_to_table(schemas, table, groups)?);
     }
     Ok(warnings)
-}
-
-/// Refuses a schema that has column groups.
-///
-/// # Errors
-/// Some table lists group tables.
-// shortcut: Pass 2 does not write the group tables yet (#78, T3b), so a load would drop the moved columns; T3b removes
-// this function and its two callers (`run_interruptible` and the CLI pipeline).
-pub fn reject_column_groups(schemas: &[TableSchema]) -> Result<()> {
-    if schemas.iter().any(|s| !s.column_groups.is_empty()) {
-        return Err(J2sError::InvalidInput(
-            "column_groups: Pass 2 does not write the group tables yet, the import would lose the moved columns \
-             (use --dry-run to see the schema)"
-                .to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Puts the columns of the group tables of `parent` back into it and removes those tables.
@@ -894,18 +876,6 @@ mod tests {
             })
             .collect();
         assert_eq!(tables, ["t_a", "t_b", "t_c", "t_d", "t_e"]);
-    }
-
-    #[test]
-    fn a_schema_with_column_groups_is_refused_until_pass_2_writes_the_group_tables() {
-        let mut schemas = vec![items()];
-        assert!(reject_column_groups(&schemas).is_ok());
-        apply(&mut schemas, ALPHA);
-        let message = reject_column_groups(&schemas).unwrap_err().to_string();
-        assert!(
-            message.contains("column_groups") && message.contains("Pass 2"),
-            "{message}"
-        );
     }
 
     #[test]

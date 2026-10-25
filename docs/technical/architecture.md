@@ -306,6 +306,8 @@ Un essai `UNLOGGED` puis `SET LOGGED` a été retiré : la réécriture dans le 
   - `AutoSplit` : colonnes stables → table principale, colonnes médiums → table `_wide` (EAV) ; les clés rares (`< --rare-threshold`) ne sont **pas importées** — voir [schema-inference.md](schema-inference.md)
   - `Ignore` : clé supprimée
 
+**Groupes de colonnes** (#78, dans `insert.rs`) : pour une table `Columns` ou `AutoSplit` qui a des tables de groupe, `insert_object()` écrit après la ligne de la table (`write_row_of`) une ligne par groupe (`write_group_rows`) : même `j2s_id` et même clé étrangère que la ligne d'origine, seulement si une colonne du groupe a une valeur (ni `null`, ni `""`, ni `[]`, ni `{}`). Les tables enfants ordinaires restent rattachées à la ligne d'origine.
+
 **Traversal des tableaux** (dans `traversal.rs`) : `insert_array()` — tableau d'objets → `insert_object()` récursif ; tableau de scalaires → ligne de jonction `(parent_id, order, value)`.
 
 ---
