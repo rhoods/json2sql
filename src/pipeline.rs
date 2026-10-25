@@ -71,8 +71,6 @@ pub struct PipelineConfig {
     pub dry_run: bool,
     /// Minimum string length (bytes) to use `TEXT` instead of `VARCHAR`.
     pub text_threshold: u32,
-    /// Store scalar arrays as `PostgreSQL` array columns instead of junction tables.
-    pub array_as_pg_array: bool,
     /// Warn when nesting depth exceeds this value. `None` = disabled.
     pub depth_limit: Option<usize>,
     /// Wide-table column threshold for automatic `Pivot`/`Jsonb` strategy assignment.
@@ -296,7 +294,7 @@ fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Res
         root_table: cfg.root_table.clone(),
         registry: crate::schema::registry::RegistryConfig {
             text_threshold: cfg.text_threshold,
-            array_as_pg_array: cfg.array_as_pg_array,
+            array_as_pg_array: true,
             wide_column_threshold: cfg.wide_column_threshold,
             sibling_threshold: cfg.sibling_threshold,
             sibling_jaccard: cfg.sibling_jaccard,
@@ -591,7 +589,6 @@ mod tests {
             drop_existing: false,
             dry_run: false,
             text_threshold: 256,
-            array_as_pg_array: false,
             depth_limit: None,
             wide_column_threshold: 50,
             sibling_threshold: 3,
@@ -626,6 +623,19 @@ mod tests {
     fn pipeline_config_skip_constraints_true_propagates() {
         let cfg = PipelineConfig { skip_constraints: true, ..minimal_pipeline_cfg(None) };
         assert!(cfg.skip_constraints, "skip_constraints must be settable to true");
+    }
+
+    #[test]
+    fn pass1_turns_scalar_arrays_into_array_columns() {
+        // #84: no caller can ask for junction tables any more
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/users.jsonl");
+        let cfg = PipelineConfig { root_table: "users".to_string(), ..minimal_pipeline_cfg(None) };
+        let pass1 = run_pass1_workers(&path, &cfg).unwrap();
+        let names: Vec<_> = pass1.schemas.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.contains(&"users_tags"), "no junction table expected, got {names:?}");
+        let users = pass1.schemas.iter().find(|s| s.name == "users").unwrap();
+        let tags = users.find_by_original("tags").expect("`tags` must be a column of `users`");
+        assert!(matches!(tags.pg_type, crate::schema::type_tracker::PgType::Array(_)), "got {:?}", tags.pg_type);
     }
 
     #[test]

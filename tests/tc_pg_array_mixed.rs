@@ -16,7 +16,6 @@ fn base_config(url: String, schema: String, fixture: &str, wide_column_threshold
         drop_existing: false,
         dry_run: false,
         text_threshold: 256,
-        array_as_pg_array: true,
         depth_limit: None,
         wide_column_threshold,
         sibling_threshold: 3,
@@ -41,8 +40,8 @@ fn base_config(url: String, schema: String, fixture: &str, wide_column_threshold
     }
 }
 
-/// Issue #48 — `array_as_pg_array` with a field that is scalar on some rows and an array on
-/// others: one TEXT[] column, scalar occurrences stored as one-element arrays (no 42701 crash).
+/// Issue #48 — a field that is scalar on some rows and an array on others: one TEXT[] column,
+/// scalar occurrences stored as one-element arrays (no 42701 crash).
 #[tokio::test]
 async fn test_pg_array_mixed_occurrences_e2e() {
     integration::with_pg_container(|client, schema, url| async move {

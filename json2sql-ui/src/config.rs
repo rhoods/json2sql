@@ -49,9 +49,6 @@ pub struct ProjectConfig {
     /// Skip the constraint phase at the end of Pass 2. Persisted for workflows that always skip.
     #[serde(default)]
     pub skip_constraints: bool,
-    /// Pass 1 only: native PG array columns for arrays of scalars.
-    #[serde(default)]
-    pub array_as_pg_array: bool,
     /// Pass 2: raise `max_wal_size` during the import (`--tune-wal`).
     #[serde(default)]
     pub tune_wal: bool,
@@ -76,7 +73,6 @@ impl Default for ProjectConfig {
             disabled_strategies: Vec::new(),
             import_limit: None,
             skip_constraints: false,
-            array_as_pg_array: false,
             tune_wal: false,
         }
     }
@@ -99,7 +95,6 @@ impl ProjectConfig {
             disabled_strategies: p.disabled_strategies.iter().map(|s| s.as_str().to_string()).collect(),
             import_limit: p.import_limit,
             skip_constraints: p.skip_constraints,
-            array_as_pg_array: p.array_as_pg_array,
             tune_wal: p.tune_wal,
         }
     }
@@ -123,7 +118,6 @@ impl ProjectConfig {
             .collect::<HashSet<_>>();
         p.import_limit = self.import_limit;
         p.skip_constraints = self.skip_constraints;
-        p.array_as_pg_array = self.array_as_pg_array;
         p.tune_wal = self.tune_wal;
     }
 }
@@ -300,14 +294,14 @@ mod tests {
     }
 
     #[test]
-    fn array_as_pg_array_round_trips_toml() {
-        let p = ProjectState { array_as_pg_array: true, ..Default::default() };
-        let cfg = ProjectConfig::from_project(&p);
-        let toml_str = toml::to_string(&cfg).expect("serialize");
-        let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
-        let mut p2 = ProjectState::default();
-        parsed.apply_to(&mut p2);
-        assert!(p2.array_as_pg_array, "array_as_pg_array=true must survive project -> TOML -> project");
+    fn legacy_array_as_pg_array_key_is_ignored() {
+        // A project saved before #84 still has `array_as_pg_array`. `load()` swallows read errors
+        // (`.ok()`), so a rejected key would silently drop the whole project: it must just be ignored.
+        let toml_str = "pg_host = \"db.example\"\npg_port = 5433\npg_database = \"lab\"\npg_username = \"u\"\n\
+            pg_schema = \"public\"\ndrop_existing = true\nworkers = 3\npass2_parallel = 2\narray_as_pg_array = true\n";
+        let parsed: ProjectConfig = toml::from_str(toml_str).expect("a legacy project file must still load");
+        assert_eq!((parsed.pg_host.as_str(), parsed.pg_port, parsed.workers), ("db.example", 5433, 3));
+        assert!(parsed.drop_existing);
     }
 
     #[test]
@@ -326,7 +320,6 @@ mod tests {
         let toml_str = "pg_host = \"localhost\"\npg_port = 5432\npg_database = \"\"\npg_username = \"\"\npg_schema = \"public\"\ndrop_existing = false\nworkers = 1\npass2_parallel = 4\n";
         let parsed: ProjectConfig = toml::from_str(toml_str).expect("deserialize");
         assert!(!parsed.skip_constraints, "skip_constraints must default to false for backward compat");
-        assert!(!parsed.array_as_pg_array, "array_as_pg_array must default to false for backward compat");
     }
 
     #[test]

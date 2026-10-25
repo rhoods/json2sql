@@ -54,7 +54,6 @@ async fn main() -> anyhow::Result<()> {
                 drop_existing: cli.drop_existing,
                 dry_run: cli.dry_run,
                 text_threshold: cli.text_threshold,
-                array_as_pg_array: cli.array_as_pg_array,
                 depth_limit: cli.depth_limit,
                 wide_column_threshold: cli.wide_column_threshold,
                 sibling_threshold: cli.sibling_threshold,
@@ -97,7 +96,7 @@ fn run_inspect(
             root_table: root_table.to_string(),
             registry: schema::registry::RegistryConfig {
                 text_threshold,
-                array_as_pg_array: false,
+                array_as_pg_array: true,
                 wide_column_threshold: usize::MAX,
                 sibling_threshold: usize::MAX,
                 sibling_jaccard: 1.0,

@@ -111,10 +111,6 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
 
-    /// Store scalar arrays as `PostgreSQL` array columns (TEXT[], INTEGER[]…) instead of junction tables
-    #[arg(long, default_value_t = false)]
-    pub array_as_pg_array: bool,
-
     /// Warn when nesting depth exceeds N levels (disabled by default)
     #[arg(long, value_name = "N")]
     pub depth_limit: Option<usize>,
@@ -248,6 +244,13 @@ mod tests {
         } else {
             panic!("expected Inspect subcommand");
         }
+    }
+
+    #[test]
+    fn test_array_as_pg_array_flag_is_gone() {
+        // Scalar arrays are always PG array columns (#84): the old flag is an unknown argument, no alias.
+        let err = Cli::try_parse_from(["json2sql", "--input", "x.json", "--array-as-pg-array"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
