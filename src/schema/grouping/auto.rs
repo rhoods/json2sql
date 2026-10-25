@@ -32,7 +32,6 @@ const NAMES_ONLY: &str = "names only (--group-columns)";
 ///
 /// # Errors
 /// A table with more columns than the lexical grouping accepts.
-#[allow(dead_code)] // called by the CLI from T2 of #91
 pub fn name_proposals(
     schemas: &[TableSchema],
     wanted: impl Fn(&TableSchema) -> bool,
@@ -61,7 +60,6 @@ pub fn name_proposals(
 ///
 /// # Errors
 /// A table with more columns than the lexical grouping accepts.
-#[allow(dead_code)] // called by the CLI from T2 of #91
 pub fn apply_name_groups(
     schemas: &mut Vec<TableSchema>,
     wanted: impl Fn(&TableSchema) -> bool,

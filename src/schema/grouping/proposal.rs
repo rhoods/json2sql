@@ -43,6 +43,7 @@
 //! - fn `families_word` — mots d'un nom de groupe : ceux de ses familles les plus grosses.
 //! - fn `unique_name` — nom de groupe libre : le mot demandé, suffixé de `_cols` (puis d'un numéro) en cas de collision.
 //! - fn `nth_name` — n-ième nom essayé pour un groupe : le mot, puis `_cols`, puis `_cols_2`…
+//! - fn `root_word` — mot d'origine d'un nom de groupe, sans son suffixe `_cols` ou `_cols_<n>`.
 //! - fn `family_notes` — familles à clé et numérotées d'une table.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -458,12 +459,18 @@ fn split_or_fuse(
 /// families it replaces.
 pub fn avoid_taken_names(proposal: &mut TableProposal, taken: &mut HashSet<String>) {
     let mut renamed: HashMap<String, String> = HashMap::new();
-    for group in &mut proposal.groups {
+    let siblings: Vec<String> = proposal.groups.iter().map(|g| g.name.clone()).collect();
+    for (at, group) in proposal.groups.iter_mut().enumerate() {
         let base = group.name.clone();
+        // the next names of its word, past those of the other groups of the table: no `_cols_cols`
+        let root = root_word(&base);
         let mut n = 1;
         while taken.contains(&group_table_name(&proposal.table, &group.name)) {
-            group.name = nth_name(&base, n);
+            group.name = nth_name(root, n);
             n += 1;
+            if siblings.iter().enumerate().any(|(other, name)| other != at && *name == group.name) {
+                group.name.clone_from(&base);
+            }
         }
         taken.insert(group_table_name(&proposal.table, &group.name));
         if group.name != base {
@@ -548,6 +555,15 @@ fn unique_name(used: &mut HashSet<String>, wanted: &str) -> String {
         n += 1;
     }
     nth_name(base, n)
+}
+
+/// The word a group name was made from: the name without its `_cols` or `_cols_<n>` suffix of [`nth_name`].
+fn root_word(name: &str) -> &str {
+    let unnumbered = name
+        .rsplit_once('_')
+        .filter(|(head, n)| head.ends_with("_cols") && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(name, |(head, _)| head);
+    unnumbered.strip_suffix("_cols").unwrap_or(name)
 }
 
 /// The `n`-th name tried for a group named after `base`: `base`, then `base_cols`, `base_cols_2`, `base_cols_3`… A
@@ -875,6 +891,21 @@ mod tests {
             taken.contains("t_nutrition_cols_2") && taken.contains("t_nutriscore"),
             "the names given are taken too"
         );
+    }
+
+    #[test]
+    fn a_renamed_group_never_stacks_suffixes_on_a_sibling_name() {
+        // OFF: two families named after `nutrition` in one table (`nutrition`, `nutrition_cols`) and a nested
+        // `nutrition` object: the first must not become `nutrition_cols_cols`
+        let mut p = names_only_of(&fused_table());
+        p.groups[0].name = "nutrition".to_string();
+        p.groups[1].name = "nutrition_cols".to_string();
+        p.groups[2].replaces = vec!["nutrition".to_string(), "nutrition_cols".to_string()];
+        let mut taken: HashSet<String> = HashSet::from(["t_nutrition".to_string()]);
+        avoid_taken_names(&mut p, &mut taken);
+        let names: Vec<&str> = p.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names[..2], ["nutrition_cols_2", "nutrition_cols"]);
+        assert_eq!(p.groups[2].replaces, ["nutrition_cols_2", "nutrition_cols"]);
     }
 
     #[test]

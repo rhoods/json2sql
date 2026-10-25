@@ -66,6 +66,7 @@ fn config(url: &str, schema: &str, toml: &str, anomaly_dir: Option<&Path>) -> (P
         schema_report_output: None,
         skip_constraints: false,
         tune_wal: false,
+        group_columns: false,
     };
     (cfg, file)
 }

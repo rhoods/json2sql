@@ -77,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
                 schema_report_output: cli.schema_report_output,
                 skip_constraints: cli.no_constraints,
                 tune_wal: cli.tune_wal,
+                group_columns: cli.group_columns,
             };
             let result = match suggest_groups {
                 Some(ref out) => run_suggest_groups(cfg, out, embedding_model.as_deref()),
