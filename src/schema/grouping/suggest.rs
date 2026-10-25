@@ -8,6 +8,9 @@
 //! like Pass 2 does (`push_data_col`): through `flatten_sources` when the column was inlined from a child, else by
 //! its original name.
 //!
+//! A group table that a config already made from a table is not proposed again: its columns are read from the
+//! parent's object.
+//!
 //! Fonctions :
 //! - struct `Suggestion` — les tables analysées, le TOML et le rapport.
 //! - fn `suggest` — propose un découpage pour chaque table éligible du schéma finalisé : échantillon, propositions, sorties.
@@ -26,14 +29,16 @@
 use std::path::Path;
 
 use super::embedding::StaticEmbedder;
+use std::collections::HashSet;
+
 use super::lexical::LexicalParams;
 use super::placement::placements;
 use super::proposal::TableProposal;
-use super::proposal::{propose, ColumnName, DataSignals};
+use super::proposal::{avoid_taken_names, propose, ColumnName, DataSignals};
 use super::render::{to_markdown, to_toml};
 use super::sample::{sample_tables, SampleSource, SampleTarget, TableSample, DEFAULT_BUDGET};
 use crate::error::{J2sError, Result};
-use crate::schema::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
+use crate::schema::table_schema::{ChildKind, ColumnSchema, TableSchema};
 
 /// A table needs at least this many data columns to be worth a proposal.
 pub const MIN_TABLE_COLUMNS: usize = 20;
@@ -83,18 +88,25 @@ pub fn suggest(
     limit: Option<u64>,
     embedder: Option<&StaticEmbedder>,
 ) -> Result<Suggestion> {
-    let tables: Vec<&TableSchema> = schemas.iter().filter(|s| eligible(s)).collect();
+    let made: HashSet<&str> = schemas
+        .iter()
+        .flat_map(|s| s.column_groups.iter().map(String::as_str))
+        .collect();
+    let tables: Vec<&TableSchema> = schemas
+        .iter()
+        .filter(|s| eligible(s) && !made.contains(s.name.as_str()))
+        .collect();
     if tables.is_empty() {
         return Err(J2sError::InvalidInput(format!(
             "no table to split: it needs a Columns or AutoSplit strategy and at least {MIN_TABLE_COLUMNS} data columns"
         )));
     }
     let signals = data_signals(schemas, &tables, input, limit);
-    let proposals = tables
-        .iter()
-        .zip(&signals)
-        .map(|(table, data)| proposal_for(table, data, embedder))
-        .collect::<Result<Vec<_>>>()?;
+    let mut taken: HashSet<String> = schemas.iter().map(|s| s.name.clone()).collect();
+    let mut proposals = Vec::with_capacity(tables.len());
+    for (table, data) in tables.iter().zip(&signals) {
+        proposals.push(proposal_for(table, data, embedder, &mut taken)?);
+    }
     Ok(Suggestion {
         tables: tables.iter().map(|t| t.name.clone()).collect(),
         toml: to_toml(&proposals),
@@ -102,12 +114,14 @@ pub fn suggest(
     })
 }
 
-/// The proposal for one table: its columns, its data signals or why they are off, and where its other columns
-/// might go when there is an `embedder`.
+/// The proposal for one table: its columns, its data signals or why they are off, groups named so that their tables
+/// do not exist yet (`taken` holds the names of the tables and of the groups given so far), and where its other
+/// columns might go when there is an `embedder`.
 fn proposal_for(
     table: &TableSchema,
     data: &Signals,
     embedder: Option<&StaticEmbedder>,
+    taken: &mut HashSet<String>,
 ) -> Result<TableProposal> {
     let columns = table
         .data_columns()
@@ -122,18 +136,16 @@ fn proposal_for(
         data.as_ref().map_err(String::as_str),
         &LexicalParams::default(),
     )?;
+    avoid_taken_names(&mut proposal, taken);
     if let Some(embedder) = embedder {
         proposal.placements = placements(&proposal, embedder);
     }
     Ok(proposal)
 }
 
-/// A `Columns` or `AutoSplit` table with enough data columns.
+/// A table that can be split (`Columns` or `AutoSplit`) with enough data columns.
 fn eligible(schema: &TableSchema) -> bool {
-    matches!(
-        &*schema.effective_strategy(),
-        InferredStrategy::Columns | InferredStrategy::AutoSplit { .. }
-    ) && schema.data_columns().count() >= MIN_TABLE_COLUMNS
+    schema.takes_column_groups() && schema.data_columns().count() >= MIN_TABLE_COLUMNS
 }
 
 /// Keys leading to a column's value inside its table's object, as `push_data_col` reads it: through the field the
@@ -268,6 +280,7 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
+    use crate::schema::table_schema::InferredStrategy;
     use crate::schema::type_tracker::PgType;
 
     fn run(schemas: &[TableSchema], input: &Path, limit: Option<u64>) -> Result<Suggestion> {
@@ -486,6 +499,53 @@ mod tests {
         assert!(
             report.contains("- `quartz` → `kiwi` (0.71), `zulu` (0.71)"),
             "{report}"
+        );
+    }
+
+    #[test]
+    fn a_group_never_takes_the_name_of_a_table_the_schema_already_has() {
+        let mut schemas = schemas(60, ChildKind::Object);
+        // a nested `kiwi` object of `props` is already the table `items_props_kiwi`
+        let mut nested = table(
+            "items_props_kiwi",
+            &["items", "props", "kiwi"],
+            Some(ChildKind::Object),
+            &["v".to_string()],
+            60,
+        );
+        nested.parent_table = Some("items_props".to_string());
+        schemas.push(nested);
+        let s = run(&schemas, jsonl(60).path(), None).unwrap();
+        let toml = parsed(&s.toml);
+        let groups = toml["items_props"]["column_groups"].as_table().unwrap();
+        assert!(
+            !groups.contains_key("kiwi") && groups.contains_key("kiwi_2"),
+            "{:?}",
+            groups.keys().collect::<Vec<_>>()
+        );
+        assert!(groups.contains_key("zulu"), "the others keep their names");
+    }
+
+    #[test]
+    fn a_group_table_that_a_config_already_made_is_not_proposed_again() {
+        let mut schemas = schemas(60, ChildKind::Object);
+        let mut group = table(
+            "items_props_kiwi",
+            &["items_props_kiwi"],
+            Some(ChildKind::Object),
+            &wide_names(),
+            60,
+        );
+        group.parent_table = Some("items_props".to_string());
+        schemas[1]
+            .column_groups
+            .push("items_props_kiwi".to_string());
+        schemas.push(group);
+        let s = run(&schemas, jsonl(60).path(), None).unwrap();
+        assert_eq!(
+            s.tables,
+            ["items_props"],
+            "its columns are read from the parent's object, not from its own path"
         );
     }
 

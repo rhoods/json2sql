@@ -33,6 +33,7 @@
 //! - fn `add_cohesion` — place la cohésion des noms en tête des preuves de chaque groupe.
 //! - fn `ungrouped_columns` — colonnes qu'aucun groupe confirmé ne prend, dans l'ordre des colonnes.
 //! - fn `data_status` — état des signaux de données à reporter : allumés avec leur échantillon, ou éteints avec la raison.
+//! - fn `avoid_taken_names` — renomme les groupes dont la table existerait déjà (`_2`, `_3`…), et les fusions qui les remplacent.
 //! - fn `families_of` — colonnes d'un groupe réparties par premier mot de radical.
 //! - fn `cross_pairs` — paires de colonnes de familles différentes.
 //! - fn `all_pairs` — toutes les paires de colonnes d'une liste.
@@ -53,6 +54,8 @@ use super::sample::TableSample;
 use super::shared::{shared_value_pairs, MIN_DISTINCT};
 use super::values::Nature;
 use crate::error::Result;
+use crate::schema::column_groups::MIN_GROUP_COLUMNS;
+use crate::schema::naming::group_table_name;
 
 /// Phi from which two columns count as filled together.
 const LINK_PHI: f64 = 0.4;
@@ -64,8 +67,6 @@ const MIN_BACKED_PAIRS: usize = 3;
 const MIN_BACKED_PERCENT: usize = 20;
 /// Presence must also reach this multiple of the table's own background rate of phi >= [`LINK_PHI`].
 const PRESENCE_OVER_BACKGROUND: f64 = 2.0;
-/// A family cut out of an unconfirmed fusion is an active group from this size.
-const MIN_FAMILY_GROUP: usize = 3;
 /// Words of a group's name.
 const NAME_WORDS: usize = 3;
 
@@ -449,6 +450,35 @@ fn split_or_fuse(
     groups
 }
 
+/// Renames the groups whose table (`{table}_{group}`, as the config applies it) would take the name of a table in
+/// `taken`, which holds the names of the existing tables and of the groups given so far: the group gets the next free
+/// `_2`, `_3`... name, so that the proposal applies as it is (a nested `nutrition` object is already the table
+/// `openfoodfacts_nutrition`). A fusion to confirm follows the new names of the families it replaces.
+pub fn avoid_taken_names(proposal: &mut TableProposal, taken: &mut HashSet<String>) {
+    let mut renamed: HashMap<String, String> = HashMap::new();
+    for group in &mut proposal.groups {
+        let base = group.name.clone();
+        let mut suffix = 2;
+        while taken.contains(&group_table_name(&proposal.table, &group.name)) {
+            group.name = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        taken.insert(group_table_name(&proposal.table, &group.name));
+        if group.name != base {
+            renamed.insert(base, group.name.clone());
+        }
+    }
+    for replaced in proposal
+        .groups
+        .iter_mut()
+        .flat_map(|g| g.replaces.iter_mut())
+    {
+        if let Some(new_name) = renamed.get(replaced.as_str()) {
+            replaced.clone_from(new_name);
+        }
+    }
+}
+
 /// Whether the links between the families of a lexical group are backed, with the evidence that was looked at. A
 /// group of one family needs no backing: its names are enough.
 fn backing(
@@ -470,14 +500,15 @@ fn backing(
     )
 }
 
-/// One confirmed group per family of at least [`MIN_FAMILY_GROUP`] columns, in column order.
+/// One confirmed group per family of at least [`MIN_GROUP_COLUMNS`] columns (a family cut out of an unconfirmed
+/// fusion is an active group from the size a group table is accepted), in column order.
 fn family_groups(
     families: &BTreeMap<String, Vec<usize>>,
     used: &mut HashSet<String>,
 ) -> Vec<Group> {
     let mut groups: Vec<Group> = families
         .iter()
-        .filter(|(_, columns)| columns.len() >= MIN_FAMILY_GROUP)
+        .filter(|(_, columns)| columns.len() >= MIN_GROUP_COLUMNS)
         .map(|(word, columns)| Group {
             name: unique_name(used, word),
             columns: columns.clone(),
@@ -810,6 +841,53 @@ mod tests {
         assert!(
             !Evidence::Names { cohesion: 1.0 }.passes(0.0),
             "names alone never confirm a fusion"
+        );
+    }
+
+    #[test]
+    fn a_group_whose_table_name_is_taken_gets_the_next_free_name_and_its_fusion_follows() {
+        let mut p = names_only_of(&fused_table());
+        let names: Vec<String> = p.groups.iter().map(|g| g.name.clone()).collect();
+        assert_eq!(names, ["nutrition", "nutriscore", "nutriscore_nutrition"]);
+        let mut taken: HashSet<String> = ["t_nutrition", "t_nutrition_2"]
+            .iter()
+            .map(|n| (*n).to_string())
+            .collect();
+        avoid_taken_names(&mut p, &mut taken);
+        let names: Vec<&str> = p.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["nutrition_3", "nutriscore", "nutriscore_nutrition"]);
+        assert_eq!(
+            p.groups[2].replaces,
+            ["nutrition_3", "nutriscore"],
+            "the fusion names the renamed family"
+        );
+        assert!(
+            taken.contains("t_nutrition_3") && taken.contains("t_nutriscore"),
+            "the names given are taken too"
+        );
+    }
+
+    #[test]
+    fn groups_of_two_tables_do_not_end_up_with_the_same_table_name() {
+        // table `a` with a group `b_c` and table `a_b` with a group `c` would both make the table `a_b_c`
+        let (mut first, mut second) =
+            (names_only_of(&fused_table()), names_only_of(&fused_table()));
+        (first.table, first.groups[0].name) = ("a".to_string(), "b_c".to_string());
+        (second.table, second.groups[0].name) = ("a_b".to_string(), "c".to_string());
+        assert_eq!(group_table_name("a", "b_c"), group_table_name("a_b", "c"));
+        let mut taken = HashSet::new();
+        avoid_taken_names(&mut first, &mut taken);
+        avoid_taken_names(&mut second, &mut taken);
+        assert_eq!(first.groups[0].name, "b_c");
+        assert_eq!(second.groups[0].name, "c_2");
+        let tables: Vec<String> = [&first, &second]
+            .iter()
+            .flat_map(|p| p.groups.iter().map(|g| group_table_name(&p.table, &g.name)))
+            .collect();
+        assert_eq!(
+            tables.len(),
+            tables.iter().collect::<HashSet<_>>().len(),
+            "{tables:?}"
         );
     }
 

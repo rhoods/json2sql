@@ -50,6 +50,7 @@
 //! - fn `TableSchema::set_ui_override` — mutateur de l'override IHM.
 //! - fn `TableSchema::set_toml_override` — mutateur de l'override TOML.
 //! - fn `TableSchema::absorbs_children` — délègue à `effective_strategy().absorbs_children()`.
+//! - fn `TableSchema::takes_column_groups` — vrai si la stratégie effective (`Columns` ou `AutoSplit`) permet de découper la table en groupes.
 //! - fn `TableSchema::is_junction` — vrai si table de jonction pour un enfant array scalaire.
 //! - fn `TableSchema::has_order_column` — vrai si Pass 2 doit émettre une colonne `j2s_order`.
 //! - fn `TableSchema::data_columns` — itère les colonnes hors `j2s_*` générées.
@@ -595,6 +596,10 @@ pub struct TableSchema {
     /// snapshots that predate this field, or for tables created synthetically during finalization.
     #[serde(default)]
     pub row_count: u64,
+    /// Names of the 1:1 child tables that hold column groups split off this table (#78), in the order they were
+    /// applied. Each of them lists this table as `parent_table`. Empty for a table that was not split.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub column_groups: Vec<String>,
 }
 
 impl TableSchema {
@@ -614,6 +619,7 @@ impl TableSchema {
             flatten_sources: HashMap::new(),
             child_routes: HashMap::new(),
             row_count: 0,
+            column_groups: Vec::new(),
         }
     }
 
@@ -668,6 +674,16 @@ impl TableSchema {
     #[must_use]
     pub fn absorbs_children(&self) -> bool {
         self.effective_strategy().absorbs_children()
+    }
+
+    /// True when the effective strategy lets the table be split into column groups: `Columns` or `AutoSplit`. Any
+    /// other strategy rebuilds the columns or does not write the table row by row from its object.
+    #[must_use]
+    pub fn takes_column_groups(&self) -> bool {
+        matches!(
+            &*self.effective_strategy(),
+            InferredStrategy::Columns | InferredStrategy::AutoSplit { .. }
+        )
     }
 
     /// Returns true if this is a junction table for a scalar array child.

@@ -32,6 +32,7 @@
 //! - fn `truncate_to_pg_limit` — tronque un identifiant à la limite `PostgreSQL` (63 octets).
 //! - fn `floor_char_boundary` — tronque au dernier caractère UTF-8 valide.
 //! - fn `truncate_table_name` — tronque un nom de table en dépiautant les segments de chemin avant repli hash.
+//! - fn `group_table_name` — nom de la table 1:1 d'un groupe de colonnes (`{parent}_{groupe}`, 53 octets au plus, hash au-delà).
 //! - fn `short_hash` — hash FNV-1a 64 bits, 7 caractères hex (stable entre versions).
 
 use std::collections::HashMap;
@@ -436,6 +437,15 @@ fn truncate_table_name(sanitized: &str, original_key: &str, max_len: usize) -> S
     }
     let leaf_used = floor_char_boundary(&leaf_sanitized, leaf_budget);
     format!("{parent_used}_{leaf_used}_{hash}")
+}
+
+/// Name of the 1:1 table that holds the column group `group` of `parent` (#78): `{parent}_{group}` sanitized, and
+/// cut to [`PG_TABLE_MAX_IDENT`] bytes with a hash of the pair when it is longer, so that `fk_{name}_parent` and the
+/// other derived identifiers stay within 63 bytes. Only the two names decide it: the same config gives the same name.
+#[must_use]
+pub fn group_table_name(parent: &str, group: &str) -> String {
+    let sanitized = sanitize_identifier(&format!("{parent}_{group}"));
+    truncate_to_limit(&sanitized, &format!("{parent}{PATH_SEP}{group}"), PG_TABLE_MAX_IDENT)
 }
 
 /// Compute a 7-char hex hash of a string using FNV-1a 64-bit.

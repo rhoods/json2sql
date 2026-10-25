@@ -89,8 +89,9 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | `naming.rs` | Sanitisation des identifiants PG, déduplication, troncature à 63 bytes avec hash, détection de collisions de noms de colonnes |
 | `suffix_detector.rs` | Détecte les patterns `{base}_{suffixe}` dans les tables larges pour la stratégie `StructuredPivot` |
 | `config.rs` | Parse et applique le fichier TOML de surcharges manuelles (`--schema-config`) |
+| `column_groups.rs` | Applique la clé `column_groups` d'une table de la config (#78) : chaque groupe de colonnes devient une table fille 1:1 (`{table}_{groupe}`, 53 octets au plus, hash au-delà) qui reçoit les colonnes et leurs `flatten_sources`, la table garde les autres colonnes et la liste de ses tables de groupe (`column_groups`). Groupes appliqués après les types, stratégies et `flatten`, dans l'ordre alphabétique de leurs noms. Un groupe invalide (colonne inconnue, générée ou déjà prise, moins de 3 colonnes, nom de table pris) est ignoré avec un avertissement ; une table qui n'est ni `Columns` ni `AutoSplit`, ou dont toutes les colonnes partiraient, n'est pas découpée. Réappliquer la config ne change rien ; une table de groupe existante avec d'autres colonnes est une erreur. `dissolve_column_groups()` remet les colonnes dans la table (avant un `Pivot`/`Jsonb`), `prune_missing_groups()` retire les noms de tables disparues, `reindex_stats()` rattache les statistiques d'une colonne déplacée à sa table de groupe |
 | `stats.rs` | Struct `ColumnStats` + génère le rapport texte de statistiques de colonnes (types inférés, taux de nullité, colonnes MIXED) |
-| `persistence.rs` | Sérialise/désérialise un résultat Pass 1 en JSON (`SchemaSnapshot`) — utilisé par l'IHM pour séparer Pass 1 et Pass 2 |
+| `persistence.rs` | Sérialise/désérialise un résultat Pass 1 en JSON (`SchemaSnapshot`) — utilisé par l'IHM pour séparer Pass 1 et Pass 2. Version 2, ou 3 quand une table est découpée en groupes de colonnes (`format_version()`) : un programme plus ancien refuse alors le fichier au lieu de lire une table sans ses colonnes déplacées |
 | `mod.rs` | Déclare le module, exporte `PATH_SEP` |
 
 ### `src/schema/finalizer/`

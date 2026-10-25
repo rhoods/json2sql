@@ -5,6 +5,7 @@
 //! backwards-incompatible way — callers must discard and regenerate old snapshots.
 //!
 //! Fonctions :
+//! - fn `format_version` — version à écrire pour des schémas : 2, ou 3 si une table est découpée en groupes de colonnes.
 //! - struct `SchemaSnapshot` — snapshot sérialisable d'un résultat Pass 1 (schémas, stats, overrides).
 //! - fn `write_snapshot` — sérialise et écrit sur disque (écriture atomique via `.tmp` + rename si demandé).
 //! - fn `save` — construit un `SchemaSnapshot` sans overrides et l'écrit (non atomique).
@@ -27,6 +28,20 @@ use crate::schema::table_schema::{TableSchema, UserOverride};
 /// ensuring all derived identifiers (pk_, fk_..._parent, j2s_..._id) fit within
 /// `PostgreSQL`'s 63-byte NAMEDATALEN limit. Snapshots from v1 must be regenerated.
 pub const SCHEMA_FORMAT_VERSION: u32 = 2;
+
+/// v3: a table was split into column groups (#78). Written only for such a schema, so that older programs refuse
+/// the file instead of reading a parent without its moved columns and group tables that are never filled.
+pub const COLUMN_GROUPS_FORMAT_VERSION: u32 = 3;
+
+/// The format version to write for `schemas`: [`SCHEMA_FORMAT_VERSION`] unless a table has column groups.
+#[must_use]
+pub fn format_version(schemas: &[TableSchema]) -> u32 {
+    if schemas.iter().any(|s| !s.column_groups.is_empty()) {
+        COLUMN_GROUPS_FORMAT_VERSION
+    } else {
+        SCHEMA_FORMAT_VERSION
+    }
+}
 
 /// Serializable snapshot of a Pass 1 result, optionally including user strategy overrides.
 #[derive(Serialize, Deserialize)]
@@ -80,7 +95,7 @@ pub fn save(
     path: &Path,
 ) -> Result<()> {
     let snapshot = SchemaSnapshot {
-        version: SCHEMA_FORMAT_VERSION,
+        version: format_version(schemas),
         total_rows,
         schemas: schemas.to_vec(),
         truncated_names: truncated_names.to_vec(),
@@ -109,7 +124,7 @@ pub fn save_with_overrides(
     path: &Path,
 ) -> Result<()> {
     let snapshot = SchemaSnapshot {
-        version: SCHEMA_FORMAT_VERSION,
+        version: format_version(schemas),
         total_rows,
         schemas: schemas.to_vec(),
         truncated_names: truncated_names.to_vec(),
@@ -127,7 +142,7 @@ pub fn load(path: &Path) -> Result<SchemaSnapshot> {
     let data = std::fs::read(path).map_err(J2sError::Io)?;
     let mut snapshot: SchemaSnapshot = serde_json::from_slice(&data)
         .map_err(|e| J2sError::InvalidInput(format!("Schema deserialization failed: {e}")))?;
-    if snapshot.version != SCHEMA_FORMAT_VERSION {
+    if snapshot.version != SCHEMA_FORMAT_VERSION && snapshot.version != COLUMN_GROUPS_FORMAT_VERSION {
         if snapshot.version == 1 {
             return Err(J2sError::InvalidInput(
                 "Schema snapshot v1 is no longer supported — table names used a wider budget \
@@ -136,8 +151,8 @@ pub fn load(path: &Path) -> Result<SchemaSnapshot> {
             ));
         }
         return Err(J2sError::InvalidInput(format!(
-            "Schema snapshot version {} is not supported (expected {})",
-            snapshot.version, SCHEMA_FORMAT_VERSION
+            "Schema snapshot version {} is not supported (expected {} or {})",
+            snapshot.version, SCHEMA_FORMAT_VERSION, COLUMN_GROUPS_FORMAT_VERSION
         )));
     }
     // Migrate legacy root-level strategy_overrides → ui_override per TableSchema.
@@ -227,6 +242,34 @@ mod tests {
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(loaded.version, SCHEMA_FORMAT_VERSION);
         assert_eq!(loaded.total_rows, 42);
+    }
+
+    #[test]
+    fn a_snapshot_is_version_3_only_when_a_table_was_split_into_column_groups() {
+        use crate::schema::table_schema::TableSchema;
+        let plain = TableSchema::new("items".to_string(), vec!["items".to_string()], 0);
+        let mut split = plain.clone();
+        split.column_groups.push("items_alpha".to_string());
+        let (a, b) = (tempfile::NamedTempFile::new().unwrap(), tempfile::NamedTempFile::new().unwrap());
+        save(std::slice::from_ref(&plain), 0, &[], &[], &[], &[], JsonFormat::Lines, a.path()).unwrap();
+        save(&[split], 0, &[], &[], &[], &[], JsonFormat::Lines, b.path()).unwrap();
+        assert_eq!(load(a.path()).unwrap().version, 2, "snapshots without groups stay what they were");
+        let loaded = load(b.path()).unwrap();
+        assert_eq!(loaded.version, 3);
+        assert_eq!(loaded.schemas[0].column_groups, ["items_alpha"]);
+        assert!(!std::fs::read_to_string(a.path()).unwrap().contains("column_groups"));
+    }
+
+    #[test]
+    fn versions_2_and_3_load_and_the_others_do_not() {
+        for (version, loads) in [(1, false), (2, true), (3, true), (4, false)] {
+            let json = format!(
+                r#"{{"version":{version},"total_rows":0,"schemas":[],"truncated_names":[],"column_collisions":[],"stats":[]}}"#
+            );
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tmp.path(), json).unwrap();
+            assert_eq!(load(tmp.path()).is_ok(), loads, "version {version}");
+        }
     }
 
     #[test]

@@ -135,6 +135,7 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
         return Ok(());
     }
 
+    crate::schema::column_groups::reject_column_groups(&pass1.schemas)?;
     let db_url = cfg.db_url.as_deref().ok_or_else(|| {
         J2sError::InvalidInput(
             "No database URL provided. Use --db-url or set DATABASE_URL, or pass dry_run=true."
@@ -457,6 +458,7 @@ fn apply_schema_config(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<
     eprintln!("\nApplying schema overrides from '{}'...", config_path.display());
     let config = crate::schema::config::SchemaConfig::from_file(config_path)?;
     let warnings = crate::schema::config::apply_overrides_complete(&mut pass1.schemas, &config)?;
+    crate::schema::column_groups::reindex_stats(&pass1.schemas, &mut pass1.stats);
     eprintln!("Schema after overrides: {} tables", pass1.schemas.len());
     Ok(warnings)
 }
@@ -464,7 +466,7 @@ fn apply_schema_config(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<
 fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()> {
     let Some(ref out_path) = cfg.schema_output else { return Ok(()) };
     let snapshot = crate::schema::persistence::SchemaSnapshot {
-        version: crate::schema::persistence::SCHEMA_FORMAT_VERSION,
+        version: crate::schema::persistence::format_version(&pass1.schemas),
         total_rows: pass1.total_rows,
         schemas: pass1.schemas.clone(),
         truncated_names: pass1.truncated_names.clone(),
@@ -770,6 +772,68 @@ mod tests {
         let cfg = minimal_pipeline_cfg(None);
         let warnings = apply_schema_config(&mut pass1, &cfg).unwrap();
         assert_eq!(warnings, []);
+    }
+
+    /// `items`: `j2s_id`, the columns `x1` to `x3` for a group and `y1`.
+    fn splittable_items() -> TableSchema {
+        use crate::schema::table_schema::ColumnSchema;
+        use crate::schema::type_tracker::PgType;
+        let mut parent = TableSchema::new("items".to_string(), vec!["items".to_string()], 0);
+        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        for name in ["x1", "x2", "x3", "y1"] {
+            parent.columns.push(ColumnSchema {
+                name: name.to_string(),
+                original_name: name.to_string(),
+                pg_type: PgType::Text,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
+            });
+        }
+        parent
+    }
+
+    fn stat_of(table: &str, column: &str) -> crate::schema::stats::ColumnStats {
+        crate::schema::stats::ColumnStats {
+            table_name: table.to_string(),
+            column_name: column.to_string(),
+            pg_type: crate::schema::type_tracker::PgType::Text,
+            total_count: 5,
+            null_count: 0,
+            type_histogram: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn apply_schema_config_moves_the_statistics_of_a_column_to_its_group_table() {
+        let mut pass1 = minimal_pass1(vec![splittable_items()]);
+        pass1.stats = vec![stat_of("items", "x1"), stat_of("items", "y1")];
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "[items.column_groups]\nalpha = [\"x1\", \"x2\", \"x3\"]\n").unwrap();
+        let cfg = minimal_pipeline_cfg(Some(tmp.path().to_path_buf()));
+        assert_eq!(apply_schema_config(&mut pass1, &cfg).unwrap(), []);
+        assert_eq!(pass1.schemas.len(), 2);
+        let stats: Vec<(&str, &str)> =
+            pass1.stats.iter().map(|s| (s.table_name.as_str(), s.column_name.as_str())).collect();
+        assert_eq!(stats, [("items", "y1"), ("items_alpha", "x1")]);
+    }
+
+    #[test]
+    fn an_import_refuses_column_groups_until_pass_2_writes_the_group_tables() {
+        let (file, config) = (wide_jsonl(30), tempfile::NamedTempFile::new().unwrap());
+        std::fs::write(
+            config.path(),
+            "[root.column_groups]\nalpha = [\"kiwi_a\", \"kiwi_b\", \"kiwi_c\"]\n",
+        )
+        .unwrap();
+        let cfg = PipelineConfig {
+            schema_config: Some(config.path().to_path_buf()),
+            db_url: Some("postgres://nobody@localhost/none".to_string()),
+            ..cfg_for(&file)
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let err = runtime.block_on(run_pipeline(cfg)).unwrap_err().to_string();
+        assert!(err.contains("column_groups") && err.contains("Pass 2"), "{err}");
     }
 
     #[test]

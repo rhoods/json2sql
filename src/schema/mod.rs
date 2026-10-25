@@ -13,6 +13,7 @@
 pub const PATH_SEP: char = '\x00';
 
 pub mod cascading;
+pub mod column_groups;
 pub mod strategies;
 pub mod config;
 pub mod finalizer;
