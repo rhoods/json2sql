@@ -148,9 +148,7 @@ async fn test_null_byte_anomaly() {
 async fn test_array_element_overflow_is_an_anomaly_not_a_copy_error() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies_array.jsonl");
-        let mut config = common::pass1_config("items");
-        config.registry.array_as_pg_array = true; // common::pass1_config is still in junction mode until the flag goes
-        let mut p1 = pass1::runner::run(&path, &config, None).unwrap();
+        let mut p1 = pass1::runner::run(&path, &common::pass1_config("items"), None).unwrap();
         let tags = p1.schemas.iter_mut()
             .find(|s| s.name == "items").unwrap()
             .columns.iter_mut().find(|c| c.name == "tags").unwrap();

@@ -94,10 +94,9 @@ pub(super) struct FinalizerConfig {
     disable_structured_pivot: bool,
 }
 
-/// Apply a wide-table strategy to `schema` if the column count exceeds the threshold.
+/// Apply a wide-table strategy to `schema` if its scalar column count exceeds the threshold.
 ///
-/// Eligible for Object and `ObjectArray` children (not `ScalarArray`, which only ever has
-/// a single fixed `value` column and can never be "wide").
+/// Eligible for Object and `ObjectArray` children.
 /// Returns a companion `_wide` table if the `AutoSplit` strategy is chosen.
 fn apply_wide_strategy(
     schema: &mut TableSchema,
@@ -223,7 +222,7 @@ fn unique_pivot_name(schema_name: &str, existing_names: &std::collections::HashS
     candidate
 }
 
-/// `array_as_pg_array` column — never routed to an EAV companion (issue #48).
+/// PG array column — never routed to an EAV companion (issue #48).
 const fn is_pg_array(col: &ColumnSchema) -> bool {
     matches!(col.pg_type, PgType::Array(_))
 }
@@ -382,7 +381,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn already_assigned_schema_is_never_reprocessed() {
-        let mut observer = SchemaObserver::new(256, false);
+        let mut observer = SchemaObserver::new(256);
         let obj: serde_json::Map<String, Value> = serde_json::from_str(
             r#"{"id": 1, "foo": {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}}"#,
         ).unwrap();

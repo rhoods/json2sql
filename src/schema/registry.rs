@@ -38,7 +38,6 @@ use super::type_tracker::TypeTracker;
 #[derive(Clone)]
 pub struct RegistryConfig {
     pub text_threshold: u32,
-    pub array_as_pg_array: bool,
     pub wide_column_threshold: usize,
     pub sibling_threshold: usize,
     pub sibling_jaccard: f64,
@@ -51,7 +50,6 @@ impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
             text_threshold: 256,
-            array_as_pg_array: false,
             wide_column_threshold: usize::MAX,
             sibling_threshold: 3,
             sibling_jaccard: 0.5,
@@ -80,7 +78,7 @@ impl SchemaRegistry {
     #[must_use]
     pub fn new(config: RegistryConfig) -> Self {
         Self {
-            observer: SchemaObserver::new(config.text_threshold, config.array_as_pg_array),
+            observer: SchemaObserver::new(config.text_threshold),
             naming: NamingRegistry::new(),
             wide_column_threshold: config.wide_column_threshold,
             sibling_threshold: config.sibling_threshold,
@@ -200,15 +198,15 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_array_creates_junction_table() {
+    fn test_scalar_array_becomes_array_column() {
+        // #84: no junction table, the array is a column of its parent
         let mut reg = SchemaRegistry::new(RegistryConfig::default());
         let obj = json!({"id": 1, "tags": ["rust", "sql"]});
         reg.observe_root("users", make_root(&obj));
         let schemas = reg.finalize();
-        assert_eq!(schemas.len(), 2);
-        let junction = schemas.iter().find(|s| s.name == "users_tags").unwrap();
-        assert!(junction.is_junction());
-        assert!(junction.find_by_original("value").is_some());
+        assert_eq!(schemas.len(), 1, "got {:?}", schemas.iter().map(|s| &s.name).collect::<Vec<_>>());
+        let tags = schemas[0].find_by_original("tags").expect("`tags` must be a column of `users`");
+        assert!(matches!(tags.pg_type, PgType::Array(_)), "got {:?}", tags.pg_type);
     }
 
     #[test]
@@ -1195,10 +1193,10 @@ mod tests {
         );
     }
 
-    /// `ScalarArray` siblings (≥ threshold) with identical value schemas must be merged into `SiblingCollapse`.
-    /// Concrete case: `nova_groups_markers` {"2": [...], "3": [...], "4": [...]} → parent becomes `SiblingCollapse`.
+    /// Arrays under dynamic keys are columns of their parent (#84): `nova_groups_markers`
+    /// {"2": [...], "3": [...], "4": [...]} is ONE table with three array columns, no key/value `SiblingCollapse`.
     #[test]
-    fn test_scalar_array_siblings_merged_keyed_pivot() {
+    fn test_scalar_array_siblings_become_columns_of_one_table() {
         let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
         let obj = json!({
             "markers": {
@@ -1211,17 +1209,19 @@ mod tests {
         let schemas = reg.finalize();
         let markers = schemas.iter().find(|s| s.name == "product_markers").unwrap();
         assert!(
-            matches!(markers.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-            "3 ScalarArray siblings with threshold=2 must become SiblingCollapse, got: {:?}",
+            matches!(markers.inferred_strategy, InferredStrategy::Columns),
+            "array siblings must stay plain columns, got: {:?}",
             markers.inferred_strategy
         );
+        let array_columns = markers.data_columns().filter(|c| matches!(c.pg_type, PgType::Array(_))).count();
+        assert_eq!(array_columns, 3, "one array column per key");
         assert!(
             !schemas.iter().any(|s| matches!(s.name.as_str(), "product_markers_2" | "product_markers_3" | "product_markers_4")),
-            "absorbed ScalarArray children must not appear in final schema"
+            "no table per key"
         );
     }
 
-    /// A single `ScalarArray` child (below threshold=2) must NOT trigger a merge.
+    /// A single array key (below threshold=2) is one array column and must NOT trigger a merge.
     #[test]
     fn test_scalar_array_single_child_not_merged() {
         let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
@@ -1235,7 +1235,7 @@ mod tests {
         let markers = schemas.iter().find(|s| s.name == "product_markers").unwrap();
         assert!(
             !matches!(markers.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-            "single ScalarArray child must NOT become SiblingCollapse, got: {:?}",
+            "a single array key must NOT become SiblingCollapse, got: {:?}",
             markers.inferred_strategy
         );
     }
@@ -1356,10 +1356,10 @@ mod tests {
             "structured_pivot disabled → no StructuredPivot, got: {:?}", nutrients_disabled.inferred_strategy);
     }
 
-    // ── issue #48 : array_as_pg_array + occurrences mixtes scalaire/array ──
+    // ── issue #48 : tableaux de scalaires + occurrences mixtes scalaire/array ──
 
     fn pg_array_reg(wide_column_threshold: usize) -> SchemaRegistry {
-        SchemaRegistry::new(RegistryConfig { array_as_pg_array: true, wide_column_threshold, ..Default::default() })
+        SchemaRegistry::new(RegistryConfig { wide_column_threshold, ..Default::default() })
     }
 
     fn assert_single_array_col(schema: &crate::schema::table_schema::TableSchema, field: &str) {

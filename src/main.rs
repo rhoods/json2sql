@@ -96,7 +96,6 @@ fn run_inspect(
             root_table: root_table.to_string(),
             registry: schema::registry::RegistryConfig {
                 text_threshold,
-                array_as_pg_array: true,
                 wide_column_threshold: usize::MAX,
                 sibling_threshold: usize::MAX,
                 sibling_jaccard: 1.0,

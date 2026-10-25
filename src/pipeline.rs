@@ -294,7 +294,6 @@ fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Res
         root_table: cfg.root_table.clone(),
         registry: crate::schema::registry::RegistryConfig {
             text_threshold: cfg.text_threshold,
-            array_as_pg_array: true,
             wide_column_threshold: cfg.wide_column_threshold,
             sibling_threshold: cfg.sibling_threshold,
             sibling_jaccard: cfg.sibling_jaccard,

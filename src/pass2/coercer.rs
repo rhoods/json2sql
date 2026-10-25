@@ -571,7 +571,7 @@ mod tests {
         // Written with the type Pass 1 really infers, not a hand-built one. Arrays do not widen a
         // VARCHAR: elements that are all arrays give TEXT[], strings mixed with arrays give VARCHAR(n)[].
         let inferred = |row: &Value| {
-            let mut reg = SchemaRegistry::new(RegistryConfig { array_as_pg_array: true, ..Default::default() });
+            let mut reg = SchemaRegistry::new(RegistryConfig::default());
             reg.observe_root("t", row.as_object().unwrap());
             reg.finalize()[0].find_by_original("m").unwrap().pg_type.clone()
         };

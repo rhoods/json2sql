@@ -76,7 +76,6 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 root_table,
                 registry: json2sql::schema::registry::RegistryConfig {
                     text_threshold: PASS1_TEXT_THRESHOLD,
-                    array_as_pg_array: true,
                     wide_column_threshold: PASS1_WIDE_COLUMN_THRESHOLD,
                     sibling_threshold: PASS1_SIBLING_THRESHOLD,
                     sibling_jaccard: PASS1_SIBLING_JACCARD,

@@ -44,7 +44,7 @@
 //! - fn `insert_normalize_dynamic_keys` — une ligne par clé dynamique.
 //!
 //! Tableaux :
-//! - fn `insert_array` — dispatch `ObjectArray`/`ScalarArray` élément par élément.
+//! - fn `insert_array` — tableau d'objets : une ligne par élément (`ObjectArray`).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -608,7 +608,6 @@ fn find_group_for_key(groups: &[SiblingGroup], key: &str) -> Option<usize> {
 }
 
 #[allow(clippy::cast_possible_wrap)] // array index never reaches i64::MAX
-#[allow(clippy::too_many_lines)] // single per-element dispatch loop, one responsibility
 pub(super) fn insert_array<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -632,22 +631,6 @@ pub(super) fn insert_array<S: RowSink>(
                     path_map, &mut InsertCtx { sinks, anomalies },
                     schema, obj, child_id, Some(parent_id), Some(order),
                 )?;
-            }
-            (Some(ChildKind::ScalarArray), scalar) => {
-                let mut builder = RowBuilder::new();
-                builder.push_uuid(child_id);
-                builder.push_uuid(parent_id);
-                builder.push_value(&CopyEscaped::from_safe_ascii(order.to_string()));
-                let value_col = schema.find_by_original("value");
-                if let Some(col) = value_col {
-                    push_coerced(&mut builder, anomalies, &schema.name, col, &child_id.to_string(), scalar)?;
-                } else {
-                    builder.push_null();
-                }
-                anomalies.inc_total(&schema.name);
-                if let Some(sink) = sinks.get_mut(&schema.name) {
-                    sink.write_row(&builder.finish())?;
-                }
             }
             _ => {}
         }

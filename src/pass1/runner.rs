@@ -246,7 +246,6 @@ fn build_inspect_registry(config: &Pass1Config) -> SchemaRegistry {
     use crate::schema::strategies::StrategyName;
     SchemaRegistry::new(RegistryConfig {
         text_threshold: config.registry.text_threshold,
-        array_as_pg_array: true,
         wide_column_threshold: usize::MAX,
         sibling_threshold: usize::MAX,
         sibling_jaccard: 1.0,
@@ -486,7 +485,6 @@ mod tests {
             root_table: root.to_string(),
             registry: RegistryConfig {
                 text_threshold: 256,
-                array_as_pg_array: false,
                 wide_column_threshold: usize::MAX,
                 sibling_threshold: usize::MAX,
                 sibling_jaccard: 1.0,
@@ -585,7 +583,6 @@ mod tests {
                 root_table: "users".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -642,7 +639,6 @@ mod tests {
                 root_table: "root".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -672,7 +668,6 @@ mod tests {
                 root_table: "root".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -708,7 +703,6 @@ mod tests {
                 root_table: "root".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -741,7 +735,6 @@ mod tests {
                 root_table: "root".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -796,7 +789,6 @@ mod tests {
             root_table: root.to_string(),
             registry: RegistryConfig {
                 text_threshold: 256,
-                array_as_pg_array: false,
                 wide_column_threshold: usize::MAX,
                 sibling_threshold: usize::MAX,
                 sibling_jaccard: 1.0,
@@ -858,7 +850,6 @@ mod tests {
                 root_table: "wrong_name".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -912,7 +903,6 @@ mod tests {
                 root_table: "foods".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,

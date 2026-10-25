@@ -40,7 +40,7 @@
 //! - struct `ColumnSchema` — une colonne dans un schéma de table finalisé.
 //! - fn `ColumnSchema::generated` — construit une colonne générée (`j2s_id`, `j2s_order`...).
 //! - fn `ColumnSchema::parent_fk` — construit la colonne FK vers le parent (`j2s_{parent}_id`).
-//! - enum `ChildKind` — nature de la relation enfant (Object/`ObjectArray`/`ScalarArray`).
+//! - enum `ChildKind` — nature de la relation enfant (Object/`ObjectArray`).
 //! - struct `TableSchema` — schéma de table pleinement résolu, prêt pour le DDL et le chargement.
 //! - fn `TableSchema::new` — crée un schéma vide, stratégie `Columns` par défaut.
 //! - fn `TableSchema::effective_strategy` — résout la priorité `ui_override` > `toml_override` > `inferred_strategy`.
@@ -50,7 +50,6 @@
 //! - fn `TableSchema::set_ui_override` — mutateur de l'override IHM.
 //! - fn `TableSchema::set_toml_override` — mutateur de l'override TOML.
 //! - fn `TableSchema::absorbs_children` — délègue à `effective_strategy().absorbs_children()`.
-//! - fn `TableSchema::is_junction` — vrai si table de jonction pour un enfant array scalaire.
 //! - fn `TableSchema::has_order_column` — vrai si Pass 2 doit émettre une colonne `j2s_order`.
 //! - fn `TableSchema::data_columns` — itère les colonnes hors `j2s_*` générées.
 //! - fn `TableSchema::column_names` — tous les noms de colonnes (en-tête COPY).
@@ -549,8 +548,6 @@ pub enum ChildKind {
     Object,
     /// Array of objects → one-to-many
     ObjectArray,
-    /// Array of scalars → junction table with (j2s_{parent}_id, value, `j2s_order`)
-    ScalarArray,
 }
 
 /// A fully resolved table schema ready for DDL generation and data loading.
@@ -670,25 +667,14 @@ impl TableSchema {
         self.effective_strategy().absorbs_children()
     }
 
-    /// Returns true if this is a junction table for a scalar array child.
-    ///
-    /// Junction tables have the schema `(j2s_parent_id, value <type>, j2s_order INT)` — there
-    /// are no user-facing data columns. They arise from JSON like `{ "tags": ["a", "b", "c"] }`.
-    #[must_use]
-    pub const fn is_junction(&self) -> bool {
-        matches!(self.child_kind, Some(ChildKind::ScalarArray))
-    }
-
     /// Returns true if Pass 2 should emit a `j2s_order` column for positional ordering.
     ///
-    /// True for `ObjectArray` and `ScalarArray` children — any child that comes from a JSON array
-    /// where the position of each element is semantically meaningful.
+    /// True for `ObjectArray` children — a child that comes from a JSON array of objects, where
+    /// the position of each element is semantically meaningful. (An array of scalars is a column
+    /// of its parent: its order is the array index.)
     #[must_use]
     pub const fn has_order_column(&self) -> bool {
-        matches!(
-            self.child_kind,
-            Some(ChildKind::ObjectArray | ChildKind::ScalarArray)
-        )
+        matches!(self.child_kind, Some(ChildKind::ObjectArray))
     }
 
     /// Return only user-facing data columns, excluding all generated `j2s_*` columns
