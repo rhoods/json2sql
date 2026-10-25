@@ -119,6 +119,9 @@ pub enum ConfigWarning {
     /// Both `strategy` and `suffix_columns` were set for the same table. `suffix_columns`
     /// takes precedence — `strategy` is ignored entirely (see #31).
     ConflictingOverride { table: String, ignored_strategy: String },
+    /// A type override targets a PG array column. `parse_pg_type` only builds scalar types, so applying
+    /// it would turn the column into a scalar one that Pass 2 fills with NULL: it is ignored (#84).
+    ArrayColumnOverride { table: String, column: String, type_str: String },
 }
 
 impl ConfigWarning {
@@ -140,6 +143,8 @@ impl ConfigWarning {
                 format!("schema-config: cannot override '{table}' from {from_strategy} to {to_strategy} — column names are lost after finalization, ignored"),
             Self::ConflictingOverride { table, ignored_strategy } =>
                 format!("schema-config: table '{table}' has both 'strategy' and 'suffix_columns' set — suffix_columns takes precedence, ignoring strategy = '{ignored_strategy}'"),
+            Self::ArrayColumnOverride { table, column, type_str } =>
+                format!("schema-config: '{table}.{column}' is a PG array column, its type cannot be overridden (got '{type_str}'), ignored"),
         }
     }
 }
@@ -337,6 +342,12 @@ fn apply_column_type_overrides(
             None => warnings.push(ConfigWarning::UnknownColumn {
                 table: table_name.to_string(),
                 column: col_name.clone(),
+            }),
+            // checked first: any type override would turn the array into a scalar column (#84)
+            Some(col) if matches!(col.pg_type, PgType::Array(_)) => warnings.push(ConfigWarning::ArrayColumnOverride {
+                table: table_name.to_string(),
+                column: col_name.clone(),
+                type_str: type_str.clone(),
             }),
             Some(col) => match parse_pg_type(type_str) {
                 None => warnings.push(ConfigWarning::UnknownType {
@@ -791,6 +802,41 @@ mod tests {
         assert_eq!(warnings, vec![ConfigWarning::UnknownType {
             table: "users".to_string(), column: "age".to_string(), type_str: "NONSENSE".to_string(),
         }]);
+    }
+
+    #[test]
+    fn apply_overrides_type_on_array_column_returns_warning_and_keeps_the_column() {
+        // `tags = "text"` used to turn a TEXT[] column into a scalar one that Pass 2 fills with NULL,
+        // with no anomaly and no warning (#84).
+        use crate::schema::table_schema::{ColumnSchema, TableSchema};
+        let array_type = PgType::Array(Box::new(PgType::Text));
+        let mut schemas = vec![{
+            let mut s = TableSchema::new("users".to_string(), vec!["users".to_string()], 0);
+            s.columns.push(ColumnSchema {
+                name: "tags".to_string(), original_name: "tags".to_string(),
+                pg_type: array_type.clone(), not_null: false, is_generated: false, is_parent_fk: false,
+            });
+            s
+        }];
+        let mut tables = HashMap::new();
+        let mut cols = HashMap::new();
+        cols.insert("tags".to_string(), toml::Value::String("text".to_string()));
+        tables.insert("users".to_string(), cols);
+        let config = SchemaConfig { tables, group: HashMap::new() };
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert_eq!(warnings, vec![ConfigWarning::ArrayColumnOverride {
+            table: "users".to_string(), column: "tags".to_string(), type_str: "text".to_string(),
+        }]);
+        assert_eq!(schemas[0].columns[0].pg_type, array_type, "the column must stay an array");
+    }
+
+    #[test]
+    fn config_warning_to_message_array_column_override() {
+        let w = ConfigWarning::ArrayColumnOverride {
+            table: "users".to_string(), column: "tags".to_string(), type_str: "text".to_string(),
+        };
+        let msg = w.to_message();
+        assert!(msg.contains("users.tags") && msg.contains("array") && msg.contains("text"), "got {msg}");
     }
 
     #[test]

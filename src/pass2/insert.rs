@@ -89,6 +89,17 @@ fn push_data_col<A: AnomalyCollect>(
     match coerce(json_val, &col.pg_type) {
         CoerceResult::Ok(s) => builder.push_value(&s),
         CoerceResult::Null => builder.push_null(),
+        CoerceResult::OkWithAnomaly { value, actual_value, actual_type } => {
+            builder.push_value(&value);
+            anomalies.record(
+                &schema.name,
+                &col.name,
+                &row_id.to_string(),
+                &col.pg_type.as_sql(),
+                &actual_value,
+                actual_type,
+            )?;
+        }
         CoerceResult::Anomaly { actual_value, actual_type } => {
             anomalies.record(
                 &schema.name,
@@ -281,6 +292,10 @@ fn push_wide_value<A: AnomalyCollect>(
         Some(pg_type) => match coerce(value, pg_type) {
             CoerceResult::Ok(s) => wb.push_value(&s),
             CoerceResult::Null => wb.push_null(),
+            CoerceResult::OkWithAnomaly { value, actual_value, actual_type } => {
+                wb.push_value(&value);
+                anomalies.record(wide_table_name, "value", &wide_id.to_string(), &pg_type.as_sql(), &actual_value, actual_type)?;
+            }
             CoerceResult::Anomaly { actual_value, actual_type } => {
                 anomalies.record(wide_table_name, "value", &wide_id.to_string(), &pg_type.as_sql(), &actual_value, actual_type)?;
                 wb.push_null();
@@ -421,6 +436,41 @@ mod tests {
         let v: Value = serde_json::from_str(json_part).expect("JSONB blob must be valid JSON");
         assert_eq!(v["name"], "Widget");
         assert_eq!(v["count"], 3);
+    }
+
+    /// #84: a PG array cell with several unconvertible elements is still written (bad elements as
+    /// NULL) and records ONE anomaly, on the array column, carrying the first faulty element.
+    #[test]
+    fn array_cell_with_bad_elements_records_one_anomaly() {
+        let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        schema.columns.push(ColumnSchema {
+            name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
+            pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: false,
+        });
+        schema.columns.push(ColumnSchema {
+            name: "tags".to_string(), original_name: "tags".to_string(),
+            pg_type: PgType::Array(Box::new(PgType::VarChar(2))), not_null: false, is_generated: false, is_parent_fk: false,
+        });
+        let path_map: HashMap<String, TableSchema> = HashMap::new();
+        let mut anomalies = AnomalyCollector::new(None);
+        let mut sinks: HashMap<String, CaptureSink> = HashMap::new();
+        sinks.insert("t".to_string(), CaptureSink(Vec::new()));
+        let obj: serde_json::Map<String, Value> =
+            serde_json::from_str(r#"{"tags":["ab","abc","abcd"]}"#).unwrap();
+
+        insert_object(
+            &path_map,
+            &mut InsertCtx { sinks: &mut sinks, anomalies: &mut anomalies },
+            &schema, &obj, Uuid::nil(), None, None,
+        ).unwrap();
+
+        let row = std::str::from_utf8(&sinks["t"].0[0]).unwrap();
+        assert!(row.ends_with("\t{\"ab\",NULL,NULL}\n"), "the cell is written with NULL elements, got {row:?}");
+        let summaries = anomalies.summaries();
+        assert_eq!(summaries.len(), 1, "one (table, column) pair: {summaries:?}");
+        let s = &summaries[0];
+        assert_eq!((s.column.as_str(), s.expected_type.as_str(), s.anomaly_count), ("tags", "VARCHAR(2)[]", 1));
+        assert_eq!(s.examples[0].actual_value, "\"abc\"", "the first faulty element is the example");
     }
 
     #[test]

@@ -73,6 +73,10 @@ fn push_coerced<A: AnomalyCollect>(
     match coerce(val, &col.pg_type) {
         CoerceResult::Ok(s) => builder.push_value(&s),
         CoerceResult::Null => builder.push_null(),
+        CoerceResult::OkWithAnomaly { value, actual_value, actual_type } => {
+            builder.push_value(&value);
+            anomalies.record(table_name, &col.name, row_id, &col.pg_type.as_sql(), &actual_value, actual_type)?;
+        }
         CoerceResult::Anomaly { actual_value, actual_type } => {
             anomalies.record(table_name, &col.name, row_id, &col.pg_type.as_sql(), &actual_value, actual_type)?;
             builder.push_null();

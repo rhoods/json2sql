@@ -137,3 +137,34 @@ async fn test_null_byte_anomaly() {
         assert_eq!(null_count, 1);
     }).await;
 }
+
+// ---------------------------------------------------------------------------
+// #84 — élément de tableau PG plus long que le VARCHAR(n) de la colonne (snapshot périmé,
+// --schema-input) : l'élément devient NULL, UNE anomalie par cellule, et le COPY ne s'arrête pas
+// (avant : `value too long for type character varying(2)` faisait échouer tout l'import).
+// Pass 1 infère un VARCHAR(n)[] assez large ; on resserre la colonne à VARCHAR(2)[] avant le DDL.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_array_element_overflow_is_an_anomaly_not_a_copy_error() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("anomalies_array.jsonl");
+        let mut config = common::pass1_config("items");
+        config.registry.array_as_pg_array = true; // common::pass1_config is still in junction mode until the flag goes
+        let mut p1 = pass1::runner::run(&path, &config, None).unwrap();
+        let tags = p1.schemas.iter_mut()
+            .find(|s| s.name == "items").unwrap()
+            .columns.iter_mut().find(|c| c.name == "tags").unwrap();
+        tags.pg_type = json2sql::schema::type_tracker::PgType::Array(Box::new(json2sql::schema::type_tracker::PgType::VarChar(2)));
+
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
+        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("items", &schema), None)
+            .await.unwrap();
+
+        assert_eq!(common::row_count(&client, &schema, "items").await, 3);
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 1, "one anomaly for the cell, not one per overflowing element");
+        let cells: Vec<String> = client
+            .query(&format!("SELECT \"tags\"::text FROM \"{schema}\".\"items\" ORDER BY \"id\""), &[])
+            .await.unwrap().iter().map(|r| r.get(0)).collect();
+        assert_eq!(cells, vec!["{ab,cd}", "{ab,NULL,NULL}", "{}"]);
+    }).await;
+}
