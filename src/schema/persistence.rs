@@ -9,6 +9,8 @@
 //! - fn `write_snapshot` — sérialise et écrit sur disque (écriture atomique via `.tmp` + rename si demandé).
 //! - fn `save` — construit un `SchemaSnapshot` sans overrides et l'écrit (non atomique).
 //! - fn `save_with_overrides` — idem, avec les overrides de stratégie utilisateur (écriture atomique).
+//! - fn `parse_snapshot` — désérialise un snapshot ; une table de jonction `ScalarArray` d'avant #84 donne
+//!   un message dédié (relancer la Pass 1) au lieu de l'erreur serde brute.
 //! - fn `load` — lit et désérialise un snapshot ; rejette les versions incompatibles (v1) ; migre
 //!   les `strategy_overrides` racine legacy vers `ui_override` par table (sans écraser l'existant).
 
@@ -122,11 +124,26 @@ pub fn save_with_overrides(
     write_snapshot(&snapshot, path, true)
 }
 
+/// Deserialize a snapshot. One made before #84 can hold junction tables for arrays of scalars
+/// (`child_kind` = `ScalarArray`), a variant that no longer exists: it gets its own message.
+/// Recognised from the serde error itself — grepping the file would also hit a column that
+/// happens to be named like that.
+fn parse_snapshot(data: &[u8]) -> Result<SchemaSnapshot> {
+    serde_json::from_slice(data).map_err(|e| {
+        if e.to_string().contains("unknown variant `ScalarArray`") {
+            return J2sError::InvalidInput(
+                "Schema snapshot uses junction tables for arrays of scalars, which json2sql no longer \
+                 generates (they are now array columns). Please re-run Pass 1 to regenerate it.".to_string()
+            );
+        }
+        J2sError::InvalidInput(format!("Schema deserialization failed: {e}"))
+    })
+}
+
 /// Load a Pass 1 result from a previously saved JSON snapshot.
 pub fn load(path: &Path) -> Result<SchemaSnapshot> {
     let data = std::fs::read(path).map_err(J2sError::Io)?;
-    let mut snapshot: SchemaSnapshot = serde_json::from_slice(&data)
-        .map_err(|e| J2sError::InvalidInput(format!("Schema deserialization failed: {e}")))?;
+    let mut snapshot = parse_snapshot(&data)?;
     if snapshot.version != SCHEMA_FORMAT_VERSION {
         if snapshot.version == 1 {
             return Err(J2sError::InvalidInput(
@@ -218,6 +235,39 @@ mod tests {
         assert!(msg.contains("v1"), "error should mention v1, got: {msg}");
         assert!(msg.contains("Pass 1") || msg.contains("re-run") || msg.contains("regenerate"),
             "error should tell user to re-run Pass 1, got: {msg}");
+    }
+
+    /// JSON of a snapshot holding one `users_tags` child table of the given kind.
+    fn snapshot_json_with_child(kind: crate::schema::table_schema::ChildKind) -> String {
+        let mut child = TableSchema::new("users_tags".to_string(), vec!["users".to_string(), "tags".to_string()], 1);
+        child.parent_table = Some("users".to_string());
+        child.child_kind = Some(kind);
+        serde_json::to_string(&SchemaSnapshot { schemas: vec![child], ..empty_snapshot() }).unwrap()
+    }
+
+    #[test]
+    fn load_refuses_a_snapshot_with_a_scalar_array_junction_table() {
+        use crate::schema::table_schema::ChildKind;
+        // Snapshots made before #84 can hold junction tables (`child_kind: "ScalarArray"`), a variant that no
+        // longer exists: the user must be told to re-run Pass 1, not shown a raw serde error.
+        let json = snapshot_json_with_child(ChildKind::ObjectArray).replace("\"ObjectArray\"", "\"ScalarArray\"");
+        assert!(json.contains("\"ScalarArray\""), "test setup: the snapshot must hold a ScalarArray child");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+
+        let msg = load(tmp.path()).err().expect("an old junction snapshot must be refused").to_string();
+        assert!(msg.contains("re-run Pass 1") && msg.contains("junction"), "got: {msg}");
+        assert!(!msg.contains("unknown variant"), "the raw serde error must not leak: {msg}");
+    }
+
+    #[test]
+    fn load_accepts_a_snapshot_with_object_array_children() {
+        use crate::schema::table_schema::ChildKind;
+        // regression guard: the new refusal must not catch snapshots made with array columns
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), snapshot_json_with_child(ChildKind::ObjectArray)).unwrap();
+        let loaded = load(tmp.path()).expect("a snapshot without junction tables still loads");
+        assert_eq!((loaded.version, loaded.schemas.len()), (SCHEMA_FORMAT_VERSION, 1));
     }
 
     #[test]
