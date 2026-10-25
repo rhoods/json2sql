@@ -135,7 +135,7 @@ fn build_data_columns(
 
 /// A field with mixed scalar/array occurrences (`array_as_pg_array`) is emitted only as its
 /// array column — its scalar occurrences are wrapped as one-element arrays in Pass 2 (issue #48).
-fn is_scalar_column(entry: &TableEntry, original_field: &str, tracker: &TypeTracker) -> bool {
+pub(super) fn is_scalar_column(entry: &TableEntry, original_field: &str, tracker: &TypeTracker) -> bool {
     !tracker.is_object_field() && !tracker.is_array_field() && !entry.array_columns.contains_key(original_field)
 }
 

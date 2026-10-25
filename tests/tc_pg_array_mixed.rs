@@ -65,6 +65,11 @@ async fn test_pg_array_autosplit_keeps_arrays_e2e() {
         let result = run_pipeline(base_config(url, schema.clone(), "tc_pg_array_autosplit.jsonl", 2)).await;
         assert!(result.is_ok(), "pg_array_autosplit pipeline failed: {result:?}");
 
+        // the root must really be AutoSplit (3 scalars > threshold 2), else this test checks nothing (#84)
+        let sql = "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'products_wide')";
+        let wide_exists: bool = client.query_one(sql, &[&schema]).await.unwrap().get(0);
+        assert!(wide_exists, "AutoSplit companion `products_wide` missing: the root was not split");
+
         let sql = format!(
             "SELECT array_to_string(\"pure\", ','), array_to_string(\"mixed\", ',') FROM \"{schema}\".\"products\" ORDER BY \"id\""
         );

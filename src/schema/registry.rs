@@ -1397,10 +1397,11 @@ mod tests {
         // root wide (threshold 2) + object child → AutoSplit. Pure and mixed pg-array fields
         // must stay as columns on the main table and never become medium (EAV) keys.
         let mut reg = pg_array_reg(2);
+        // `n1`/`n2` give the root three scalar columns: the wide decision (#84) ignores array columns.
         for v in [
-            json!({"id": 1, "child": {"x": 1}, "pure": ["a"], "mixed": "s"}),
-            json!({"id": 2, "child": {"x": 2}, "pure": ["b", "c"], "mixed": ["t", "u"]}),
-            json!({"id": 3, "child": {"x": 3}, "pure": ["d"], "mixed": "v"}),
+            json!({"id": 1, "n1": 1, "n2": 1, "child": {"x": 1}, "pure": ["a"], "mixed": "s"}),
+            json!({"id": 2, "n1": 2, "n2": 2, "child": {"x": 2}, "pure": ["b", "c"], "mixed": ["t", "u"]}),
+            json!({"id": 3, "n1": 3, "n2": 3, "child": {"x": 3}, "pure": ["d"], "mixed": "v"}),
         ] {
             reg.observe_root("root", make_root(&v));
         }
@@ -1428,6 +1429,104 @@ mod tests {
         };
         assert_single_array_col(identity, "tags");
         assert!(!medium_keys.contains("tags"), "array field leaked into companion keys: {medium_keys:?}");
+    }
+
+    // ── issue #84 : la décision « table large » ne juge que les colonnes scalaires ──
+    // Thresholds 10 (IHM) and 15 (CLI), 40 rows (below 10 rows the "high stable ratio → Columns"
+    // branch is skipped). Column names have no `_`, so no StructuredPivot suffix is ever detected.
+
+    fn observe_rows(reg: &mut SchemaRegistry, root: &str, rows: usize, build: impl Fn(usize) -> Value) {
+        for i in 0..rows {
+            reg.observe_root(root, make_root(&build(i)));
+        }
+    }
+
+    /// `scalars` integer fields `s0..` and `arrays` array fields `a0..`, all present on every row.
+    fn dense_row(i: usize, scalars: usize, arrays: usize) -> Value {
+        let mut obj = serde_json::Map::new();
+        for s in 0..scalars { obj.insert(format!("s{s}"), json!(i)); }
+        for a in 0..arrays { obj.insert(format!("a{a}"), json!(["x", "y"])); }
+        Value::Object(obj)
+    }
+
+    /// The root stays one plain `Columns` table with all its columns: nothing split off to a companion.
+    fn assert_kept_as_columns(schemas: &[TableSchema], data_columns: usize, threshold: usize) {
+        let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(schemas.len(), 1, "threshold {threshold}: no companion table expected, got {names:?}");
+        assert!(
+            matches!(schemas[0].inferred_strategy, InferredStrategy::Columns),
+            "threshold {threshold}: must stay Columns, got {:?}", schemas[0].inferred_strategy
+        );
+        assert_eq!(schemas[0].data_columns().count(), data_columns, "threshold {threshold}");
+    }
+
+    #[test]
+    fn pg_array_dense_ten_scalars_ten_arrays_is_not_wide() {
+        // used to read "50 % stable" (10 stable / 20 columns) and send the scalars to a `_pivot` companion
+        for threshold in [10, 15] {
+            let mut reg = pg_array_reg(threshold);
+            observe_rows(&mut reg, "root", 40, |i| dense_row(i, 10, 10));
+            assert_kept_as_columns(&reg.finalize(), 20, threshold);
+        }
+    }
+
+    #[test]
+    fn pg_array_three_scalars_twenty_arrays_is_not_wide() {
+        // used to read "13 % stable" (3 / 23) and pivot the 3 scalars away
+        for threshold in [10, 15] {
+            let mut reg = pg_array_reg(threshold);
+            observe_rows(&mut reg, "root", 40, |i| dense_row(i, 3, 20));
+            assert_kept_as_columns(&reg.finalize(), 23, threshold);
+        }
+    }
+
+    #[test]
+    fn pg_array_fourteen_scalars_five_arrays_stays_one_table() {
+        // pinning test: green before and after #84 (stable ratio 74 % then 100 %, kept as Columns)
+        for threshold in [10, 15] {
+            let mut reg = pg_array_reg(threshold);
+            observe_rows(&mut reg, "root", 40, |i| dense_row(i, 14, 5));
+            assert_kept_as_columns(&reg.finalize(), 19, threshold);
+        }
+    }
+
+    #[test]
+    fn pg_array_dynamic_keys_valued_by_arrays_create_no_pivot_companion() {
+        // 30 dynamic keys whose values are arrays: no scalar to pivot, so no (empty) `_pivot` companion
+        for threshold in [10, 15] {
+            let mut reg = pg_array_reg(threshold);
+            observe_rows(&mut reg, "root", 40, |i| {
+                let keys: serde_json::Map<String, Value> = (0..30).map(|k| (format!("k{k}"), json!(["x"]))).collect();
+                json!({"id": i, "d": keys})
+            });
+            let schemas = reg.finalize();
+            let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
+            assert!(!names.iter().any(|n| n.ends_with("_pivot")), "threshold {threshold}: empty companion in {names:?}");
+            let d = schemas.iter().find(|s| s.name == "root_d").unwrap();
+            assert!(matches!(d.inferred_strategy, InferredStrategy::Columns), "threshold {threshold}: {:?}", d.inferred_strategy);
+            assert_eq!(d.data_columns().count(), 30, "threshold {threshold}");
+        }
+    }
+
+    #[test]
+    fn pg_array_mixed_field_scalar_side_does_not_count_as_stable() {
+        // 11 scalars (5 stable, 6 rare) + 2 mixed fields that are scalar on 38 rows out of 40.
+        // Counting the mixed fields' scalar side gave 7/13 = 54 % stable → kept as Columns;
+        // judged on the 11 scalars alone it is 5/11 = 45 % → split, the arrays staying on the identity table.
+        let mut reg = pg_array_reg(10);
+        observe_rows(&mut reg, "root", 40, |i| {
+            let mut obj = serde_json::Map::new();
+            for s in 0..5 { obj.insert(format!("s{s}"), json!(i)); }
+            if i < 2 { for r in 0..6 { obj.insert(format!("r{r}"), json!(i)); } }
+            for m in 0..2 { obj.insert(format!("m{m}"), if i < 2 { json!([i, i + 1]) } else { json!(i) }); }
+            Value::Object(obj)
+        });
+        let schemas = reg.finalize();
+        let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"root_pivot"), "the 11 scalars must go to a companion, got {names:?}");
+        let root = schemas.iter().find(|s| s.name == "root").unwrap();
+        assert_eq!(root.data_columns().count(), 2);
+        assert!(root.data_columns().all(|c| matches!(c.pg_type, PgType::Array(_))), "identity keeps only the arrays");
     }
 
     #[test]
