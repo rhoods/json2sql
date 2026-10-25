@@ -80,23 +80,22 @@ json2sql inspect mon_fichier.json --limit 500 --text-threshold 512
 ```
 Inspecting 'products.jsonl' (limit: 200 objects)...
 
-Scanned 200 object(s) → 4 table(s) detected
+Scanned 200 object(s) → 3 table(s) detected
 
-┌─ products (5 columns)
+┌─ products (6 columns)
 │  id                             INTEGER
 │  name                           VARCHAR(64)
 │  price                          DOUBLE PRECISION
 │  available                      BOOLEAN
 │  category                       VARCHAR(32)
-
-┌─ products_tags (1 columns)
-│  parent: products
-│  value                          VARCHAR(16)
+│  tags                           VARCHAR(16)[]
 
 ...
 
 ⚠ 1 column(s) with mixed types detected (re-run with --schema-report for details)
 ```
+
+Un tableau de scalaires apparaît comme une colonne tableau de sa table (`tags VARCHAR(16)[]`), pas comme une table.
 
 ### Workflow typique
 
@@ -132,9 +131,6 @@ json2sql --input data.json --dry-run --schema staging
 json2sql --input data.json --dry-run --schema-report
 json2sql --input data.json --dry-run --schema-report-output stats.txt
 
-# Stocker les tableaux scalaires en colonnes PostgreSQL natives
-json2sql --input data.json --db-url $DATABASE_URL --array-as-pg-array
-
 # Import complet avec options
 json2sql \
   --input data.jsonl \
@@ -148,6 +144,46 @@ json2sql \
   --max-anomaly-rate 0.01 \
   --text-threshold 512
 ```
+
+---
+
+## Tableaux de scalaires
+
+Un tableau de scalaires n'est jamais une table : c'est une colonne tableau de la table qui le contient (`VARCHAR(n)[]`, `INTEGER[]`, `DOUBLE PRECISION[]`…). Le type des éléments suit les règles d'une colonne ordinaire.
+
+| JSON | Cellule |
+|---|---|
+| `"tags": ["rust", "sql"]` | `{rust,sql}` |
+| `"tags": []` | `{}` (tableau vide) |
+| `tags` absent, ou `"tags": null` | `NULL` |
+| `"tags": "bio"` (champ tantôt scalaire, tantôt tableau) | `{bio}` : une seule colonne tableau, la valeur scalaire y est un tableau à un élément ; le type des éléments est élargi si besoin (entier + texte → texte) |
+| `"tags": [["a"], ["b"]]` (tableaux imbriqués) | colonne `TEXT[]` dont chaque élément est le JSON du sous-tableau, en texte |
+
+Requêtes, sur l'import de [`examples/products.jsonl`](../../examples/products.jsonl) :
+
+```sql
+-- les produits qui ont un tag donné
+SELECT name FROM products WHERE 'chocolate' = ANY(tags);
+
+-- contenance et intersection : le littéral doit avoir le type de la colonne (VARCHAR[]),
+-- pas TEXT[] comme le ferait ARRAY['biscuit'] seul
+SELECT name FROM products WHERE tags @> '{biscuit}';
+SELECT name FROM products WHERE tags && ARRAY['spread', 'biscuit']::varchar[];
+
+-- une ligne par élément, avec sa position
+SELECT p.name, t.tag, t.pos
+FROM products p, unnest(p.tags) WITH ORDINALITY AS t(tag, pos)
+ORDER BY p.name, t.pos;
+
+-- nombre d'éléments et premier élément
+SELECT name, cardinality(tags) AS n, tags[1] AS premier FROM products;
+```
+
+**Ordre.** L'ordre d'un tableau de scalaires est l'index dans la colonne. `unnest(...) WITH ORDINALITY` redonne la position que `j2s_order` donnait aux anciennes tables de jonction, avec un décalage : elle commence à **1**, alors que `j2s_order` (toujours présent pour les tableaux d'objets) commence à 0.
+
+**Anomalies.** Un élément qui ne peut pas être stocké (chaîne plus longue que le `VARCHAR(n)` de la colonne, valeur qui n'a pas le type des éléments, octet nul dans un texte…) devient `NULL` dans le tableau, et l'import continue. La cellule compte pour **une seule** anomalie, même si plusieurs éléments sont fautifs : le rapport donne la colonne (le tableau) et le premier élément fautif.
+
+> **Changement.** L'option `--array-as-pg-array` et la case « Arrays as PG arrays » de l'IHM n'existent plus : ce comportement est le seul. Un script qui passe encore l'option échoue (`error: unexpected argument '--array-as-pg-array' found`, code de sortie 2). Un snapshot de schéma ancien qui contient des tables de jonction est refusé avec un message qui demande de relancer la Pass 1 ; un snapshot fait avec l'option est accepté tel quel.
 
 ---
 
@@ -172,12 +208,11 @@ json2sql \
 | Paramètre | Défaut | Description |
 |---|---|---|
 | `--text-threshold` | 256 | Longueur max avant TEXT (sinon VARCHAR) |
-| `--wide-column-threshold` | 15 | Seuil de détection des tables larges |
+| `--wide-column-threshold` | 15 | Seuil de détection des tables larges, compté en colonnes **scalaires** : les colonnes tableau ne comptent pas |
 | `--stable-threshold` | 0.10 | Fréquence min pour colonne stable (AutoSplit) |
 | `--rare-threshold` | 0.001 | Fréquence sous laquelle une clé n'est **pas importée** (AutoSplit). `0` = tout conserver |
 | `--sibling-threshold` | 2 | Nb min de tables sœurs pour fusion |
 | `--sibling-jaccard` | 0.8 | Similarité min des colonnes sœurs |
-| `--array-as-pg-array` | false | Tableaux scalaires → colonne `TEXT[]`. Un champ tantôt scalaire, tantôt tableau devient une seule colonne tableau ; ses valeurs scalaires sont stockées comme tableaux à un élément (`"bio"` → `{bio}`) |
 | `--depth-limit` | aucun | Avertissement si imbrication dépasse N niveaux |
 | `--workers` | 1 | Threads de la Pass 1 (inférence parallèle) |
 | `--disable-strategy` | aucun | Désactive une stratégie d'inférence optionnelle. Répétable. Valeurs : `sibling`, `pivot`, `structured_pivot`. La stratégie `split` (wide-table) est obligatoire et ne peut pas être désactivée. |
@@ -210,7 +245,7 @@ ALTER SYSTEM SET max_wal_senders = 0;
 | `--anomaly-dir` | aucun | Dossier pour les fichiers NDJSON d'anomalies par table |
 | `--anomaly-output` | stdout | Fichier du rapport de synthèse des anomalies |
 | `--anomaly-format` | json | Format du rapport (`json` ou `csv`) |
-| `--max-anomaly-rate` | aucun | Taux max acceptable (0.0–1.0) ; abort si dépassé |
+| `--max-anomaly-rate` | aucun | Taux max acceptable (0.0–1.0) ; abort si dépassé. Le taux se calcule sur toutes les lignes écrites, toutes tables confondues : les éléments d'un tableau de scalaires ne sont plus des lignes (ils l'étaient dans les anciennes tables de jonction), donc à données égales le taux est plus élevé qu'avant |
 
 ### Paramètres de rapport de schéma
 
@@ -238,6 +273,8 @@ suffix_columns = ["_100g", "_unit", "_serving"]
 [nom_table.columns]
 ma_colonne = "INTEGER"      # forcer un type : INTEGER | BIGINT | TEXT | VARCHAR(N) | etc.
 ```
+
+Ces types sont scalaires : une surcharge de type sur une colonne tableau est ignorée avec un avertissement, la colonne reste un tableau.
 
 ### Stratégies disponibles
 

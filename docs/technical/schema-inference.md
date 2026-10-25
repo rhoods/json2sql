@@ -25,7 +25,7 @@ Chaque champ JSON observé dans la Pass 1 alimente un `TypeTracker` qui accumule
 | Chaîne ≤ `text_threshold` chars | VarChar(N) |
 | Chaîne > `text_threshold` chars | Text |
 | Objet `{}` | Object (→ table enfant) |
-| Tableau `[]` | Array (→ table enfant ou colonne array) |
+| Tableau `[]` | Array (tableau d'objets → table enfant ; tableau de scalaires → colonne tableau) |
 
 ### Règles de résolution (`to_pg_type`)
 
@@ -59,7 +59,7 @@ Si la longueur maximale observée d'un champ texte dépasse ce seuil, le type pa
 **Fichier :** `src/schema/registry.rs`
 **Paramètre CLI :** `--wide-column-threshold` (défaut : 15)
 
-Une table est dite **large** si le nombre de colonnes de données (hors colonnes générées `j2s_*`) dépasse ce seuil. Une fois détectée comme large, plusieurs stratégies peuvent s'appliquer.
+Une table est dite **large** si le nombre de ses colonnes **scalaires** (hors colonnes générées `j2s_*` et hors colonnes tableau) dépasse ce seuil. Les colonnes tableau ne comptent pas : elles restent sur la table quelle que soit la stratégie, et ne sont jamais envoyées dans une table EAV. Une fois détectée comme large, plusieurs stratégies peuvent s'appliquer.
 
 ---
 
@@ -70,8 +70,10 @@ Une table est dite **large** si le nombre de colonnes de données (hors colonnes
 Avant d'appliquer une stratégie wide, on vérifie :
 
 ```
-ratio_stable = fraction de clés présentes dans >= stable_threshold % des lignes
+ratio_stable = fraction des colonnes scalaires présentes dans >= stable_threshold % des lignes
 ```
+
+Les colonnes tableau, et les champs tantôt scalaires, tantôt tableau, n'entrent pas dans ce ratio.
 
 Si `ratio_stable > 0.5` **et** que la table contient au moins 10 lignes, le schéma est un schéma dense légitime : la stratégie `Columns` est conservée, sans pivot ni AutoSplit.
 
@@ -94,6 +96,8 @@ S'applique uniquement à la **table racine** qui possède des tables enfants (ob
 
 La table `_wide` est une table EAV synthétique générée automatiquement avec les colonnes `j2s_id`, `j2s_parent_id`, `j2s_order`, `key`, `value`. Elle est liée à la table principale via une clé étrangère.
 
+Les colonnes tableau ne sont ni médiums ni rares : elles restent dans la table principale.
+
 **Exemple OpenFoodFacts :** 189 881 clés observées → 125 stables, 184 médiums, 189 572 rares supprimées.
 
 > ⚠️ **Perte de données volontaire.** Les clés rares sont écartées pour éviter une table EAV de centaines de milliers de clés quasi vides. Pour tout conserver, passer `--rare-threshold 0` : toutes les clés non stables vont alors dans `{nom}_wide`.
@@ -105,6 +109,8 @@ La table `_wide` est une table EAV synthétique générée automatiquement avec 
 **Fichier :** `src/schema/suffix_detector.rs`
 
 Pour les tables larges non-racines dont les colonnes suivent un pattern `{base}_{suffixe}` (ex. `calcium_100g`, `calcium_unit`, `calcium_serving`), un pivot structuré est auto-détecté.
+
+> ⚠️ **Limite connue.** Une table qui prend cette stratégie ne conserve pas ses colonnes tableau : elles disparaissent du schéma et des données. Sur les 10 000 premières lignes d'OpenFoodFacts, aucune des tables concernées n'a de tableau.
 
 ### Algorithme
 
@@ -230,6 +236,8 @@ suffix_columns = ["_100g", "_unit"]  # suffixes explicites pour structured_pivot
 [nom_table.columns]
 ma_colonne = "INTEGER"      # forcer un type de colonne
 ```
+
+Les types forçables sont scalaires : une surcharge sur une colonne tableau est ignorée avec un avertissement.
 
 Les surcharges sont appliquées après `finalize()` et suivies d'une nouvelle passe d'exclusion.
 

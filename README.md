@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS "public"."products" (
     "name" VARCHAR(12),
     "price" VARCHAR(30),        -- un seul "N/A" suffit : le type le plus large l'emporte
     "quantity_g" INTEGER,
+    "tags" VARCHAR(11)[],       -- tableau de scalaires : une colonne tableau, pas de table de jonction
     CONSTRAINT "pk_products" PRIMARY KEY (j2s_id)
 );
 
@@ -41,7 +42,7 @@ CREATE TABLE IF NOT EXISTS "public"."products_stores" (       -- tableau d'objet
     CONSTRAINT "pk_products_stores" PRIMARY KEY (j2s_id)
 );
 
--- + products_tags (tableau de scalaires) et les FOREIGN KEY, ajoutées après le chargement
+-- + les FOREIGN KEY, ajoutées après le chargement
 ```
 
 ## Fonctionnement
