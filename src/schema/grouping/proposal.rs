@@ -33,7 +33,7 @@
 //! - fn `add_cohesion` — place la cohésion des noms en tête des preuves de chaque groupe.
 //! - fn `ungrouped_columns` — colonnes qu'aucun groupe confirmé ne prend, dans l'ordre des colonnes.
 //! - fn `data_status` — état des signaux de données à reporter : allumés avec leur échantillon, ou éteints avec la raison.
-//! - fn `avoid_taken_names` — renomme les groupes dont la table existerait déjà (`_2`, `_3`…), et les fusions qui les remplacent.
+//! - fn `avoid_taken_names` — renomme les groupes dont la table existerait déjà (`_cols`, `_cols_2`…), et les fusions qui les remplacent.
 //! - fn `families_of` — colonnes d'un groupe réparties par premier mot de radical.
 //! - fn `cross_pairs` — paires de colonnes de familles différentes.
 //! - fn `all_pairs` — toutes les paires de colonnes d'une liste.
@@ -41,7 +41,8 @@
 //! - fn `backing` — les liens entre les familles d'un groupe lexical sont-ils soutenus ? avec les preuves examinées.
 //! - fn `family_groups` — un groupe actif par famille d'au moins trois colonnes, dans l'ordre des colonnes.
 //! - fn `families_word` — mots d'un nom de groupe : ceux de ses familles les plus grosses.
-//! - fn `unique_name` — nom de groupe libre : le mot demandé, suffixé d'un numéro en cas de collision.
+//! - fn `unique_name` — nom de groupe libre : le mot demandé, suffixé de `_cols` (puis d'un numéro) en cas de collision.
+//! - fn `nth_name` — n-ième nom essayé pour un groupe : le mot, puis `_cols`, puis `_cols_2`…
 //! - fn `family_notes` — familles à clé et numérotées d'une table.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -452,16 +453,17 @@ fn split_or_fuse(
 
 /// Renames the groups whose table (`{table}_{group}`, as the config applies it) would take the name of a table in
 /// `taken`, which holds the names of the existing tables and of the groups given so far: the group gets the next free
-/// `_2`, `_3`... name, so that the proposal applies as it is (a nested `nutrition` object is already the table
-/// `openfoodfacts_nutrition`). A fusion to confirm follows the new names of the families it replaces.
+/// name of [`nth_name`], so that the proposal applies as it is (a nested `nutrition` object is already the table
+/// `openfoodfacts_nutrition`, the group becomes `nutrition_cols`). A fusion to confirm follows the new names of the
+/// families it replaces.
 pub fn avoid_taken_names(proposal: &mut TableProposal, taken: &mut HashSet<String>) {
     let mut renamed: HashMap<String, String> = HashMap::new();
     for group in &mut proposal.groups {
         let base = group.name.clone();
-        let mut suffix = 2;
+        let mut n = 1;
         while taken.contains(&group_table_name(&proposal.table, &group.name)) {
-            group.name = format!("{base}_{suffix}");
-            suffix += 1;
+            group.name = nth_name(&base, n);
+            n += 1;
         }
         taken.insert(group_table_name(&proposal.table, &group.name));
         if group.name != base {
@@ -538,16 +540,24 @@ fn families_word(families: &BTreeMap<String, Vec<usize>>) -> String {
         .join("_")
 }
 
-/// `wanted`, or `wanted_2`, `wanted_3`… if the name is taken; `group` for an empty word.
+/// `wanted`, or the next free name of [`nth_name`] if it is taken; `group` for an empty word.
 fn unique_name(used: &mut HashSet<String>, wanted: &str) -> String {
     let base = if wanted.is_empty() { "group" } else { wanted };
-    let mut name = base.to_string();
-    let mut suffix = 2;
-    while !used.insert(name.clone()) {
-        name = format!("{base}_{suffix}");
-        suffix += 1;
+    let mut n = 0;
+    while !used.insert(nth_name(base, n)) {
+        n += 1;
     }
-    name
+    nth_name(base, n)
+}
+
+/// The `n`-th name tried for a group named after `base`: `base`, then `base_cols`, `base_cols_2`, `base_cols_3`… A
+/// number says nothing, `_cols` says these are columns of the table and not its nested `base` object (#91).
+fn nth_name(base: &str, n: usize) -> String {
+    match n {
+        0 => base.to_string(),
+        1 => format!("{base}_cols"),
+        _ => format!("{base}_cols_{n}"),
+    }
 }
 
 /// The keyed and numbered families of the table, in column order.
@@ -849,22 +859,34 @@ mod tests {
         let mut p = names_only_of(&fused_table());
         let names: Vec<String> = p.groups.iter().map(|g| g.name.clone()).collect();
         assert_eq!(names, ["nutrition", "nutriscore", "nutriscore_nutrition"]);
-        let mut taken: HashSet<String> = ["t_nutrition", "t_nutrition_2"]
+        let mut taken: HashSet<String> = ["t_nutrition", "t_nutrition_cols"]
             .iter()
             .map(|n| (*n).to_string())
             .collect();
         avoid_taken_names(&mut p, &mut taken);
         let names: Vec<&str> = p.groups.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(names, ["nutrition_3", "nutriscore", "nutriscore_nutrition"]);
+        assert_eq!(names, ["nutrition_cols_2", "nutriscore", "nutriscore_nutrition"]);
         assert_eq!(
             p.groups[2].replaces,
-            ["nutrition_3", "nutriscore"],
+            ["nutrition_cols_2", "nutriscore"],
             "the fusion names the renamed family"
         );
         assert!(
-            taken.contains("t_nutrition_3") && taken.contains("t_nutriscore"),
+            taken.contains("t_nutrition_cols_2") && taken.contains("t_nutriscore"),
             "the names given are taken too"
         );
+    }
+
+    #[test]
+    fn a_long_table_name_still_gets_a_free_cols_name_once_hashed() {
+        // the table names of 53 bytes and more end with a hash: the check is on that final name
+        let mut p = names_only_of(&fused_table());
+        p.table = "p".repeat(50);
+        let mut taken: HashSet<String> = HashSet::from([group_table_name(&p.table, "nutrition")]);
+        avoid_taken_names(&mut p, &mut taken);
+        assert_eq!(p.groups[0].name, "nutrition_cols");
+        let name = group_table_name(&p.table, "nutrition_cols");
+        assert!(name.len() <= 53 && name != group_table_name(&p.table, "nutrition"), "{name}");
     }
 
     #[test]
@@ -879,7 +901,7 @@ mod tests {
         avoid_taken_names(&mut first, &mut taken);
         avoid_taken_names(&mut second, &mut taken);
         assert_eq!(first.groups[0].name, "b_c");
-        assert_eq!(second.groups[0].name, "c_2");
+        assert_eq!(second.groups[0].name, "c_cols");
         let tables: Vec<String> = [&first, &second]
             .iter()
             .flat_map(|p| p.groups.iter().map(|g| group_table_name(&p.table, &g.name)))
@@ -1044,8 +1066,8 @@ mod tests {
     fn group_names_are_unique() {
         let mut used = HashSet::new();
         assert_eq!(unique_name(&mut used, "name"), "name");
-        assert_eq!(unique_name(&mut used, "name"), "name_2");
-        assert_eq!(unique_name(&mut used, "name"), "name_3");
+        assert_eq!(unique_name(&mut used, "name"), "name_cols");
+        assert_eq!(unique_name(&mut used, "name"), "name_cols_2");
         assert_eq!(unique_name(&mut used, ""), "group");
     }
 

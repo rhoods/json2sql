@@ -6,7 +6,9 @@
 //! rows. The data signals need a table reachable through objects only from its root rows; under an array, or with
 //! an unknown root row count, a table is proposed from its names alone and the report says why. Columns are read
 //! like Pass 2 does (`push_data_col`): through `flatten_sources` when the column was inlined from a child, else by
-//! its original name.
+//! its original name. Both the sample and the proposal take a table's columns sorted by name, so that the proposal
+//! does not depend on the order Pass 1 gave them (it varies with several workers, #90) and the signals of a column
+//! stay on that column.
 //!
 //! A group table that a config already made from a table is not proposed again: its columns are read from the
 //! parent's object.
@@ -19,6 +21,7 @@
 //! - fn `ReadPlan::target` — la cible de l'échantillonneur pour cette table, si son objet est atteignable.
 //! - fn `read_plans` — où lire chacune des tables.
 //! - fn `eligible` — vrai pour une table de stratégie `Columns` ou `AutoSplit` avec assez de colonnes de données.
+//! - fn `data_columns_by_name` — colonnes de données d'une table triées par nom : l'ordre de l'échantillon et de la proposition.
 //! - fn `key_path` — chemin de clés d'une colonne dans l'objet de sa table, comme `push_data_col`.
 //! - fn `object_path` — clés à suivre depuis une ligne racine jusqu'à la table, si aucun tableau n'est traversé.
 //! - fn `samplable_root` — la table racine, si les signaux de données peuvent être calculés.
@@ -122,8 +125,8 @@ fn proposal_for(
     embedder: Option<&StaticEmbedder>,
     taken: &mut HashSet<String>,
 ) -> Result<TableProposal> {
-    let columns = table
-        .data_columns()
+    let columns = data_columns_by_name(table)
+        .into_iter()
         .map(|c| ColumnName {
             name: c.name.clone(),
             original: c.original_name.clone(),
@@ -145,6 +148,14 @@ fn proposal_for(
 /// A table that can be split (`Columns` or `AutoSplit`) with enough data columns.
 fn eligible(schema: &TableSchema) -> bool {
     schema.takes_column_groups() && schema.data_columns().count() >= MIN_TABLE_COLUMNS
+}
+
+/// The data columns of a table by original name, then by `PostgreSQL` name: the one order of the columns for the
+/// sample and for the proposal.
+fn data_columns_by_name(table: &TableSchema) -> Vec<&ColumnSchema> {
+    let mut columns: Vec<&ColumnSchema> = table.data_columns().collect();
+    columns.sort_by(|a, b| a.original_name.cmp(&b.original_name).then_with(|| a.name.cmp(&b.name)));
+    columns
 }
 
 /// Keys leading to a column's value inside its table's object, as `push_data_col` reads it: through the field the
@@ -236,7 +247,7 @@ fn read_plans(schemas: &[TableSchema], tables: &[&TableSchema]) -> Vec<ReadPlan>
         .iter()
         .map(|table| ReadPlan {
             path: object_path(schemas, table),
-            columns: table.data_columns().map(|c| key_path(table, c)).collect(),
+            columns: data_columns_by_name(table).into_iter().map(|c| key_path(table, c)).collect(),
         })
         .collect()
 }
@@ -467,7 +478,7 @@ mod tests {
         let toml = parsed(&s.toml);
         let groups = toml["items_props"]["column_groups"].as_table().unwrap();
         assert!(
-            !groups.contains_key("kiwi") && groups.contains_key("kiwi_2"),
+            !groups.contains_key("kiwi") && groups.contains_key("kiwi_cols"),
             "{:?}",
             groups.keys().collect::<Vec<_>>()
         );
@@ -495,6 +506,70 @@ mod tests {
             ["items_props"],
             "its columns are read from the parent's object, not from its own path"
         );
+    }
+
+    /// Two prefix families whose columns `i` and `i + 4` hold the same six values, then twelve fillers with values of
+    /// their own: the names make one fusion of `nutrition` and `nutriscore`, the shared values confirm it.
+    const FUSED: [&str; 8] = [
+        "nutrition_fat", "nutrition_sugar", "nutrition_salt", "nutrition_fiber",
+        "nutriscore_fat", "nutriscore_sugar", "nutriscore_salt", "nutriscore_fiber",
+    ];
+
+    fn fused_names() -> Vec<String> {
+        FUSED.iter().chain(&OTHER).map(|n| (*n).to_string()).collect()
+    }
+
+    /// `rows` lines with the fused table under `props`.
+    fn fused_jsonl(rows: usize) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        for i in 0..rows {
+            let props: serde_json::Map<String, Value> = FUSED
+                .iter()
+                .enumerate()
+                .map(|(c, n)| ((*n).to_string(), json!(format!("{}{}", char::from(b'a' + u8::try_from(c % 4).unwrap()), i % 6))))
+                .chain(OTHER.iter().map(|n| ((*n).to_string(), json!(format!("{n}{}", i % 6)))))
+                .collect();
+            writeln!(f, "{}", json!({"id": i, "props": props})).unwrap();
+        }
+        f
+    }
+
+    /// The proposal for the fused table with its columns in the given order.
+    fn fused_run(columns: &[String], input: &Path) -> Suggestion {
+        let schemas = vec![
+            table("items", &["items"], None, &["id".to_string()], 60),
+            table("items_props", &["items", "props"], Some(ChildKind::Object), columns, 60),
+        ];
+        run(&schemas, input, None).unwrap()
+    }
+
+    /// The fused names in an order that interleaves the families and the fillers.
+    fn shuffled(names: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = names.iter().rev().cloned().collect();
+        out.rotate_left(7);
+        out
+    }
+
+    #[test]
+    fn the_names_alone_give_the_same_proposal_whatever_the_order_of_the_columns() {
+        // #90: with several Pass 1 workers the columns of a table come in another order at each run
+        let missing = Path::new("/nonexistent/dir/input.json");
+        let names = fused_names();
+        let (a, b) = (fused_run(&names, missing), fused_run(&shuffled(&names), missing));
+        assert_eq!(a.toml, b.toml);
+        assert_eq!(a.report, b.report);
+        assert!(a.toml.contains("nutrition = [") && a.toml.contains("nutriscore = ["), "{}", a.toml);
+    }
+
+    #[test]
+    fn the_data_signals_stay_on_their_columns_whatever_the_order_of_the_columns() {
+        // the sample and the proposal must list the columns in the same order, or the signals land on other columns
+        let f = fused_jsonl(60);
+        let names = fused_names();
+        let (a, b) = (fused_run(&names, f.path()), fused_run(&shuffled(&names), f.path()));
+        assert!(a.toml.contains("\nnutriscore_nutrition = ["), "the shared values confirm the fusion: {}", a.toml);
+        assert_eq!(a.toml, b.toml);
+        assert_eq!(a.report, b.report);
     }
 
     #[test]
