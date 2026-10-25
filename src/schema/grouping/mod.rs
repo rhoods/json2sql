@@ -1,6 +1,7 @@
 //! Thematic split of wide tables (#78): proposing 1:1 groups of columns.
 //!
 //! Sous-modules :
+//! - [`auto`] — groupes confirmés par les noms, appliqués comme une stratégie (`--group-columns`, bascule de l'IHM) (#91)
 //! - [`names`] — normalisation des noms de colonnes en radicaux (T1a)
 //! - [`embedding`] — embeddings statiques `Model2Vec` des noms de colonnes : lecteur safetensors et `WordPiece` (T2)
 //! - [`lexical`] — regroupement lexical des radicaux : trigrammes TF-IDF, liaison moyenne (T1b)
@@ -14,6 +15,7 @@
 //! - [`suggest`] — l'exécution de `--suggest-groups` : choix d'une table, échantillon, proposition, sorties (T1e)
 //! - [`values`] — valeurs échantillonnées des colonnes (vocabulaire, nombres), pour les signaux de données (T1d)
 
+pub mod auto;
 pub mod embedding;
 pub mod lexical;
 pub mod names;

@@ -119,7 +119,7 @@ pub fn suggest(
 /// The proposal for one table: its columns, its data signals or why they are off, groups named so that their tables
 /// do not exist yet (`taken` holds the names of the tables and of the groups given so far), and where its other
 /// columns might go when there is an `embedder`.
-fn proposal_for(
+pub(super) fn proposal_for(
     table: &TableSchema,
     data: &Signals,
     embedder: Option<&StaticEmbedder>,
@@ -146,7 +146,7 @@ fn proposal_for(
 }
 
 /// A table that can be split (`Columns` or `AutoSplit`) with enough data columns.
-fn eligible(schema: &TableSchema) -> bool {
+pub(super) fn eligible(schema: &TableSchema) -> bool {
     schema.takes_column_groups() && schema.data_columns().count() >= MIN_TABLE_COLUMNS
 }
 
