@@ -48,6 +48,8 @@ Séquence de `run_pipeline()` :
 8. Sinon : se connecte à PostgreSQL, crée les tables, lance la Pass 2
 9. Affiche le résumé d'import et les anomalies
 
+Avec `--suggest-groups`, `main.rs` appelle `pipeline::suggest_groups()` à la place : les étapes 1 à 6 (partagées via `finalized_schema()`), puis la proposition de découpage de toutes les tables larges, depuis un seul échantillon du fichier (`schema::grouping::suggest`), et, avec `--embedding-model`, les deux groupes les plus proches de chaque colonne laissée dans la table (`placement`) ; aucune base n'est touchée (#78).
+
 ---
 
 ## `src/ipc.rs`
@@ -222,16 +224,16 @@ Toutes les fonctions `insert_*` privées — traversal du graphe JSON selon les 
 - `insert_keyed_pivot_object()` / `insert_keyed_pivot_array_of_objects()` : fusion de tables sœurs
 - `insert_normalize_dynamic_keys()` : clé/valeur normalisée depuis les sous-objets dynamiques
 - `insert_multi_keyed_pivot()` : pivot multiple via tables synthétiques
-- `insert_array()` : tableau de scalaires → table de jonction ; tableau d'objets → `insert_object()` récursif
+- `insert_array()` : tableau d'objets → `insert_object()` récursif (un tableau de scalaires n'y passe pas : c'est une colonne tableau, écrite avec les autres colonnes de sa table)
 
 ### `coercer.rs`
 
 Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cible.
 
-- **`CoerceResult`** : `Ok(CopyEscaped)`, `Null` ou `Anomaly`
+- **`CoerceResult`** : `Ok(CopyEscaped)`, `Null`, `Anomaly`, ou `OkWithAnomaly` (tableau écrit dont au moins un élément est mis à `NULL`)
 - **`coerce()`** : dispatch principal vers des coerceurs spécialisés par type
 - Types gérés : Integer (contrôle de plage i32), BigInt, DoublePrecision (NaN/Infini → NULL), Boolean (flexible : "yes"/"no"/"1"/"0"...), UUID, Date, Timestamp, Text, VarChar, Jsonb, Array PG
-- **`coerce_pg_array()`** : sérialise un tableau JSON en litéral PostgreSQL `{elem1,elem2,NULL}`
+- **`coerce_pg_array()`** : sérialise un tableau JSON en litéral PostgreSQL `{elem1,elem2,NULL}`. Un élément non convertible (type, longueur d'un `VARCHAR(n)`, octet nul) devient `NULL` et le premier est rapporté : une seule anomalie par cellule
 
 ### `runner/`
 
@@ -304,7 +306,9 @@ Un essai `UNLOGGED` puis `SET LOGGED` a été retiré : la réécriture dans le 
   - `AutoSplit` : colonnes stables → table principale, colonnes médiums → table `_wide` (EAV) ; les clés rares (`< --rare-threshold`) ne sont **pas importées** — voir [schema-inference.md](schema-inference.md)
   - `Ignore` : clé supprimée
 
-**Traversal des tableaux** (dans `traversal.rs`) : `insert_array()` — tableau d'objets → `insert_object()` récursif ; tableau de scalaires → ligne de jonction `(parent_id, order, value)`.
+**Groupes de colonnes** (#78, dans `insert.rs`) : pour une table `Columns` ou `AutoSplit` qui a des tables de groupe, `insert_object()` écrit après la ligne de la table (`write_row_of`) une ligne par groupe (`write_group_rows`) : même `j2s_id` et même clé étrangère que la ligne d'origine, seulement si une colonne du groupe a une valeur (ni `null`, ni `""`, ni `[]`, ni `{}`). Les tables enfants ordinaires restent rattachées à la ligne d'origine.
+
+**Traversal des tableaux** (dans `traversal.rs`) : `insert_array()` — tableau d'objets → `insert_object()` récursif. Un tableau de scalaires n'a pas de table : c'est une colonne tableau.
 
 ---
 
@@ -326,7 +330,7 @@ Définit les types de données fondamentaux du schéma :
   - `Ignore` : clé supprimée
 - **`ColumnSchema`** : définition d'une colonne (nom PG, nom original, type, nullable, is_generated)
 - **`TableSchema`** : définition complète d'une table (nom, chemin JSON, colonnes, parent, profondeur, stratégie)
-- **`ChildKind`** : `Object`, `ObjectArray`, `ScalarArray`
+- **`ChildKind`** : `Object`, `ObjectArray`
 - **`KeyShape`** : forme des clés détectées (Numeric, IsoLang, Slug, Mixed)
 - **`SuffixSchema`** / **`SiblingSchema`** : métadonnées pour StructuredPivot et KeyedPivot. `SiblingSchema` contient le nom de la colonne clé, la forme des clés (`KeyShape`), le flag `array_children` (ObjectArray vs Object) et `data_col_name` (nom de la colonne JSONB brute, toujours `j2s_data`)
 
@@ -440,7 +444,7 @@ Sérialisation et désérialisation du résultat Pass 1 — permet à l'IHM de d
 
 - **`SchemaSnapshot`** : struct sérialisable contenant `version`, `total_rows`, `schemas`, `truncated_names`, `column_collisions`, `stats`
 - **`save()`** : sérialise un résultat Pass 1 en JSON vers un fichier
-- **`load()`** : désérialise et vérifie la version (`SCHEMA_FORMAT_VERSION = 1`)
+- **`load()`** : désérialise et vérifie la version (`SCHEMA_FORMAT_VERSION = 2`) ; refuse, avec un message qui demande de relancer la Pass 1, un snapshot d'avant #84 qui contient une table de jonction `ScalarArray`
 
 ---
 

@@ -3,7 +3,7 @@
 Outil Rust pour importer des fichiers JSON volumineux (plusieurs Go) dans une base de données PostgreSQL relationnelle, en :
 
 - inférant le schéma (types, nullabilité) à partir d'un scan complet du fichier
-- normalisant les objets imbriqués et les tableaux en tables filles liées par clés étrangères
+- normalisant les objets imbriqués et les tableaux d'objets en tables filles liées par clés étrangères (un tableau de scalaires devient une colonne tableau)
 - chargeant les données via `COPY FROM STDIN` — la méthode la plus rapide pour PostgreSQL
 - produisant un rapport des anomalies de type (valeurs non convertibles vers le type inféré)
 
@@ -22,17 +22,16 @@ La passe 1 ne fait aucune écriture en base — uniquement du suivi de types en 
 
 ### Normalisation complète
 
-Les objets imbriqués et les tableaux deviennent des tables filles — pas de colonne JSONB par défaut. Chaque niveau d'imbrication crée une table préfixée :
+Les objets imbriqués et les tableaux d'objets deviennent des tables filles — pas de colonne JSONB par défaut. Chaque niveau d'imbrication crée une table préfixée :
 
 ```
 users                    → table racine
 users_address            → objet imbriqué { "address": {...} }
 users_orders             → tableau d'objets [ {"amount": ...} ]
-users_tags               → tableau de scalaires ["rust", "sql"] → (value, j2s_order)
 users_orders_items       → imbrication profonde
 ```
 
-Avec `--array-as-pg-array`, les tableaux de scalaires deviennent des colonnes `TEXT[]`, `INTEGER[]`, etc. au lieu de tables de jonction. Un champ tantôt scalaire, tantôt tableau (`"bio"` puis `["bio", "vegan"]`) devient une seule colonne tableau : chaque valeur scalaire y est stockée comme un tableau à un élément (`{bio}`), et le type des éléments est élargi si besoin (entier + texte → `TEXT[]`).
+Un tableau de scalaires ne crée pas de table : c'est une colonne tableau de sa table parente (`tags VARCHAR(n)[]`, `INTEGER[]`, etc.). Dans `users`, `"tags": ["rust", "sql"]` donne `{rust,sql}`, `[]` donne `{}`, un tableau absent ou `null` donne `NULL`, et l'ordre est l'index du tableau. Un champ tantôt scalaire, tantôt tableau (`"bio"` puis `["bio", "vegan"]`) devient une seule colonne tableau : chaque valeur scalaire y est stockée comme un tableau à un élément (`{bio}`), et le type des éléments est élargi si besoin (entier + texte → texte). Exemples de requêtes : [usage.md](usage.md#tableaux-de-scalaires).
 
 ### Clés générées (préfixe `j2s_`)
 
@@ -42,7 +41,7 @@ Toutes les tables reçoivent des colonnes synthétiques réservées :
 |---|---|---|
 | `j2s_id` | UUID v7 | Clé primaire (time-ordered) |
 | `j2s_<parent>_id` | UUID v7 | Clé étrangère vers la table parente |
-| `j2s_order` | BIGINT | Préserve l'ordre d'apparition dans les tableaux |
+| `j2s_order` | BIGINT | Préserve l'ordre d'apparition dans les tableaux d'objets (l'ordre d'un tableau de scalaires est l'index dans sa colonne) |
 
 UUID v7 est choisi pour ses propriétés time-ordered (index B-tree efficace, insert-order préservé).
 
@@ -80,5 +79,7 @@ Une seule chaîne suffit à faire passer la colonne en texte : `1000 INTEGER + 3
 Les valeurs incompatibles avec le type inféré produisent :
 - une entrée `NULL` dans la base (aucune perte de ligne)
 - une entrée dans le rapport d'anomalies (table, colonne, valeur, type observé vs attendu)
+
+Dans un tableau de scalaires, seul l'élément fautif devient `NULL`, et la cellule compte pour une seule anomalie.
 
 Le rapport est exportable en JSON ou CSV via `--anomaly-output`. L'option `--max-anomaly-rate` fait échouer l'import si le taux d'anomalies dépasse le seuil fixé (ex. : `0.01` = 1 %).

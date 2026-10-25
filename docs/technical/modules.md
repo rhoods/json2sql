@@ -62,7 +62,7 @@ Pass 2 : relecture du fichier pour insérer les données.
 | Fichier | Rôle |
 |---|---|
 | `runner/` | Pipeline diskless : `mod.rs` (`run()`), `dispatch.rs` (dispatcher round-robin), `worker.rs` (parse + `MemSink` par table), `flusher.rs` (COPY vers PG, pause sous pression mémoire), `config.rs` (`Pass2Config`) |
-| `insert.rs` | `insert_object()` — orchestrateur (~50 lignes). Construit les colonnes générées et délègue à `traversal.rs` selon la `WideStrategy` |
+| `insert.rs` | `insert_object()` — orchestrateur. Écrit la ligne de la table (`write_row_of`), puis la ligne 1:1 de chaque table de groupe de colonnes (`write_group_rows`, #78 : même `j2s_id` et même clé étrangère que la ligne d'origine, seulement si une colonne du groupe a une valeur au sens de `is_present`), puis délègue à `traversal.rs` selon la `WideStrategy` |
 | `traversal.rs` | Toutes les fonctions `insert_*` privées : traversal du graphe JSON selon les stratégies (`insert_pivot_object`, `insert_jsonb_object`, `insert_flatten`, `insert_array`…) |
 | `sink.rs` | `trait RowSink { write_row() }` — abstraction sur l'écriture de lignes. `MemSink` (dans `db/copy_sink.rs`) en est l'implémentation concrète |
 | `coercer.rs` | Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cible. Produit `Ok(CopyEscaped)`, `Null` ou `Anomaly` |
@@ -81,6 +81,7 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | `observer.rs` | `SchemaObserver` : accumule les observations row-by-row via `observe_root()` et `merge()`. Contient `TableEntry` (privé) |
 | `finalizer/` | `SchemaFinalizer` : transformations post-stream — construit les `TableSchema`, applique les stratégies, trie topologiquement — voir sous-section dédiée ci-dessous |
 | `cascading/` | Détection et fusion des tables sœurs (BFS cascade) — voir sous-section dédiée ci-dessous |
+| `grouping/` | Découpage thématique des tables larges (#78) : propose des groupes de colonnes qui deviendront des tables 1:1 — voir sous-section dédiée ci-dessous |
 | `wide_strategies.rs` | Fonctions d'application des stratégies wide : `apply_wide_strategy_columns`, `apply_flatten`, `apply_jsonb_flatten`, `apply_normalize_dynamic_keys`, `build_union_columns`, `classify_key_shape` |
 | `strategies.rs` | `StrategyName` (enum des stratégies optionnelles désactivables : `Sibling`, `Pivot`, `StructuredPivot`), `StrategyError`, `parse_disabled_strategies()`. Utilisé par `Pass1Config` et `SchemaRegistry` pour gater les stratégies via `--disable-strategy`. |
 | `inspector.rs` | Statistiques d'inspection : `collect_stats()` construit les `ColumnStats` (histogramme de types) pour le mode `--inspect` |
@@ -88,8 +89,9 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | `naming.rs` | Sanitisation des identifiants PG, déduplication, troncature à 63 bytes avec hash, détection de collisions de noms de colonnes |
 | `suffix_detector.rs` | Détecte les patterns `{base}_{suffixe}` dans les tables larges pour la stratégie `StructuredPivot` |
 | `config.rs` | Parse et applique le fichier TOML de surcharges manuelles (`--schema-config`) |
+| `column_groups.rs` | Applique la clé `column_groups` d'une table de la config (#78) : chaque groupe de colonnes devient une table fille 1:1 (`{table}_{groupe}`, 53 octets au plus, hash au-delà) qui reçoit les colonnes et leurs `flatten_sources`, la table garde les autres colonnes et la liste de ses tables de groupe (`column_groups`). Groupes appliqués après les types, stratégies et `flatten`, dans l'ordre alphabétique de leurs noms. Un groupe invalide (colonne inconnue, générée ou déjà prise, moins de 3 colonnes, nom de table pris) est ignoré avec un avertissement ; une table qui n'est ni `Columns` ni `AutoSplit`, ou dont toutes les colonnes partiraient, n'est pas découpée. Réappliquer la config ne change rien ; une table de groupe existante avec d'autres colonnes est une erreur. `dissolve_column_groups()` remet les colonnes dans la table (avant un `Pivot`/`Jsonb`), `prune_missing_groups()` retire les noms de tables disparues, `reindex_stats()` rattache les statistiques d'une colonne déplacée à sa table de groupe |
 | `stats.rs` | Struct `ColumnStats` + génère le rapport texte de statistiques de colonnes (types inférés, taux de nullité, colonnes MIXED) |
-| `persistence.rs` | Sérialise/désérialise un résultat Pass 1 en JSON (`SchemaSnapshot`) — utilisé par l'IHM pour séparer Pass 1 et Pass 2 |
+| `persistence.rs` | Sérialise/désérialise un résultat Pass 1 en JSON (`SchemaSnapshot`) — utilisé par l'IHM pour séparer Pass 1 et Pass 2. Version 2, ou 3 quand une table est découpée en groupes de colonnes (`format_version()`) : un programme plus ancien refuse alors le fichier au lieu de lire une table sans ses colonnes déplacées |
 | `mod.rs` | Déclare le module, exporte `PATH_SEP` |
 
 ### `src/schema/finalizer/`
@@ -114,6 +116,26 @@ BFS cascade — détection des groupes de tables sœurs (*siblings*) et fusion (
 | `scoring.rs` | Jaccard (`pairwise_jaccard_min`), clustering glouton — fonctions pures sur `&[TableSchema]` et indices |
 | `merge.rs` | `build_sibling_collapse_from_siblings()` — API publique pour la fusion manuelle depuis l'IHM |
 | `mod.rs` | Déclare les sous-modules, ré-exporte `finalize_cascading` |
+
+### `src/schema/grouping/`
+
+Découpage thématique des tables larges (#78) : propose des groupes de colonnes qui deviendront des tables 1:1. Appelé par `--suggest-groups` (`pipeline::suggest_groups`). Le TOML `column_groups` qu'il produit s'applique avec `--schema-config` (`schema/column_groups.rs`) et Pass 2 écrit les tables de groupe (`pass2/insert.rs`).
+
+| Fichier | Rôle |
+|---|---|
+| `names.rs` | Normalisation des `original_name` d'une table en radicaux : coupe `snake_case` / `camelCase` / chiffres, puis retire les jetons de format (`tags`, `lc`…), la clé des familles (`NAME_FR`) et les mots de bruit (> 40 % des colonnes). `normalize()` renvoie un `NameStems` ; `numbered_families()` repère les familles numérotées (`strIngredient1..20`, au moins 8 colonnes) |
+| `lexical.rs` | Regroupement lexical des radicaux : vecteurs de trigrammes TF-IDF, liaison moyenne coupée à 0,20, groupes d'au moins 4 colonnes, puis les colonnes restées seules entre elles (minimum 3). `lexical_groups()` renvoie des listes d'indices ; refuse plus de 2 000 colonnes (matrice n×n). `group_cohesion()` : similarité moyenne des paires d'un groupe, pour le rapport |
+| `presence.rs` | Co-présence des colonnes dans un échantillon de lignes (« taux de correspondance ») : bitsets de présence, cinq strates de richesse de fiche, φ de présence ajusté par strate et signé, colonnes informatives (présentes dans 2 % à 98 % des lignes). `Presence`, `PhiMatrix` |
+| `sample.rs` | Échantillon borné relu dans le fichier d'entrée après finalisation : une ligne racine sur `ceil(lignes racine / budget)` (20 000 par défaut), `--limit` respecté, une table enfant atteinte par un chemin d'objets (un tableau sur le chemin est refusé). `sample_tables()` lit plusieurs tables (`SampleTarget` : chemin vers l'objet et chemins des colonnes) dans les mêmes lignes en un seul passage et renvoie, par table, la présence et les valeurs |
+| `values.rs` | Valeurs échantillonnées des colonnes, remplies ligne à ligne pendant le même passage que la présence : vocabulaire des colonnes texte (empreintes 64 bits des chaînes de 128 octets au plus, borné à 20 000 valeurs distinctes), étendue et entiers des colonnes numériques, sous-échantillon d'environ 2 000 lignes pour les rangs. `ValueProfile`, `Nature` |
+| `shared.rs` | Valeurs partagées entre colonnes texte : contenance pondérée par la rareté (`ln(colonnes / colonnes qui contiennent la valeur)`), au moins 5 valeurs distinctes et 3 en commun, colonnes texte seulement. `shared_value_pairs()` |
+| `numeric.rs` | Signaux numériques : corrélation de rang de Spearman entre colonnes numériques (au moins 30 lignes communes, `|ρ|` ≥ 0,9) et formes précises (année, epoch en secondes, degrés). Une forme ou une corrélation n'est jamais décisive seule. `rank_correlations()`, `shape()` |
+| `embedding.rs` | Embeddings statiques Model2Vec (optionnels) : lecteur maison, sans dépendance, de `model.safetensors` (un seul tenseur `embeddings` en `F32`) et de `tokenizer.json` de type WordPiece. Un texte est mis en minuscules, sans accents (table Latin-1 et Latin étendu A, marques U+0300..U+036F), coupé aux espaces et à la ponctuation, découpé en sous-mots (plus long préfixe d'abord, `##`, mot de plus de 100 caractères ignoré), les lignes de la table sont additionnées puis normalisées. Autre type de tokenizer, autre tenseur ou autre type de données : refusé avec un message qui nomme le fichier. `StaticEmbedder` |
+| `placement.rs` | Pour chaque colonne laissée dans une table, les deux groupes confirmés dont le centre (somme normalisée des vecteurs des radicaux de ses membres) est le plus proche de son radical, avec le cosinus ; seuls les cosinus positifs comptent. Une indication, jamais une décision. `placements()` |
+| `proposal.rs` | Assemblage d'une proposition pour une table : règle des deux signaux. Un groupe lexical d'une seule famille de préfixe est confirmé par les noms ; une fusion de plusieurs familles l'est seulement si un signal de données soutient les liens entre familles (au moins 3 paires et 20 % des paires où le signal est défini ; la présence doit aussi dépasser deux fois le bruit de fond de la table), sinon elle est « à confirmer » et remplace les familles d'au moins 3 colonnes, qui restent des groupes actifs. Les familles à clé ou numérotées sont signalées, jamais transformées. `propose()`, `DataSignals`, `TableProposal` |
+| `render.rs` | Sorties d'une proposition : TOML `[table.column_groups]` en noms PG (groupes confirmés actifs, fusions à confirmer en commentaire, une ligne de preuves par groupe) et rapport Markdown. `to_toml()`, `to_markdown()` |
+| `suggest.rs` | L'exécution de `--suggest-groups` sur le schéma finalisé : toutes les tables `Columns` / `AutoSplit` d'au moins 20 colonnes de données, en un seul échantillon relu comme Pass 2 lit ses colonnes (`flatten_sources` puis `original_name`). Les signaux de données d'une table sont éteints avec leur raison (nombre de lignes racine inconnu, `--limit 0`, tableau sur le chemin, aucune ligne qui contienne l'objet, erreur de lecture). Le rapport signale les tableaux de scalaires restés des tables de jonction, hors de l'analyse. `suggest()` |
+| `mod.rs` | Déclare les sous-modules |
 
 ---
 

@@ -6,10 +6,12 @@
 //! est alors enregistrée comme anomalie et remplacée par NULL en base.
 //!
 //! Fonctions :
-//! - enum `CoerceResult` — résultat d'une tentative de coercition (Ok/Null/Anomaly).
+//! - enum `CoerceResult` — résultat d'une tentative de coercition (Ok/Null/Anomaly/`OkWithAnomaly`).
 //! - fn `coerce` — dispatch principal selon le `PgType` cible (NULL court-circuité en amont).
-//! - fn `coerce_pg_array` — sérialise un tableau JSON en littéral `PostgreSQL` `{e1,e2,...}`.
-//! - fn `coerce_pg_array_element` — représentation d'un élément dans le littéral (guillemets pour le texte).
+//! - fn `coerce_pg_array` — sérialise un tableau JSON en littéral `PostgreSQL` `{e1,e2,...}` ; un élément
+//!   non convertible devient `NULL`, le premier est rapporté (une anomalie par cellule, #84).
+//! - fn `coerce_pg_array_element` — représentation d'un élément dans le littéral, ou la raison de son rejet.
+//! - fn `quote_array_text` — élément texte entre guillemets ; octet nul ou dépassement de `VARCHAR(n)` = rejet.
 //! - fn `coerce_integer` — coercition vers INTEGER, produit `Ok`/`Anomaly`.
 //! - fn `coerce_bigint` — coercition vers BIGINT, produit `Ok`/`Anomaly`.
 //! - fn `coerce_float` — coercition vers DOUBLE PRECISION, produit `Ok`/`Anomaly`.
@@ -34,6 +36,9 @@ pub enum CoerceResult {
     Null,
     /// Value could not be coerced to the target type
     Anomaly { actual_value: String, actual_type: &'static str },
+    /// PG array written with at least one element replaced by `NULL`. Carries the literal and the
+    /// first faulty element: the caller records one anomaly for the whole cell (#84).
+    OkWithAnomaly { value: CopyEscaped, actual_value: String, actual_type: &'static str },
 }
 
 /// Coerce a JSON value to the COPY text-format representation for the given `PgType`.
@@ -90,60 +95,83 @@ pub fn coerce(value: &Value, pg_type: &PgType) -> CoerceResult {
 
 /// Serialize a JSON array as a `PostgreSQL` array literal for COPY text format.
 /// Format: `{elem1,elem2,NULL,elem3}` with COPY-level escaping applied to the whole literal.
+/// An element that cannot be stored becomes `NULL`; the first one is reported, so the caller records
+/// one anomaly for the cell, not one per element (#84).
 fn coerce_pg_array(arr: &[Value], elem_type: &PgType) -> CoerceResult {
     let mut parts = Vec::with_capacity(arr.len());
+    let mut first_bad: Option<(String, &'static str)> = None;
     for item in arr {
         if matches!(item, Value::Null) {
             parts.push("NULL".to_string());
             continue;
         }
-        let elem_str = coerce_pg_array_element(item, elem_type);
-        parts.push(elem_str);
+        match coerce_pg_array_element(item, elem_type) {
+            Ok(elem_str) => parts.push(elem_str),
+            Err(bad) => {
+                parts.push("NULL".to_string());
+                first_bad.get_or_insert(bad);
+            }
+        }
     }
     // Build `{e1,e2,...}` and COPY-escape the whole literal.
-    // Null bytes were stripped from text elements in coerce_pg_array_element,
+    // An element with a null byte was replaced by NULL in coerce_pg_array_element,
     // so escape_copy_text will always return Some here.
     let literal = format!("{{{}}}", parts.join(","));
     let escaped = escape_copy_text(&literal)
         .expect("array literal is null-byte-free by construction");
-    CoerceResult::Ok(escaped)
+    match first_bad {
+        None => CoerceResult::Ok(escaped),
+        Some((actual_value, actual_type)) => CoerceResult::OkWithAnomaly { value: escaped, actual_value, actual_type },
+    }
 }
 
-/// Produce the array-literal representation of one element (no outer COPY escaping yet).
+/// Produce the array-literal representation of one element (no outer COPY escaping yet), or the
+/// reason it cannot be stored: the element as JSON text and the anomaly type.
 /// Text-like types are double-quoted; numeric/boolean are bare.
-fn coerce_pg_array_element(value: &Value, pg_type: &PgType) -> String {
+fn coerce_pg_array_element(value: &Value, pg_type: &PgType) -> Result<String, (String, &'static str)> {
     match pg_type {
-        PgType::Integer | PgType::BigInt | PgType::DoublePrecision | PgType::Boolean => {
-            match coerce(value, pg_type) {
-                CoerceResult::Ok(s) => s.as_str().to_owned(), // numeric/bool: ASCII-safe, bare in array literal
-                _ => "NULL".to_string(),
-            }
+        PgType::Integer | PgType::BigInt | PgType::DoublePrecision | PgType::Boolean => match coerce(value, pg_type) {
+            CoerceResult::Ok(s) => Ok(s.as_str().to_owned()), // numeric/bool: ASCII-safe, bare in array literal
+            CoerceResult::Anomaly { actual_value, actual_type } => Err((actual_value, actual_type)),
+            // out of reach: nulls are filtered by the caller and a scalar type never yields OkWithAnomaly
+            CoerceResult::Null | CoerceResult::OkWithAnomaly { .. } => Err((value.to_string(), json_type_name(value))),
+        },
+        // Dates, UUIDs and timestamps must be JSON strings, as for their scalar coerce_*
+        // (the content of a date is not checked there either).
+        PgType::Uuid | PgType::Date | PgType::Timestamp if !matches!(value, Value::String(_)) => {
+            Err((value.to_string(), json_type_name(value)))
         }
-        _ => {
-            // Text-like: get the raw string and double-quote it for array syntax.
-            // Escape `\` and `"` inside the element so the array parser can read them back.
-            // The outer escape_copy_text call will then COPY-escape the whole literal.
-            // Null bytes are stripped here (PostgreSQL rejects them); the caller's
-            // unwrap_or_default() on the outer escape_copy_text is safe because
-            // we guarantee no null bytes survive into the array literal.
-            let raw = match value {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            let mut out = String::with_capacity(raw.len() + 2);
-            out.push('"');
-            for c in raw.chars() {
-                match c {
-                    '\\' => out.push_str("\\\\"),
-                    '"' => out.push_str("\\\""),
-                    '\0' => {} // strip null bytes — PostgreSQL rejects them in array elements
-                    other => out.push(other),
-                }
-            }
-            out.push('"');
-            out
+        PgType::VarChar(max_len) => quote_array_text(value, Some(*max_len as usize)),
+        _ => quote_array_text(value, None),
+    }
+}
+
+/// Double-quote an element for array syntax. `\` and `"` are escaped so the array parser reads them
+/// back; the outer `escape_copy_text` then COPY-escapes the whole literal. Numbers, booleans and
+/// nested arrays/objects keep their JSON text (#83). A null byte or a `VARCHAR(n)` overflow
+/// (`max_chars`) is an anomaly, as for a scalar: `PostgreSQL` would reject the element and abort the COPY.
+fn quote_array_text(value: &Value, max_chars: Option<usize>) -> Result<String, (String, &'static str)> {
+    let raw = match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    let mut chars = 0usize;
+    for c in raw.chars() {
+        chars += 1;
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\0' => return Err((value.to_string(), "string_contains_null_byte")),
+            other => out.push(other),
         }
     }
+    if max_chars.is_some_and(|max| chars > max) {
+        return Err((value.to_string(), "string_too_long"));
+    }
+    out.push('"');
+    Ok(out)
 }
 
 #[allow(clippy::too_many_lines)] // exhaustive type dispatch per JSON variant
@@ -405,19 +433,20 @@ mod tests {
     }
 
     #[test]
-    fn test_pg_array_null_byte_stripped() {
-        // Un null byte dans un élément texte d'array doit être supprimé
-        // (PG rejette les null bytes dans les arrays text aussi)
+    fn test_pg_array_null_byte_element_becomes_null() {
+        // PG rejette les null bytes dans les arrays text. Un élément qui en contient devient NULL
+        // et laisse une anomalie, comme un scalaire texte (avant #84 : retiré en silence).
         let arr = vec![
             serde_json::Value::String("hello\x00world".to_string()),
             serde_json::Value::String("normal".to_string()),
         ];
         let result = coerce_pg_array(&arr, &PgType::Text);
-        assert!(matches!(result, CoerceResult::Ok(_)));
-        if let CoerceResult::Ok(s) = result {
-            assert!(!s.as_str().contains('\0'), "null byte should be stripped from array element");
-            assert!(s.as_str().contains("helloworld"), "content sans null byte doit être présent");
-        }
+        let CoerceResult::OkWithAnomaly { value, actual_value, actual_type } = result else {
+            panic!("expected OkWithAnomaly");
+        };
+        assert_eq!(value.as_str(), r#"{NULL,"normal"}"#);
+        assert_eq!(actual_type, "string_contains_null_byte");
+        assert!(actual_value.contains("hello"), "the faulty element is reported, got {actual_value}");
     }
 
     #[test]
@@ -476,5 +505,88 @@ mod tests {
     #[test]
     fn test_coerce_null_into_pg_array_stays_null() {
         assert!(matches!(coerce(&Value::Null, &PgType::Array(Box::new(PgType::Text))), CoerceResult::Null));
+    }
+
+    // ── issue #84 : un élément non convertible → NULL dans le tableau + UNE anomalie par cellule ──
+
+    fn array_of(elem: PgType) -> PgType {
+        PgType::Array(Box::new(elem))
+    }
+
+    /// (literal, first faulty element, anomaly type) of a cell written with at least one `NULL` element.
+    fn coerce_partial(value: &Value, pg_type: &PgType) -> (String, String, &'static str) {
+        match coerce(value, pg_type) {
+            CoerceResult::OkWithAnomaly { value, actual_value, actual_type } => {
+                (value.as_str().to_owned(), actual_value, actual_type)
+            }
+            _ => panic!("expected OkWithAnomaly"),
+        }
+    }
+
+    #[test]
+    fn test_pg_array_element_too_long_for_varchar_becomes_null() {
+        // VARCHAR(2)[]: "abc" and "abcd" overflow, only the first one is reported
+        let (literal, bad, kind) = coerce_partial(&json!(["ab", "abc", "abcd"]), &array_of(PgType::VarChar(2)));
+        assert_eq!(literal, r#"{"ab",NULL,NULL}"#);
+        assert_eq!((bad.as_str(), kind), (r#""abc""#, "string_too_long"));
+    }
+
+    #[test]
+    fn test_pg_array_non_string_element_in_date_array_becomes_null() {
+        let (literal, bad, kind) = coerce_partial(&json!(["2024-01-01", 5]), &array_of(PgType::Date));
+        assert_eq!(literal, r#"{"2024-01-01",NULL}"#);
+        assert_eq!((bad.as_str(), kind), ("5", "number"));
+    }
+
+    #[test]
+    fn test_pg_array_polygon_in_float_array_becomes_null() {
+        // GeoJSON polygon: one ring (an array) where a number is expected
+        let polygon = json!([[[0, 0], [1, 0], [1, 1], [0, 0]]]);
+        let (literal, _, kind) = coerce_partial(&polygon, &array_of(PgType::DoublePrecision));
+        assert_eq!((literal.as_str(), kind), ("{NULL}", "array"));
+    }
+
+    #[test]
+    fn test_pg_array_reports_first_faulty_element_only() {
+        let (literal, bad, kind) = coerce_partial(&json!(["abc", 7, "xyz"]), &array_of(PgType::Integer));
+        assert_eq!(literal, "{NULL,7,NULL}");
+        assert_eq!((bad.as_str(), kind), ("abc", "string"));
+    }
+
+    #[test]
+    fn test_pg_array_null_elements_are_not_anomalies() {
+        assert_eq!(coerce_ok(&json!([1, null, 3]), &array_of(PgType::Integer)), "{1,NULL,3}");
+    }
+
+    #[test]
+    fn test_scalar_occurrence_too_long_for_varchar_array_becomes_null() {
+        // mixed field (#48): the scalar is wrapped as a one-element array and checked like one
+        let (literal, _, kind) = coerce_partial(&json!("toolong"), &array_of(PgType::VarChar(2)));
+        assert_eq!((literal.as_str(), kind), ("{NULL}", "string_too_long"));
+    }
+
+    #[test]
+    fn test_pg_array_nested_arrays_stay_json_text_with_the_inferred_type() {
+        use crate::schema::registry::{RegistryConfig, SchemaRegistry};
+        // Written with the type Pass 1 really infers, not a hand-built one. Arrays do not widen a
+        // VARCHAR: elements that are all arrays give TEXT[], strings mixed with arrays give VARCHAR(n)[].
+        let inferred = |row: &Value| {
+            let mut reg = SchemaRegistry::new(RegistryConfig::default());
+            reg.observe_root("t", row.as_object().unwrap());
+            reg.finalize()[0].find_by_original("m").unwrap().pg_type.clone()
+        };
+
+        // all arrays → TEXT[]: nested arrays stay JSON text (#83), no anomaly
+        let all_arrays = json!({"m": [["a"], ["b"]]});
+        let pg_type = inferred(&all_arrays);
+        assert_eq!(pg_type, array_of(PgType::Text));
+        assert_eq!(coerce_ok(&all_arrays["m"], &pg_type), r#"{"[\\"a\\"]","[\\"b\\"]"}"#); // COPY-escaped
+
+        // strings mixed with arrays → VARCHAR(2)[]: the nested array overflows, which used to abort the COPY
+        let mixed = json!({"m": ["a", ["b"]]});
+        let pg_type = inferred(&mixed);
+        assert_eq!(pg_type, array_of(PgType::VarChar(2)));
+        let (literal, _, kind) = coerce_partial(&mixed["m"], &pg_type);
+        assert_eq!((literal.as_str(), kind), (r#"{"a",NULL}"#, "string_too_long"));
     }
 }

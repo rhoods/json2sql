@@ -246,7 +246,6 @@ fn build_inspect_registry(config: &Pass1Config) -> SchemaRegistry {
     use crate::schema::strategies::StrategyName;
     SchemaRegistry::new(RegistryConfig {
         text_threshold: config.registry.text_threshold,
-        array_as_pg_array: false,
         wide_column_threshold: usize::MAX,
         sibling_threshold: usize::MAX,
         sibling_jaccard: 1.0,
@@ -486,7 +485,6 @@ mod tests {
             root_table: root.to_string(),
             registry: RegistryConfig {
                 text_threshold: 256,
-                array_as_pg_array: false,
                 wide_column_threshold: usize::MAX,
                 sibling_threshold: usize::MAX,
                 sibling_jaccard: 1.0,
@@ -510,6 +508,17 @@ mod tests {
         let path = fixture("users.jsonl"); // 3 rows
         let result = run_inspect(&path, &inspect_config("users"), 1000).unwrap();
         assert_eq!(result.rows_scanned, 3, "should read all rows when limit > file size");
+    }
+
+    #[test]
+    fn test_inspect_shows_scalar_arrays_as_array_columns() {
+        // #84: `inspect` builds its own registry, so it must follow the engine default too
+        let result = run_inspect(&fixture("users.jsonl"), &inspect_config("users"), 10).unwrap();
+        let names: Vec<_> = result.schemas.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.contains(&"users_tags"), "no junction table expected, got {names:?}");
+        let users = result.schemas.iter().find(|s| s.name == "users").unwrap();
+        let tags = users.find_by_original("tags").expect("`tags` must be a column of `users`");
+        assert!(matches!(tags.pg_type, crate::schema::type_tracker::PgType::Array(_)), "got {:?}", tags.pg_type);
     }
 
     #[test]
@@ -574,7 +583,6 @@ mod tests {
                 root_table: "users".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -631,7 +639,6 @@ mod tests {
                 root_table: "root".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -661,7 +668,6 @@ mod tests {
                 root_table: "root".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -697,7 +703,6 @@ mod tests {
                 root_table: "root".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -730,7 +735,6 @@ mod tests {
                 root_table: "root".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -785,7 +789,6 @@ mod tests {
             root_table: root.to_string(),
             registry: RegistryConfig {
                 text_threshold: 256,
-                array_as_pg_array: false,
                 wide_column_threshold: usize::MAX,
                 sibling_threshold: usize::MAX,
                 sibling_jaccard: 1.0,
@@ -847,7 +850,6 @@ mod tests {
                 root_table: "wrong_name".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,
@@ -901,7 +903,6 @@ mod tests {
                 root_table: "foods".to_string(),
                 registry: RegistryConfig {
                     text_threshold: 256,
-                    array_as_pg_array: false,
                     wide_column_threshold: usize::MAX,
                     sibling_threshold: usize::MAX,
                     sibling_jaccard: 1.0,

@@ -264,8 +264,6 @@ pub struct ProjectState {
     pub verbose_logs: bool,
     /// Skip the constraint phase (PK + FK) at the end of Pass 2. Default false.
     pub skip_constraints: bool,
-    /// Pass 1: map JSON arrays of scalars to native PG array columns (CLI `--array-as-pg-array`). Default false.
-    pub array_as_pg_array: bool,
     /// Pass 2: raise `max_wal_size` during the import (CLI `--tune-wal`). Default false.
     pub tune_wal: bool,
 }
@@ -290,7 +288,6 @@ impl Default for ProjectState {
             import_limit: None,
             verbose_logs: false,
             skip_constraints: false,
-            array_as_pg_array: false,
             tune_wal: false,
         }
     }

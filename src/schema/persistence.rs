@@ -5,10 +5,13 @@
 //! backwards-incompatible way — callers must discard and regenerate old snapshots.
 //!
 //! Fonctions :
+//! - fn `format_version` — version à écrire pour des schémas : 2, ou 3 si une table est découpée en groupes de colonnes.
 //! - struct `SchemaSnapshot` — snapshot sérialisable d'un résultat Pass 1 (schémas, stats, overrides).
 //! - fn `write_snapshot` — sérialise et écrit sur disque (écriture atomique via `.tmp` + rename si demandé).
 //! - fn `save` — construit un `SchemaSnapshot` sans overrides et l'écrit (non atomique).
 //! - fn `save_with_overrides` — idem, avec les overrides de stratégie utilisateur (écriture atomique).
+//! - fn `parse_snapshot` — désérialise un snapshot ; une table de jonction `ScalarArray` d'avant #84 donne
+//!   un message dédié (relancer la Pass 1) au lieu de l'erreur serde brute.
 //! - fn `load` — lit et désérialise un snapshot ; rejette les versions incompatibles (v1) ; migre
 //!   les `strategy_overrides` racine legacy vers `ui_override` par table (sans écraser l'existant).
 
@@ -27,6 +30,20 @@ use crate::schema::table_schema::{TableSchema, UserOverride};
 /// ensuring all derived identifiers (pk_, fk_..._parent, j2s_..._id) fit within
 /// `PostgreSQL`'s 63-byte NAMEDATALEN limit. Snapshots from v1 must be regenerated.
 pub const SCHEMA_FORMAT_VERSION: u32 = 2;
+
+/// v3: a table was split into column groups (#78). Written only for such a schema, so that older programs refuse
+/// the file instead of reading a parent without its moved columns and group tables that are never filled.
+pub const COLUMN_GROUPS_FORMAT_VERSION: u32 = 3;
+
+/// The format version to write for `schemas`: [`SCHEMA_FORMAT_VERSION`] unless a table has column groups.
+#[must_use]
+pub fn format_version(schemas: &[TableSchema]) -> u32 {
+    if schemas.iter().any(|s| !s.column_groups.is_empty()) {
+        COLUMN_GROUPS_FORMAT_VERSION
+    } else {
+        SCHEMA_FORMAT_VERSION
+    }
+}
 
 /// Serializable snapshot of a Pass 1 result, optionally including user strategy overrides.
 #[derive(Serialize, Deserialize)]
@@ -80,7 +97,7 @@ pub fn save(
     path: &Path,
 ) -> Result<()> {
     let snapshot = SchemaSnapshot {
-        version: SCHEMA_FORMAT_VERSION,
+        version: format_version(schemas),
         total_rows,
         schemas: schemas.to_vec(),
         truncated_names: truncated_names.to_vec(),
@@ -109,7 +126,7 @@ pub fn save_with_overrides(
     path: &Path,
 ) -> Result<()> {
     let snapshot = SchemaSnapshot {
-        version: SCHEMA_FORMAT_VERSION,
+        version: format_version(schemas),
         total_rows,
         schemas: schemas.to_vec(),
         truncated_names: truncated_names.to_vec(),
@@ -122,12 +139,27 @@ pub fn save_with_overrides(
     write_snapshot(&snapshot, path, true)
 }
 
+/// Deserialize a snapshot. One made before #84 can hold junction tables for arrays of scalars
+/// (`child_kind` = `ScalarArray`), a variant that no longer exists: it gets its own message.
+/// Recognised from the serde error itself — grepping the file would also hit a column that
+/// happens to be named like that.
+fn parse_snapshot(data: &[u8]) -> Result<SchemaSnapshot> {
+    serde_json::from_slice(data).map_err(|e| {
+        if e.to_string().contains("unknown variant `ScalarArray`") {
+            return J2sError::InvalidInput(
+                "Schema snapshot uses junction tables for arrays of scalars, which json2sql no longer \
+                 generates (they are now array columns). Please re-run Pass 1 to regenerate it.".to_string()
+            );
+        }
+        J2sError::InvalidInput(format!("Schema deserialization failed: {e}"))
+    })
+}
+
 /// Load a Pass 1 result from a previously saved JSON snapshot.
 pub fn load(path: &Path) -> Result<SchemaSnapshot> {
     let data = std::fs::read(path).map_err(J2sError::Io)?;
-    let mut snapshot: SchemaSnapshot = serde_json::from_slice(&data)
-        .map_err(|e| J2sError::InvalidInput(format!("Schema deserialization failed: {e}")))?;
-    if snapshot.version != SCHEMA_FORMAT_VERSION {
+    let mut snapshot = parse_snapshot(&data)?;
+    if snapshot.version != SCHEMA_FORMAT_VERSION && snapshot.version != COLUMN_GROUPS_FORMAT_VERSION {
         if snapshot.version == 1 {
             return Err(J2sError::InvalidInput(
                 "Schema snapshot v1 is no longer supported — table names used a wider budget \
@@ -136,8 +168,8 @@ pub fn load(path: &Path) -> Result<SchemaSnapshot> {
             ));
         }
         return Err(J2sError::InvalidInput(format!(
-            "Schema snapshot version {} is not supported (expected {})",
-            snapshot.version, SCHEMA_FORMAT_VERSION
+            "Schema snapshot version {} is not supported (expected {} or {})",
+            snapshot.version, SCHEMA_FORMAT_VERSION, COLUMN_GROUPS_FORMAT_VERSION
         )));
     }
     // Migrate legacy root-level strategy_overrides → ui_override per TableSchema.
@@ -220,6 +252,39 @@ mod tests {
             "error should tell user to re-run Pass 1, got: {msg}");
     }
 
+    /// JSON of a snapshot holding one `users_tags` child table of the given kind.
+    fn snapshot_json_with_child(kind: crate::schema::table_schema::ChildKind) -> String {
+        let mut child = TableSchema::new("users_tags".to_string(), vec!["users".to_string(), "tags".to_string()], 1);
+        child.parent_table = Some("users".to_string());
+        child.child_kind = Some(kind);
+        serde_json::to_string(&SchemaSnapshot { schemas: vec![child], ..empty_snapshot() }).unwrap()
+    }
+
+    #[test]
+    fn load_refuses_a_snapshot_with_a_scalar_array_junction_table() {
+        use crate::schema::table_schema::ChildKind;
+        // Snapshots made before #84 can hold junction tables (`child_kind: "ScalarArray"`), a variant that no
+        // longer exists: the user must be told to re-run Pass 1, not shown a raw serde error.
+        let json = snapshot_json_with_child(ChildKind::ObjectArray).replace("\"ObjectArray\"", "\"ScalarArray\"");
+        assert!(json.contains("\"ScalarArray\""), "test setup: the snapshot must hold a ScalarArray child");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+
+        let msg = load(tmp.path()).err().expect("an old junction snapshot must be refused").to_string();
+        assert!(msg.contains("re-run Pass 1") && msg.contains("junction"), "got: {msg}");
+        assert!(!msg.contains("unknown variant"), "the raw serde error must not leak: {msg}");
+    }
+
+    #[test]
+    fn load_accepts_a_snapshot_with_object_array_children() {
+        use crate::schema::table_schema::ChildKind;
+        // regression guard: the new refusal must not catch snapshots made with array columns
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), snapshot_json_with_child(ChildKind::ObjectArray)).unwrap();
+        let loaded = load(tmp.path()).expect("a snapshot without junction tables still loads");
+        assert_eq!((loaded.version, loaded.schemas.len()), (SCHEMA_FORMAT_VERSION, 1));
+    }
+
     #[test]
     fn v2_snapshot_round_trips() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -227,6 +292,34 @@ mod tests {
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(loaded.version, SCHEMA_FORMAT_VERSION);
         assert_eq!(loaded.total_rows, 42);
+    }
+
+    #[test]
+    fn a_snapshot_is_version_3_only_when_a_table_was_split_into_column_groups() {
+        use crate::schema::table_schema::TableSchema;
+        let plain = TableSchema::new("items".to_string(), vec!["items".to_string()], 0);
+        let mut split = plain.clone();
+        split.column_groups.push("items_alpha".to_string());
+        let (a, b) = (tempfile::NamedTempFile::new().unwrap(), tempfile::NamedTempFile::new().unwrap());
+        save(std::slice::from_ref(&plain), 0, &[], &[], &[], &[], JsonFormat::Lines, a.path()).unwrap();
+        save(&[split], 0, &[], &[], &[], &[], JsonFormat::Lines, b.path()).unwrap();
+        assert_eq!(load(a.path()).unwrap().version, 2, "snapshots without groups stay what they were");
+        let loaded = load(b.path()).unwrap();
+        assert_eq!(loaded.version, 3);
+        assert_eq!(loaded.schemas[0].column_groups, ["items_alpha"]);
+        assert!(!std::fs::read_to_string(a.path()).unwrap().contains("column_groups"));
+    }
+
+    #[test]
+    fn versions_2_and_3_load_and_the_others_do_not() {
+        for (version, loads) in [(1, false), (2, true), (3, true), (4, false)] {
+            let json = format!(
+                r#"{{"version":{version},"total_rows":0,"schemas":[],"truncated_names":[],"column_collisions":[],"stats":[]}}"#
+            );
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tmp.path(), json).unwrap();
+            assert_eq!(load(tmp.path()).is_ok(), loads, "version {version}");
+        }
     }
 
     #[test]

@@ -178,7 +178,7 @@ pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: S
 }
 
 /// Like `widen_pg_types`, but a pg-array side wins: sibling tables mixing a scalar and an
-/// `array_as_pg_array` field merge into one array column, scalars wrapped as `{x}` (issues #48, #61).
+/// array field merge into one array column, scalars wrapped as `{x}` (issues #48, #61).
 fn widen_union_type(a: PgType, b: &PgType) -> PgType {
     match (a, b) {
         (PgType::Array(x), PgType::Array(y)) => PgType::Array(Box::new(widen_pg_types(*x, y))),

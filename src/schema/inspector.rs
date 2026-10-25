@@ -5,7 +5,7 @@
 //!
 //! Fonctions :
 //! - fn `make_stat` — assemble un `ColumnStats` à partir d'un `TypeTracker`.
-//! - fn `collect_entry_stats` — stats d'une table (colonnes de données + `value` scalaire + arrays).
+//! - fn `collect_entry_stats` — stats d'une table (colonnes de données + colonnes tableau).
 //! - fn `collect_stats` — point d'entrée : construit les `ColumnStats` de toutes les tables, triées.
 //! - fn `type_histogram` — histogramme des types JSON observés, trié par fréquence décroissante.
 
@@ -32,9 +32,6 @@ fn collect_entry_stats(entry: &super::observer::TableEntry, table_name: &str) ->
     for (original_field, tracker) in &entry.columns {
         if tracker.is_object_field() || tracker.is_array_field() || entry.array_columns.contains_key(original_field) { continue; }
         stats.push(make_stat(table_name, NamingRegistry::column_name(original_field), tracker.to_pg_type(), tracker));
-    }
-    if let Some(ref tracker) = entry.scalar_tracker {
-        stats.push(make_stat(table_name, "value".to_string(), tracker.to_pg_type(), tracker));
     }
     for (original_field, tracker) in &entry.array_columns {
         let pg_type = entry.array_column_type(original_field, tracker);

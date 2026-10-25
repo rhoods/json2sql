@@ -25,7 +25,7 @@ Chaque champ JSON observé dans la Pass 1 alimente un `TypeTracker` qui accumule
 | Chaîne ≤ `text_threshold` chars | VarChar(N) |
 | Chaîne > `text_threshold` chars | Text |
 | Objet `{}` | Object (→ table enfant) |
-| Tableau `[]` | Array (→ table enfant ou colonne array) |
+| Tableau `[]` | Array (tableau d'objets → table enfant ; tableau de scalaires → colonne tableau) |
 
 ### Règles de résolution (`to_pg_type`)
 
@@ -59,7 +59,7 @@ Si la longueur maximale observée d'un champ texte dépasse ce seuil, le type pa
 **Fichier :** `src/schema/registry.rs`
 **Paramètre CLI :** `--wide-column-threshold` (défaut : 15)
 
-Une table est dite **large** si le nombre de colonnes de données (hors colonnes générées `j2s_*`) dépasse ce seuil. Une fois détectée comme large, plusieurs stratégies peuvent s'appliquer.
+Une table est dite **large** si le nombre de ses colonnes **scalaires** (hors colonnes générées `j2s_*` et hors colonnes tableau) dépasse ce seuil. Les colonnes tableau ne comptent pas : elles restent sur la table quelle que soit la stratégie, et ne sont jamais envoyées dans une table EAV. Une fois détectée comme large, plusieurs stratégies peuvent s'appliquer.
 
 ---
 
@@ -70,12 +70,16 @@ Une table est dite **large** si le nombre de colonnes de données (hors colonnes
 Avant d'appliquer une stratégie wide, on vérifie :
 
 ```
-ratio_stable = fraction de clés présentes dans >= stable_threshold % des lignes
+ratio_stable = fraction des colonnes scalaires présentes dans >= stable_threshold % des lignes
 ```
+
+Les colonnes tableau, et les champs tantôt scalaires, tantôt tableau, n'entrent pas dans ce ratio.
 
 Si `ratio_stable > 0.5` **et** que la table contient au moins 10 lignes, le schéma est un schéma dense légitime : la stratégie `Columns` est conservée, sans pivot ni AutoSplit.
 
 Cela permet aux schémas réellement denses (ex. table de métriques avec 200 indicateurs tous remplis) de ne pas être faussement identifiés comme "trop larges".
+
+Une table dense gardée en `Columns` (ou en `AutoSplit`) peut ensuite être découpée en tables 1:1 thématiques : `--suggest-groups` propose les groupes pour les tables d'au moins 20 colonnes de données, et la clé `column_groups` de la config les applique (§12).
 
 ---
 
@@ -94,6 +98,8 @@ S'applique uniquement à la **table racine** qui possède des tables enfants (ob
 
 La table `_wide` est une table EAV synthétique générée automatiquement avec les colonnes `j2s_id`, `j2s_parent_id`, `j2s_order`, `key`, `value`. Elle est liée à la table principale via une clé étrangère.
 
+Les colonnes tableau ne sont ni médiums ni rares : elles restent dans la table principale.
+
 **Exemple OpenFoodFacts :** 189 881 clés observées → 125 stables, 184 médiums, 189 572 rares supprimées.
 
 > ⚠️ **Perte de données volontaire.** Les clés rares sont écartées pour éviter une table EAV de centaines de milliers de clés quasi vides. Pour tout conserver, passer `--rare-threshold 0` : toutes les clés non stables vont alors dans `{nom}_wide`.
@@ -105,6 +111,8 @@ La table `_wide` est une table EAV synthétique générée automatiquement avec 
 **Fichier :** `src/schema/suffix_detector.rs`
 
 Pour les tables larges non-racines dont les colonnes suivent un pattern `{base}_{suffixe}` (ex. `calcium_100g`, `calcium_unit`, `calcium_serving`), un pivot structuré est auto-détecté.
+
+> ⚠️ **Limite connue.** Une table qui prend cette stratégie ne conserve pas ses colonnes tableau : elles disparaissent du schéma et des données. Sur OpenFoodFacts complet (70 Go), `nutriscore_2023_data` en était victime avant #84 (37 colonnes dont 2 tableaux, 3 tables filles perdues) ; elle y échappe désormais parce que les colonnes tableau ne comptent plus dans le ratio de stabilité (51 % au lieu de 49 %, seuil à 50 %). La décision reste fragile : #85.
 
 ### Algorithme
 
@@ -231,7 +239,24 @@ suffix_columns = ["_100g", "_unit"]  # suffixes explicites pour structured_pivot
 ma_colonne = "INTEGER"      # forcer un type de colonne
 ```
 
+Les types forçables sont scalaires : une surcharge sur une colonne tableau est ignorée avec un avertissement.
+
 Les surcharges sont appliquées après `finalize()` et suivies d'une nouvelle passe d'exclusion.
+
+### Groupes de colonnes (`column_groups`, #78)
+
+**Fichier :** `src/schema/column_groups.rs` (application), `src/pass2/insert.rs` (écriture)
+
+```toml
+[nom_table.column_groups]
+nutrition = ["energie", "graisses", "sucres"]
+```
+
+Une table à stratégie `Columns` ou `AutoSplit` range chaque groupe dans une table fille 1:1 `{table}_{groupe}` (53 octets au plus, hash au-delà). Le groupe est appliqué après les types, la stratégie et `flatten`, dans l'ordre alphabétique des noms. La table fille est un enfant `Object` : `j2s_id` (clé primaire), clé étrangère vers le parent, puis les colonnes déplacées dans l'ordre du parent, avec leurs `flatten_sources`. Le parent garde les autres colonnes, ses autres tables enfants et la liste de ses tables de groupe (`TableSchema.column_groups`).
+
+Un groupe est ignoré avec un avertissement (`ConfigWarning::ColumnGroup*`) pour une colonne inconnue, générée ou déjà dans un autre groupe, un groupe de moins de 3 colonnes, un nom de table déjà pris ou un parent qui n'aurait plus de colonne de données. Réappliquer la même config ne change rien ; une table de groupe existante avec d'autres colonnes est une erreur. Un snapshot qui contient des groupes est écrit en version 3 (`load` accepte 2 et 3).
+
+**Pass 2.** `insert_object` écrit la ligne du parent, puis, pour chaque table de groupe, une ligne dont `j2s_id` et la clé étrangère valent l'id de la ligne du parent. La ligne n'est écrite que si une colonne du groupe a une valeur (`is_present` : ni `null`, ni `""`, ni `[]`, ni `{}`) ; chaque ligne écrite compte dans le taux d'anomalies. Les enfants ordinaires restent rattachés à la ligne d'origine. Cela vaut pour la racine, un enfant objet et les éléments d'un tableau d'objets.
 
 ---
 

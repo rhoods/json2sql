@@ -18,7 +18,6 @@ fn base_config(url: String, schema: String) -> PipelineConfig {
         drop_existing: false,
         dry_run: false,
         text_threshold: 256,
-        array_as_pg_array: false,
         depth_limit: None,
         wide_column_threshold: 100,
         sibling_threshold: 3,

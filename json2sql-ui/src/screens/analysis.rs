@@ -71,13 +71,11 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         }
 
         let disabled_strategies = state.read().project.disabled_strategies.clone();
-        let array_as_pg_array = state.read().project.array_as_pg_array;
         let handle = tokio::task::spawn_blocking(move || {
             let config = json2sql::pass1::runner::Pass1Config {
                 root_table,
                 registry: json2sql::schema::registry::RegistryConfig {
                     text_threshold: PASS1_TEXT_THRESHOLD,
-                    array_as_pg_array,
                     wide_column_threshold: PASS1_WIDE_COLUMN_THRESHOLD,
                     sibling_threshold: PASS1_SIBLING_THRESHOLD,
                     sibling_jaccard: PASS1_SIBLING_JACCARD,

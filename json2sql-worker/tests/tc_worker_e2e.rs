@@ -91,7 +91,6 @@ async fn worker_e2e_small_import_streams_events_and_writes_result() {
             root_table: root_table.clone(),
             registry: RegistryConfig {
                 text_threshold: 256,
-                array_as_pg_array: false,
                 wide_column_threshold: 100,
                 sibling_threshold: 3,
                 sibling_jaccard: 0.5,

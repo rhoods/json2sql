@@ -73,22 +73,6 @@ fn build_entry_schema_base(
 
     push_generated_columns(&mut schema);
 
-    // Junction tables have a single `value` column
-    if schema.is_junction() {
-        if let Some(ref tracker) = entry.scalar_tracker {
-            let pg_type = tracker.to_pg_type();
-            schema.columns.push(ColumnSchema {
-                name: "value".to_string(),
-                original_name: "value".to_string(),
-                pg_type,
-                not_null: tracker.is_not_null(),
-                is_generated: false,
-                is_parent_fk: false,
-            });
-        }
-        return (schema, Vec::new());
-    }
-
     let local_collisions = build_data_columns(&mut schema, entry, &pg_name);
     (schema, local_collisions)
 }
@@ -133,9 +117,9 @@ fn build_data_columns(
     local_collisions
 }
 
-/// A field with mixed scalar/array occurrences (`array_as_pg_array`) is emitted only as its
+/// A field with mixed scalar/array occurrences is emitted only as its
 /// array column — its scalar occurrences are wrapped as one-element arrays in Pass 2 (issue #48).
-fn is_scalar_column(entry: &TableEntry, original_field: &str, tracker: &TypeTracker) -> bool {
+pub(super) fn is_scalar_column(entry: &TableEntry, original_field: &str, tracker: &TypeTracker) -> bool {
     !tracker.is_object_field() && !tracker.is_array_field() && !entry.array_columns.contains_key(original_field)
 }
 

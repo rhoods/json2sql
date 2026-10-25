@@ -53,7 +53,7 @@ pub enum InferredType {
     Text      = 9,  // string, max_len > text_threshold
     /// Nested object → becomes a child table (not stored as a column)
     Object    = 10,
-    /// Array → becomes a child table or junction table
+    /// Array → becomes a child table (of objects) or a PG array column (of scalars)
     Array     = 11,
 }
 

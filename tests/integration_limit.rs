@@ -82,7 +82,7 @@ async fn test_no_limit_is_full_import() {
             "no limit must import all 3 root objects");
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
         assert_eq!(common::row_count(&client, &schema, "users_address").await, 3);
-        assert_eq!(common::row_count(&client, &schema, "users_tags").await, 6);
+        assert_eq!(common::array_elements(&client, &schema, "users", "tags").await, 6);
     }).await;
 }
 

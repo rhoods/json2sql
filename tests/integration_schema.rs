@@ -4,7 +4,6 @@ mod common;
 // pass2 is used by all async tests in this file; pass1-only test_schema_inference_no_db
 // does not use it but sharing the import avoids per-test redundancy.
 use json2sql::{db, pass1, pass2};
-use json2sql::schema::registry::RegistryConfig;
 use json2sql::schema::table_schema::InferredStrategy;
 use std::io::Write;
 
@@ -19,13 +18,12 @@ async fn test_nested_row_counts_json_array() {
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("users_address").unwrap(), 3);
-        assert_eq!(*p2.rows_per_table.get("users_tags").unwrap(), 6);
         assert_eq!(*p2.rows_per_table.get("users_orders").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("users_orders_items").unwrap(), 3);
 
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
         assert_eq!(common::row_count(&client, &schema, "users_address").await, 3);
-        assert_eq!(common::row_count(&client, &schema, "users_tags").await, 6);
+        assert_eq!(common::array_elements(&client, &schema, "users", "tags").await, 6);
         assert_eq!(common::row_count(&client, &schema, "users_orders").await, 3);
         assert_eq!(common::row_count(&client, &schema, "users_orders_items").await, 3);
 
@@ -44,7 +42,7 @@ async fn test_nested_row_counts_ndjson() {
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
-        assert_eq!(common::row_count(&client, &schema, "users_tags").await, 6);
+        assert_eq!(common::array_elements(&client, &schema, "users", "tags").await, 6);
         assert_eq!(common::row_count(&client, &schema, "users_orders").await, 3);
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
     }).await;
@@ -88,14 +86,15 @@ async fn test_transaction_commit() {
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
-        assert_eq!(common::row_count(&client, &schema, "users_tags").await, 6);
+        assert_eq!(common::array_elements(&client, &schema, "users", "tags").await, 6);
         assert_eq!(common::row_count(&client, &schema, "users_orders").await, 3);
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
     }).await;
 }
 
 // ---------------------------------------------------------------------------
-// Vérifie que Pass 1 produit bien 5 tables dans le bon ordre topologique.
+// Vérifie que Pass 1 produit bien 4 tables dans le bon ordre topologique (les tableaux de
+// scalaires sont des colonnes de leur parent, pas des tables : #84).
 // Test sans base de données — pas besoin de with_schema.
 // ---------------------------------------------------------------------------
 #[test]
@@ -103,12 +102,12 @@ fn test_schema_inference_no_db() {
     let path = common::fixture("users.json");
     let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
 
-    assert_eq!(p1.schemas.len(), 5);
+    assert_eq!(p1.schemas.len(), 4);
 
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"users"));
     assert!(names.contains(&"users_address"));
-    assert!(names.contains(&"users_tags"));
+    assert!(!names.contains(&"users_tags"), "scalar arrays are columns, not junction tables");
     assert!(names.contains(&"users_orders"));
     assert!(names.contains(&"users_orders_items"));
 
@@ -545,18 +544,19 @@ fn test_schema_inference_parallel_parity() {
 }
 
 // ---------------------------------------------------------------------------
-// Avec array_as_pg_array=true : users_tags devient une colonne TEXT[]
+// Un tableau de scalaires est une colonne tableau de sa table parente : users.tags est un
+// tableau, plus une table de jonction users_tags (#84)
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn test_array_as_pg_array() {
+async fn test_scalar_arrays_are_array_columns() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
-        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config { root_table: "users".to_string(), registry: RegistryConfig { array_as_pg_array: true, ..Default::default() }, num_workers: None }, None).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
 
         assert_eq!(p1.schemas.len(), 4);
         let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"users"));
-        assert!(!names.contains(&"users_tags"), "users_tags should not exist with array_as_pg_array");
+        assert!(!names.contains(&"users_tags"), "users_tags should not exist: tags is an array column");
 
         let users_schema = p1.schemas.iter().find(|s| s.name == "users").unwrap();
         let tags_col = users_schema.find_by_original("tags").unwrap();
@@ -679,12 +679,11 @@ async fn test_parallel_copy() {
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("users_address").unwrap(), 3);
-        assert_eq!(*p2.rows_per_table.get("users_tags").unwrap(), 6);
         assert_eq!(*p2.rows_per_table.get("users_orders").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("users_orders_items").unwrap(), 3);
 
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
-        assert_eq!(common::row_count(&client, &schema, "users_tags").await, 6);
+        assert_eq!(common::array_elements(&client, &schema, "users", "tags").await, 6);
         assert_eq!(common::row_count(&client, &schema, "users_orders_items").await, 3);
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
     }).await;

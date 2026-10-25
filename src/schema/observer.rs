@@ -12,11 +12,11 @@
 //! - fn `TableEntry::array_column_type` — type PG d'une colonne array, élargi par les occurrences scalaires (#48).
 //! - fn `TableEntry::observe_field` — met à jour le `TypeTracker` d'un champ scalaire.
 //! - struct `SchemaObserver` — accumulateur par worker des observations JSON brutes (Pass 1).
-//! - fn `SchemaObserver::new` — crée l'observateur (seuil texte, mode array-as-pg-array).
+//! - fn `SchemaObserver::new` — crée l'observateur (seuil texte).
 //! - fn `SchemaObserver::observe_root` — observe un objet racine via une pile explicite (pas de
 //!   récursion, évite tout stack overflow sur imbrication profonde).
 //! - fn `SchemaObserver::observe_array_field` — route un champ tableau (objets → table enfant,
-//!   scalaires → colonne PG array ou table de jonction selon `array_as_pg_array`).
+//!   scalaires → colonne PG array).
 //! - fn `SchemaObserver::merge` — fusionne un observateur d'un autre worker (Pass 1 parallèle).
 //! - fn `SchemaObserver::anomaly_iter` — itère les colonnes ayant des anomalies de type.
 //! - fn `SchemaObserver::ensure_table_key` — crée l'entrée de table si absente (idempotent).
@@ -36,9 +36,7 @@ pub struct TableEntry {
     pub(crate) parent_key: String,
     pub(crate) columns: IndexMap<String, TypeTracker>,
     pub(crate) child_kind: Option<ChildKind>,
-    /// For scalar junction tables, the element type tracker.
-    pub(crate) scalar_tracker: Option<TypeTracker>,
-    /// Element type trackers for scalar arrays stored as PG array columns (`array_as_pg_array` mode).
+    /// Element type trackers for scalar arrays, stored as PG array columns.
     pub(crate) array_columns: IndexMap<String, TypeTracker>,
     pub(crate) row_count: u64,
 }
@@ -52,7 +50,6 @@ impl TableEntry {
             parent_key,
             columns: IndexMap::new(),
             child_kind,
-            scalar_tracker: None,
             array_columns: IndexMap::new(),
             row_count: 0,
         }
@@ -74,14 +71,9 @@ impl TableEntry {
                 self.array_columns.insert(name, tracker);
             }
         }
-        match (&mut self.scalar_tracker, other.scalar_tracker) {
-            (Some(a), Some(b)) => a.merge(&b),
-            (None, Some(b))    => self.scalar_tracker = Some(b),
-            _                  => {}
-        }
     }
 
-    /// PG type of an `array_as_pg_array` column. A field with mixed scalar/array occurrences
+    /// PG type of a PG array column. A field with mixed scalar/array occurrences
     /// widens its element type with its scalar occurrences, which Pass 2 wraps as `{x}` (issue #48).
     pub(crate) fn array_column_type(&self, field: &str, elem_tracker: &TypeTracker) -> PgType {
         let elem_type = self.columns.get(field).map_or_else(
@@ -110,16 +102,14 @@ impl TableEntry {
 pub struct SchemaObserver {
     pub(crate) tables: IndexMap<String, TableEntry>,
     pub(crate) text_threshold: u32,
-    array_as_pg_array: bool,
 }
 
 impl SchemaObserver {
     #[must_use]
-    pub fn new(text_threshold: u32, array_as_pg_array: bool) -> Self {
+    pub fn new(text_threshold: u32) -> Self {
         Self {
             tables: IndexMap::new(),
             text_threshold,
-            array_as_pg_array,
         }
     }
 
@@ -182,16 +172,10 @@ impl SchemaObserver {
                 for obj in objs { stack.push((child_key.to_string(), obj)); }
                 stack.push((child_key.to_string(), last));
             }
-        } else if self.array_as_pg_array {
+        } else {
             let threshold = self.text_threshold;
             let entry = self.tables.get_mut(path_key).expect("invariant: path_key was popped from stack, must exist in tables");
             let tracker = entry.array_columns.entry(field.to_string()).or_insert_with(|| TypeTracker::new(threshold));
-            for item in arr { tracker.observe(item); }
-        } else {
-            self.ensure_table_key(child_key, path_key, Some(ChildKind::ScalarArray));
-            let threshold = self.text_threshold;
-            let entry = self.tables.get_mut(child_key).expect("invariant: child_key just inserted by ensure_table_key");
-            let tracker = entry.scalar_tracker.get_or_insert_with(|| TypeTracker::new(threshold));
             for item in arr { tracker.observe(item); }
         }
     }

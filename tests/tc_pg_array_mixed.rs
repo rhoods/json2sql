@@ -16,7 +16,6 @@ fn base_config(url: String, schema: String, fixture: &str, wide_column_threshold
         drop_existing: false,
         dry_run: false,
         text_threshold: 256,
-        array_as_pg_array: true,
         depth_limit: None,
         wide_column_threshold,
         sibling_threshold: 3,
@@ -41,8 +40,8 @@ fn base_config(url: String, schema: String, fixture: &str, wide_column_threshold
     }
 }
 
-/// Issue #48 — `array_as_pg_array` with a field that is scalar on some rows and an array on
-/// others: one TEXT[] column, scalar occurrences stored as one-element arrays (no 42701 crash).
+/// Issue #48 — a field that is scalar on some rows and an array on others: one TEXT[] column,
+/// scalar occurrences stored as one-element arrays (no 42701 crash).
 #[tokio::test]
 async fn test_pg_array_mixed_occurrences_e2e() {
     integration::with_pg_container(|client, schema, url| async move {
@@ -64,6 +63,11 @@ async fn test_pg_array_autosplit_keeps_arrays_e2e() {
     integration::with_pg_container(|client, schema, url| async move {
         let result = run_pipeline(base_config(url, schema.clone(), "tc_pg_array_autosplit.jsonl", 2)).await;
         assert!(result.is_ok(), "pg_array_autosplit pipeline failed: {result:?}");
+
+        // the root must really be AutoSplit (3 scalars > threshold 2), else this test checks nothing (#84)
+        let sql = "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'products_wide')";
+        let wide_exists: bool = client.query_one(sql, &[&schema]).await.unwrap().get(0);
+        assert!(wide_exists, "AutoSplit companion `products_wide` missing: the root was not split");
 
         let sql = format!(
             "SELECT array_to_string(\"pure\", ','), array_to_string(\"mixed\", ',') FROM \"{schema}\".\"products\" ORDER BY \"id\""
