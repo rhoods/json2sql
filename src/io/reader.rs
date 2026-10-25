@@ -94,7 +94,7 @@ use crate::error::{J2sError, Result};
 
 /// Map a simd-json parse error to `J2sError`.
 #[allow(clippy::needless_pass_by_value)] // map_err(simd_err) requires fn(Error) -> J2sError signature
-fn simd_err(e: simd_json::Error) -> J2sError {
+pub fn simd_err(e: simd_json::Error) -> J2sError {
     J2sError::InvalidInput(format!("JSON parse error: {e}"))
 }
 

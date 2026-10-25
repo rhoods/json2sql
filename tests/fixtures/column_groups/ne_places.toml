@@ -1,0 +1,92 @@
+# Natural Earth, lieux habités 10m (domaine public), propriétés des features : 137 colonnes.
+# Étiquettes = PROPOSITION de Claude d'après les seuls noms de champs (documentation Natural Earth non relue), à corriger par l'utilisateur.
+# Jeu déjà examiné pendant la conception : ce n'est pas un jeu hors échantillon.
+
+name = "ne_places"
+role = "tuning"
+source = "https://naturalearth.s3.amazonaws.com/10m_cultural/ne_10m_populated_places.geojson (19 Mo, domaine public)"
+# où sont les colonnes sous une ligne racine du fichier (GeoJSON : les propriétés de chaque Feature)
+rows_path = ["properties"]
+columns = [
+  "SCALERANK", "NATSCALE", "LABELRANK", "FEATURECLA", "NAME", "NAMEPAR", "NAMEALT",
+  "NAMEASCII", "ADM0CAP", "CAPIN", "WORLDCITY", "MEGACITY", "SOV0NAME", "SOV_A3", "ADM0NAME",
+  "ADM0_A3", "ADM1NAME", "ISO_A2", "NOTE", "LATITUDE", "LONGITUDE", "POP_MAX", "POP_MIN",
+  "POP_OTHER", "RANK_MAX", "RANK_MIN", "MEGANAME", "LS_NAME", "MAX_POP10", "MAX_POP20",
+  "MAX_POP50", "MAX_POP300", "MAX_POP310", "MAX_NATSCA", "MIN_AREAKM", "MAX_AREAKM",
+  "MIN_AREAMI", "MAX_AREAMI", "MIN_PERKM", "MAX_PERKM", "MIN_PERMI", "MAX_PERMI", "MIN_BBXMIN",
+  "MAX_BBXMIN", "MIN_BBXMAX", "MAX_BBXMAX", "MIN_BBYMIN", "MAX_BBYMIN", "MIN_BBYMAX",
+  "MAX_BBYMAX", "MEAN_BBXC", "MEAN_BBYC", "TIMEZONE", "UN_FID", "POP1950", "POP1955",
+  "POP1960", "POP1965", "POP1970", "POP1975", "POP1980", "POP1985", "POP1990", "POP1995",
+  "POP2000", "POP2005", "POP2010", "POP2015", "POP2020", "POP2025", "POP2050", "MIN_ZOOM",
+  "WIKIDATAID", "WOF_ID", "CAPALT", "NAME_EN", "NAME_DE", "NAME_ES", "NAME_FR", "NAME_PT",
+  "NAME_RU", "NAME_ZH", "LABEL", "NAME_AR", "NAME_BN", "NAME_EL", "NAME_HI", "NAME_HU",
+  "NAME_ID", "NAME_IT", "NAME_JA", "NAME_KO", "NAME_NL", "NAME_PL", "NAME_SV", "NAME_TR",
+  "NAME_VI", "NE_ID", "NAME_FA", "NAME_HE", "NAME_UK", "NAME_UR", "NAME_ZHT", "GEONAMESID",
+  "FCLASS_ISO", "FCLASS_US", "FCLASS_FR", "FCLASS_RU", "FCLASS_ES", "FCLASS_CN", "FCLASS_TW",
+  "FCLASS_IN", "FCLASS_NP", "FCLASS_PK", "FCLASS_DE", "FCLASS_GB", "FCLASS_BR", "FCLASS_IL",
+  "FCLASS_PS", "FCLASS_SA", "FCLASS_EG", "FCLASS_MA", "FCLASS_PT", "FCLASS_AR", "FCLASS_JP",
+  "FCLASS_KO", "FCLASS_VN", "FCLASS_TR", "FCLASS_ID", "FCLASS_PL", "FCLASS_GR", "FCLASS_IT",
+  "FCLASS_NL", "FCLASS_SE", "FCLASS_BD", "FCLASS_UA", "FCLASS_TLC",
+]
+
+[[relation]]
+name = "population"
+left = [
+  "POP_MAX", "POP_MIN", "POP_OTHER", "RANK_MAX", "RANK_MIN", "POP1950", "POP1955", "POP1960",
+  "POP1965", "POP1970", "POP1975", "POP1980", "POP1985", "POP1990", "POP1995", "POP2000",
+  "POP2005", "POP2010", "POP2015", "POP2020", "POP2025", "POP2050",
+]
+
+[[relation]]
+name = "géométrie de l'agglomération (surface, périmètre, emprise)"
+left = [
+  "MIN_AREAKM", "MAX_AREAKM", "MIN_AREAMI", "MAX_AREAMI", "MIN_PERKM", "MAX_PERKM",
+  "MIN_PERMI", "MAX_PERMI", "MIN_BBXMIN", "MAX_BBXMIN", "MIN_BBXMAX", "MAX_BBXMAX",
+  "MIN_BBYMIN", "MAX_BBYMIN", "MIN_BBYMAX", "MAX_BBYMAX", "MEAN_BBXC", "MEAN_BBYC",
+]
+
+[[relation]]
+name = "pays et rattachement administratif"
+left = [
+  "ADM0NAME", "ADM0_A3", "ADM1NAME", "ISO_A2", "SOV0NAME", "SOV_A3",
+]
+
+[[relation]]
+name = "identifiants externes"
+left = [
+  "WIKIDATAID", "WOF_ID", "GEONAMESID", "NE_ID", "UN_FID",
+]
+
+[[relation]]
+name = "échelle cartographique"
+left = [
+  "SCALERANK", "NATSCALE", "LABELRANK", "MIN_ZOOM",
+]
+
+[[relation]]
+name = "statut urbain"
+left = [
+  "ADM0CAP", "CAPIN", "CAPALT", "WORLDCITY", "MEGACITY", "MEGANAME",
+]
+
+[[relation]]
+name = "coordonnées"
+left = [
+  "LATITUDE", "LONGITUDE",
+]
+
+[[separate]]
+name = "noms par langue ≠ classes de fonction par pays"
+left = [
+  "NAME_EN", "NAME_DE", "NAME_ES", "NAME_FR", "NAME_PT", "NAME_RU", "NAME_ZH", "NAME_AR",
+  "NAME_BN", "NAME_EL", "NAME_HI", "NAME_HU", "NAME_ID", "NAME_IT", "NAME_JA", "NAME_KO",
+  "NAME_NL", "NAME_PL", "NAME_SV", "NAME_TR", "NAME_VI", "NAME_FA", "NAME_HE", "NAME_UK",
+  "NAME_UR", "NAME_ZHT",
+]
+right = [
+  "FCLASS_ISO", "FCLASS_US", "FCLASS_FR", "FCLASS_RU", "FCLASS_ES", "FCLASS_CN", "FCLASS_TW",
+  "FCLASS_IN", "FCLASS_NP", "FCLASS_PK", "FCLASS_DE", "FCLASS_GB", "FCLASS_BR", "FCLASS_IL",
+  "FCLASS_PS", "FCLASS_SA", "FCLASS_EG", "FCLASS_MA", "FCLASS_PT", "FCLASS_AR", "FCLASS_JP",
+  "FCLASS_KO", "FCLASS_VN", "FCLASS_TR", "FCLASS_ID", "FCLASS_PL", "FCLASS_GR", "FCLASS_IT",
+  "FCLASS_NL", "FCLASS_SE", "FCLASS_BD", "FCLASS_UA", "FCLASS_TLC",
+]

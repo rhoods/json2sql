@@ -14,6 +14,10 @@
 //! - fn `ctrl_c_interrupt` — se résout sur Ctrl-C (arrêt propre de la Pass 2).
 //! - fn `finalize_pass2` — rapport final + vérification du taux d'anomalie max.
 //!
+//! Proposition de groupes de colonnes (#78) :
+//! - fn `suggest_groups` — schéma finalisé puis proposition `column_groups` de toutes les tables larges, au lieu d'un import.
+//! - fn `finalized_schema` — stdin → Pass 1 ou snapshot → surcharges : le schéma que partagent import et proposition.
+//!
 //! Résolution d'entrée :
 //! - fn `resolve_input` — bufferise stdin dans un fichier temporaire si aucun chemin n'est fourni.
 //!
@@ -50,6 +54,8 @@ use crate::error::{J2sError, Result};
 use crate::pass1::runner::{Pass1Config, Pass1Result};
 use crate::schema::config::SkipCascadeWarning;
 use crate::schema::finalizer::OverflowWarning;
+use crate::schema::grouping::embedding::StaticEmbedder;
+use crate::schema::grouping::suggest::{suggest, Suggestion};
 use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::strategies::StrategyName;
 use crate::schema::table_schema::TableSchema;
@@ -122,13 +128,7 @@ pub struct PipelineConfig {
 /// Orchestrates stdin buffering → Pass 1 (schema inference or snapshot load) →
 /// schema override application → DDL creation → Pass 2 (data insertion) → reporting.
 pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
-    let (_stdin_temp, input_path) = resolve_input(std::mem::take(&mut cfg.input))?;
-    let mut pass1 = load_or_infer_schema(&cfg, &input_path)?;
-    report_pass1_warnings(&pass1, cfg.depth_limit);
-    let config_warnings = post_process_schema(&mut pass1, &cfg)?;
-    for w in &config_warnings {
-        eprintln!("WARNING: {}", w.to_message());
-    }
+    let (_stdin_temp, input_path, pass1) = finalized_schema(&mut cfg)?;
 
     if cfg.dry_run {
         print_dry_run_ddl(&pass1.schemas, &cfg.pg_schema, cfg.drop_existing);
@@ -144,6 +144,17 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
     let client = connect_and_create_tables(db_url, &pass1.schemas, &cfg.pg_schema, cfg.drop_existing).await?;
     let pass2 = run_pass2(&input_path, &pass1, &client, db_url, &cfg).await?;
     finalize_pass2(&pass2, &cfg)
+}
+
+/// Propose a split of every wide table instead of importing (`--suggest-groups`, #78): the same Pass 1 (or
+/// snapshot) and overrides as an import, then ONE sample of the input's rows and a proposal for each eligible
+/// table. `cfg.limit` bounds the sampled root rows. With the folder of a static embedding `model`, the columns left
+/// in a table also get the two groups nearest to their name; the model is read first, so a bad folder fails before
+/// the long Pass 1. No database is touched.
+pub fn suggest_groups(mut cfg: PipelineConfig, model: Option<&Path>) -> Result<Suggestion> {
+    let embedder = model.map(StaticEmbedder::load).transpose()?;
+    let (_stdin_temp, input_path, pass1) = finalized_schema(&mut cfg)?;
+    suggest(&pass1.schemas, &input_path, cfg.limit, embedder.as_ref())
 }
 
 async fn connect_and_create_tables(
@@ -236,6 +247,20 @@ fn finalize_pass2(
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/// Stdin buffering, Pass 1 (or snapshot) and schema overrides: the finalized schema, with the input path it was
+/// read from. The guard keeps a buffered stdin alive.
+fn finalized_schema(
+    cfg: &mut PipelineConfig,
+) -> Result<(Option<tempfile::NamedTempFile>, PathBuf, Pass1Result)> {
+    let (stdin_temp, input_path) = resolve_input(std::mem::take(&mut cfg.input))?;
+    let mut pass1 = load_or_infer_schema(cfg, &input_path)?;
+    report_pass1_warnings(&pass1, cfg.depth_limit);
+    for w in post_process_schema(&mut pass1, cfg)? {
+        eprintln!("WARNING: {}", w.to_message());
+    }
+    Ok((stdin_temp, input_path, pass1))
+}
 
 /// Buffer stdin to a named temp file when no explicit input path is given.
 /// Returns `(temp_file_guard, resolved_path)`. The guard must stay alive for
@@ -432,6 +457,7 @@ fn apply_schema_config(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<
     eprintln!("\nApplying schema overrides from '{}'...", config_path.display());
     let config = crate::schema::config::SchemaConfig::from_file(config_path)?;
     let warnings = crate::schema::config::apply_overrides_complete(&mut pass1.schemas, &config)?;
+    crate::schema::column_groups::reindex_stats(&pass1.schemas, &mut pass1.stats);
     eprintln!("Schema after overrides: {} tables", pass1.schemas.len());
     Ok(warnings)
 }
@@ -439,7 +465,7 @@ fn apply_schema_config(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<
 fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()> {
     let Some(ref out_path) = cfg.schema_output else { return Ok(()) };
     let snapshot = crate::schema::persistence::SchemaSnapshot {
-        version: crate::schema::persistence::SCHEMA_FORMAT_VERSION,
+        version: crate::schema::persistence::format_version(&pass1.schemas),
         total_rows: pass1.total_rows,
         schemas: pass1.schemas.clone(),
         truncated_names: pass1.truncated_names.clone(),
@@ -628,12 +654,167 @@ mod tests {
         assert!(cfg.skip_constraints, "skip_constraints must be settable to true");
     }
 
+    /// Objects with two families of six columns and twelve unrelated ones, all filled.
+    fn wide_jsonl(rows: usize) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        const OTHER: [&str; 12] = [
+            "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow", "oyster", "pebble",
+            "saddle", "thimble",
+        ];
+        let names: Vec<String> = ('a'..='f')
+            .flat_map(|c| [format!("kiwi_{c}"), format!("zulu_{c}")])
+            .chain(OTHER.iter().map(|n| (*n).to_string()))
+            .collect();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for i in 0..rows {
+            let object: serde_json::Map<String, serde_json::Value> =
+                names.iter().map(|n| (n.clone(), serde_json::json!(format!("v{}", i % 5)))).collect();
+            writeln!(file, "{}", serde_json::Value::Object(object)).unwrap();
+        }
+        file
+    }
+
+    fn cfg_for(file: &tempfile::NamedTempFile) -> PipelineConfig {
+        PipelineConfig { input: Some(file.path().to_path_buf()), ..minimal_pipeline_cfg(None) }
+    }
+
+    #[test]
+    fn suggest_groups_runs_pass_1_then_reads_the_rows_of_the_wide_table() {
+        let file = wide_jsonl(60);
+        let s = suggest_groups(cfg_for(&file), None).unwrap();
+        assert_eq!(s.tables, ["root"]);
+        let parsed: toml::Table = toml::from_str(&s.toml).unwrap_or_else(|e| panic!("{e}\n{}", s.toml));
+        let groups = parsed["root"]["column_groups"].as_table().unwrap();
+        assert!(groups.contains_key("kiwi") && groups.contains_key("zulu"), "{:?}", groups.keys().collect::<Vec<_>>());
+        assert!(s.report.contains("Data signals: on, 60 rows sampled"), "{}", s.report);
+    }
+
+    #[test]
+    fn suggest_groups_limit_bounds_the_sampled_root_rows() {
+        let file = wide_jsonl(60);
+        let cfg = PipelineConfig { limit: Some(25), ..cfg_for(&file) };
+        let s = suggest_groups(cfg, None).unwrap();
+        assert!(s.report.contains("Data signals: on, 25 rows sampled"), "{}", s.report);
+    }
+
+    #[test]
+    fn suggest_groups_proposes_every_wide_table_of_the_file_from_one_sample() {
+        use std::io::Write;
+        let wide = |i: usize| -> serde_json::Map<String, serde_json::Value> {
+            ('a'..='f')
+                .flat_map(|c| [format!("kiwi_{c}"), format!("zulu_{c}")])
+                .chain((0..12).map(|n| format!("filler{}", char::from(b'a' + n))))
+                .map(|name| (name, serde_json::json!(format!("v{}", i % 5))))
+                .collect()
+        };
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for i in 0..60 {
+            let mut object = wide(i);
+            object.insert("props".to_string(), serde_json::Value::Object(wide(i)));
+            writeln!(file, "{}", serde_json::Value::Object(object)).unwrap();
+        }
+        let s = suggest_groups(cfg_for(&file), None).unwrap();
+        assert_eq!(s.tables, ["root", "root_props"]);
+        assert_eq!(
+            s.report.matches("Data signals: on, 60 rows sampled").count(),
+            2,
+            "{}",
+            s.report
+        );
+    }
+
+    /// A model folder with the words `kiwi`, `zulu` and `quartz` as rows of two dimensions.
+    fn toy_model() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let vocab = serde_json::json!({"[UNK]": 0, "kiwi": 1, "zulu": 2, "quartz": 3});
+        let tokenizer = serde_json::json!({
+            "normalizer": {"type": "BertNormalizer", "lowercase": true, "strip_accents": null},
+            "pre_tokenizer": {"type": "BertPreTokenizer"},
+            "model": {"type": "WordPiece", "vocab": vocab}
+        });
+        std::fs::write(dir.path().join("tokenizer.json"), tokenizer.to_string()).unwrap();
+        let rows: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let header = serde_json::json!({"embeddings": {"dtype": "F32", "shape": [4, 2], "data_offsets": [0, 32]}}).to_string();
+        let mut file = (header.len() as u64).to_le_bytes().to_vec();
+        file.extend(header.bytes());
+        file.extend(rows.iter().flatten().flat_map(|x| x.to_le_bytes()));
+        std::fs::write(dir.path().join("model.safetensors"), file).unwrap();
+        dir
+    }
+
+    #[test]
+    fn suggest_groups_with_a_model_suggests_groups_for_the_columns_that_stay() {
+        let (file, model) = (wide_jsonl(60), toy_model());
+        let s = suggest_groups(cfg_for(&file), Some(model.path())).unwrap();
+        assert!(s.report.contains("- `quartz` → `kiwi` (0.71), `zulu` (0.71)"), "{}", s.report);
+    }
+
+    #[test]
+    fn suggest_groups_reads_the_model_before_the_long_pass_1() {
+        let missing = std::path::Path::new("/nonexistent/model");
+        let cfg = PipelineConfig { input: Some("/nonexistent/input.json".into()), ..minimal_pipeline_cfg(None) };
+        let err = suggest_groups(cfg, Some(missing)).unwrap_err().to_string();
+        assert!(err.contains("/nonexistent/model"), "the model fails first: {err}");
+    }
+
+    #[test]
+    fn suggest_groups_without_a_wide_table_says_what_is_needed() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "{\"id\": 1}\n{\"id\": 2}\n").unwrap();
+        let err = suggest_groups(cfg_for(&file), None).unwrap_err().to_string();
+        assert!(err.contains("at least 20 data columns"), "{err}");
+    }
+
     #[test]
     fn apply_schema_config_none_returns_empty() {
         let mut pass1 = minimal_pass1(vec![]);
         let cfg = minimal_pipeline_cfg(None);
         let warnings = apply_schema_config(&mut pass1, &cfg).unwrap();
         assert_eq!(warnings, []);
+    }
+
+    /// `items`: `j2s_id`, the columns `x1` to `x3` for a group and `y1`.
+    fn splittable_items() -> TableSchema {
+        use crate::schema::table_schema::ColumnSchema;
+        use crate::schema::type_tracker::PgType;
+        let mut parent = TableSchema::new("items".to_string(), vec!["items".to_string()], 0);
+        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        for name in ["x1", "x2", "x3", "y1"] {
+            parent.columns.push(ColumnSchema {
+                name: name.to_string(),
+                original_name: name.to_string(),
+                pg_type: PgType::Text,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
+            });
+        }
+        parent
+    }
+
+    fn stat_of(table: &str, column: &str) -> crate::schema::stats::ColumnStats {
+        crate::schema::stats::ColumnStats {
+            table_name: table.to_string(),
+            column_name: column.to_string(),
+            pg_type: crate::schema::type_tracker::PgType::Text,
+            total_count: 5,
+            null_count: 0,
+            type_histogram: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn apply_schema_config_moves_the_statistics_of_a_column_to_its_group_table() {
+        let mut pass1 = minimal_pass1(vec![splittable_items()]);
+        pass1.stats = vec![stat_of("items", "x1"), stat_of("items", "y1")];
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "[items.column_groups]\nalpha = [\"x1\", \"x2\", \"x3\"]\n").unwrap();
+        let cfg = minimal_pipeline_cfg(Some(tmp.path().to_path_buf()));
+        assert_eq!(apply_schema_config(&mut pass1, &cfg).unwrap(), []);
+        assert_eq!(pass1.schemas.len(), 2);
+        let stats: Vec<(&str, &str)> =
+            pass1.stats.iter().map(|s| (s.table_name.as_str(), s.column_name.as_str())).collect();
+        assert_eq!(stats, [("items", "y1"), ("items_alpha", "x1")]);
     }
 
     #[test]

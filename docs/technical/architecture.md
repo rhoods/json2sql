@@ -48,6 +48,8 @@ Séquence de `run_pipeline()` :
 8. Sinon : se connecte à PostgreSQL, crée les tables, lance la Pass 2
 9. Affiche le résumé d'import et les anomalies
 
+Avec `--suggest-groups`, `main.rs` appelle `pipeline::suggest_groups()` à la place : les étapes 1 à 6 (partagées via `finalized_schema()`), puis la proposition de découpage de toutes les tables larges, depuis un seul échantillon du fichier (`schema::grouping::suggest`), et, avec `--embedding-model`, les deux groupes les plus proches de chaque colonne laissée dans la table (`placement`) ; aucune base n'est touchée (#78).
+
 ---
 
 ## `src/ipc.rs`
@@ -303,6 +305,8 @@ Un essai `UNLOGGED` puis `SET LOGGED` a été retiré : la réécriture dans le 
   - `KeyedPivot` : `insert_keyed_pivot_object()` / `insert_keyed_pivot_array_of_objects()` — fusion de tables sœurs ; sérialise l'objet enfant dans `j2s_data JSONB`
   - `AutoSplit` : colonnes stables → table principale, colonnes médiums → table `_wide` (EAV) ; les clés rares (`< --rare-threshold`) ne sont **pas importées** — voir [schema-inference.md](schema-inference.md)
   - `Ignore` : clé supprimée
+
+**Groupes de colonnes** (#78, dans `insert.rs`) : pour une table `Columns` ou `AutoSplit` qui a des tables de groupe, `insert_object()` écrit après la ligne de la table (`write_row_of`) une ligne par groupe (`write_group_rows`) : même `j2s_id` et même clé étrangère que la ligne d'origine, seulement si une colonne du groupe a une valeur (ni `null`, ni `""`, ni `[]`, ni `{}`). Les tables enfants ordinaires restent rattachées à la ligne d'origine.
 
 **Traversal des tableaux** (dans `traversal.rs`) : `insert_array()` — tableau d'objets → `insert_object()` récursif ; tableau de scalaires → ligne de jonction `(parent_id, order, value)`.
 
