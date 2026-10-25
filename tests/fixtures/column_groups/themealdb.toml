@@ -1,0 +1,76 @@
+# TheMealDB (clé de test publique), recettes : 54 colonnes, dont deux familles numérotées (strIngredient1..20, strMeasure1..20).
+# Familles numérotées : dépivotage hors v1 (seulement signalées). Chaque famille est étiquetée À PART : les réunir
+# (ingrédient i + mesure i, 40 colonnes sur 54) dépasserait le plafond de 50 % et relève du dépivotage.
+# Étiquettes = PROPOSITION de Claude, à corriger par l'utilisateur. Jeu déjà examiné pendant la conception.
+# Le préfixe « str » est commun à 52 colonnes sur 54 : un préfixe naïf donne un seul groupe géant.
+
+name = "themealdb"
+role = "tuning"
+source = "https://www.themealdb.com/api/json/v1/1/search.php?f=<lettre> (clé de test publique « 1 », 1,9 Mo agrégés)"
+columns = [
+  "idMeal", "strMeal", "strMealAlternate", "strCategory", "strArea", "strCountry",
+  "strInstructions", "strMealThumb", "strTags", "strYoutube", "strIngredient1",
+  "strIngredient2", "strIngredient3", "strIngredient4", "strIngredient5", "strIngredient6",
+  "strIngredient7", "strIngredient8", "strIngredient9", "strIngredient10", "strIngredient11",
+  "strIngredient12", "strIngredient13", "strIngredient14", "strIngredient15",
+  "strIngredient16", "strIngredient17", "strIngredient18", "strIngredient19",
+  "strIngredient20", "strMeasure1", "strMeasure2", "strMeasure3", "strMeasure4", "strMeasure5",
+  "strMeasure6", "strMeasure7", "strMeasure8", "strMeasure9", "strMeasure10", "strMeasure11",
+  "strMeasure12", "strMeasure13", "strMeasure14", "strMeasure15", "strMeasure16",
+  "strMeasure17", "strMeasure18", "strMeasure19", "strMeasure20", "strSource",
+  "strImageSource", "strCreativeCommonsConfirmed", "dateModified",
+]
+
+[[relation]]
+name = "ingrédients (famille numérotée)"
+left = [
+  "strIngredient1", "strIngredient2", "strIngredient3", "strIngredient4", "strIngredient5",
+  "strIngredient6", "strIngredient7", "strIngredient8", "strIngredient9", "strIngredient10",
+  "strIngredient11", "strIngredient12", "strIngredient13", "strIngredient14",
+  "strIngredient15", "strIngredient16", "strIngredient17", "strIngredient18",
+  "strIngredient19", "strIngredient20",
+]
+
+[[relation]]
+name = "mesures (famille numérotée)"
+left = [
+  "strMeasure1", "strMeasure2", "strMeasure3", "strMeasure4", "strMeasure5", "strMeasure6",
+  "strMeasure7", "strMeasure8", "strMeasure9", "strMeasure10", "strMeasure11", "strMeasure12",
+  "strMeasure13", "strMeasure14", "strMeasure15", "strMeasure16", "strMeasure17",
+  "strMeasure18", "strMeasure19", "strMeasure20",
+]
+
+[[relation]]
+name = "médias et sources"
+left = [
+  "strMealThumb", "strYoutube", "strSource", "strImageSource", "strCreativeCommonsConfirmed",
+]
+
+[[relation]]
+name = "classification"
+left = [
+  "strCategory", "strArea", "strCountry", "strTags",
+]
+
+[[relation]]
+name = "identité"
+left = [
+  "idMeal", "strMeal", "strMealAlternate",
+]
+
+[[separate]]
+name = "ingrédients et mesures ≠ médias et sources"
+left = [
+  "strIngredient1", "strIngredient2", "strIngredient3", "strIngredient4", "strIngredient5",
+  "strIngredient6", "strIngredient7", "strIngredient8", "strIngredient9", "strIngredient10",
+  "strIngredient11", "strIngredient12", "strIngredient13", "strIngredient14",
+  "strIngredient15", "strIngredient16", "strIngredient17", "strIngredient18",
+  "strIngredient19", "strIngredient20", "strMeasure1", "strMeasure2", "strMeasure3",
+  "strMeasure4", "strMeasure5", "strMeasure6", "strMeasure7", "strMeasure8", "strMeasure9",
+  "strMeasure10", "strMeasure11", "strMeasure12", "strMeasure13", "strMeasure14",
+  "strMeasure15", "strMeasure16", "strMeasure17", "strMeasure18", "strMeasure19",
+  "strMeasure20",
+]
+right = [
+  "strMealThumb", "strYoutube", "strSource", "strImageSource", "strCreativeCommonsConfirmed",
+]

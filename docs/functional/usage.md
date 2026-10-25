@@ -202,6 +202,8 @@ SELECT name, cardinality(tags) AS n, tags[1] AS premier FROM products;
 | `--schema-config` | aucun | Fichier TOML de surcharges manuelles |
 | `--schema-output` | aucun | Sauvegarde le schéma de la Pass 1 (JSON) |
 | `--schema-input` | aucun | Charge un schéma sauvegardé et saute la Pass 1 |
+| `--suggest-groups` | aucun | Au lieu d'importer, propose un découpage de toutes les tables larges en tables 1:1 thématiques : écrit le TOML `column_groups` (une section par table qui a un groupe) dans le fichier donné et affiche le rapport (Markdown) sur la sortie standard. Une table est éligible si sa stratégie est `Columns` ou `AutoSplit` et qu'elle a au moins 20 colonnes de données ; les colonnes sans groupe restent dans la table d'origine, qui garde le lien avec les tables enfants issues des objets. Aucune base n'est nécessaire ; incompatible avec `--dry-run`. `--limit N` borne les lignes racine relues (`0` éteint les signaux de données). Un groupe dont la table existerait déjà (un objet imbriqué `nutrition` donne déjà la table `{table}_nutrition`) est proposé sous le nom suivant libre (`nutrition_2`), pour que le TOML s'applique tel quel. Les tableaux de scalaires (`*_tags`…) sont des colonnes de la table analysée, comme les autres. Le TOML se réutilise tel quel avec `--schema-config` (clé `column_groups`, voir plus bas) ; l'écriture des lignes des tables de groupe n'est pas encore faite (#78, T3b) : un import avec `column_groups` est refusé pour l'instant, `--dry-run` montre le schéma |
+| `--embedding-model` | aucun | Avec `--suggest-groups` : dossier d'un modèle d'embeddings statiques (Model2Vec à tokenizer WordPiece, par exemple `potion-base-8M` : `model.safetensors` et `tokenizer.json`). Pour chaque colonne laissée dans une table, le rapport donne les deux groupes dont le centre est le plus proche de son nom, avec un score (cosinus). C'est une indication : rien n'est déplacé ni fusionné sur ce signal. Le modèle est fourni par l'utilisateur, json2sql ne le télécharge jamais ; un tokenizer d'un autre type (le modèle multilingue est de type Unigram) est refusé avec un message clair |
 
 ### Paramètres d'inférence
 
@@ -275,6 +277,23 @@ ma_colonne = "INTEGER"      # forcer un type : INTEGER | BIGINT | TEXT | VARCHAR
 ```
 
 Ces types sont scalaires : une surcharge de type sur une colonne tableau est ignorée avec un avertissement, la colonne reste un tableau.
+
+### Découper une table en groupes de colonnes (`column_groups`)
+
+La clé `column_groups` d'une table range des colonnes dans des tables filles 1:1, une par groupe. C'est le format que produit `--suggest-groups` ; les noms de colonnes sont ceux de PostgreSQL.
+
+```toml
+[openfoodfacts.column_groups]
+nutrition = ["nutrition_data", "nutrition_data_per", "nutrition_grades"]
+packaging = ["packaging_materials_tags", "packaging_recycling_tags", "packaging_shapes_tags"]
+```
+
+- La table du groupe s'appelle `{table}_{groupe}` (53 octets au plus, un hash si c'est plus long). Elle reprend l'identifiant de la table d'origine (`j2s_id`) et une clé étrangère vers elle ; la table d'origine garde les colonnes qui ne sont dans aucun groupe, ainsi que ses autres tables enfants.
+- Les groupes sont appliqués après les surcharges de types, de stratégie et `flatten`, dans l'ordre alphabétique de leurs noms.
+- Un groupe est ignoré, avec un avertissement, si une colonne est inconnue, générée par json2sql (`j2s_*`), déjà dans un autre groupe, si le groupe a moins de 3 colonnes ou si le nom de table qu'il aurait existe déjà. Une table dont la stratégie n'est ni `columns` ni `AutoSplit`, ou dont toutes les colonnes partiraient, n'est pas découpée.
+- À l'import, la table d'un groupe reçoit une ligne par objet de la table d'origine qui a au moins une valeur dans les colonnes du groupe. Une valeur est tout sauf `null`, `""`, `[]` et `{}` (la règle de `--suggest-groups`). La ligne reprend le `j2s_id` de la ligne d'origine : `LEFT JOIN {table}_{groupe} USING (j2s_id)` redonne la table de départ. Quand toutes les colonnes d'un groupe sont vides, il n'y a pas de ligne et la jointure rend ces colonnes à `NULL`, y compris celles qui contenaient `""` ou `[]`. `--dry-run` affiche le DDL.
+- Une valeur de groupe qui ne rentre pas dans le type de sa colonne est une anomalie de la table du groupe (fichier d'anomalies au nom de cette table) ; chaque ligne de groupe écrite compte dans le taux de `--max-anomaly-rate`, au même titre que les lignes des autres tables.
+- Réappliquer la même config à un schéma déjà découpé (`--schema-input` d'un snapshot) ne change rien. Un snapshot qui contient des groupes est écrit en version 3 : un json2sql plus ancien le refuse.
 
 ### Stratégies disponibles
 

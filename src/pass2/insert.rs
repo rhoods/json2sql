@@ -18,6 +18,9 @@
 //!   ou insertion standard récursive).
 //! - fn `recurse_children` — parcourt les champs de l'objet, route chaque enfant (objet/array) vers
 //!   `insert_child_object`/`insert_array`.
+//! - fn `write_row_of` — écrit la ligne d'une table pour un objet : colonnes générées puis colonnes de données.
+//! - fn `write_group_rows` — écrit les lignes des tables de groupes de colonnes d'une table (une par groupe qui a au moins une valeur).
+//! - fn `column_value` — valeur JSON d'une colonne de données dans l'objet de sa table (via le champ d'origine si elle vient d'un `Flatten`).
 //! - fn `write_autosplit_rows` — écrit les paires clé/valeur de fréquence moyenne en lignes EAV
 //!   dans la table wide compagnon (stratégie `AutoSplit`).
 //! - fn `push_data_col` — résout et coerce la valeur d'une colonne de données (flatten, JSONB, coercition).
@@ -36,6 +39,7 @@ use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::error::Result;
 use crate::pass2::coercer::{coerce, CoerceResult};
 use crate::pass2::sink::RowSink;
+use crate::schema::grouping::sample::is_present;
 use crate::schema::PATH_SEP;
 use crate::schema::table_schema::{TableSchema, InferredStrategy};
 
@@ -53,6 +57,22 @@ pub struct InsertCtx<'a, S, A> {
     pub(crate) anomalies: &'a mut A,
 }
 
+/// The JSON value of a data column in the object of its table: for a column inlined via the Flatten strategy, the
+/// value is looked up in the nested object it came from.
+fn column_value<'a>(
+    schema: &TableSchema,
+    col: &crate::schema::table_schema::ColumnSchema,
+    obj: &'a serde_json::Map<String, Value>,
+) -> &'a Value {
+    schema.flatten_sources.get(col.name.as_str()).map_or_else(
+        || obj.get(&col.original_name).unwrap_or(&Value::Null),
+        |source_field| obj.get(source_field.as_str())
+            .and_then(|v| v.as_object())
+            .and_then(|nested| nested.get(col.original_name.as_str()))
+            .unwrap_or(&Value::Null),
+    )
+}
+
 #[allow(clippy::too_many_lines)] // sequential phases of a single responsibility: resolve → fast-path → guard → coerce
 fn push_data_col<A: AnomalyCollect>(
     builder: &mut RowBuilder,
@@ -62,14 +82,7 @@ fn push_data_col<A: AnomalyCollect>(
     obj: &serde_json::Map<String, Value>,
     row_id: Uuid,
 ) -> Result<()> {
-    // For columns inlined via Flatten strategy, look up the value in the nested object.
-    let json_val = schema.flatten_sources.get(col.name.as_str()).map_or_else(
-        || obj.get(&col.original_name).unwrap_or(&Value::Null),
-        |source_field| obj.get(source_field.as_str())
-            .and_then(|v| v.as_object())
-            .and_then(|nested| nested.get(col.original_name.as_str()))
-            .unwrap_or(&Value::Null),
-    );
+    let json_val = column_value(schema, col, obj);
 
     // JSONB columns accept any JSON value — serialize the raw value directly.
     if matches!(col.pg_type, crate::schema::type_tracker::PgType::Jsonb) {
@@ -130,19 +143,7 @@ pub fn insert_object<S: RowSink, A: AnomalyCollect>(
         return write_root_jsonb(path_map, ctx, schema, obj, row_id);
     }
 
-    let mut builder = RowBuilder::new();
-    for col in &schema.columns {
-        if col.is_generated {
-            push_generated_col_insert(&mut builder, col, row_id, parent_id, order);
-            continue;
-        }
-        push_data_col(&mut builder, ctx.anomalies, schema, col, obj, row_id)?;
-    }
-
-    ctx.anomalies.inc_total(&schema.name);
-    if let Some(sink) = ctx.sinks.get_mut(&schema.name) {
-        sink.write_row(&builder.finish())?;
-    }
+    write_row_of(ctx, schema, obj, row_id, parent_id, order)?;
 
     // For SiblingCollapseMulti, the row above IS the routing row.
     // Delegate child routing using row_id as routing_id (no second emit_routing_row).
@@ -151,8 +152,53 @@ pub fn insert_object<S: RowSink, A: AnomalyCollect>(
         return route_multi_collapse_children(path_map, ctx.sinks, ctx.anomalies, schema, obj, row_id, &groups);
     }
 
+    write_group_rows(path_map, ctx, schema, obj, row_id)?;
     write_autosplit_rows(path_map, ctx, schema, obj, row_id)?;
     recurse_children(path_map, ctx, schema, obj, row_id)?;
+    Ok(())
+}
+
+/// Write the row of `schema` for `obj`: its generated columns, then its data columns. It counts as a row written.
+fn write_row_of<S: RowSink, A: AnomalyCollect>(
+    ctx: &mut InsertCtx<'_, S, A>,
+    schema: &TableSchema,
+    obj: &serde_json::Map<String, Value>,
+    row_id: Uuid,
+    parent_id: Option<Uuid>,
+    order: Option<i64>,
+) -> Result<()> {
+    let mut builder = RowBuilder::new();
+    for col in &schema.columns {
+        if col.is_generated {
+            push_generated_col_insert(&mut builder, col, row_id, parent_id, order);
+            continue;
+        }
+        push_data_col(&mut builder, ctx.anomalies, schema, col, obj, row_id)?;
+    }
+    ctx.anomalies.inc_total(&schema.name);
+    if let Some(sink) = ctx.sinks.get_mut(&schema.name) {
+        sink.write_row(&builder.finish())?;
+    }
+    Ok(())
+}
+
+/// Write the rows of the column groups split off `schema` (#78): one row per group table that has at least one
+/// value in `obj`, none when all its values are empty (null, `""`, `[]`, `{}`: the rule the groups were proposed
+/// with). The row takes the id of the row just written for both its `j2s_id` and its foreign key, which is what makes
+/// the table 1:1. A group table the path map does not have is skipped.
+fn write_group_rows<S: RowSink, A: AnomalyCollect>(
+    path_map: &HashMap<String, TableSchema>,
+    ctx: &mut InsertCtx<'_, S, A>,
+    schema: &TableSchema,
+    obj: &serde_json::Map<String, Value>,
+    row_id: Uuid,
+) -> Result<()> {
+    for name in &schema.column_groups {
+        let Some(group) = path_map.get(name.as_str()) else { continue };
+        if group.data_columns().any(|col| is_present(column_value(group, col, obj))) {
+            write_row_of(ctx, group, obj, row_id, Some(row_id), None)?;
+        }
+    }
     Ok(())
 }
 
@@ -381,6 +427,142 @@ mod tests {
     use crate::schema::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
     use crate::schema::type_tracker::PgType;
     use super::{insert_object, InsertCtx};
+    use crate::anomaly::collector::AnomalyCollect;
+    use crate::error::Result;
+    use crate::schema::table_schema::ChildKind;
+
+    // --- column groups (#78, T3b) ---
+
+    /// Records the anomalies and the rows counted per table.
+    #[derive(Default)]
+    struct Recorder {
+        anomalies: Vec<(String, String, String)>,
+        totals: HashMap<String, u64>,
+    }
+
+    impl AnomalyCollect for Recorder {
+        fn record(&mut self, table: &str, column: &str, row_id: &str, _: &str, _: &str, _: &str) -> Result<()> {
+            self.anomalies.push((table.to_string(), column.to_string(), row_id.to_string()));
+            Ok(())
+        }
+
+        fn inc_total(&mut self, table: &str) {
+            *self.totals.entry(table.to_string()).or_default() += 1;
+        }
+    }
+
+    fn column(name: &str, original: &str, pg_type: PgType) -> ColumnSchema {
+        ColumnSchema {
+            name: name.to_string(),
+            original_name: original.to_string(),
+            pg_type,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
+        }
+    }
+
+    /// `t` (`a` TEXT, `y` INTEGER) split in the group `t_g` (`x1` TEXT, `x2` TEXT), in a path map.
+    fn split_table() -> HashMap<String, TableSchema> {
+        let mut parent = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        parent.columns.push(column("a", "a", PgType::Text));
+        parent.columns.push(column("y", "y", PgType::Integer));
+        parent.column_groups.push("t_g".to_string());
+        let mut group = TableSchema::new("t_g".to_string(), vec!["t_g".to_string()], 1);
+        group.parent_table = Some("t".to_string());
+        group.child_kind = Some(ChildKind::Object);
+        group.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        group.columns.push(ColumnSchema::parent_fk("t"));
+        group.columns.push(column("x1", "x1", PgType::Text));
+        group.columns.push(column("x2", "x2", PgType::Text));
+        HashMap::from([("t".to_string(), parent), ("t_g".to_string(), group)])
+    }
+
+    /// Writes `json` as an object of `t` and returns the rows of each table, as cells.
+    fn write(path_map: &HashMap<String, TableSchema>, json: &str, recorder: &mut Recorder) -> HashMap<String, Vec<Vec<String>>> {
+        let mut sinks: HashMap<String, CaptureSink> = path_map.keys().map(|k| (k.clone(), CaptureSink(Vec::new()))).collect();
+        let obj: serde_json::Map<String, Value> = serde_json::from_str(json).unwrap();
+        let schema = &path_map["t"];
+        insert_object(path_map, &mut InsertCtx { sinks: &mut sinks, anomalies: recorder }, schema, &obj, ID, None, None).unwrap();
+        sinks
+            .into_iter()
+            .map(|(table, sink)| {
+                let rows = sink.0.iter().map(|r| String::from_utf8_lossy(r).trim_end_matches('\n').split('\t').map(str::to_string).collect()).collect();
+                (table, rows)
+            })
+            .collect()
+    }
+
+    const ID: Uuid = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+
+    #[test]
+    fn a_column_group_gets_one_row_that_shares_the_id_of_the_row_it_was_split_from() {
+        let mut recorder = Recorder::default();
+        let rows = write(&split_table(), r#"{"a": "A", "y": 2, "x1": "u", "x2": "v"}"#, &mut recorder);
+        let id = ID.to_string();
+        assert_eq!(rows["t"], [[id.clone(), "A".to_string(), "2".to_string()]]);
+        assert_eq!(rows["t_g"], [[id.clone(), id, "u".to_string(), "v".to_string()]], "j2s_id and the foreign key are the parent's id");
+        assert_eq!((recorder.totals["t"], recorder.totals["t_g"]), (1, 1), "a group row counts as a row written");
+    }
+
+    #[test]
+    fn a_group_whose_values_are_all_empty_has_no_row() {
+        for empty in [r#"{"a": "A", "y": 2}"#, r#"{"a": "A", "x1": null, "x2": ""}"#, r#"{"a": "A", "x1": [], "x2": {}}"#] {
+            let mut recorder = Recorder::default();
+            let rows = write(&split_table(), empty, &mut recorder);
+            assert_eq!(rows["t"].len(), 1, "{empty}");
+            assert!(rows["t_g"].is_empty(), "{empty}");
+            assert!(!recorder.totals.contains_key("t_g"), "{empty}");
+        }
+    }
+
+    #[test]
+    fn one_value_is_enough_and_the_others_are_null() {
+        let mut recorder = Recorder::default();
+        let rows = write(&split_table(), r#"{"x2": "v"}"#, &mut recorder);
+        assert_eq!(rows["t_g"][0][2..], ["\\N".to_string(), "v".to_string()]);
+    }
+
+    #[test]
+    fn a_flattened_column_is_read_from_its_nested_field_in_the_group() {
+        let mut path_map = split_table();
+        let group = path_map.get_mut("t_g").unwrap();
+        group.columns[2] = column("n_q", "q", PgType::Text);
+        group.flatten_sources.insert("n_q".to_string(), "n".to_string());
+        let mut recorder = Recorder::default();
+        let rows = write(&path_map, r#"{"n": {"q": "deep"}}"#, &mut recorder);
+        assert_eq!(rows["t_g"][0][2], "deep");
+    }
+
+    #[test]
+    fn a_group_column_is_read_by_the_json_key_it_came_from() {
+        let mut path_map = split_table();
+        path_map.get_mut("t_g").unwrap().columns[2] = column("x_1", "X 1", PgType::Text);
+        let mut recorder = Recorder::default();
+        let rows = write(&path_map, r#"{"X 1": "v"}"#, &mut recorder);
+        assert_eq!(rows["t_g"][0][2], "v", "the column is x_1 in the table and X 1 in the file");
+    }
+
+    #[test]
+    fn an_anomaly_in_a_group_column_is_recorded_for_the_group_table() {
+        let mut path_map = split_table();
+        path_map.get_mut("t_g").unwrap().columns[2] = column("x1", "x1", PgType::Integer);
+        let mut recorder = Recorder::default();
+        let rows = write(&path_map, r#"{"x1": "text", "x2": "v"}"#, &mut recorder);
+        assert_eq!(recorder.anomalies, [("t_g".to_string(), "x1".to_string(), ID.to_string())]);
+        assert_eq!(rows["t_g"][0][2], "\\N", "the value that cannot be coerced is null");
+    }
+
+    #[test]
+    fn a_group_table_the_path_map_does_not_have_is_skipped() {
+        let mut path_map = split_table();
+        path_map.get_mut("t").unwrap().column_groups.insert(0, "t_gone".to_string());
+        let mut recorder = Recorder::default();
+        let rows = write(&path_map, r#"{"a": "A", "x1": "u"}"#, &mut recorder);
+        assert_eq!(rows["t"].len(), 1);
+        assert_eq!(rows["t_g"].len(), 1, "the groups that come after the missing one are still written");
+    }
 
     fn make_jsonb_root_schema() -> TableSchema {
         let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);

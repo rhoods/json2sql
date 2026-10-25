@@ -1,10 +1,11 @@
 //! CLI entry point for json2sql.
 //!
 //! Parses arguments via [`cli`], converts to [`pipeline::PipelineConfig`], and dispatches
-//! to [`pipeline::run_pipeline`]. The `inspect` subcommand is handled inline here.
+//! to [`pipeline::run_pipeline`]. The `inspect` subcommand and `--suggest-groups` are handled inline here.
 //!
 //! Fonctions :
-//! - fn `main` — parse la CLI, dispatch vers `inspect` ou vers le pipeline d'import complet.
+//! - fn `main` — parse la CLI, dispatch vers `inspect`, la proposition de groupes ou le pipeline d'import complet.
+//! - fn `run_suggest_groups` — écrit le TOML `column_groups` des tables larges et affiche le rapport.
 //! - fn `run_inspect` — exécute Pass 1 seule (sans stratégies ni overrides) et affiche un résumé.
 //! - fn `write_inspect_outputs` — écrit le schéma inféré (stdout ou fichier) et le résumé d'anomalies.
 //! - fn `write_sample_file` — écrit les objets JSON échantillonnés en NDJSON.
@@ -46,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
             let disabled_strategies = parse_disabled_strategies(&cli.disable_strategy)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let root_table = cli.root_table_name();
+            let (suggest_groups, embedding_model) = (cli.suggest_groups, cli.embedding_model);
             let cfg = pipeline::PipelineConfig {
                 input: cli.input,
                 root_table,
@@ -76,9 +78,25 @@ async fn main() -> anyhow::Result<()> {
                 skip_constraints: cli.no_constraints,
                 tune_wal: cli.tune_wal,
             };
-            pipeline::run_pipeline(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))
+            let result = match suggest_groups {
+                Some(ref out) => run_suggest_groups(cfg, out, embedding_model.as_deref()),
+                None => pipeline::run_pipeline(cfg).await,
+            };
+            result.map_err(|e| anyhow::anyhow!("{e}"))
         }
     }
+}
+
+fn run_suggest_groups(
+    cfg: pipeline::PipelineConfig,
+    out: &std::path::Path,
+    model: Option<&std::path::Path>,
+) -> Result<()> {
+    let suggestion = pipeline::suggest_groups(cfg, model)?;
+    std::fs::write(out, &suggestion.toml).map_err(error::J2sError::Io)?;
+    eprintln!("Column groups of {} table(s) written → {}", suggestion.tables.len(), out.display());
+    println!("{}", suggestion.report);
+    Ok(())
 }
 
 fn run_inspect(

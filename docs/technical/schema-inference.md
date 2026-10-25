@@ -79,6 +79,8 @@ Si `ratio_stable > 0.5` **et** que la table contient au moins 10 lignes, le sch�
 
 Cela permet aux schémas réellement denses (ex. table de métriques avec 200 indicateurs tous remplis) de ne pas être faussement identifiés comme "trop larges".
 
+Une table dense gardée en `Columns` (ou en `AutoSplit`) peut ensuite être découpée en tables 1:1 thématiques : `--suggest-groups` propose les groupes pour les tables d'au moins 20 colonnes de données, et la clé `column_groups` de la config les applique (§12).
+
 ---
 
 ## 5. AutoSplit pour la table racine
@@ -240,6 +242,21 @@ ma_colonne = "INTEGER"      # forcer un type de colonne
 Les types forçables sont scalaires : une surcharge sur une colonne tableau est ignorée avec un avertissement.
 
 Les surcharges sont appliquées après `finalize()` et suivies d'une nouvelle passe d'exclusion.
+
+### Groupes de colonnes (`column_groups`, #78)
+
+**Fichier :** `src/schema/column_groups.rs` (application), `src/pass2/insert.rs` (écriture)
+
+```toml
+[nom_table.column_groups]
+nutrition = ["energie", "graisses", "sucres"]
+```
+
+Une table à stratégie `Columns` ou `AutoSplit` range chaque groupe dans une table fille 1:1 `{table}_{groupe}` (53 octets au plus, hash au-delà). Le groupe est appliqué après les types, la stratégie et `flatten`, dans l'ordre alphabétique des noms. La table fille est un enfant `Object` : `j2s_id` (clé primaire), clé étrangère vers le parent, puis les colonnes déplacées dans l'ordre du parent, avec leurs `flatten_sources`. Le parent garde les autres colonnes, ses autres tables enfants et la liste de ses tables de groupe (`TableSchema.column_groups`).
+
+Un groupe est ignoré avec un avertissement (`ConfigWarning::ColumnGroup*`) pour une colonne inconnue, générée ou déjà dans un autre groupe, un groupe de moins de 3 colonnes, un nom de table déjà pris ou un parent qui n'aurait plus de colonne de données. Réappliquer la même config ne change rien ; une table de groupe existante avec d'autres colonnes est une erreur. Un snapshot qui contient des groupes est écrit en version 3 (`load` accepte 2 et 3).
+
+**Pass 2.** `insert_object` écrit la ligne du parent, puis, pour chaque table de groupe, une ligne dont `j2s_id` et la clé étrangère valent l'id de la ligne du parent. La ligne n'est écrite que si une colonne du groupe a une valeur (`is_present` : ni `null`, ni `""`, ni `[]`, ni `{}`) ; chaque ligne écrite compte dans le taux d'anomalies. Les enfants ordinaires restent rattachés à la ligne d'origine. Cela vaut pour la racine, un enfant objet et les éléments d'un tableau d'objets.
 
 ---
 

@@ -189,7 +189,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                             if picking_save() { return; }
                             let s = state.read();
                             let snapshot = json2sql::schema::persistence::SchemaSnapshot {
-                                version: json2sql::schema::persistence::SCHEMA_FORMAT_VERSION,
+                                version: json2sql::schema::persistence::format_version(&s.schema.schemas),
                                 schemas: s.schema.schemas.clone(),
                                 total_rows: s.schema.pass1_progress.rows_scanned,
                                 truncated_names: s.schema.truncated_names.clone(),
