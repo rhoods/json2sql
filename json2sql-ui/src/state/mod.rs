@@ -669,6 +669,7 @@ mod tests {
             strategy_overrides: HashMap::new(),
             overflow_warnings: vec![],
             detected_format: None,
+            group_columns: Vec::new(),
         });
 
         s.clear_snapshot();
@@ -695,6 +696,7 @@ mod tests {
             stats: vec![],
             overflow_warnings: vec![],
             detected_format: None,
+            group_columns: Vec::new(),
             strategy_overrides: {
                 let mut m = HashMap::new();
                 m.insert("t".to_string(), UserOverride::Jsonb);
@@ -729,6 +731,7 @@ mod tests {
             stats: vec![],
             overflow_warnings: vec![],
             detected_format: None,
+            group_columns: Vec::new(),
             strategy_overrides: HashMap::new(),
         };
         let mut s = AppState::default();

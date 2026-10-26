@@ -198,6 +198,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                 strategy_overrides: s.schema.strategy_overrides.clone(),
                                 overflow_warnings: s.schema.overflow_warnings.clone(),
                                 detected_format: s.schema.detected_format.clone(),
+                                group_columns: Vec::new(),
                             };
                             drop(s);
                             spawn(async move {

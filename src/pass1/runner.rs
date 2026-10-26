@@ -90,6 +90,8 @@ pub struct Pass1Result {
     /// JSON format detected during pass1. `None` when restored from an old snapshot that
     /// predates this field — pass2 will re-detect in that case.
     pub detected_format: Option<JsonFormat>,
+    /// Tables ticked for column groups in the UI (#91), read from a snapshot. Always empty on a fresh Pass 1 run.
+    pub group_columns: Vec<String>,
 }
 
 /// Run Pass 1: stream through the entire file and build the schema.
@@ -197,6 +199,7 @@ fn build_pass1_result(
         schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings,
         skip_cascade_warnings: Vec::new(),
         detected_format: Some(format),
+        group_columns: Vec::new(),
     }
 }
 

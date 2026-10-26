@@ -66,6 +66,10 @@ pub struct SchemaSnapshot {
     /// `None`, in which case pass2 re-detects the format by scanning the source file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detected_format: Option<JsonFormat>,
+    /// Tables the user ticked for column groups in the UI (#91): the groups are computed again at each load, they are
+    /// never saved. Absent in older snapshots, which an older program reads as having no switch (no data is lost).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_columns: Vec<String>,
 }
 
 /// Serialize and write a snapshot to disk (atomic for `save_with_overrides`, direct for `save`).
@@ -106,6 +110,7 @@ pub fn save(
         strategy_overrides: std::collections::HashMap::new(),
         overflow_warnings: overflow_warnings.to_vec(),
         detected_format: Some(detected_format),
+        group_columns: Vec::new(),
     };
     write_snapshot(&snapshot, path, false)
 }
@@ -135,6 +140,7 @@ pub fn save_with_overrides(
         strategy_overrides: strategy_overrides.clone(),
         overflow_warnings: overflow_warnings.to_vec(),
         detected_format: Some(detected_format),
+        group_columns: Vec::new(),
     };
     write_snapshot(&snapshot, path, true)
 }
@@ -204,6 +210,7 @@ mod tests {
             strategy_overrides: HashMap::new(),
             overflow_warnings: vec![],
             detected_format: None,
+            group_columns: vec![],
         }
     }
 
@@ -320,6 +327,21 @@ mod tests {
             std::fs::write(tmp.path(), json).unwrap();
             assert_eq!(load(tmp.path()).is_ok(), loads, "version {version}");
         }
+    }
+
+    #[test]
+    fn the_tables_ticked_for_column_groups_round_trip_and_are_absent_when_empty() {
+        // #91 D3: the per-table switches of the UI; the automatic groups themselves are never saved
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ticked = SchemaSnapshot { group_columns: vec!["products".to_string()], ..empty_snapshot() };
+        write_snapshot(&ticked, tmp.path(), false).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!((loaded.version, loaded.group_columns), (SCHEMA_FORMAT_VERSION, vec!["products".to_string()]));
+        write_snapshot(&empty_snapshot(), tmp.path(), false).unwrap();
+        assert!(!std::fs::read_to_string(tmp.path()).unwrap().contains("group_columns"));
+        let old = r#"{"version":2,"total_rows":0,"schemas":[],"truncated_names":[],"column_collisions":[],"stats":[]}"#;
+        std::fs::write(tmp.path(), old).unwrap();
+        assert!(load(tmp.path()).unwrap().group_columns.is_empty(), "older snapshots have no switch");
     }
 
     #[test]
