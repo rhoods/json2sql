@@ -16,6 +16,7 @@
 //! - fn `ValueProfile::nature` — nature d'une colonne.
 //! - fn `ValueProfile::vocabulary` — valeurs distinctes d'une colonne texte, si elles tiennent dans la borne.
 //! - fn `ValueProfile::numbers` — résumé des nombres d'une colonne.
+//! - fn `ValueProfile::drop_unranked` — vide le sous-échantillon des rangs des colonnes non numériques, avant de stocker l'échantillon.
 //! - fn `ValueProfile::ranked` — nombres d'une colonne sur les lignes du sous-échantillon (NaN si absent).
 //! - struct `ColumnValues` — valeurs échantillonnées d'une colonne.
 //! - fn `ColumnValues::new` — colonne sans valeur.
@@ -55,7 +56,7 @@ pub enum Nature {
 }
 
 /// Range and shape of the numbers of a column.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NumberSummary {
     pub min: f64,
     pub max: f64,
@@ -66,7 +67,7 @@ pub struct NumberSummary {
 }
 
 /// The sampled values of every column of a table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ValueProfile {
     columns: Vec<ColumnValues>,
     rank_step: usize,
@@ -74,9 +75,10 @@ pub struct ValueProfile {
 }
 
 /// The sampled values of one column.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ColumnValues {
     /// Hashes of the distinct short strings.
+    #[serde(with = "super::packed::word_set")]
     strings: BTreeSet<u64>,
     /// More distinct strings than the bound: the set was dropped.
     overflow: bool,
@@ -85,6 +87,7 @@ struct ColumnValues {
     other_cells: usize,
     summary: Option<NumberSummary>,
     /// Numbers on the rank sample rows, NaN where the cell is not a number.
+    #[serde(with = "super::packed::floats")]
     ranked: Vec<f64>,
 }
 
@@ -202,6 +205,16 @@ impl ValueProfile {
     /// The column's numbers on the rank sample rows, NaN where the cell is not a number.
     pub fn ranked(&self, column: usize) -> &[f64] {
         &self.columns[column].ranked
+    }
+
+    /// Empties the rank sample of the columns that are not numeric: only numeric columns are ranked, and a stored
+    /// sample would otherwise be mostly the NaN of its text columns (#91, phase 2).
+    pub fn drop_unranked(&mut self) {
+        for column in 0..self.columns.len() {
+            if self.nature(column) != Nature::Numeric {
+                self.columns[column].ranked = Vec::new();
+            }
+        }
     }
 }
 
@@ -350,6 +363,19 @@ mod tests {
         assert_eq!(ranked.len(), 4, "rows 0, 3, 6, 9");
         assert_eq!((ranked[0], ranked[2], ranked[3]), (0.0, 6.0, 9.0));
         assert!(ranked[1].is_nan(), "row 3 is a string");
+    }
+
+    #[test]
+    fn dropping_the_rank_sample_of_non_numeric_columns_keeps_the_rank_correlations() {
+        // #91 phase 2: the rank sample of a text column is NaN only, and the bulk of a stored sample
+        let rows: Vec<Vec<Value>> =
+            (0..60_i64).map(|i| vec![json!(i), json!(3 * i + 1), json!(format!("w{}", i % 7))]).collect();
+        let mut p = profile(3, 1, &rows);
+        let before = crate::schema::grouping::numeric::rank_correlations(&p);
+        p.drop_unranked();
+        assert!(p.ranked(2).is_empty() && p.ranked(0).len() == 60);
+        let after = crate::schema::grouping::numeric::rank_correlations(&p);
+        assert_eq!(format!("{before:?}"), format!("{after:?}"));
     }
 
     #[test]

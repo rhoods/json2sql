@@ -34,12 +34,14 @@ const INFORMATIVE_MAX_PERCENT: usize = 98;
 const STRATA: usize = 5;
 
 /// Presence of each column in the sampled rows, one bit per row.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Presence {
     columns: usize,
     /// `bits[column]`: bit `row % 64` of word `row / 64` is set when the column is present in `row`.
+    #[serde(with = "super::packed::word_lists")]
     bits: Vec<Vec<u64>>,
     /// Number of present columns of each row.
+    #[serde(with = "super::packed::half_words")]
     richness: Vec<u32>,
 }
 

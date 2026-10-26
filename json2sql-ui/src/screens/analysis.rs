@@ -109,6 +109,7 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 s.schema.column_collisions = result.column_collisions;
                 s.schema.pass1_stats = result.stats;
                 s.schema.detected_format = result.detected_format;
+                s.schema.pass1_samples = result.samples;
                 s.schema.schema_snapshot_loaded = false;
                 if s.project.group_columns {
                     s.schema.group_columns = crate::screens::splittable_tables(&s.schema.schemas, &s.schema.strategy_overrides);

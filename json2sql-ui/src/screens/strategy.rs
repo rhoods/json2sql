@@ -227,6 +227,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                 overflow_warnings: s.schema.overflow_warnings.clone(),
                                 detected_format: s.schema.detected_format.clone(),
                                 group_columns: s.schema.group_columns.iter().cloned().collect(),
+                                samples: s.schema.pass1_samples.clone(),
                             };
                             drop(s);
                             spawn(async move {

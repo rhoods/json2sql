@@ -67,7 +67,7 @@ pub struct SampleTarget<'a> {
 }
 
 /// What one pass over the sample yields for a table: which columns are present, and what they hold.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TableSample {
     pub presence: Presence,
     pub values: ValueProfile,
@@ -101,8 +101,7 @@ pub fn sample_tables(
 
 /// The sample of a table taken during Pass 1 (#91, phase 2): its columns by `PostgreSQL` name, in the order of the
 /// sample (sorted by name), and their presence and values.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // read by the snapshot (T7) and the strategy (T8) of #91
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredSample {
     pub table: String,
     pub columns: Vec<String>,

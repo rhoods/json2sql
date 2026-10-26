@@ -70,6 +70,11 @@ pub struct SchemaSnapshot {
     /// never saved. Absent in older snapshots, which an older program reads as having no switch (no data is lost).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_columns: Vec<String>,
+    /// Presence and values of the eligible wide tables in a bounded sample of the rows, taken during Pass 1 (#91,
+    /// phase 2): the data signals of the column groups without reading the file again. An optional field: an older
+    /// program ignores it and loses nothing, so the format version does not change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<crate::schema::grouping::sample::StoredSample>,
 }
 
 /// Serialize and write a snapshot to disk (atomic for `save_with_overrides`, direct for `save`).
@@ -111,6 +116,7 @@ pub fn save(
         overflow_warnings: overflow_warnings.to_vec(),
         detected_format: Some(detected_format),
         group_columns: Vec::new(),
+        samples: Vec::new(),
     };
     write_snapshot(&snapshot, path, false)
 }
@@ -141,6 +147,7 @@ pub fn save_with_overrides(
         overflow_warnings: overflow_warnings.to_vec(),
         detected_format: Some(detected_format),
         group_columns: Vec::new(),
+        samples: Vec::new(),
     };
     write_snapshot(&snapshot, path, true)
 }
@@ -211,6 +218,7 @@ mod tests {
             overflow_warnings: vec![],
             detected_format: None,
             group_columns: vec![],
+            samples: vec![],
         }
     }
 
@@ -342,6 +350,45 @@ mod tests {
         let old = r#"{"version":2,"total_rows":0,"schemas":[],"truncated_names":[],"column_collisions":[],"stats":[]}"#;
         std::fs::write(tmp.path(), old).unwrap();
         assert!(load(tmp.path()).unwrap().group_columns.is_empty(), "older snapshots have no switch");
+    }
+
+    /// The sample of a table of three columns: a vocabulary, numbers with gaps (NaN in the rank sample), presence.
+    fn stored_sample() -> crate::schema::grouping::sample::StoredSample {
+        use crate::schema::grouping::presence::Presence;
+        use crate::schema::grouping::sample::{StoredSample, TableSample};
+        use crate::schema::grouping::values::ValueProfile;
+        let mut presence = Presence::new(3);
+        let mut values = ValueProfile::new(3, 1);
+        for i in 0..40_i64 {
+            let cells = [serde_json::json!(format!("w{}", i % 6)), if i % 3 == 0 { serde_json::Value::Null } else { serde_json::json!(i) }, serde_json::json!(i * 2)];
+            presence.push_row(cells.iter().map(crate::schema::grouping::sample::is_present));
+            values.observe_row(cells.iter().map(Some));
+        }
+        StoredSample { table: "items".to_string(), columns: vec!["a".into(), "b".into(), "c".into()], sample: TableSample { presence, values } }
+    }
+
+    #[test]
+    fn the_samples_of_pass_1_round_trip_and_older_snapshots_have_none() {
+        // #91 phase 2: the data signals come back from the snapshot, without reading the file again
+        use crate::schema::grouping::proposal::DataSignals;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let sample = stored_sample();
+        write_snapshot(&SchemaSnapshot { samples: vec![sample.clone()], ..empty_snapshot() }, tmp.path(), false).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(loaded.version, SCHEMA_FORMAT_VERSION, "an optional field, no new version");
+        let got = &loaded.samples[0];
+        assert_eq!((got.table.as_str(), got.columns.clone()), ("items", sample.columns.clone()));
+        let (a, b) = (&sample.sample, &got.sample);
+        assert_eq!(a.presence.rows(), b.presence.rows());
+        for c in 0..3 {
+            assert_eq!(a.presence.present_count(c), b.presence.present_count(c));
+            assert_eq!(a.values.vocabulary(c), b.values.vocabulary(c));
+            assert_eq!(format!("{:?}", a.values.ranked(c)), format!("{:?}", b.values.ranked(c)), "NaN gaps survive");
+        }
+        assert_eq!(format!("{:?}", DataSignals::new(a).rows()), format!("{:?}", DataSignals::new(b).rows()));
+        write_snapshot(&empty_snapshot(), tmp.path(), false).unwrap();
+        assert!(!std::fs::read_to_string(tmp.path()).unwrap().contains("samples"));
+        assert!(load(tmp.path()).unwrap().samples.is_empty());
     }
 
     #[test]

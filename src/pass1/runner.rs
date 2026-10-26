@@ -97,7 +97,6 @@ pub struct Pass1Result {
     pub group_columns: Vec<String>,
     /// Presence and values of the eligible wide tables in a bounded sample of the rows (#91, phase 2): the data
     /// signals of the column groups, without reading the file again.
-    #[allow(dead_code)] // read by the snapshot (T7) and the strategy (T8) of #91
     pub samples: Vec<StoredSample>,
 }
 

@@ -5,6 +5,7 @@
 //! - [`names`] — normalisation des noms de colonnes en radicaux (T1a)
 //! - [`embedding`] — embeddings statiques `Model2Vec` des noms de colonnes : lecteur safetensors et `WordPiece` (T2)
 //! - [`lexical`] — regroupement lexical des radicaux : trigrammes TF-IDF, liaison moyenne (T1b)
+//! - [`packed`] — forme compacte (hexadécimale) des tables de nombres d'un échantillon dans le snapshot (#91, phase 2)
 //! - [`numeric`] — signaux numériques : corrélation de rang et formes précises (année, epoch, degrés) (T1d)
 //! - [`placement`] — pour chaque colonne laissée dans la table, les deux groupes les plus proches de son nom en embedding (T2)
 //! - [`presence`] — co-présence des colonnes dans un échantillon de lignes : φ ajusté par richesse de fiche (T1c)
@@ -20,6 +21,7 @@ pub mod embedding;
 pub mod lexical;
 pub mod names;
 pub mod numeric;
+pub mod packed;
 pub mod placement;
 pub mod presence;
 pub mod proposal;

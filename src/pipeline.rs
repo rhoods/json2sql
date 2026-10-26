@@ -315,7 +315,7 @@ fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
         skip_cascade_warnings,
         detected_format: snap.detected_format,
         group_columns: snap.group_columns,
-        samples: Vec::new(),
+        samples: snap.samples,
     })
 }
 
@@ -514,6 +514,7 @@ fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()>
         overflow_warnings: pass1.overflow_warnings.clone(),
         detected_format: pass1.detected_format.clone(),
         group_columns: pass1.group_columns.clone(),
+        samples: pass1.samples.clone(),
     };
     crate::schema::persistence::write_snapshot(&snapshot, out_path, false)?;
     eprintln!("Schema snapshot saved to '{}'.", out_path.display());
@@ -910,6 +911,20 @@ mod tests {
             sorted(table_names(from_snapshot(&snapshot, true))),
             ["root", "root_kiwi", "root_props", "root_props_mine", "root_zulu"]
         );
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_samples_of_pass_1_and_gives_them_back() {
+        // #91 phase 2: every snapshot carries the data signals of its wide tables
+        let file = wide_jsonl(60);
+        let snapshot = snapshot_of(cfg_for(&file));
+        let saved = crate::schema::persistence::load(snapshot.path()).unwrap();
+        assert_eq!(saved.samples.len(), 1);
+        assert_eq!((saved.samples[0].table.as_str(), saved.samples[0].sample.presence.rows()), ("root", 60));
+        let mut cfg = from_snapshot(&snapshot, false);
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
+        assert_eq!(pass1.samples.len(), 1);
+        assert_eq!(pass1.samples[0].columns, saved.samples[0].columns);
     }
 
     #[test]

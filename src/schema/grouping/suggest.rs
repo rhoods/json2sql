@@ -210,10 +210,12 @@ pub fn samples_of_rows(
     plans
         .into_iter()
         .filter_map(|plan| {
+            let mut sample = plan.sample?;
+            sample.values.drop_unranked();
             Some(StoredSample {
                 table: plan.table.name.clone(),
                 columns: data_columns_by_name(plan.table).iter().map(|c| c.name.clone()).collect(),
-                sample: plan.sample?,
+                sample,
             })
         })
         .collect()
