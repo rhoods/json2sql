@@ -10,6 +10,7 @@ Point d'entrée unique. Chaque entrée indique **quand consulter** le document.
 |---|---|
 | [functional/overview.md](functional/overview.md) | Comprendre ce que fait l'outil, ses choix de conception (deux passes, normalisation, types inférés, anomalies) |
 | [functional/usage.md](functional/usage.md) | Utiliser l'outil : CLI flags, exemples, variable d'environnement, config TOML, cas concrets |
+| [functional/strategies.md](functional/strategies.md) | Voir, stratégie par stratégie, le schéma SQL produit avec et sans elle (exemples reproductibles dans `examples/strategies/`) |
 
 ---
 

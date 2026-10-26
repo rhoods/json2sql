@@ -1,0 +1,3 @@
+[products_images]
+strategy = "normalize_dynamic_keys"
+id_column = "image_id"

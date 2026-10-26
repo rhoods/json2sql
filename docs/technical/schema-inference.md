@@ -79,7 +79,7 @@ Si `ratio_stable > 0.5` **et** que la table contient au moins 10 lignes, le sch�
 
 Cela permet aux schémas réellement denses (ex. table de métriques avec 200 indicateurs tous remplis) de ne pas être faussement identifiés comme "trop larges".
 
-Une table dense gardée en `Columns` (ou en `AutoSplit`) peut ensuite être découpée en tables 1:1 thématiques : `--suggest-groups` propose les groupes pour les tables d'au moins 20 colonnes de données, et la clé `column_groups` de la config les applique (§12).
+Une table dense gardée en `Columns` (ou en `AutoSplit`) peut ensuite être découpée en tables 1:1 thématiques : `--suggest-groups` propose les groupes pour les tables d'au moins 20 colonnes de données, et la clé `column_groups` de la config les applique (§12) ; la stratégie `--group-columns` applique directement ceux que les noms confirment (#91).
 
 ---
 
@@ -255,6 +255,8 @@ nutrition = ["energie", "graisses", "sucres"]
 Une table à stratégie `Columns` ou `AutoSplit` range chaque groupe dans une table fille 1:1 `{table}_{groupe}` (53 octets au plus, hash au-delà). Le groupe est appliqué après les types, la stratégie et `flatten`, dans l'ordre alphabétique des noms. La table fille est un enfant `Object` : `j2s_id` (clé primaire), clé étrangère vers le parent, puis les colonnes déplacées dans l'ordre du parent, avec leurs `flatten_sources`. Le parent garde les autres colonnes, ses autres tables enfants et la liste de ses tables de groupe (`TableSchema.column_groups`).
 
 Un groupe est ignoré avec un avertissement (`ConfigWarning::ColumnGroup*`) pour une colonne inconnue, générée ou déjà dans un autre groupe, un groupe de moins de 3 colonnes, un nom de table déjà pris ou un parent qui n'aurait plus de colonne de données. Réappliquer la même config ne change rien ; une table de groupe existante avec d'autres colonnes est une erreur. Un snapshot qui contient des groupes est écrit en version 3 (`load` accepte 2 et 3).
+
+**Stratégie `--group-columns` (#91).** Après le TOML, les overrides de l'IHM et la sauvegarde du snapshot, `grouping::auto::apply_name_groups` propose par les noms seuls chaque table éligible (comme `--suggest-groups`, sans échantillon) et applique ses groupes confirmés par le même chemin qu'une config. Elle saute les tables déjà découpées (relancer la proposition sur le reste d'une table donnerait d'autres groupes : les seuils des noms dépendent des colonnes de la table), les tables de groupe (la Pass 2 ne remplit que les groupes d'une table écrite depuis son objet) et les tables dont le TOML a une clé `column_groups`. Les colonnes sont triées par nom avant la proposition, si bien que le résultat ne dépend pas de l'ordre des colonnes (#90). Le snapshot n'en contient jamais le résultat, seulement les tables cochées dans l'IHM (`SchemaSnapshot.group_columns`).
 
 **Pass 2.** `insert_object` écrit la ligne du parent, puis, pour chaque table de groupe, une ligne dont `j2s_id` et la clé étrangère valent l'id de la ligne du parent. La ligne n'est écrite que si une colonne du groupe a une valeur (`is_present` : ni `null`, ni `""`, ni `[]`, ni `{}`) ; chaque ligne écrite compte dans le taux d'anomalies. Les enfants ordinaires restent rattachés à la ligne d'origine. Cela vaut pour la racine, un enfant objet et les éléments d'un tableau d'objets.
 

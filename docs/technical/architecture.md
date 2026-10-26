@@ -43,12 +43,14 @@ Séquence de `run_pipeline()` :
 3. Affiche les avertissements (noms tronqués, collisions de colonnes, dépassement de profondeur)
 4. Applique les surcharges TOML (`--schema-config`)
 5. Ré-exclut les tables enfants absorbées après les surcharges
-6. Génère le rapport de schéma (optionnel)
-7. En mode `--dry-run` : affiche le DDL SQL et sort
-8. Sinon : se connecte à PostgreSQL, crée les tables, lance la Pass 2
-9. Affiche le résumé d'import et les anomalies
+6. Sauvegarde le snapshot (`--schema-output`), avant la stratégie de groupes : un snapshot ne contient jamais de groupes automatiques
+7. Avec `--group-columns`, ou pour les tables cochées dans un snapshot de l'IHM : découpe les tables larges en groupes de colonnes par leurs noms (`schema::grouping::auto`, #91), sauf les tables dont le TOML a une clé `column_groups`, puis ré-indexe les statistiques
+8. Génère le rapport de schéma (optionnel)
+9. En mode `--dry-run` : affiche le DDL SQL et sort
+10. Sinon : se connecte à PostgreSQL, crée les tables, lance la Pass 2
+11. Affiche le résumé d'import et les anomalies
 
-Avec `--suggest-groups`, `main.rs` appelle `pipeline::suggest_groups()` à la place : les étapes 1 à 6 (partagées via `finalized_schema()`), puis la proposition de découpage de toutes les tables larges, depuis un seul échantillon du fichier (`schema::grouping::suggest`), et, avec `--embedding-model`, les deux groupes les plus proches de chaque colonne laissée dans la table (`placement`) ; aucune base n'est touchée (#78).
+Avec `--suggest-groups` (incompatible avec `--group-columns`), `main.rs` appelle `pipeline::suggest_groups()` à la place : les étapes 1 à 8 (partagées via `finalized_schema()`), puis la proposition de découpage de toutes les tables larges, depuis un seul échantillon du fichier (`schema::grouping::suggest`), et, avec `--embedding-model`, les deux groupes les plus proches de chaque colonne laissée dans la table (`placement`) ; aucune base n'est touchée (#78).
 
 ---
 
