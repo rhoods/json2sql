@@ -16,7 +16,7 @@ use dioxus::prelude::*;
 use dioxus::prelude::Modifiers;
 use json2sql::schema::table_schema::{InferredStrategy, TableSchema, UserOverride};
 
-use crate::screens::{build_table_rows, pick_save_file, strategy_badge, strategy_label, user_override_badge, PickResult, TableRowsCtx};
+use crate::screens::{build_table_rows, display_schemas, group_preview, pick_save_file, strategy_badge, strategy_label, user_override_badge, GroupPreview, PickResult, TableRowsCtx};
 use crate::state::select_children_visible;
 use crate::screens::table_list::TableListPanel;
 use crate::state::{AppScreen, AppState};
@@ -81,8 +81,11 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let mut anchor_idx:      Signal<usize>           = use_signal(|| 0);
 
     // ── Derived snapshot ──────────────────────────────────────────────────
-    let schemas           = state.read().schema.schemas.clone();
+    // The original tables (the indices of the state point into them), then the group tables of the ticked tables,
+    // shown read-only under their parent (#91).
+    let originals         = state.read().schema.schemas.clone();
     let overrides_snap    = state.read().schema.strategy_overrides.clone();
+    let schemas           = display_schemas(&originals, &overrides_snap, &state.read().schema.group_columns);
     let overflow_warnings  = state.read().schema.overflow_warnings.clone();
     let config_warnings    = state.read().schema.config_warnings.clone();
     let selected_indices  = state.read().schema.selected_table_indices.clone();
@@ -92,7 +95,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
         overflow_warnings.iter().map(|w| w.table_name.clone()).collect();
     // Real children that a Skip elsewhere in strategy_overrides will remove by cascade —
     // never chosen by the user directly (#47). Computed on the full, un-reduced list.
-    let cascaded_names = crate::screens::skip_cascade_names(&schemas, &overrides_snap);
+    let cascaded_names = crate::screens::skip_cascade_names(&originals, &overrides_snap);
 
     let tables_count  = schemas.len();
     let columns_count: usize = schemas.iter().map(|s| s.columns.len()).sum();
@@ -114,6 +117,22 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
 
     let is_multi = selected_indices.len() > 1;
     let selection_count = selected_indices.len();
+
+    // Column groups of the selected table (#91): what the switch would split, or why it cannot.
+    let group_columns_snap = state.read().schema.group_columns.clone();
+    let groups_on = group_columns_snap.contains(&selected_table.name);
+    let (preview_groups, preview_note): (Vec<(String, usize, String)>, String) =
+        match group_preview(&originals, &overrides_snap, &group_columns_snap, &selected_table.name) {
+            GroupPreview::Groups(groups) => (
+                groups.into_iter().map(|(table, columns)| (table, columns.len(), columns.join(", "))).collect(),
+                String::new(),
+            ),
+            GroupPreview::Unavailable(why) if groups_on => (Vec::new(), format!("No group will be made: {why}.")),
+            GroupPreview::Unavailable(why) => (Vec::new(), format!("Not available: {why}.")),
+        };
+    let groups_available = !preview_groups.is_empty();
+    let is_group_row = idx >= originals.len();
+    let group_parent = selected_table.parent_table.clone().unwrap_or_default();
 
     // Jaccard info + derived display strings — computed only when multi-select is active.
     let jaccard = if is_multi {
@@ -198,7 +217,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                 strategy_overrides: s.schema.strategy_overrides.clone(),
                                 overflow_warnings: s.schema.overflow_warnings.clone(),
                                 detected_format: s.schema.detected_format.clone(),
-                                group_columns: Vec::new(),
+                                group_columns: s.schema.group_columns.iter().cloned().collect(),
                             };
                             drop(s);
                             spawn(async move {
@@ -573,8 +592,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                             for name in names {
                                                 s.schema.strategy_overrides.remove(&name);
                                             }
-                                        } else {
-                                            let name = s.schema.schemas[idx].name.clone();
+                                        } else if let Some(name) = s.schema.schemas.get(idx).map(|t| t.name.clone()) {
                                             s.schema.strategy_overrides.remove(&name);
                                         }
                                     },
@@ -701,6 +719,64 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                             }
                                         }
                                     }
+
+                                    // ── Bulk column groups (#91) ───────────
+                                    div { class: "section",
+                                        h4 { "Column groups" }
+                                        div { class: "sub-h",
+                                            "Split the selected tables into 1:1 tables by their column names. Tables that cannot be split are left as they are."
+                                        }
+                                        div { class: "strat-list",
+                                            button {
+                                                class: "strat-btn",
+                                                onclick: move |_| {
+                                                    let names: Vec<String> = {
+                                                        let s = state.read();
+                                                        s.schema.selected_table_indices.iter()
+                                                            .filter_map(|&i| s.schema.schemas.get(i).map(|t| t.name.clone()))
+                                                            .filter(|n| matches!(
+                                                                group_preview(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.group_columns, n),
+                                                                GroupPreview::Groups(_)
+                                                            ))
+                                                            .collect()
+                                                    };
+                                                    state.write().schema.group_columns.extend(names);
+                                                },
+                                                span { class: "radio" }
+                                                span { class: "nm",
+                                                    "Split by column names"
+                                                    span { class: "dsc", "the tables that have groups" }
+                                                }
+                                                span { class: "badge default", "groups" }
+                                            }
+                                            button {
+                                                class: "strat-btn",
+                                                onclick: move |_| {
+                                                    let names: Vec<String> = {
+                                                        let s = state.read();
+                                                        s.schema.selected_table_indices.iter()
+                                                            .filter_map(|&i| s.schema.schemas.get(i).map(|t| t.name.clone()))
+                                                            .collect()
+                                                    };
+                                                    let mut s = state.write();
+                                                    for n in names { s.schema.group_columns.remove(&n); }
+                                                },
+                                                span { class: "radio" }
+                                                span { class: "nm",
+                                                    "Keep whole"
+                                                    span { class: "dsc", "no column group" }
+                                                }
+                                                span { class: "badge default", "whole" }
+                                            }
+                                        }
+                                    }
+                                } else if is_group_row {
+                                    // ── Group table (#91): read-only ──────
+                                    p { style: "font-size:var(--fs-sm);color:var(--fg-3);line-height:1.6;",
+                                        "Column group of "
+                                        span { style: "font-family:'JetBrains Mono',monospace;color:var(--fg-2);", "{group_parent}" }
+                                        ": a 1:1 table with the same j2s_id. Switch it from that table (Column groups)."
+                                    }
                                 } else {
                                     // ── Single-table strategy ─────────────
                                     div { class: "strat-list",
@@ -708,7 +784,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                         button {
                                             class: if current_override.is_none() { "strat-btn on" } else { "strat-btn" },
                                             onclick: move |_| {
-                                                let name = state.read().schema.schemas[idx].name.clone();
+                                                let Some(name) = state.read().schema.schemas.get(idx).map(|t| t.name.clone()) else { return };
                                                 state.write().schema.strategy_overrides.remove(&name);
                                             },
                                             span { class: "radio" }
@@ -722,7 +798,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                         button {
                                             class: if matches!(current_override, Some(UserOverride::Jsonb)) { "strat-btn on" } else { "strat-btn" },
                                             onclick: move |_| {
-                                                let name = state.read().schema.schemas[idx].name.clone();
+                                                let Some(name) = state.read().schema.schemas.get(idx).map(|t| t.name.clone()) else { return };
                                                 state.write().schema.strategy_overrides.insert(name, UserOverride::Jsonb);
                                             },
                                             span { class: "radio" }
@@ -736,7 +812,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                         button {
                                             class: if matches!(current_override, Some(UserOverride::Pivot)) { "strat-btn on" } else { "strat-btn" },
                                             onclick: move |_| {
-                                                let name = state.read().schema.schemas[idx].name.clone();
+                                                let Some(name) = state.read().schema.schemas.get(idx).map(|t| t.name.clone()) else { return };
                                                 state.write().schema.strategy_overrides.insert(name, UserOverride::Pivot);
                                             },
                                             span { class: "radio" }
@@ -750,7 +826,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                         button {
                                             class: if matches!(current_override, Some(UserOverride::Skip)) { "strat-btn on" } else { "strat-btn" },
                                             onclick: move |_| {
-                                                let name = state.read().schema.schemas[idx].name.clone();
+                                                let Some(name) = state.read().schema.schemas.get(idx).map(|t| t.name.clone()) else { return };
                                                 state.write().schema.strategy_overrides.insert(name, UserOverride::Skip);
                                             },
                                             span { class: "radio" }
@@ -759,6 +835,42 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                 span { class: "dsc", "exclude from import entirely" }
                                             }
                                             span { class: "badge skip", "skip" }
+                                        }
+                                    }
+
+                                    // Column groups (#91)
+                                    div { style: "margin-top:16px;padding-top:12px;border-top:1px solid var(--bd);",
+                                        label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: groups_on,
+                                                disabled: !groups_on && !groups_available,
+                                                onchange: move |e| {
+                                                    let Some(name) = state.read().schema.schemas.get(idx).map(|t| t.name.clone()) else { return };
+                                                    if e.value() == "true" {
+                                                        state.write().schema.group_columns.insert(name);
+                                                    } else {
+                                                        state.write().schema.group_columns.remove(&name);
+                                                    }
+                                                },
+                                            }
+                                            span { "Column groups" }
+                                            span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(--group-columns)" }
+                                        }
+                                        p { style: "font-size:var(--fs-xs);color:var(--fg-3);margin:4px 0 8px;line-height:1.5;",
+                                            "Moves the column families its names show into 1:1 tables (same j2s_id)."
+                                        }
+                                        if !preview_note.is_empty() {
+                                            p { style: "font-size:var(--fs-xs);color:var(--fg-4);font-style:italic;line-height:1.5;", "{preview_note}" }
+                                        }
+                                        for (group_table, count, columns) in preview_groups.iter() {
+                                            div { style: "margin-bottom:6px;",
+                                                div { style: "display:flex;gap:8px;font-size:var(--fs-xs);",
+                                                    span { style: "font-family:'JetBrains Mono',monospace;color:var(--fg-2);", "{group_table}" }
+                                                    span { style: "color:var(--fg-4);margin-left:auto;", "{count} columns" }
+                                                }
+                                                div { style: "font-size:var(--fs-xs);color:var(--fg-4);line-height:1.4;", "{columns}" }
+                                            }
                                         }
                                     }
 

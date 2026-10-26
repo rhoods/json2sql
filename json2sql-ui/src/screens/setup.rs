@@ -334,6 +334,13 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                                     match res {
                                                         Ok(Ok(snap)) => {
                                                             state.write().load_snapshot(snap);
+                                                            if state.read().project.group_columns {
+                                                                let ticked = {
+                                                                    let s = state.read();
+                                                                    crate::screens::splittable_tables(&s.schema.schemas, &s.schema.strategy_overrides)
+                                                                };
+                                                                state.write().schema.group_columns.extend(ticked);
+                                                            }
                                                             active_step.set(2);
                                                         }
                                                         Ok(Err(e)) => load_error.set(Some(format!("Failed: {e}"))),
@@ -679,9 +686,28 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                             }
                                         }
                                     }
+                                    // Column groups (#91): off by default, unlike the strategies above
+                                    {
+                                        let groups_on = state.read().project.group_columns;
+                                        rsx! {
+                                            label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: groups_on,
+                                                    onchange: move |e| {
+                                                        state.write().project.group_columns = e.value() == "true";
+                                                        crate::config::try_save(&state.read().project);
+                                                    },
+                                                }
+                                                span { "Column groups " }
+                                                span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(group_columns, off by default)" }
+                                            }
+                                        }
+                                    }
                                 }
                                 p { style: "font-size:var(--fs-xs);color:var(--fg-4);margin:8px 0 0;",
-                                    "Wide-table split is mandatory and always runs."
+                                    "Wide-table split is mandatory and always runs. Column groups splits the wide tables into 1:1 tables by "
+                                    "their column names; each table can still be switched in the Strategy screen."
                                 }
 
                                 div { class: "divider" }

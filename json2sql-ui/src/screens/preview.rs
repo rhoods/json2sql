@@ -30,12 +30,12 @@ use crate::state::{AppScreen, AppState};
 pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
     use json2sql::schema::table_schema::{InferredStrategy, UserOverride};
 
-    let (schemas_orig, strategy_overrides) = {
+    let (schemas_orig, strategy_overrides, group_columns) = {
         let s = state.read();
-        (s.schema.schemas.clone(), s.schema.strategy_overrides.clone())
+        (s.schema.schemas.clone(), s.schema.strategy_overrides.clone(), s.schema.group_columns.clone())
     };
 
-    let schemas = build_effective_schemas(&schemas_orig, &strategy_overrides);
+    let schemas = build_effective_schemas(&schemas_orig, &strategy_overrides, &group_columns);
 
     if schemas.is_empty() {
         return rsx! {

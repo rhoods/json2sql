@@ -52,6 +52,9 @@ pub struct ProjectConfig {
     /// Pass 2: raise `max_wal_size` during the import (`--tune-wal`).
     #[serde(default)]
     pub tune_wal: bool,
+    /// Column groups by names on every table that can be split (#91, `--group-columns`), off by default.
+    #[serde(default)]
+    pub group_columns: bool,
 }
 
 impl Default for ProjectConfig {
@@ -74,6 +77,7 @@ impl Default for ProjectConfig {
             import_limit: None,
             skip_constraints: false,
             tune_wal: false,
+            group_columns: false,
         }
     }
 }
@@ -96,6 +100,7 @@ impl ProjectConfig {
             import_limit: p.import_limit,
             skip_constraints: p.skip_constraints,
             tune_wal: p.tune_wal,
+            group_columns: p.group_columns,
         }
     }
 
@@ -119,6 +124,7 @@ impl ProjectConfig {
         p.import_limit = self.import_limit;
         p.skip_constraints = self.skip_constraints;
         p.tune_wal = self.tune_wal;
+        p.group_columns = self.group_columns;
     }
 }
 
@@ -312,6 +318,19 @@ mod tests {
         let mut p2 = ProjectState::default();
         parsed.apply_to(&mut p2);
         assert!(p2.tune_wal, "tune_wal=true must survive project -> TOML -> project");
+    }
+
+    #[test]
+    fn group_columns_round_trips_toml_and_is_off_for_an_older_file() {
+        // #91: the column-groups strategy is off by default
+        let p = ProjectState { group_columns: true, ..Default::default() };
+        let parsed: ProjectConfig = toml::from_str(&toml::to_string(&ProjectConfig::from_project(&p)).expect("serialize")).expect("deserialize");
+        let mut p2 = ProjectState::default();
+        parsed.apply_to(&mut p2);
+        assert!(p2.group_columns);
+        let old = "pg_host = \"localhost\"\npg_port = 5432\npg_database = \"\"\npg_username = \"\"\npg_schema = \"public\"\ndrop_existing = false\nworkers = 1\npass2_parallel = 4\n";
+        assert!(!toml::from_str::<ProjectConfig>(old).expect("an older file loads").group_columns);
+        assert!(!ProjectState::default().group_columns);
     }
 
     #[test]
