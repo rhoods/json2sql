@@ -304,7 +304,8 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     let progress      = state.read().import.pass2_progress.clone();
     let done          = progress.done;
     let elapsed       = *elapsed_secs.read();
-    let tables_total  = state.read().schema.schemas.len() as u64;
+    // the tables the worker created (overrides and column groups applied), not the tables of Pass 1
+    let tables_total  = progress.ddl_table_count as u64;
 
     // Phase 0 — DDL (tables created / total)
     let pct_0: u32 = if progress.ddl_complete {
