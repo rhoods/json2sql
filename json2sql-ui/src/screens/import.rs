@@ -103,6 +103,7 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                         &s.schema.schemas,
                         &s.schema.strategy_overrides,
                         &s.schema.group_columns,
+                        &s.schema.pass1_samples,
                     ),
                     s.project.drop_existing,
                     s.project.anomaly_dir.clone(),

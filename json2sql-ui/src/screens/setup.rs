@@ -337,7 +337,7 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                                             if state.read().project.group_columns {
                                                                 let ticked = {
                                                                     let s = state.read();
-                                                                    crate::screens::splittable_tables(&s.schema.schemas, &s.schema.strategy_overrides)
+                                                                    crate::screens::splittable_tables(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.pass1_samples)
                                                                 };
                                                                 state.write().schema.group_columns.extend(ticked);
                                                             }

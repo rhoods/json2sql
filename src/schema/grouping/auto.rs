@@ -9,31 +9,35 @@
 //! checks, names and order. The tables are taken by name and their columns sorted by name: the result does not depend
 //! on the order of the schema.
 //!
+//! With the Pass 1 sample of a table (phase 2, kept in the snapshot), its data signals confirm the fusions of
+//! families too, as in `--suggest-groups`; a table without a sample, or whose columns changed since Pass 1 (a TOML
+//! `flatten`, an older snapshot), is grouped by its names alone.
+//!
 //! Fonctions :
 //! - fn `name_proposals` — propositions par les noms des tables à découper, dans l'ordre de leurs noms.
 //! - fn `apply_name_groups` — applique les groupes confirmés par les noms aux tables à découper ; avertissements de l'application.
 //! - fn `confirmed_config` — la config `column_groups` des groupes confirmés d'une liste de propositions.
+//! - fn `signals_of` — signaux de données d'une table depuis son échantillon du Pass 1, ou la raison de leur absence.
 
 use std::collections::{HashMap, HashSet};
 
-use super::proposal::{Status, TableProposal};
-use super::suggest::{eligible, proposal_for};
+use super::proposal::{DataSignals, Status, TableProposal};
+use super::sample::StoredSample;
+use super::suggest::{data_columns_by_name, eligible, proposal_for};
 use crate::error::Result;
 use crate::schema::column_groups::apply_column_groups;
 use crate::schema::config::{ConfigWarning, SchemaConfig};
 use crate::schema::table_schema::TableSchema;
 
-/// Why the data signals are off for this strategy in phase 1.
-const NAMES_ONLY: &str = "names only (--group-columns)";
-
-/// The proposals from the names alone of the tables to split that `wanted` keeps, in the order of their names: an
-/// eligible table, not split yet, that is not a group table. The groups are named so that their tables do not
-/// exist yet.
+/// The proposals of the tables to split that `wanted` keeps, in the order of their names: an eligible table, not
+/// split yet, that is not a group table. Each uses the data signals of its Pass 1 sample in `samples` when it has
+/// one that fits, its names alone otherwise. The groups are named so that their tables do not exist yet.
 ///
 /// # Errors
 /// A table with more columns than the lexical grouping accepts.
 pub fn name_proposals(
     schemas: &[TableSchema],
+    samples: &[StoredSample],
     wanted: impl Fn(&TableSchema) -> bool,
 ) -> Result<Vec<TableProposal>> {
     let made: HashSet<&str> = schemas
@@ -48,23 +52,38 @@ pub fn name_proposals(
         .collect();
     tables.sort_by(|a, b| a.name.cmp(&b.name));
     let mut taken: HashSet<String> = schemas.iter().map(|s| s.name.clone()).collect();
-    let off = Err(NAMES_ONLY.to_string());
     tables
         .into_iter()
-        .map(|table| proposal_for(table, &off, None, &mut taken))
+        .map(|table| proposal_for(table, &signals_of(table, samples), None, &mut taken))
         .collect()
 }
 
-/// Applies the groups the names confirm to the tables of [`name_proposals`]; the warnings are those of
+/// The data signals of `table` from its Pass 1 sample, or why there are none: no sample, a sample whose columns are
+/// not the table's (they changed since Pass 1), or no sampled row with the table's object.
+fn signals_of(table: &TableSchema, samples: &[StoredSample]) -> std::result::Result<DataSignals, String> {
+    let Some(stored) = samples.iter().find(|s| s.table == table.name) else {
+        return Err("no Pass 1 sample of this table (an older snapshot?)".to_string());
+    };
+    if !stored.columns.iter().map(String::as_str).eq(data_columns_by_name(table).iter().map(|c| c.name.as_str())) {
+        return Err("the columns of the table changed since Pass 1".to_string());
+    }
+    if stored.sample.presence.rows() == 0 {
+        return Err("no sampled row holds the table's object".to_string());
+    }
+    Ok(DataSignals::new(&stored.sample))
+}
+
+/// Applies the confirmed groups of the tables of [`name_proposals`]; the warnings are those of
 /// [`apply_column_groups`] (a table whose groups would take every data column is not split).
 ///
 /// # Errors
 /// A table with more columns than the lexical grouping accepts.
 pub fn apply_name_groups(
     schemas: &mut Vec<TableSchema>,
+    samples: &[StoredSample],
     wanted: impl Fn(&TableSchema) -> bool,
 ) -> Result<Vec<ConfigWarning>> {
-    let proposals = name_proposals(schemas, wanted)?;
+    let proposals = name_proposals(schemas, samples, wanted)?;
     apply_column_groups(schemas, &confirmed_config(&proposals))
 }
 
@@ -92,6 +111,7 @@ fn confirmed_config(proposals: &[TableProposal]) -> SchemaConfig {
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
+    use crate::schema::grouping::sample::StoredSample;
     use crate::schema::table_schema::{ChildKind, ColumnSchema, InferredStrategy};
     use crate::schema::type_tracker::PgType;
 
@@ -125,7 +145,7 @@ mod tests {
     }
 
     fn apply(schemas: &mut Vec<TableSchema>) -> Vec<ConfigWarning> {
-        apply_name_groups(schemas, |_| true).unwrap()
+        apply_name_groups(schemas, &[], |_| true).unwrap()
     }
 
     fn names(schemas: &[TableSchema]) -> Vec<&str> {
@@ -167,6 +187,55 @@ mod tests {
         assert_eq!(serde_json::to_string(&schemas).unwrap(), once);
     }
 
+    /// `nutrition_*` and `nutriscore_*` (four each) and the twelve unrelated columns.
+    fn fused_columns() -> Vec<String> {
+        let mut columns: Vec<String> = ["nutrition", "nutriscore"]
+            .iter()
+            .flat_map(|p| ["fat", "sugar", "salt", "fiber"].map(|s| format!("{p}_{s}")))
+            .collect();
+        columns.extend(OTHER.iter().map(|n| (*n).to_string()));
+        columns
+    }
+
+    /// The Pass 1 sample of `t` with the fused columns: `nutrition_x` and `nutriscore_x` hold the same six values,
+    /// the unrelated columns are empty.
+    fn fused_sample(columns: &[String]) -> StoredSample {
+        use crate::schema::grouping::presence::Presence;
+        use crate::schema::grouping::sample::TableSample;
+        use crate::schema::grouping::values::ValueProfile;
+        let mut sorted = columns.to_vec();
+        sorted.sort();
+        let mut presence = Presence::new(sorted.len());
+        let mut values = ValueProfile::new(sorted.len(), 1);
+        for row in 0..6 {
+            let cells: Vec<Option<serde_json::Value>> = sorted
+                .iter()
+                .map(|c| c.starts_with("nutri").then(|| serde_json::json!(format!("{}{row}", c.rsplit('_').next().unwrap()))))
+                .collect();
+            presence.push_row(cells.iter().map(Option::is_some));
+            values.observe_row(cells.iter().map(Option::as_ref));
+        }
+        StoredSample { table: "t".to_string(), columns: sorted, sample: TableSample { presence, values } }
+    }
+
+    #[test]
+    fn the_pass_1_sample_confirms_a_fusion_the_names_alone_leave_to_confirm() {
+        // #91 phase 2: the data signals come from the snapshot
+        let mut schemas = vec![table("t", &fused_columns())];
+        assert_eq!(apply_name_groups(&mut schemas, &[fused_sample(&fused_columns())], |_| true).unwrap(), []);
+        assert_eq!(names(&schemas), ["t", "t_nutriscore_nutrition"]);
+    }
+
+    #[test]
+    fn a_sample_whose_columns_changed_since_pass_1_is_not_used() {
+        // a TOML flatten or a dropped column: the signals would land on other columns
+        let mut stale = fused_sample(&fused_columns());
+        stale.columns.pop();
+        let mut schemas = vec![table("t", &fused_columns())];
+        apply_name_groups(&mut schemas, &[stale], |_| true).unwrap();
+        assert_eq!(names(&schemas), ["t", "t_nutriscore", "t_nutrition"], "the names alone");
+    }
+
     #[test]
     fn a_table_already_split_is_left_as_it_is() {
         let mut schemas = vec![table("t", &wide_names())];
@@ -186,7 +255,7 @@ mod tests {
         group.parent_table = Some("t".to_string());
         group.child_kind = Some(ChildKind::Object);
         let schemas = vec![parent, group];
-        assert!(name_proposals(&schemas, |_| true).unwrap().is_empty());
+        assert!(name_proposals(&schemas, &[], |_| true).unwrap().is_empty());
     }
 
     #[test]
@@ -202,7 +271,7 @@ mod tests {
     #[test]
     fn only_the_tables_wanted_are_split() {
         let mut schemas = vec![table("a", &wide_names()), table("b", &wide_names())];
-        apply_name_groups(&mut schemas, |t| t.name == "b").unwrap();
+        apply_name_groups(&mut schemas, &[], |t| t.name == "b").unwrap();
         assert_eq!(names(&schemas), ["a", "b", "b_kiwi", "b_zulu"]);
     }
 

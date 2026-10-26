@@ -467,7 +467,7 @@ fn apply_group_columns(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<
     }
     let left_to_toml = toml_column_group_tables(cfg)?;
     let ticked = pass1.group_columns.clone();
-    let warnings = crate::schema::grouping::auto::apply_name_groups(&mut pass1.schemas, |t| {
+    let warnings = crate::schema::grouping::auto::apply_name_groups(&mut pass1.schemas, &pass1.samples, |t| {
         (cfg.group_columns || ticked.contains(&t.name)) && !left_to_toml.contains(&t.name)
     })?;
     crate::schema::column_groups::reindex_stats(&pass1.schemas, &mut pass1.stats);
@@ -911,6 +911,53 @@ mod tests {
             sorted(table_names(from_snapshot(&snapshot, true))),
             ["root", "root_kiwi", "root_props", "root_props_mine", "root_zulu"]
         );
+    }
+
+    /// Lines of a wide root table: `nutrition_x` and `nutriscore_x` hold the same six values (the data confirm their
+    /// fusion), and twelve unrelated columns their own values.
+    fn fused_jsonl(rows: usize) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        const OTHER: [&str; 12] = [
+            "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow", "oyster", "pebble",
+            "saddle", "thimble",
+        ];
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for i in 0..rows {
+            let mut row = serde_json::Map::new();
+            for p in ["nutrition", "nutriscore"] {
+                for suffix in ["fat", "sugar", "salt", "fiber"] {
+                    row.insert(format!("{p}_{suffix}"), serde_json::json!(format!("{suffix}{}", i % 6)));
+                }
+            }
+            for n in OTHER {
+                row.insert(n.to_string(), serde_json::json!(format!("{n}{}", i % 6)));
+            }
+            writeln!(file, "{}", serde_json::Value::Object(row)).unwrap();
+        }
+        file
+    }
+
+    #[test]
+    fn group_columns_applies_the_fusions_the_data_of_pass_1_confirm() {
+        // #91 phase 2: one pass over the file, and the fusion the names alone leave to confirm is applied
+        let file = fused_jsonl(60);
+        assert_eq!(table_names(grouped(&file)), ["root", "root_nutriscore_nutrition"]);
+        let snapshot = snapshot_of(cfg_for(&file));
+        assert_eq!(table_names(from_snapshot(&snapshot, true)), ["root", "root_nutriscore_nutrition"], "from the snapshot too");
+    }
+
+    #[test]
+    fn group_columns_applies_the_active_groups_suggest_groups_proposes() {
+        // parity with --suggest-groups when the sample holds the whole file
+        let file = fused_jsonl(60);
+        let s = suggest_groups(cfg_for(&file), None).unwrap();
+        let parsed: toml::Table = toml::from_str(&s.toml).unwrap();
+        let mut proposed: Vec<String> =
+            parsed["root"]["column_groups"].as_table().unwrap().keys().map(|g| format!("root_{g}")).collect();
+        proposed.sort();
+        let mut applied: Vec<String> = table_names(grouped(&file)).into_iter().filter(|t| t != "root").collect();
+        applied.sort();
+        assert_eq!(applied, proposed);
     }
 
     #[test]

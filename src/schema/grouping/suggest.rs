@@ -235,7 +235,7 @@ fn root_of<'s>(schemas: &'s [TableSchema], table: &'s TableSchema) -> Option<&'s
 
 /// The data columns of a table by original name, then by `PostgreSQL` name: the one order of the columns for the
 /// sample and for the proposal.
-fn data_columns_by_name(table: &TableSchema) -> Vec<&ColumnSchema> {
+pub(super) fn data_columns_by_name(table: &TableSchema) -> Vec<&ColumnSchema> {
     let mut columns: Vec<&ColumnSchema> = table.data_columns().collect();
     columns.sort_by(|a, b| a.original_name.cmp(&b.original_name).then_with(|| a.name.cmp(&b.name)));
     columns

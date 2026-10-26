@@ -20,6 +20,7 @@
 //! - struct `FamilyNote` — une famille à clé ou numérotée, signalée sans être transformée.
 //! - enum `DataStatus` — ce que les signaux de données ont regardé, ou pourquoi ils sont éteints.
 //! - struct `Placement` — une colonne laissée dans la table et les groupes les plus proches de son nom, avec leur score.
+//! - struct `Attachment` — colonne laissée dans la table que les données rapprochent d'un groupe confirmé : candidat à confirmer, jamais appliqué.
 //! - struct `TableProposal` — la proposition pour une table.
 //! - struct `DataSignals` — les signaux de données d'une table, prêts à être interrogés par paires.
 //! - fn `DataSignals::new` — signaux de données à partir d'un échantillon.
@@ -27,9 +28,13 @@
 //! - fn `DataSignals::informative` — colonnes informatives pour la présence.
 //! - fn `DataSignals::verdict` — un signal soutient-il une paire ? `None` s'il n'est pas défini pour elle.
 //! - fn `DataSignals::backing` — paires soutenues et paires où le signal est défini, sur une liste de paires.
+//! - fn `DataSignals::background` — part des paires informatives liées par la seule richesse des fiches.
+//! - fn `DataSignals::lift` — lignes où une colonne est présente, et lift ajusté par richesse d'une autre sachant celle-ci.
 //! - fn `DataSignals::evidence` — preuves de données sur une liste de paires, pour les signaux définis.
 //! - fn `background_rate` — part des paires informatives dont le φ atteint le seuil de lien, sans rien d'autre en commun.
 //! - fn `propose` — proposition de groupes pour une table à partir des noms de ses colonnes et des signaux de données.
+//! - fn `attachments` — colonnes laissées dans la table que les données rapprochent d'un seul groupe confirmé (lift moyen, avance, lignes).
+//! - fn `mean_lift` — lift moyen des membres d'un groupe sachant une colonne.
 //! - fn `add_cohesion` — place la cohésion des noms en tête des preuves de chaque groupe.
 //! - fn `ungrouped_columns` — colonnes qu'aucun groupe confirmé ne prend, dans l'ordre des colonnes.
 //! - fn `data_status` — état des signaux de données à reporter : allumés avec leur échantillon, ou éteints avec la raison.
@@ -51,7 +56,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use super::lexical::{group_cohesion, lexical_groups, LexicalParams};
 use super::names::{normalize, numbered_families, NameStems};
 use super::numeric::{rank_correlations, shape, Shape};
-use super::presence::PhiMatrix;
+use super::presence::{PhiMatrix, Presence, PresenceStrata};
 use super::sample::TableSample;
 use super::shared::{shared_value_pairs, MIN_DISTINCT};
 use super::values::Nature;
@@ -71,6 +76,14 @@ const MIN_BACKED_PERCENT: usize = 20;
 const PRESENCE_OVER_BACKGROUND: f64 = 2.0;
 /// Words of a group's name.
 const NAME_WORDS: usize = 3;
+/// A stray column is a candidate for a confirmed group from this richness-adjusted lift on, averaged over the members
+/// (#91, T8; calibrated on the OFF bench: lower values mostly follow the richness of complete records)...
+const ATTACH_LIFT: f64 = 2.0;
+/// ...ahead of the next group by this factor...
+const ATTACH_MARGIN: f64 = 1.3;
+/// ...when it is present in at least this share (percent) of the sampled rows: fewer is noise (on OFF, a column of
+/// 15 rows out of 10 000 reached a lift of 334).
+const ATTACH_ROWS_PERCENT: usize = 1;
 
 /// A column of the analysed table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +192,22 @@ pub struct Placement {
     pub nearest: Vec<(usize, f64)>,
 }
 
+/// A column left in the table that might join a confirmed group, from the data alone: a candidate to confirm, shown
+/// and never applied (#91, T8). On OFF the rule finds plausible and debatable links, and some wrong ones.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attachment {
+    /// Index of the column in the table.
+    pub column: usize,
+    /// Index of the group in the proposal's groups.
+    pub group: usize,
+    /// Richness-adjusted lift of the group given the column, averaged over the members.
+    pub lift: f64,
+    /// The same lift for the next group.
+    pub next: f64,
+    /// Sampled rows where the column is present.
+    pub rows: usize,
+}
+
 /// The proposal for one table.
 #[derive(Debug, Clone)]
 pub struct TableProposal {
@@ -193,6 +222,8 @@ pub struct TableProposal {
     pub data: DataStatus,
     /// Where the columns left in the table might go; empty without an embedding model.
     pub placements: Vec<Placement>,
+    /// Columns left in the table that the data tie to a confirmed group: candidates, never applied.
+    pub attachments: Vec<Attachment>,
 }
 
 /// The data signals of one table, ready to be asked about pairs of columns.
@@ -208,6 +239,9 @@ pub struct DataSignals {
     /// Column has a vocabulary the shared-values signal can use.
     text: Vec<bool>,
     numeric: Vec<bool>,
+    /// The presence of the sample and its richness strata, for the lift of a stray column (#91, phase 2).
+    presence: Presence,
+    strata: PresenceStrata,
 }
 
 impl DataSignals {
@@ -240,7 +274,14 @@ impl DataSignals {
             numeric: (0..columns)
                 .map(|c| values.nature(c) == Nature::Numeric)
                 .collect(),
+            presence: sample.presence.clone(),
+            strata: sample.presence.strata(),
         }
+    }
+
+    /// Rows where `a` is present, and the richness-adjusted lift of `b` given `a` with the rows where both are.
+    pub fn lift(&self, a: usize, b: usize) -> (usize, Option<(usize, f64)>) {
+        (self.presence.present_count(a), self.presence.lift(&self.strata, a, b))
     }
 
     /// Rows of the sample.
@@ -251,6 +292,11 @@ impl DataSignals {
     /// Columns informative for the presence signal.
     pub const fn informative(&self) -> usize {
         self.informative
+    }
+
+    /// Share of the informative pairs whose phi reaches the link threshold by chance of richness alone.
+    pub const fn background(&self) -> f64 {
+        self.background
     }
 
     /// Does `signal` back the link between `a` and `b` (`a < b`)? `None` when it cannot judge this pair.
@@ -281,7 +327,7 @@ impl DataSignals {
     }
 
     /// One piece of evidence per signal that can judge at least one of `pairs`.
-    fn evidence(&self, pairs: &[(usize, usize)]) -> Vec<Evidence> {
+    pub fn evidence(&self, pairs: &[(usize, usize)]) -> Vec<Evidence> {
         [
             Signal::Presence,
             Signal::SharedValues,
@@ -335,6 +381,7 @@ pub fn propose(
         .collect();
     add_cohesion(&mut groups, &names.stems);
     let ungrouped = ungrouped_columns(&groups, columns.len());
+    let attachments = data.ok().map_or_else(Vec::new, |signals| attachments(&groups, &ungrouped, signals));
     let families = family_notes(&names, &originals);
     Ok(TableProposal {
         table: table.to_string(),
@@ -345,7 +392,39 @@ pub fn propose(
         families,
         data: data_status(data),
         placements: Vec::new(),
+        attachments,
     })
+}
+
+/// The columns left out that the data tie to one confirmed group: its mean lift given the column reaches
+/// [`ATTACH_LIFT`], beats the next group by [`ATTACH_MARGIN`], and the column is present in [`ATTACH_ROWS_PERCENT`] %
+/// of the sampled rows.
+fn attachments(groups: &[Group], ungrouped: &[usize], data: &DataSignals) -> Vec<Attachment> {
+    ungrouped
+        .iter()
+        .filter_map(|&column| {
+            let mut scored: Vec<(f64, usize)> = groups
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| g.status == Status::Confirmed)
+                .map(|(at, g)| (mean_lift(data, column, &g.columns), at))
+                .collect();
+            scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            let &(lift, group) = scored.first()?;
+            let next = scored.get(1).map_or(0.0, |s| s.0);
+            let rows = data.lift(column, groups[group].columns[0]).0;
+            let enough_rows = rows > 0 && rows * 100 >= ATTACH_ROWS_PERCENT * data.rows();
+            (lift >= ATTACH_LIFT && enough_rows && lift >= ATTACH_MARGIN * next)
+                .then_some(Attachment { column, group, lift, next, rows })
+        })
+        .collect()
+}
+
+/// The lift of the members of a group given `column`, averaged over the members where it is defined; 0 for none.
+#[allow(clippy::cast_precision_loss)] // a few dozen members
+fn mean_lift(data: &DataSignals, column: usize, members: &[usize]) -> f64 {
+    let lifts: Vec<f64> = members.iter().filter_map(|&m| data.lift(column, m).1.map(|(_, lift)| lift)).collect();
+    if lifts.is_empty() { 0.0 } else { lifts.iter().sum::<f64>() / lifts.len() as f64 }
 }
 
 /// Puts the cohesion of the names first among the evidence of each group.
@@ -502,7 +581,7 @@ fn backing(
         cross_pairs(families)
     };
     let evidence = data.map_or_else(Vec::new, |signals| signals.evidence(&pairs));
-    let background = data.map_or(0.0, |signals| signals.background);
+    let background = data.map_or(0.0, DataSignals::background);
     (
         single || evidence.iter().any(|e| e.passes(background)),
         evidence,
@@ -1080,6 +1159,66 @@ mod tests {
         let signals = DataSignals::new(&TableSample { presence, values });
         assert_eq!(signals.verdict(Signal::Rank, 0, 1), Some(true));
         assert_eq!(signals.verdict(Signal::Rank, 0, 2), Some(false));
+    }
+
+    /// 200 rows: the family `kiwi_*` (four columns) is filled in a tenth of them, `lonely` only in those rows, twelve
+    /// unrelated columns are filled at random.
+    fn lonely_with_kiwi() -> (Vec<ColumnName>, DataSignals) {
+        lonely_with_kiwi_in(200, 20)
+    }
+
+    /// `rows` rows: the family `kiwi_*` is filled in a tenth of them, `lonely` in one row out of `lonely_every` of those.
+    fn lonely_with_kiwi_in(rows: u64, lonely_every: u64) -> (Vec<ColumnName>, DataSignals) {
+        let mut names: Vec<String> = ["red", "blue", "green", "gold"].iter().map(|c| format!("kiwi_{c}")).collect();
+        names.push("lonely".to_string());
+        names.extend(["quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow", "oyster", "pebble", "saddle", "thimble"].map(String::from));
+        let mut presence = Presence::new(names.len());
+        let mut values = ValueProfile::new(names.len(), 1);
+        let mut seed = 5_u64;
+        for row in 0..rows {
+            let kiwi = row % 10 == 0;
+            let cells: Vec<bool> = (0..names.len())
+                .map(|c| match c {
+                    0..=3 => kiwi,
+                    4 => kiwi && row % lonely_every == 0,
+                    _ => {
+                        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                        (seed >> 33).is_multiple_of(2)
+                    }
+                })
+                .collect();
+            presence.push_row(cells.iter().copied());
+            values.observe_row(std::iter::repeat_n(None, names.len()));
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        (columns(&refs), DataSignals::new(&TableSample { presence, values }))
+    }
+
+    #[test]
+    fn a_stray_column_that_only_comes_with_a_group_is_a_candidate_never_a_member() {
+        // #91 T8: a candidate to confirm, shown and never applied
+        let (cols, data) = lonely_with_kiwi();
+        let p = propose("t", cols, Ok(&data), &LexicalParams::default()).unwrap();
+        let kiwi = p.groups.iter().position(|g| g.name == "kiwi").expect("the kiwi family");
+        assert_eq!(p.groups[kiwi].columns, [0, 1, 2, 3], "the group keeps its own columns");
+        assert!(p.ungrouped.contains(&4));
+        assert_eq!(p.attachments.len(), 1, "{:?}", p.attachments);
+        let a = &p.attachments[0];
+        assert_eq!((a.column, a.group), (4, kiwi));
+        assert!(a.lift >= 2.0 && a.rows >= 10, "{a:?}");
+    }
+
+    #[test]
+    fn a_column_in_less_than_one_percent_of_the_rows_is_no_candidate() {
+        // 8 rows out of 2 000: too few to tell a link from noise
+        let (cols, data) = lonely_with_kiwi_in(2_000, 250);
+        assert!(propose("t", cols, Ok(&data), &LexicalParams::default()).unwrap().attachments.is_empty());
+    }
+
+    #[test]
+    fn without_data_signals_there_is_no_candidate() {
+        let (cols, _) = lonely_with_kiwi();
+        assert!(propose("t", cols, Err("test"), &LexicalParams::default()).unwrap().attachments.is_empty());
     }
 
     #[test]

@@ -35,7 +35,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
         (s.schema.schemas.clone(), s.schema.strategy_overrides.clone(), s.schema.group_columns.clone())
     };
 
-    let schemas = build_effective_schemas(&schemas_orig, &strategy_overrides, &group_columns);
+    let schemas = build_effective_schemas(&schemas_orig, &strategy_overrides, &group_columns, &state.read().schema.pass1_samples);
 
     if schemas.is_empty() {
         return rsx! {

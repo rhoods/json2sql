@@ -16,6 +16,9 @@
 //! - fn `Presence::present_count` — nombre de lignes où une colonne est présente.
 //! - fn `Presence::informative_columns` — colonnes présentes dans 2 % à 98 % des lignes.
 //! - fn `Presence::phi_matrix` — φ ajusté par richesse entre toutes les colonnes informatives.
+//! - struct `PresenceStrata` — lignes de chaque strate de richesse et comptes de présence de chaque colonne dans ces strates.
+//! - fn `Presence::strata` — strates et comptes par strate de toutes les colonnes, calculés une fois pour de nombreux lifts.
+//! - fn `Presence::lift` — lift d'une colonne sachant une autre, ajusté par richesse : présences communes sur présences attendues (#91, phase 2).
 //! - struct `PhiMatrix` — φ ajusté signé entre colonnes informatives.
 //! - fn `PhiMatrix::informative` — colonnes informatives, dans l'ordre.
 //! - fn `PhiMatrix::get` — φ ajusté d'une paire, `None` si l'une des colonnes n'est pas informative.
@@ -132,6 +135,41 @@ impl Presence {
     }
 }
 
+/// The rows of each richness stratum and the presence counts of every column in them: the base of the lift.
+#[derive(Debug, Clone)]
+pub struct PresenceStrata {
+    masks: Vec<Vec<u64>>,
+    sizes: [usize; STRATA],
+    counts: Vec<[usize; STRATA]>,
+}
+
+impl Presence {
+    /// The strata of the rows and the per-stratum counts of every column, computed once for many lifts.
+    pub fn strata(&self) -> PresenceStrata {
+        let masks = stratum_masks(&strata(&self.richness));
+        let sizes = std::array::from_fn(|s| masks[s].iter().map(|w| w.count_ones() as usize).sum());
+        let counts = self.bits.iter().map(|column| counts_per_stratum(column, &masks)).collect();
+        PresenceStrata { masks, sizes, counts }
+    }
+
+    /// Lift of `b` given `a`, adjusted by richness (#91, phase 2): the rows where both are present over the rows
+    /// expected if they were independent inside each richness stratum, with that observed count. Unlike phi it does
+    /// not shrink for a rare column that only ever comes with `b`. `None` when nothing is expected.
+    #[allow(clippy::cast_precision_loss)] // exact counts, far below 2^52
+    pub fn lift(&self, strata: &PresenceStrata, a: usize, b: usize) -> Option<(usize, f64)> {
+        let mut observed = 0_usize;
+        for (word, (l, r)) in self.bits[a].iter().zip(&self.bits[b]).enumerate() {
+            let joint = l & r;
+            observed += strata.masks.iter().map(|mask| (joint & mask[word]).count_ones() as usize).sum::<usize>();
+        }
+        let expected: f64 = (0..STRATA)
+            .filter(|&s| strata.sizes[s] > 0)
+            .map(|s| (strata.counts[a][s] * strata.counts[b][s]) as f64 / strata.sizes[s] as f64)
+            .sum();
+        (expected > 0.0).then(|| (observed, observed as f64 / expected))
+    }
+}
+
 /// Adjusted phi between the informative columns, signed.
 #[derive(Debug, Clone)]
 pub struct PhiMatrix {
@@ -236,6 +274,38 @@ mod tests {
     use super::*;
 
     const EPS: f64 = 1e-12;
+
+    /// 200 rows of 10 filler columns filled at random (same richness everywhere), then `b` (30 % of the rows), `rare`
+    /// (5 %, always with `b`) and `spread` (10 %, independent of `b`).
+    fn rare_with_b() -> Presence {
+        let mut seed = 11_u64;
+        let mut presence = Presence::new(13);
+        for row in 0..200_u64 {
+            let mut cells = [false; 13];
+            for cell in cells.iter_mut().take(10) {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                *cell = (seed >> 33).is_multiple_of(2);
+            }
+            cells[10] = row % 10 < 3;
+            cells[11] = row % 20 == 0;
+            cells[12] = row % 10 == 7;
+            presence.push_row(cells);
+        }
+        presence
+    }
+
+    #[test]
+    fn the_lift_finds_a_rare_column_that_only_comes_with_another() {
+        // #91 phase 2: phi shrinks for a rare column, the lift does not
+        let p = rare_with_b();
+        let strata = p.strata();
+        let (observed, rare) = p.lift(&strata, 11, 10).unwrap();
+        assert_eq!(observed, 10, "rare is present in 10 rows, all with b");
+        assert!(rare > 2.0, "1 / 0.3 without strata, less once the richer rows are discounted: {rare}");
+        let (_, spread) = p.lift(&strata, 12, 10).unwrap();
+        assert!(spread < 0.5, "never together: {spread}");
+        assert_eq!(p.lift(&strata, 11, 10).map(|(_, l)| l), p.lift(&strata, 10, 11).map(|(_, l)| l), "symmetric");
+    }
 
     /// 43 rows x 6 columns (strata of 9, 9, 8, 9 and 8 rows) from a fixed LCG, column 1 mostly copied from column 0; expected values come
     /// from the #78 spike's `phi_adj` run in Python on the same matrix.

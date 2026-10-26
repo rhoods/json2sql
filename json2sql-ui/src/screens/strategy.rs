@@ -90,7 +90,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     // shown read-only under their parent (#91).
     let originals         = state.read().schema.schemas.clone();
     let overrides_snap    = state.read().schema.strategy_overrides.clone();
-    let schemas           = display_schemas(&originals, &overrides_snap, &state.read().schema.group_columns);
+    let schemas           = display_schemas(&originals, &overrides_snap, &state.read().schema.group_columns, &state.read().schema.pass1_samples);
     let overflow_warnings  = state.read().schema.overflow_warnings.clone();
     let config_warnings    = state.read().schema.config_warnings.clone();
     // the indices of group tables that are no longer listed (column groups unticked) are dropped (#91)
@@ -128,10 +128,13 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     // Column groups of the selected table (#91): what the switch would split, or why it cannot.
     let group_columns_snap = state.read().schema.group_columns.clone();
     let groups_on = group_columns_snap.contains(&selected_table.name);
-    let (preview_groups, preview_note): (Vec<(String, usize, String)>, String) =
-        match group_preview(&originals, &overrides_snap, &group_columns_snap, &selected_table.name) {
+    let (preview_groups, preview_note): (Vec<(String, usize, String, String)>, String) =
+        match group_preview(&originals, &overrides_snap, &group_columns_snap, &state.read().schema.pass1_samples, &selected_table.name) {
             GroupPreview::Groups(groups) => (
-                groups.into_iter().map(|(table, columns)| (table, columns.len(), columns.join(", "))).collect(),
+                groups
+                    .into_iter()
+                    .map(|g| (g.table, g.columns.len(), g.columns.join(", "), g.candidates.join(", ")))
+                    .collect(),
                 String::new(),
             ),
             GroupPreview::Unavailable(why) if groups_on => (Vec::new(), format!("No group will be made: {why}.")),
@@ -751,7 +754,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                         s.schema.selected_table_indices.iter()
                                                             .filter_map(|&i| s.schema.schemas.get(i).map(|t| t.name.clone()))
                                                             .filter(|n| matches!(
-                                                                group_preview(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.group_columns, n),
+                                                                group_preview(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.group_columns, &s.schema.pass1_samples, n),
                                                                 GroupPreview::Groups(_)
                                                             ))
                                                             .collect()
@@ -879,13 +882,20 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                         if !preview_note.is_empty() {
                                             p { style: "font-size:var(--fs-xs);color:var(--fg-4);font-style:italic;line-height:1.5;", "{preview_note}" }
                                         }
-                                        for (group_table, count, columns) in preview_groups.iter() {
+                                        for (group_table, count, columns, candidates) in preview_groups.iter() {
                                             div { style: "margin-bottom:6px;",
                                                 div { style: "display:flex;gap:8px;font-size:var(--fs-xs);",
                                                     span { style: "font-family:'JetBrains Mono',monospace;color:var(--fg-2);", "{group_table}" }
                                                     span { style: "color:var(--fg-4);margin-left:auto;", "{count} columns" }
                                                 }
                                                 div { style: "font-size:var(--fs-xs);color:var(--fg-4);line-height:1.4;", "{columns}" }
+                                                if !candidates.is_empty() {
+                                                    div {
+                                                        style: "font-size:var(--fs-xs);color:var(--fg-3);font-style:italic;line-height:1.4;",
+                                                        title: "the data tie these columns to the group; they stay in the table",
+                                                        "might join, to confirm: {candidates}"
+                                                    }
+                                                }
                                             }
                                         }
                                     }

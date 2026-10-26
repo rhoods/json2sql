@@ -5,6 +5,7 @@
 //! - fn `display_schemas` — tables de l'écran Strategy : les tables d'origine (indexées), puis les tables de groupe des tables cochées.
 //! - fn `splittable_tables` — tables que les noms de colonnes permettent de découper : ce que coche l'option de Setup.
 //! - enum `GroupPreview` — aperçu des groupes de colonnes d'une table : tables de groupe et leurs colonnes, ou raison de leur absence.
+//! - struct `PreviewGroup` — une table de groupe d'un aperçu : nom, colonnes et colonnes candidates à confirmer.
 //! - fn `group_preview` — aperçu des groupes de colonnes d'une table, sur le schéma effectif, avec les noms qu'aura l'import.
 //! - fn `not_splittable` — raison pour laquelle une table du schéma effectif ne peut pas être découpée, s'il y en a une.
 //! - fn `skip_cascade_names` — noms des vrais enfants retirés par cascade d'un `Skip` (#47),
@@ -12,6 +13,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use json2sql::schema::grouping::auto::{apply_name_groups, name_proposals};
 use json2sql::schema::grouping::proposal::Status;
+use json2sql::schema::grouping::sample::StoredSample;
 use json2sql::schema::grouping::suggest::MIN_TABLE_COLUMNS;
 use json2sql::schema::naming::group_table_name;
 use json2sql::schema::table_schema::{TableSchema, UserOverride};
@@ -28,6 +30,7 @@ pub fn build_effective_schemas(
     schemas: &[TableSchema],
     strategy_overrides: &HashMap<String, UserOverride>,
     group_columns: &BTreeSet<String>,
+    samples: &[StoredSample],
 ) -> Vec<TableSchema> {
     let mut result = schemas.to_vec();
     json2sql::schema::config::apply_user_overrides(&mut result, strategy_overrides);
@@ -37,7 +40,7 @@ pub fn build_effective_schemas(
     result.retain(|s| seen.insert(s.name.clone()));
     if !group_columns.is_empty() {
         // the only error is a table of over 2000 columns, which the 1600-column guard already turned into JSONB
-        if let Err(e) = apply_name_groups(&mut result, |t| group_columns.contains(&t.name)) {
+        if let Err(e) = apply_name_groups(&mut result, samples, |t| group_columns.contains(&t.name)) {
             eprintln!("column groups not applied: {e}");
         }
     }
@@ -51,8 +54,9 @@ pub fn display_schemas(
     schemas: &[TableSchema],
     strategy_overrides: &HashMap<String, UserOverride>,
     group_columns: &BTreeSet<String>,
+    samples: &[StoredSample],
 ) -> Vec<TableSchema> {
-    let effective = build_effective_schemas(schemas, strategy_overrides, group_columns);
+    let effective = build_effective_schemas(schemas, strategy_overrides, group_columns, samples);
     let groups: HashSet<&str> = effective.iter().flat_map(|t| t.column_groups.iter().map(String::as_str)).collect();
     let mut shown: Vec<TableSchema> = schemas
         .iter()
@@ -75,9 +79,13 @@ pub fn display_schemas(
 
 /// The tables the column names can split on the schema the overrides give: what the Setup switch ticks, like
 /// `--group-columns` does in the CLI.
-pub fn splittable_tables(schemas: &[TableSchema], strategy_overrides: &HashMap<String, UserOverride>) -> BTreeSet<String> {
-    let effective = build_effective_schemas(schemas, strategy_overrides, &BTreeSet::new());
-    name_proposals(&effective, |_| true)
+pub fn splittable_tables(
+    schemas: &[TableSchema],
+    strategy_overrides: &HashMap<String, UserOverride>,
+    samples: &[StoredSample],
+) -> BTreeSet<String> {
+    let effective = build_effective_schemas(schemas, strategy_overrides, &BTreeSet::new(), samples);
+    name_proposals(&effective, samples, |_| true)
         .unwrap_or_default()
         .into_iter()
         .filter(|p| p.groups.iter().any(|g| g.status == Status::Confirmed))
@@ -85,11 +93,20 @@ pub fn splittable_tables(schemas: &[TableSchema], strategy_overrides: &HashMap<S
         .collect()
 }
 
+/// One group table of a preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewGroup {
+    pub table: String,
+    pub columns: Vec<String>,
+    /// Columns left in the table that the data tie to this group: candidates to confirm, never moved (#91, T8).
+    pub candidates: Vec<String>,
+}
+
 /// What splitting a table into column groups would give.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupPreview {
-    /// Each group table, with its columns.
-    Groups(Vec<(String, Vec<String>)>),
+    /// Each group table, with its columns and its candidates.
+    Groups(Vec<PreviewGroup>),
     /// Why the table gets no group.
     Unavailable(String),
 }
@@ -100,26 +117,29 @@ pub fn group_preview(
     schemas: &[TableSchema],
     strategy_overrides: &HashMap<String, UserOverride>,
     group_columns: &BTreeSet<String>,
+    samples: &[StoredSample],
     table: &str,
 ) -> GroupPreview {
-    let effective = build_effective_schemas(schemas, strategy_overrides, &BTreeSet::new());
+    let effective = build_effective_schemas(schemas, strategy_overrides, &BTreeSet::new(), samples);
     if let Some(why) = not_splittable(&effective, table) {
         return GroupPreview::Unavailable(why);
     }
-    let proposals = match name_proposals(&effective, |s| s.name == table || group_columns.contains(&s.name)) {
+    let proposals = match name_proposals(&effective, samples, |s| s.name == table || group_columns.contains(&s.name)) {
         Ok(proposals) => proposals,
         Err(e) => return GroupPreview::Unavailable(e.to_string()),
     };
-    let groups: Vec<(String, Vec<String>)> = proposals
+    let groups: Vec<PreviewGroup> = proposals
         .iter()
         .filter(|p| p.table == table)
         .flat_map(|p| {
-            p.groups.iter().filter(|g| g.status == Status::Confirmed).map(|g| {
-                (group_table_name(table, &g.name), g.columns.iter().map(|&c| p.columns[c].name.clone()).collect())
+            p.groups.iter().enumerate().filter(|(_, g)| g.status == Status::Confirmed).map(move |(at, g)| PreviewGroup {
+                table: group_table_name(table, &g.name),
+                columns: g.columns.iter().map(|&c| p.columns[c].name.clone()).collect(),
+                candidates: p.attachments.iter().filter(|a| a.group == at).map(|a| p.columns[a.column].name.clone()).collect(),
             })
         })
         .collect();
-    let moved: usize = groups.iter().map(|(_, columns)| columns.len()).sum();
+    let moved: usize = groups.iter().map(|g| g.columns.len()).sum();
     let data_columns = effective.iter().find(|s| s.name == table).map_or(0, |t| t.data_columns().count());
     if groups.is_empty() {
         GroupPreview::Unavailable("the column names give no group".to_string())
@@ -179,7 +199,7 @@ mod tests {
         let schemas = vec![make_table("a", None), make_table("b", None)];
         let mut overrides = HashMap::new();
         overrides.insert("a".to_string(), UserOverride::Skip);
-        let result = build_effective_schemas(&schemas, &overrides, &BTreeSet::new());
+        let result = build_effective_schemas(&schemas, &overrides, &BTreeSet::new(), &[]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "b");
     }
@@ -187,7 +207,7 @@ mod tests {
     #[test]
     fn no_overrides_returns_full_clone() {
         let schemas = vec![make_table("x", None), make_table("y", None)];
-        let result = build_effective_schemas(&schemas, &HashMap::new(), &BTreeSet::new());
+        let result = build_effective_schemas(&schemas, &HashMap::new(), &BTreeSet::new(), &[]);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].name, "x");
     }
@@ -210,7 +230,7 @@ mod tests {
         let schemas = vec![t];
         let mut overrides = HashMap::new();
         overrides.insert("wide".to_string(), UserOverride::Jsonb);
-        let result = build_effective_schemas(&schemas, &overrides, &BTreeSet::new());
+        let result = build_effective_schemas(&schemas, &overrides, &BTreeSet::new(), &[]);
         assert_eq!(result[0].ui_override(), Some(&UserOverride::Jsonb), "ui_override must be set");
         assert_eq!(result[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must be preserved");
         assert_eq!(*result[0].effective_strategy(), InferredStrategy::Jsonb, "effective_strategy must reflect override");
@@ -222,7 +242,7 @@ mod tests {
         let original_len = schemas.len();
         let mut overrides = HashMap::new();
         overrides.insert("a".to_string(), UserOverride::Skip);
-        let _ = build_effective_schemas(&schemas, &overrides, &BTreeSet::new());
+        let _ = build_effective_schemas(&schemas, &overrides, &BTreeSet::new(), &[]);
         assert_eq!(schemas.len(), original_len, "original slice must not be mutated");
     }
 
@@ -236,7 +256,7 @@ mod tests {
             make_table("b", None),
             make_table("a", None), // duplicate
         ];
-        let result = build_effective_schemas(&schemas, &HashMap::new(), &BTreeSet::new());
+        let result = build_effective_schemas(&schemas, &HashMap::new(), &BTreeSet::new(), &[]);
         assert_eq!(result.len(), 2, "duplicate table names must be removed");
         assert!(result.iter().any(|s| s.name == "a"));
         assert!(result.iter().any(|s| s.name == "b"));
@@ -260,7 +280,7 @@ mod tests {
         let schemas = vec![main, companion, other];
         let mut overrides = HashMap::new();
         overrides.insert("events".to_string(), UserOverride::Skip);
-        let result = build_effective_schemas(&schemas, &overrides, &BTreeSet::new());
+        let result = build_effective_schemas(&schemas, &overrides, &BTreeSet::new(), &[]);
 
         let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
         assert!(!names.contains(&"events"),      "main table must be removed");
@@ -299,7 +319,7 @@ mod tests {
     #[test]
     fn a_ticked_table_is_split_in_the_effective_schema_only() {
         let schemas = vec![wide_table("a"), wide_table("b")];
-        let result = build_effective_schemas(&schemas, &HashMap::new(), &ticked(&["b"]));
+        let result = build_effective_schemas(&schemas, &HashMap::new(), &ticked(&["b"]), &[]);
         assert_eq!(names(&result), ["a", "b", "b_kiwi", "b_zulu"]);
         assert_eq!(names(&schemas), ["a", "b"], "the schemas of the Strategy screen keep their indices");
     }
@@ -308,7 +328,7 @@ mod tests {
     fn a_pivot_or_skip_chosen_for_a_ticked_table_wins() {
         let schemas = vec![wide_table("a"), wide_table("b")];
         let overrides = HashMap::from([("a".to_string(), UserOverride::Pivot), ("b".to_string(), UserOverride::Skip)]);
-        let result = build_effective_schemas(&schemas, &overrides, &ticked(&["a", "b"]));
+        let result = build_effective_schemas(&schemas, &overrides, &ticked(&["a", "b"]), &[]);
         assert_eq!(names(&result), ["a"]);
     }
 
@@ -316,13 +336,13 @@ mod tests {
     fn the_strategy_screen_lists_the_group_tables_after_the_tables_it_indexes() {
         // the indices of the Strategy screen point into the original tables: the group tables come after them
         let schemas = vec![wide_table("a"), wide_table("b")];
-        let shown = display_schemas(&schemas, &HashMap::new(), &ticked(&["a"]));
+        let shown = display_schemas(&schemas, &HashMap::new(), &ticked(&["a"]), &[]);
         assert_eq!(names(&shown), ["a", "b", "a_kiwi", "a_zulu"]);
         let kept: Vec<&str> = shown[0].data_columns().map(|c| c.name.as_str()).collect();
         assert!(!kept.contains(&"kiwi_a") && kept.contains(&"quartz"), "a split table shows the columns it keeps: {kept:?}");
         assert_eq!(shown[0].column_groups, ["a_kiwi", "a_zulu"]);
         assert_eq!(shown[1].columns.len(), schemas[1].columns.len(), "a table that is not split is shown as it is");
-        assert_eq!(names(&display_schemas(&schemas, &HashMap::new(), &ticked(&[]))), ["a", "b"]);
+        assert_eq!(names(&display_schemas(&schemas, &HashMap::new(), &ticked(&[]), &[])), ["a", "b"]);
     }
 
     #[test]
@@ -330,21 +350,22 @@ mod tests {
         // the Setup switch ticks them all, like --group-columns
         let schemas = vec![wide_table("a"), make_table("small", None), wide_table("b")];
         let overrides = HashMap::from([("b".to_string(), UserOverride::Jsonb)]);
-        assert_eq!(splittable_tables(&schemas, &overrides), ticked(&["a"]));
+        assert_eq!(splittable_tables(&schemas, &overrides, &[]), ticked(&["a"]));
     }
 
     #[test]
     fn the_preview_lists_the_group_tables_or_says_why_there_are_none() {
         let schemas = vec![wide_table("a"), make_table("small", None)];
-        match group_preview(&schemas, &HashMap::new(), &ticked(&[]), "a") {
+        match group_preview(&schemas, &HashMap::new(), &ticked(&[]), &[], "a") {
             GroupPreview::Groups(groups) => {
-                let tables: Vec<&str> = groups.iter().map(|(t, _)| t.as_str()).collect();
+                let tables: Vec<&str> = groups.iter().map(|g| g.table.as_str()).collect();
                 assert_eq!(tables, ["a_kiwi", "a_zulu"]);
-                assert_eq!(groups[0].1.len(), 6);
+                assert_eq!(groups[0].columns.len(), 6);
+                assert!(groups[0].candidates.is_empty(), "no data signal, no candidate");
             }
             GroupPreview::Unavailable(why) => panic!("{why}"),
         }
-        let why = |table: &str, overrides: &HashMap<String, UserOverride>| match group_preview(&schemas, overrides, &ticked(&[]), table) {
+        let why = |table: &str, overrides: &HashMap<String, UserOverride>| match group_preview(&schemas, overrides, &ticked(&[]), &[], table) {
             GroupPreview::Unavailable(why) => why,
             GroupPreview::Groups(g) => panic!("{g:?}"),
         };

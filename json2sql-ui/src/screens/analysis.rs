@@ -112,8 +112,8 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 s.schema.pass1_samples = result.samples;
                 s.schema.schema_snapshot_loaded = false;
                 if s.project.group_columns {
-                    s.schema.group_columns = crate::screens::splittable_tables(&s.schema.schemas, &s.schema.strategy_overrides);
-                    let shown = crate::screens::build_effective_schemas(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.group_columns);
+                    s.schema.group_columns = crate::screens::splittable_tables(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.pass1_samples);
+                    let shown = crate::screens::build_effective_schemas(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.group_columns, &s.schema.pass1_samples);
                     let line = format!(
                         "Column groups: {} table(s) split into {} group table(s) — schema: {} tables, {} columns",
                         s.schema.group_columns.len(),
@@ -138,7 +138,7 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
     // the tables of the import: with the column groups ticked (#91)
     let schemas   = {
         let s = state.read();
-        crate::screens::build_effective_schemas(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.group_columns)
+        crate::screens::build_effective_schemas(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.group_columns, &s.schema.pass1_samples)
     };
     let done      = progress.done;
     if done && !schemas.is_empty() {

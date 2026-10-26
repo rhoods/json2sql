@@ -16,6 +16,8 @@
 //! - fn `to_markdown` — rapport Markdown de toutes les tables.
 //! - fn `table_markdown` — section du rapport pour une table.
 //! - fn `table_summary` — titre, taille de la table et état des signaux de données.
+//! - fn `candidates_toml` — lignes de commentaire des colonnes candidates à un groupe, sous ce groupe dans le TOML.
+//! - fn `attachments_markdown` — colonnes laissées dans la table que les données rapprochent d'un groupe, à confirmer ; rien sans elles.
 //! - fn `placements_markdown` — où les colonnes laissées dans la table iraient, d'après les embeddings ; rien sans eux.
 //! - fn `placement_line` — une colonne laissée dans la table et ses groupes les plus proches.
 //! - fn `families_markdown` — familles à clé ou numérotées que la proposition laisse telles quelles.
@@ -50,10 +52,27 @@ pub fn to_toml(proposals: &[TableProposal]) -> String {
 /// `[table.column_groups]` and its groups.
 fn table_toml(proposal: &TableProposal) -> String {
     let mut out = format!("[{}.column_groups]\n", key(&proposal.table));
-    for group in &proposal.groups {
+    for (at, group) in proposal.groups.iter().enumerate() {
         out.push_str(&group_toml(proposal, group));
+        out.push_str(&candidates_toml(proposal, at));
     }
     out
+}
+
+/// One comment line per column the data tie to the group at `at`, after it: a candidate, never an active member.
+fn candidates_toml(proposal: &TableProposal, at: usize) -> String {
+    use std::fmt::Write as _;
+    proposal.attachments.iter().filter(|a| a.group == at).fold(String::new(), |mut out, a| {
+        // writing to a String cannot fail
+        let _ = writeln!(
+            out,
+            "# might join {}, to confirm: {} (lift {:.2})",
+            proposal.groups[at].name,
+            quoted(&proposal.columns[a.column].name),
+            a.lift
+        );
+        out
+    })
 }
 
 /// A comment line with the status and evidence, then the group as a TOML array wrapped at [`WIDTH`]; the whole
@@ -136,7 +155,7 @@ fn table_markdown(proposal: &TableProposal) -> String {
             .collect::<String>(),
         proposal.ungrouped.len(),
         column_list(proposal, &proposal.ungrouped),
-        placements_markdown(proposal),
+        attachments_markdown(proposal) + &placements_markdown(proposal),
         families_markdown(proposal)
     )
 }
@@ -161,6 +180,26 @@ fn table_summary(proposal: &TableProposal) -> String {
         proposal.table,
         proposal.columns.len(),
         proposal.groups.len() - confirmed
+    )
+}
+
+/// The columns that stay in the table and that the data tie to one group; nothing without such a column.
+fn attachments_markdown(proposal: &TableProposal) -> String {
+    if proposal.attachments.is_empty() {
+        return String::new();
+    }
+    let lines = proposal.attachments.iter().fold(String::new(), |mut out, a| {
+        use std::fmt::Write as _;
+        // writing to a String cannot fail
+        let _ = writeln!(
+            out,
+            "- `{}` → `{}` (lift {:.2}, next group {:.2}, {} rows)",
+            proposal.columns[a.column].name, proposal.groups[a.group].name, a.lift, a.next, a.rows
+        );
+        out
+    });
+    format!(
+        "\n### Columns that might join a group (to confirm)\n\nThe data alone: the group is filled with these columns far more often than the richness of the records explains (richness-adjusted lift). A hint, never applied.\n\n{lines}"
     )
 }
 
@@ -283,7 +322,7 @@ fn column_list(proposal: &TableProposal, columns: &[usize]) -> String {
 #[cfg(test)]
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
-    use super::super::proposal::{ColumnName, Placement};
+    use super::super::proposal::{Attachment, ColumnName, Placement};
     use super::*;
     use crate::schema::config::SchemaConfig;
 
@@ -343,6 +382,7 @@ mod tests {
             ungrouped: vec![7, 8, 9, 10, 11],
             stems: Vec::new(),
             placements: Vec::new(),
+            attachments: Vec::new(),
             families: vec![FamilyNote {
                 kind: FamilyKind::Numbered,
                 label: "item".to_string(),
@@ -517,6 +557,20 @@ mod tests {
                 .expect("col_8"),
         );
         assert!(seven < eight, "the best score comes first:\n{md}");
+    }
+
+    #[test]
+    fn the_candidates_to_join_a_group_are_shown_to_confirm_and_never_active() {
+        // #91 T8: in the report, and as a comment under their group in the TOML
+        let mut p = proposal("products");
+        p.attachments = vec![Attachment { column: 8, group: 0, lift: 2.534, next: 1.08, rows: 5152 }];
+        let md = to_markdown(std::slice::from_ref(&p));
+        assert!(md.contains("### Columns that might join a group"), "{md}");
+        assert!(md.contains("- `col_8` → `alpha` (lift 2.53, next group 1.08, 5152 rows)"), "{md}");
+        let toml = to_toml(std::slice::from_ref(&p));
+        assert!(toml.contains("# might join alpha, to confirm: \"col_8\" (lift 2.53)"), "{toml}");
+        assert_eq!(array(&parse(&toml), "products", "alpha"), ["col_0", "col_1", "col_2", "col_3"], "not in the group");
+        assert!(!to_markdown(&[proposal("products")]).contains("might join"));
     }
 
     #[test]
