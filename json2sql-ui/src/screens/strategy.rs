@@ -74,6 +74,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let mut right_collapsed: Signal<bool>            = use_signal(|| false);
     let mut filter_text:     Signal<String>          = use_signal(String::new);
     let mut warn_only:       Signal<bool>            = use_signal(|| false);
+    let mut modified_only:   Signal<bool>            = use_signal(|| false);
     let mut save_feedback:   Signal<Option<Result<String, String>>> = use_signal(|| None);
     let mut picking_save:    Signal<bool>            = use_signal(|| false);
     let mut banner_dismissed:         Signal<bool> = use_signal(|| false);
@@ -158,6 +159,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     // Table list — filtered
     let filter   = filter_text.read().to_lowercase();
     let show_warn = *warn_only.read();
+    let show_modified = *modified_only.read();
 
     // Pre-compute rows and visible index list so the Shift+click handler can capture it.
     let anomaly_counts = state.read().import.pass2_progress.anomaly_counts_per_table.clone();
@@ -166,6 +168,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
         selected_indices: &selected_indices, absorbed_names: &absorbed_names,
         cascaded_names: &cascaded_names,
         filter: &filter, show_warn_only: show_warn, anomaly_counts: &anomaly_counts,
+        grouped: &state.read().schema.group_columns, show_modified_only: show_modified,
     });
     let visible_indices: Vec<usize> = table_rows.iter()
         .filter(|r| r.visible)
@@ -338,14 +341,20 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                 }
                                 span { class: "seg",
                                     button {
-                                        class: if !show_warn { "on" } else { "" },
-                                        onclick: move |_| { warn_only.set(false); },
+                                        class: if !show_warn && !show_modified { "on" } else { "" },
+                                        onclick: move |_| { warn_only.set(false); modified_only.set(false); },
                                         "all"
                                     }
                                     button {
                                         class: if show_warn { "on" } else { "" },
-                                        onclick: move |_| { warn_only.set(true); },
+                                        onclick: move |_| { warn_only.set(true); modified_only.set(false); },
                                         "⚠"
+                                    }
+                                    button {
+                                        class: if show_modified { "on" } else { "" },
+                                        title: "only the tables you changed: strategy override or column groups",
+                                        onclick: move |_| { modified_only.set(true); warn_only.set(false); },
+                                        "modified"
                                     }
                                 }
                                 button {
