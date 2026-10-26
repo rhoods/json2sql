@@ -17,6 +17,9 @@
 //! - struct `SampleTarget` — où sont les colonnes d'une table : chemin vers son objet et chemins des colonnes.
 //! - struct `TableSample` — présence et valeurs des colonnes d'une table, issues d'un seul passage.
 //! - fn `sample_tables` — présence et valeurs des colonnes de plusieurs tables, en un seul passage sur un échantillon à pas régulier.
+//! - struct `StoredSample` — l'échantillon d'une table pris au Pass 1, avec les noms de ses colonnes (#91, phase 2).
+//! - fn `observe_row` — ajoute une ligne racine à l'échantillon d'une table (sans l'objet de la table, rien n'est ajouté).
+//! - fn `empty_sample` — échantillon vide d'une table, pour un pas de sous-échantillon des rangs.
 //! - fn `effective_rows` — lignes racine qui comptent : toutes, ou les `limit` premières.
 //! - fn `visit_sampled_rows` — appelle une fonction sur chaque ligne racine échantillonnée.
 //! - fn `cells` — valeur de chaque colonne dans l'objet de la table, dans l'ordre des colonnes.
@@ -64,6 +67,7 @@ pub struct SampleTarget<'a> {
 }
 
 /// What one pass over the sample yields for a table: which columns are present, and what they hold.
+#[derive(Debug, Clone)]
 pub struct TableSample {
     pub presence: Presence,
     pub values: ValueProfile,
@@ -85,25 +89,44 @@ pub fn sample_tables(
         .div_ceil(stride(rows, source.budget))
         .min(u64::try_from(source.budget).unwrap_or(u64::MAX));
     let rank_step = usize::try_from(sampled).unwrap_or(usize::MAX) / RANK_SAMPLE;
-    let mut tables: Vec<TableSample> = targets
-        .iter()
-        .map(|target| TableSample {
-            presence: Presence::new(target.columns.len()),
-            values: ValueProfile::new(target.columns.len(), rank_step),
-        })
-        .collect();
+    let mut tables: Vec<TableSample> = targets.iter().map(|target| empty_sample(target, rank_step)).collect();
     visit_sampled_rows(source, |row| {
         for (target, sample) in targets.iter().zip(&mut tables) {
-            if let Some(object) = object_at(row, target.path)? {
-                sample.presence.push_row(
-                    cells(object, target.columns).map(|cell| cell.is_some_and(is_present)),
-                );
-                sample.values.observe_row(cells(object, target.columns));
-            }
+            observe_row(sample, row, target)?;
         }
         Ok(())
     })?;
     Ok(tables)
+}
+
+/// The sample of a table taken during Pass 1 (#91, phase 2): its columns by `PostgreSQL` name, in the order of the
+/// sample (sorted by name), and their presence and values.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // read by the snapshot (T7) and the strategy (T8) of #91
+pub struct StoredSample {
+    pub table: String,
+    pub columns: Vec<String>,
+    pub sample: TableSample,
+}
+
+/// Adds `row`, a root row, to the sample of `target`; a row without the table's object adds nothing.
+///
+/// # Errors
+/// An array where the path to the table expects an object.
+pub fn observe_row(sample: &mut TableSample, row: &Value, target: &SampleTarget<'_>) -> Result<()> {
+    if let Some(object) = object_at(row, target.path)? {
+        sample.presence.push_row(cells(object, target.columns).map(|cell| cell.is_some_and(is_present)));
+        sample.values.observe_row(cells(object, target.columns));
+    }
+    Ok(())
+}
+
+/// An empty sample for `target`; the rank correlation looks at one row in `rank_step`.
+pub fn empty_sample(target: &SampleTarget<'_>, rank_step: usize) -> TableSample {
+    TableSample {
+        presence: Presence::new(target.columns.len()),
+        values: ValueProfile::new(target.columns.len(), rank_step),
+    }
 }
 
 /// Rows of the root table that take part: all of them, or the first `limit`.

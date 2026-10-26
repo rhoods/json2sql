@@ -315,6 +315,7 @@ fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
         skip_cascade_warnings,
         detected_format: snap.detected_format,
         group_columns: snap.group_columns,
+        samples: Vec::new(),
     })
 }
 
@@ -644,6 +645,7 @@ mod tests {
             skip_cascade_warnings: vec![],
             detected_format: None,
             group_columns: vec![],
+            samples: vec![],
         }
     }
 

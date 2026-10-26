@@ -21,6 +21,9 @@
 //! - fn `ReadPlan::target` — la cible de l'échantillonneur pour cette table, si son objet est atteignable.
 //! - fn `read_plans` — où lire chacune des tables.
 //! - fn `eligible` — vrai pour une table de stratégie `Columns` ou `AutoSplit` avec assez de colonnes de données.
+//! - fn `samples_of_rows` — échantillons gardés par le Pass 1 : présence et valeurs de chaque table éligible dans les lignes de sa racine (#91, phase 2).
+//! - fn `root_of` — table racine d'une table, en remontant ses parents.
+//! - struct `SamplePlan` — où lire une table dans les lignes gardées par le Pass 1, et son échantillon en cours.
 //! - fn `data_columns_by_name` — colonnes de données d'une table triées par nom : l'ordre de l'échantillon et de la proposition.
 //! - fn `key_path` — chemin de clés d'une colonne dans l'objet de sa table, comme `push_data_col`.
 //! - fn `object_path` — clés à suivre depuis une ligne racine jusqu'à la table, si aucun tableau n'est traversé.
@@ -38,7 +41,8 @@ use super::placement::placements;
 use super::proposal::TableProposal;
 use super::proposal::{avoid_taken_names, propose, ColumnName, DataSignals};
 use super::render::{to_markdown, to_toml};
-use super::sample::{sample_tables, SampleSource, SampleTarget, TableSample, DEFAULT_BUDGET};
+use super::sample::{empty_sample, observe_row, sample_tables, SampleSource, SampleTarget, StoredSample, TableSample, DEFAULT_BUDGET};
+use super::values::RANK_SAMPLE;
 use crate::error::{J2sError, Result};
 use crate::schema::table_schema::{ChildKind, ColumnSchema, TableSchema};
 
@@ -148,6 +152,83 @@ pub(super) fn proposal_for(
 /// A table that can be split (`Columns` or `AutoSplit`) with enough data columns.
 pub(super) fn eligible(schema: &TableSchema) -> bool {
     schema.takes_column_groups() && schema.data_columns().count() >= MIN_TABLE_COLUMNS
+}
+
+/// Where a table is read in the rows Pass 1 keeps, and its sample so far (`None` once its rows did not fit).
+struct SamplePlan<'s> {
+    table: &'s TableSchema,
+    /// The wrapper key of its root table.
+    root: &'s str,
+    path: Vec<String>,
+    keys: Vec<Vec<String>>,
+    sample: Option<TableSample>,
+}
+
+impl<'s> SamplePlan<'s> {
+    /// The plans of the eligible tables reached from their root through objects only.
+    fn of_eligible(schemas: &'s [TableSchema], row_count: usize) -> Vec<Self> {
+        schemas
+            .iter()
+            .filter(|t| eligible(t))
+            .filter_map(|table| {
+                let path = object_path(schemas, table)?;
+                let root = root_of(schemas, table)?.path[0].as_str();
+                let keys: Vec<Vec<String>> = data_columns_by_name(table).iter().map(|c| key_path(table, c)).collect();
+                let sample = Some(empty_sample(&SampleTarget { path: &path, columns: &keys }, row_count / RANK_SAMPLE));
+                Some(Self { table, root, path, keys, sample })
+            })
+            .collect()
+    }
+
+    /// Adds a row read under `key`; a row that does not fit the path drops the sample.
+    fn observe(&mut self, key: Option<&str>, row: &serde_json::Value) {
+        let Some(sample) = self.sample.as_mut() else { return };
+        if key.is_some_and(|key| key != self.root) {
+            return;
+        }
+        if observe_row(sample, row, &SampleTarget { path: &self.path, columns: &self.keys }).is_err() {
+            self.sample = None;
+        }
+    }
+}
+
+/// The samples Pass 1 keeps (#91, phase 2): for each eligible table reached from its root through objects only, the
+/// presence and values of its columns (sorted by name) in the rows read under its root's wrapper key. The rows come
+/// one at a time (`row_count` of them), so that only one is parsed at once. A table whose rows do not fit its path
+/// (an array where an object is expected) gets no sample: Pass 1 never fails on it.
+pub fn samples_of_rows(
+    schemas: &[TableSchema],
+    rows: impl IntoIterator<Item = (Option<String>, serde_json::Value)>,
+    row_count: usize,
+) -> Vec<StoredSample> {
+    let mut plans = SamplePlan::of_eligible(schemas, row_count);
+    for (key, row) in rows {
+        for plan in &mut plans {
+            plan.observe(key.as_deref(), &row);
+        }
+    }
+    plans
+        .into_iter()
+        .filter_map(|plan| {
+            Some(StoredSample {
+                table: plan.table.name.clone(),
+                columns: data_columns_by_name(plan.table).iter().map(|c| c.name.clone()).collect(),
+                sample: plan.sample?,
+            })
+        })
+        .collect()
+}
+
+/// The root table above `table` (itself for a root table).
+fn root_of<'s>(schemas: &'s [TableSchema], table: &'s TableSchema) -> Option<&'s TableSchema> {
+    let mut current = table;
+    for _ in 0..=schemas.len() {
+        if current.is_root() {
+            return Some(current);
+        }
+        current = schemas.iter().find(|s| Some(&s.name) == current.parent_table.as_ref())?;
+    }
+    None
 }
 
 /// The data columns of a table by original name, then by `PostgreSQL` name: the one order of the columns for the
@@ -570,6 +651,51 @@ mod tests {
         assert!(a.toml.contains("\nnutriscore_nutrition = ["), "the shared values confirm the fusion: {}", a.toml);
         assert_eq!(a.toml, b.toml);
         assert_eq!(a.report, b.report);
+    }
+
+    /// The rows of `f`, as Pass 1 keeps them (no wrapper key).
+    fn rows_of(f: &tempfile::NamedTempFile) -> Vec<(Option<String>, Value)> {
+        std::fs::read_to_string(f.path())
+            .unwrap()
+            .lines()
+            .map(|l| (None, serde_json::from_str(l).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn pass_1_keeps_a_sample_of_each_eligible_table_with_its_columns_sorted_by_name() {
+        // #91 phase 2: the data signals without reading the file again
+        let mut schemas = schemas(60, ChildKind::Object);
+        schemas[1].columns.reverse();
+        let samples = samples_of_rows(&schemas, rows_of(&jsonl(60)), 60);
+        assert_eq!(samples.len(), 1, "items (one column) is not eligible");
+        let s = &samples[0];
+        assert_eq!(s.table, "items_props");
+        let mut sorted = s.columns.clone();
+        sorted.sort();
+        assert_eq!(s.columns, sorted);
+        assert_eq!((s.columns.len(), s.sample.presence.rows()), (24, 60));
+    }
+
+    #[test]
+    fn a_table_under_an_array_or_whose_rows_do_not_fit_gets_no_sample_and_nothing_fails() {
+        let mut schemas = schemas(60, ChildKind::Object);
+        schemas.push(wide_child("more", ChildKind::ObjectArray));
+        let mut rows = rows_of(&jsonl(60));
+        rows[5].1["props"] = json!([1, 2]);
+        let samples = samples_of_rows(&schemas, rows, 60);
+        assert!(samples.is_empty(), "{:?}", samples.iter().map(|s| &s.table).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_rows_of_another_wrapper_key_are_not_sampled() {
+        let schemas = schemas(60, ChildKind::Object);
+        let rows: Vec<(Option<String>, Value)> = rows_of(&jsonl(60))
+            .into_iter()
+            .enumerate()
+            .map(|(i, (_, v))| (Some(if i < 20 { "items" } else { "other" }.to_string()), v))
+            .collect();
+        assert_eq!(samples_of_rows(&schemas, rows, 60)[0].sample.presence.rows(), 20);
     }
 
     #[test]
