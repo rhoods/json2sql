@@ -41,6 +41,10 @@ pub fn compute_jaccard_display(schemas: &[TableSchema], indices: &[usize]) -> Ja
     use json2sql::schema::cascading::scoring::pairwise_jaccard_min;
     use std::collections::HashSet as HS;
 
+    // a selection can still hold the index of a group table that is no longer listed (#91)
+    let indices: Vec<usize> = indices.iter().copied().filter(|&i| i < schemas.len()).collect();
+    let indices = indices.as_slice();
+
     if indices.len() < 2 {
         return JaccardDisplay { score: 1.0, common: 0, union_count: 0 };
     }
@@ -89,7 +93,9 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     let schemas           = display_schemas(&originals, &overrides_snap, &state.read().schema.group_columns);
     let overflow_warnings  = state.read().schema.overflow_warnings.clone();
     let config_warnings    = state.read().schema.config_warnings.clone();
-    let selected_indices  = state.read().schema.selected_table_indices.clone();
+    // the indices of group tables that are no longer listed (column groups unticked) are dropped (#91)
+    let selected_indices: std::collections::HashSet<usize> = state.read().schema.selected_table_indices
+        .iter().copied().filter(|&i| i < schemas.len()).collect();
     let absorbed_names    = state.read().schema.absorbed_names.clone();
 
     let overflow_names: std::collections::HashSet<String> =
@@ -962,6 +968,18 @@ mod tests {
             s.columns.push(ColumnSchema { name: k.to_string(), original_name: k.to_string(), pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false });
         }
         s
+    }
+
+    #[test]
+    fn jaccard_display_ignores_indices_of_tables_no_longer_listed() {
+        // #91: unticking column groups removes the group rows a selection may still point to
+        let schemas = vec![
+            make_schema_with_cols("img_front", Some("img"), &["url", "width"]),
+            make_schema_with_cols("img_back",  Some("img"), &["url", "width"]),
+        ];
+        let d = compute_jaccard_display(&schemas, &[0, 1, 141]);
+        assert!((d.score - 1.0).abs() < 1e-9);
+        assert_eq!(d.union_count, 2);
     }
 
     #[test]
