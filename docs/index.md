@@ -46,6 +46,7 @@ fiche ou avancer `verified_at`. `tests/guides_consistency.rs` vérifie en CI que
 |---|---|
 | [guides/ajouter-une-strategie.md](guides/ajouter-une-strategie.md) | Ajouter une stratégie de matérialisation : tableau des stratégies existantes, flux, checklist (ce que le compilateur impose, et le reste), odeurs constatées (fiche pilote) |
 | [guides/config-toml.md](guides/config-toml.md) | Modifier la config TOML (`--schema-config`), les overrides de l'IHM ou le snapshot : où intervenir, tableaux des avertissements et des overrides, pièges silencieux (TOML réappliqué sur un snapshot, IHM et TOML sur la même table, clés ignorées), checklists nouvelle stratégie, nouveau champ ou version du snapshot |
+| [guides/finalisation.md](guides/finalisation.md) | Modifier la finalisation du schéma (phases de `SchemaFinalizer`, fusion des tables sœurs, noms, garde des 1 600 colonnes) : où intervenir, formes de clé, pièges silencieux (tables synthétiques, dédoublonnage, colonne clé), checklists |
 | [guides/pass1.md](guides/pass1.md) | Modifier la Pass 1 (lecture du fichier, observation des types, échantillon) : où intervenir, tableau des types inférés, pièges silencieux (fusion parallèle, ordre des colonnes, nouveau type qui devient `TEXT`), checklists statistique et type inféré |
 | [guides/pass2.md](guides/pass2.md) | Modifier la Pass 2 (parcours du JSON, écriture des lignes, COPY) : où intervenir, pièges silencieux (ordre des colonnes, tables et sinks sautés, colonnes générées), tests sans base avec `CaptureSink` |
 

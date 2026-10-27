@@ -8,8 +8,9 @@
 //!   qui est le nom exact d'une définition doit figurer dans `symbols:`.
 //! - Niveau 2 : ce qui s'énumère dans le code est mentionné dans la fiche. Pilote : variantes
 //!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`),
-//!   variantes d'`InferredType` (fiche `pass1.md`), de `ConfigWarning` et `UserOverride` (fiche
-//!   `config-toml.md`).
+//!   variantes d'`InferredType` (fiche `pass1.md`), variantes de `KeyShape` et `ChildKind`
+//!   (fiche `finalisation.md`), variantes de `ConfigWarning` et
+//!   `UserOverride` (fiche `config-toml.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
@@ -27,6 +28,7 @@ use code_items::{collect_rs_files, extract_code_items, find_matching_brace};
 
 const STRATEGY_GUIDE: &str = "docs/guides/ajouter-une-strategie.md";
 const PASS1_GUIDE: &str = "docs/guides/pass1.md";
+const FINALISATION_GUIDE: &str = "docs/guides/finalisation.md";
 const CONFIG_GUIDE: &str = "docs/guides/config-toml.md";
 
 /// En-tête YAML d'une fiche : `verified_at` et les listes `files:` / `symbols:`.
@@ -247,6 +249,24 @@ fn pass1_guide_lists_every_inferred_type() {
         missing.is_empty(),
         "{PASS1_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des types pour {missing:?}"
     );
+}
+
+/// Niveau 2 : chaque variante de `KeyShape` et de `ChildKind` a sa ligne dans un tableau de la
+/// fiche finalisation. Le nom de colonne clé est choisi par des `match` avec cas par défaut : une
+/// forme de clé ajoutée compile sans qu'on y pense.
+#[test]
+fn finalisation_guide_lists_key_shapes_and_child_kinds() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join(FINALISATION_GUIDE)).unwrap();
+    for enum_name in ["KeyShape", "ChildKind"] {
+        let variants = enum_variants(&root, "src/schema/table_schema.rs", enum_name);
+        assert!(variants.len() > 1, "extraction des variantes de {enum_name} cassée : {variants:?}");
+        let missing = variants_missing_from_table(&guide, &variants);
+        assert!(
+            missing.is_empty(),
+            "{FINALISATION_GUIDE} : pas de ligne `| `Variante` |` dans le tableau {enum_name} pour {missing:?}"
+        );
+    }
 }
 
 /// Niveau 2 : chaque variante de `ConfigWarning` (ce que le TOML ignore) et de `UserOverride`
