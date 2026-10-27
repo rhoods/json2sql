@@ -26,6 +26,7 @@ use code_items::{collect_rs_files, extract_code_items, find_matching_brace};
 
 const STRATEGY_GUIDE: &str = "docs/guides/ajouter-une-strategie.md";
 const PASS1_GUIDE: &str = "docs/guides/pass1.md";
+const GROUPS_GUIDE: &str = "docs/guides/groupes-colonnes.md";
 
 /// En-tête YAML d'une fiche : `verified_at` et les listes `files:` / `symbols:`.
 #[derive(Debug, Default, PartialEq)]
@@ -244,6 +245,22 @@ fn pass1_guide_lists_every_inferred_type() {
     assert!(
         missing.is_empty(),
         "{PASS1_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des types pour {missing:?}"
+    );
+}
+
+/// Niveau 2 : chaque variante de `Signal` a sa ligne dans le tableau des signaux de la fiche des
+/// groupes de colonnes. `DataSignals::evidence` recopie ces variantes à la main, ce que le compilateur
+/// ne vérifie pas : la fiche le rappelle.
+#[test]
+fn groups_guide_lists_every_signal() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join(GROUPS_GUIDE)).unwrap();
+    let variants = enum_variants(&root, "src/schema/grouping/proposal.rs", "Signal");
+    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    let missing = variants_missing_from_table(&guide, &variants);
+    assert!(
+        missing.is_empty(),
+        "{GROUPS_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des signaux pour {missing:?}"
     );
 }
 
