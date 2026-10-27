@@ -7,13 +7,13 @@
 //!   partagée dans `tests/common/code_items.rs`. Filet : un mot cité entre backticks dans le texte
 //!   qui est le nom exact d'une définition doit figurer dans `symbols:`.
 //! - Niveau 2 : ce qui s'énumère dans le code est mentionné dans la fiche. Pilote : variantes
-//!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`),
-//!   variantes d'`InferredType` (fiche `pass1.md`), variantes de `KeyShape` et `ChildKind`
-//!   (fiche `finalisation.md`), variantes de `ProgressEvent`
-//!   (fiche `worker-ipc.md`), options de la CLI et leurs valeurs
-//!   dans `usage.md` (fiche `cli-pipeline.md`), variantes de `PgType` (fiche `db.md`), variantes de `Signal`
-//!   (fiche `groupes-colonnes.md`), variantes d'`AppScreen` (fiche `ihm.md`), variantes de `ConfigWarning` et
-//!   `UserOverride` (fiche `config-toml.md`).
+//!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL`
+//!   (fiche `ajouter-une-strategie.md`), variantes d'`InferredType` (fiche `pass1.md`), variantes
+//!   de `KeyShape` et `ChildKind` (fiche `finalisation.md`), variantes de `ProgressEvent`
+//!   (fiche `worker-ipc.md`), options de la CLI et leurs valeurs dans `usage.md`
+//!   (fiche `cli-pipeline.md`), variantes de `PgType` (fiche `db.md`), variantes de `Signal`
+//!   (fiche `groupes-colonnes.md`), variantes d'`AppScreen` (fiche `ihm.md`), variantes de
+//!   `ConfigWarning` et `UserOverride` (fiche `config-toml.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
