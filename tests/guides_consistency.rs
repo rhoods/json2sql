@@ -12,7 +12,8 @@
 //!   (fiche `finalisation.md`), variantes de `ProgressEvent`
 //!   (fiche `worker-ipc.md`), options de la CLI et leurs valeurs
 //!   dans `usage.md` (fiche `cli-pipeline.md`), variantes de `PgType` (fiche `db.md`), variantes de `Signal`
-//!   (fiche `groupes-colonnes.md`), variantes d'`AppScreen` (fiche `ihm.md`).
+//!   (fiche `groupes-colonnes.md`), variantes d'`AppScreen` (fiche `ihm.md`), variantes de `ConfigWarning` et
+//!   `UserOverride` (fiche `config-toml.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
@@ -31,6 +32,7 @@ use code_items::{collect_rs_files, extract_code_items, find_matching_brace};
 const STRATEGY_GUIDE: &str = "docs/guides/ajouter-une-strategie.md";
 const PASS1_GUIDE: &str = "docs/guides/pass1.md";
 const FINALISATION_GUIDE: &str = "docs/guides/finalisation.md";
+const CONFIG_GUIDE: &str = "docs/guides/config-toml.md";
 const IHM_GUIDE: &str = "docs/guides/ihm.md";
 const GROUPS_GUIDE: &str = "docs/guides/groupes-colonnes.md";
 const DB_GUIDE: &str = "docs/guides/db.md";
@@ -392,6 +394,26 @@ fn ihm_guide_lists_every_app_screen() {
         missing.is_empty(),
         "{IHM_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des écrans pour {missing:?}"
     );
+}
+
+/// Niveau 2 : chaque variante de `ConfigWarning` (ce que le TOML ignore) et de `UserOverride`
+/// (qui la pose, ce qu'en fait `apply_single_user_override`) a sa ligne dans un tableau de la fiche.
+#[test]
+fn config_guide_lists_every_warning_and_override() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join(CONFIG_GUIDE)).unwrap();
+    for (file, enum_name) in [
+        ("src/schema/config.rs", "ConfigWarning"),
+        ("src/schema/table_schema.rs", "UserOverride"),
+    ] {
+        let variants = enum_variants(&root, file, enum_name);
+        assert!(variants.len() > 1, "extraction des variantes de {enum_name} cassée : {variants:?}");
+        let missing = variants_missing_from_table(&guide, &variants);
+        assert!(
+            missing.is_empty(),
+            "{CONFIG_GUIDE} : pas de ligne `| `Variante` |` pour {enum_name} {missing:?}"
+        );
+    }
 }
 
 /// Niveau 2 : chaque stratégie désactivable figure dans la colonne « Désactivable » du tableau
