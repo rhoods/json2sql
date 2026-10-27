@@ -9,7 +9,8 @@
 //! - Niveau 2 : ce qui s'énumère dans le code est mentionné dans la fiche. Pilote : variantes
 //!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`),
 //!   variantes d'`InferredType` (fiche `pass1.md`), variantes de `KeyShape` et `ChildKind`
-//!   (fiche `finalisation.md`).
+//!   (fiche `finalisation.md`), variantes de `ProgressEvent`
+//!   (fiche `worker-ipc.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
@@ -28,6 +29,7 @@ use code_items::{collect_rs_files, extract_code_items, find_matching_brace};
 const STRATEGY_GUIDE: &str = "docs/guides/ajouter-une-strategie.md";
 const PASS1_GUIDE: &str = "docs/guides/pass1.md";
 const FINALISATION_GUIDE: &str = "docs/guides/finalisation.md";
+const WORKER_IPC_GUIDE: &str = "docs/guides/worker-ipc.md";
 
 /// En-tête YAML d'une fiche : `verified_at` et les listes `files:` / `symbols:`.
 #[derive(Debug, Default, PartialEq)]
@@ -265,6 +267,21 @@ fn finalisation_guide_lists_key_shapes_and_child_kinds() {
             "{FINALISATION_GUIDE} : pas de ligne `| `Variante` |` dans le tableau {enum_name} pour {missing:?}"
         );
     }
+}
+
+/// Niveau 2 : chaque variante de `ProgressEvent` a sa ligne dans le tableau des événements de
+/// la fiche worker et IPC (passe ou non par le socket, rôle dans le protocole).
+#[test]
+fn worker_ipc_guide_lists_every_progress_event() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join(WORKER_IPC_GUIDE)).unwrap();
+    let variants = enum_variants(&root, "src/io/progress_event.rs", "ProgressEvent");
+    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    let missing = variants_missing_from_table(&guide, &variants);
+    assert!(
+        missing.is_empty(),
+        "{WORKER_IPC_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des événements pour {missing:?}"
+    );
 }
 
 /// Niveau 2 : chaque stratégie désactivable figure dans la colonne « Désactivable » du tableau
