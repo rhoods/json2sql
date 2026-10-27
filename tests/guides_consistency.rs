@@ -7,7 +7,8 @@
 //!   partagée dans `tests/common/code_items.rs`. Filet : un mot cité entre backticks dans le texte
 //!   qui est le nom exact d'une définition doit figurer dans `symbols:`.
 //! - Niveau 2 : ce qui s'énumère dans le code est mentionné dans la fiche. Pilote : variantes
-//!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`).
+//!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`),
+//!   options de la CLI et leurs valeurs dans `usage.md` (fiche `cli-pipeline.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
@@ -251,6 +252,65 @@ fn optional_strategies_documented() {
         }
     }
     assert!(errors.is_empty(), "Stratégies désactivables non documentées :\n{}", errors.join("\n"));
+}
+
+/// Lignes de tableau `| `--x` |` d'un texte, par nom d'option.
+fn option_row<'a>(text: &'a str, long: &str) -> Option<&'a str> {
+    let start = format!("| `--{long}` |");
+    text.lines().find(|l| l.starts_with(&start))
+}
+
+/// Niveau 2 (fiche `cli-pipeline.md`) : chaque option de la CLI a sa ligne dans usage.md, avec ses
+/// valeurs possibles ; les options d'`inspect` dans la section de `inspect`. Lu par l'introspection
+/// de clap (`Cli::command()`), dérivée des définitions, pas d'une liste tenue à la main.
+#[test]
+fn cli_options_documented() {
+    use clap::CommandFactory;
+    let usage = fs::read_to_string(workspace_root().join("docs/functional/usage.md")).unwrap();
+    let inspect_section = usage
+        .split_once("### Paramètres de `inspect`")
+        .and_then(|(_, rest)| rest.split("\n### ").next())
+        .expect("section « Paramètres de `inspect` » introuvable dans usage.md");
+    let cli = json2sql::cli::Cli::command();
+    let inspect = cli.find_subcommand("inspect").expect("sous-commande `inspect` introuvable");
+
+    let mut errors = Vec::new();
+    let mut checked = 0;
+    for (cmd, text, where_) in [(&cli, usage.as_str(), "usage.md"), (inspect, inspect_section, "usage.md § inspect")] {
+        for arg in cmd.get_arguments() {
+            let Some(long) = arg.get_long() else { continue }; // `FILE` d'inspect, positionnel
+            if long == "help" || long == "version" {
+                continue;
+            }
+            checked += 1;
+            let Some(row) = option_row(text, long) else {
+                errors.push(format!("  {where_} : pas de ligne `| `--{long}` |`"));
+                continue;
+            };
+            // Les booléens ont `true`/`false` pour valeurs : seules comptent les options à valeur.
+            let values = if arg.get_action().takes_values() { arg.get_possible_values() } else { Vec::new() };
+            for value in values {
+                if !row.contains(&format!("`{}`", value.get_name())) {
+                    errors.push(format!("  {where_} : `{}` absent de la ligne `--{long}`", value.get_name()));
+                }
+            }
+        }
+    }
+    assert!(checked > 20, "extraction des options cassée : {checked} options");
+
+    // L'aide de `--disable-strategy` recopie les valeurs de `StrategyName::OPTIONAL` (odeur 4 de #96).
+    let help = cli
+        .get_arguments()
+        .find(|a| a.get_long() == Some("disable-strategy"))
+        .and_then(|a| a.get_help())
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    for s in StrategyName::OPTIONAL {
+        if !help.contains(s.as_str()) {
+            errors.push(format!("  src/cli.rs : `{}` absent de l'aide de `--disable-strategy`", s.as_str()));
+        }
+    }
+    assert!(errors.is_empty(), "Options de la CLI non documentées :\n{}", errors.join("\n"));
 }
 
 #[cfg(test)]
