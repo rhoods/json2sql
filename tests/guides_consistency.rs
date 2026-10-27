@@ -12,7 +12,7 @@
 //!   (fiche `finalisation.md`), variantes de `ProgressEvent`
 //!   (fiche `worker-ipc.md`), options de la CLI et leurs valeurs
 //!   dans `usage.md` (fiche `cli-pipeline.md`), variantes de `PgType` (fiche `db.md`), variantes de `Signal`
-//!   (fiche `groupes-colonnes.md`).
+//!   (fiche `groupes-colonnes.md`), variantes d'`AppScreen` (fiche `ihm.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
@@ -31,6 +31,7 @@ use code_items::{collect_rs_files, extract_code_items, find_matching_brace};
 const STRATEGY_GUIDE: &str = "docs/guides/ajouter-une-strategie.md";
 const PASS1_GUIDE: &str = "docs/guides/pass1.md";
 const FINALISATION_GUIDE: &str = "docs/guides/finalisation.md";
+const IHM_GUIDE: &str = "docs/guides/ihm.md";
 const GROUPS_GUIDE: &str = "docs/guides/groupes-colonnes.md";
 const DB_GUIDE: &str = "docs/guides/db.md";
 const WORKER_IPC_GUIDE: &str = "docs/guides/worker-ipc.md";
@@ -376,6 +377,20 @@ fn groups_guide_lists_every_signal() {
     assert!(
         missing.is_empty(),
         "{GROUPS_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des signaux pour {missing:?}"
+    );
+}
+
+/// Niveau 2 : chaque variante d'`AppScreen` a sa ligne dans le tableau des écrans de la fiche IHM.
+#[test]
+fn ihm_guide_lists_every_app_screen() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join(IHM_GUIDE)).unwrap();
+    let variants = enum_variants(&root, "json2sql-ui/src/state/mod.rs", "AppScreen");
+    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    let missing = variants_missing_from_table(&guide, &variants);
+    assert!(
+        missing.is_empty(),
+        "{IHM_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des écrans pour {missing:?}"
     );
 }
 
