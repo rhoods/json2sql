@@ -110,7 +110,10 @@ mod tests {
 
     #[test]
     fn parse_ext_multiple() {
-        assert_eq!(parse_ext("*.json *.jsonl *.ndjson"), vec!["json", "jsonl", "ndjson"]);
+        assert_eq!(
+            parse_ext("*.json *.jsonl *.ndjson"),
+            vec!["json", "jsonl", "ndjson"]
+        );
     }
 
     #[test]
@@ -134,7 +137,10 @@ mod tests {
         assert!(PICKER_ACTIVE.load(Ordering::SeqCst));
         // Drop guard must reset the flag
         drop(PickerGuard);
-        assert!(!PICKER_ACTIVE.load(Ordering::SeqCst), "PickerGuard drop must reset PICKER_ACTIVE to false");
+        assert!(
+            !PICKER_ACTIVE.load(Ordering::SeqCst),
+            "PickerGuard drop must reset PICKER_ACTIVE to false"
+        );
     }
 
     #[test]

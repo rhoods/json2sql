@@ -37,15 +37,15 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
-use urlencoding::encode;
-use zeroize::{Zeroize, Zeroizing};
 use json2sql::io::progress_event::ProgressEvent;
-use json2sql::schema::naming::{ColumnCollision, TruncatedName};
+use json2sql::schema::config::ConfigWarning;
 use json2sql::schema::finalizer::OverflowWarning;
+use json2sql::schema::naming::{ColumnCollision, TruncatedName};
 use json2sql::schema::stats::ColumnStats;
 use json2sql::schema::strategies::StrategyName;
-use json2sql::schema::config::ConfigWarning;
 use json2sql::schema::table_schema::{TableSchema, UserOverride};
+use urlencoding::encode;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::worker_client::WorkerKillHandle;
 
@@ -116,8 +116,11 @@ impl PgConfig {
 
         Zeroizing::new(format!(
             "postgres://{}:{}@{}:{}/{}",
-            encode(&self.username), encode(&self.password),
-            host, self.port, encode(&self.database)
+            encode(&self.username),
+            encode(&self.password),
+            host,
+            self.port,
+            encode(&self.database)
         ))
     }
 
@@ -301,7 +304,10 @@ impl ProjectState {
         self.source_file.is_some()
             && self.pg.is_complete()
             && !self.pg_schema.is_empty()
-            && self.pg_schema.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && self
+                .pg_schema
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_')
     }
 }
 
@@ -428,7 +434,9 @@ impl AppState {
         // Dedup defensively: snapshots saved before the finalizer fix may contain
         // duplicate table names → add_constraints() would fail with 42P16.
         let mut seen = std::collections::HashSet::new();
-        self.schema.schemas = snapshot.schemas.into_iter()
+        self.schema.schemas = snapshot
+            .schemas
+            .into_iter()
             .filter(|s| seen.insert(s.name.clone()))
             .collect();
         self.schema.truncated_names = snapshot.truncated_names;
@@ -465,7 +473,8 @@ impl AppState {
         // Stop the subprocess worker if one is active: SIGTERM lets it put back the PostgreSQL
         // settings it changed (max_wal_size, autovacuum) before SIGKILL after the grace delay.
         // 2 min: a cancel during the load COMMITs waits for them first (~50 s on OFF 70 GB, #80).
-        self.worker_kill.terminate(std::time::Duration::from_mins(2));
+        self.worker_kill
+            .terminate(std::time::Duration::from_mins(2));
         self.worker_kill = WorkerKillHandle::default();
         self.resume_socket = None;
         self.schema.clear();
@@ -502,9 +511,17 @@ impl AppState {
     /// Apply a `ProgressEvent` coming from a Pass 1 / Pass 2 runner.
     #[allow(clippy::too_many_lines)]
     pub fn apply_progress_event(&mut self, event: ProgressEvent) {
-        use ProgressEvent::{Pass1Log, Pass1Progress, Pass1Done, Pass2Progress, Pass2Flush, Pass2AnomalyUpdate, Pass2Log, Pass2Done, Pass2Error, DdlStart, DdlProgress, DdlDone, ConstraintsStart, ConstraintsProgress, ConstraintsDone};
+        use ProgressEvent::{
+            ConstraintsDone, ConstraintsProgress, ConstraintsStart, DdlDone, DdlProgress, DdlStart,
+            Pass1Done, Pass1Log, Pass1Progress, Pass2AnomalyUpdate, Pass2Done, Pass2Error,
+            Pass2Flush, Pass2Log, Pass2Progress,
+        };
         match event {
-            Pass1Progress { rows_scanned, bytes_read, total_bytes } => {
+            Pass1Progress {
+                rows_scanned,
+                bytes_read,
+                total_bytes,
+            } => {
                 self.schema.pass1_progress.rows_scanned = rows_scanned;
                 self.schema.pass1_progress.bytes_read = bytes_read;
                 self.schema.pass1_progress.total_bytes = total_bytes;
@@ -515,7 +532,11 @@ impl AppState {
                     format_bytes(total_bytes),
                 ));
             }
-            Pass1Done { total_rows, tables_count, columns_count } => {
+            Pass1Done {
+                total_rows,
+                tables_count,
+                columns_count,
+            } => {
                 self.schema.pass1_progress.rows_scanned = total_rows;
                 self.schema.pass1_progress.tables_count = tables_count;
                 self.schema.pass1_progress.columns_count = columns_count;
@@ -524,19 +545,33 @@ impl AppState {
                     "Schema complete: {tables_count} tables, {columns_count} columns"
                 ));
             }
-            Pass2Progress { rows_processed, bytes_read, total_bytes } => {
+            Pass2Progress {
+                rows_processed,
+                bytes_read,
+                total_bytes,
+            } => {
                 self.import.pass2_progress.rows_processed = rows_processed;
                 self.import.pass2_progress.bytes_read = bytes_read;
                 self.import.pass2_progress.total_bytes = total_bytes;
             }
-            Pass2Flush { table_name, rows_flushed } => {
-                *self.import.pass2_progress.rows_per_table.entry(table_name.clone()).or_default() += rows_flushed;
-                self.import.pass2_progress.push_log(format!(
-                    "flush {table_name} ({rows_flushed} rows)"
-                ));
+            Pass2Flush {
+                table_name,
+                rows_flushed,
+            } => {
+                *self
+                    .import
+                    .pass2_progress
+                    .rows_per_table
+                    .entry(table_name.clone())
+                    .or_default() += rows_flushed;
+                self.import
+                    .pass2_progress
+                    .push_log(format!("flush {table_name} ({rows_flushed} rows)"));
             }
             Pass2AnomalyUpdate { table_name, count } => {
-                self.import.pass2_progress.anomaly_counts_per_table
+                self.import
+                    .pass2_progress
+                    .anomaly_counts_per_table
                     .insert(table_name, count);
             }
             Pass1Log(msg) => {
@@ -545,7 +580,11 @@ impl AppState {
             Pass2Log(msg) => {
                 self.import.pass2_progress.push_log(msg);
             }
-            Pass2Done { total_rows, anomaly_count, constraint_warning_count } => {
+            Pass2Done {
+                total_rows,
+                anomaly_count,
+                constraint_warning_count,
+            } => {
                 self.import.pass2_progress.rows_processed = total_rows;
                 self.import.pass2_progress.total_anomalies = anomaly_count;
                 self.import.pass2_progress.constraint_warning_count = constraint_warning_count;
@@ -557,18 +596,21 @@ impl AppState {
                     "Import complete: {total_rows} rows, {anomaly_count} anomalies, {constraint_warning_count} FK warnings"
                 ));
             }
-            Pass2Error { table_name, message } => {
-                self.import.pass2_progress.push_log(format!(
-                    "Error in {table_name}: {message}"
-                ));
+            Pass2Error {
+                table_name,
+                message,
+            } => {
+                self.import
+                    .pass2_progress
+                    .push_log(format!("Error in {table_name}: {message}"));
             }
             DdlStart { table_count } => {
                 self.import.pass2_progress.ddl_table_count = table_count;
                 self.import.pass2_progress.ddl_done = 0;
                 self.import.pass2_progress.ddl_complete = false;
-                self.import.pass2_progress.push_log(format!(
-                    "Creating {table_count} tables…"
-                ));
+                self.import
+                    .pass2_progress
+                    .push_log(format!("Creating {table_count} tables…"));
             }
             DdlProgress { done, total } => {
                 self.import.pass2_progress.ddl_done = done;
@@ -596,9 +638,9 @@ impl AppState {
             }
             ConstraintsDone => {
                 self.import.pass2_progress.constraints_complete = true;
-                self.import.pass2_progress.push_log(
-                    "Constraints applied".to_string()
-                );
+                self.import
+                    .pass2_progress
+                    .push_log("Constraints applied".to_string());
             }
         }
     }
@@ -636,15 +678,24 @@ mod tests {
         assert!(s.column_collisions.is_empty());
         assert!(s.pass1_stats.is_empty());
         assert!(!s.pass1_progress.done);
-        assert_eq!(s.config_warnings, [] as [json2sql::schema::config::ConfigWarning; 0]);
+        assert_eq!(
+            s.config_warnings,
+            [] as [json2sql::schema::config::ConfigWarning; 0]
+        );
     }
 
     #[test]
     fn schema_state_clear_resets_config_warnings() {
         use json2sql::schema::config::ConfigWarning;
-        let mut s = SchemaState { config_warnings: vec![ConfigWarning::UnknownTable("t".to_string())], ..Default::default() };
+        let mut s = SchemaState {
+            config_warnings: vec![ConfigWarning::UnknownTable("t".to_string())],
+            ..Default::default()
+        };
         s.clear();
-        assert_eq!(s.config_warnings, [] as [json2sql::schema::config::ConfigWarning; 0]);
+        assert_eq!(
+            s.config_warnings,
+            [] as [json2sql::schema::config::ConfigWarning; 0]
+        );
     }
 
     #[test]
@@ -665,7 +716,10 @@ mod tests {
             group_columns: vec!["products".to_string()],
             samples: Vec::new(),
         });
-        assert_eq!(s.schema.group_columns, std::collections::BTreeSet::from(["products".to_string()]));
+        assert_eq!(
+            s.schema.group_columns,
+            std::collections::BTreeSet::from(["products".to_string()])
+        );
         s.clear_snapshot();
         assert_eq!(s.schema.group_columns.len(), 0);
     }
@@ -777,7 +831,11 @@ mod tests {
         let mut s = AppState::default();
         s.load_snapshot(snapshot);
 
-        assert_eq!(s.schema.schemas.len(), 2, "duplicate table names must be removed on load");
+        assert_eq!(
+            s.schema.schemas.len(),
+            2,
+            "duplicate table names must be removed on load"
+        );
         let names: Vec<&str> = s.schema.schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"dup"));
         assert!(names.contains(&"other"));
@@ -798,11 +856,13 @@ mod tests {
         s.project.source_file = Some(PathBuf::from("/tmp/data.json"));
         s.project.pg.host = "myhost".to_string();
         s.schema.schema_snapshot_loaded = true;
-        s.schema.truncated_names.push(json2sql::schema::naming::TruncatedName {
-            original_path: "a.b".to_string(),
-            full_name: "a_b_long".to_string(),
-            pg_name: "a_b".to_string(),
-        });
+        s.schema
+            .truncated_names
+            .push(json2sql::schema::naming::TruncatedName {
+                original_path: "a.b".to_string(),
+                full_name: "a_b_long".to_string(),
+                pg_name: "a_b".to_string(),
+            });
         s.import.pass2_progress.rows_processed = 42;
         s.cancel();
 
@@ -818,7 +878,10 @@ mod tests {
     #[test]
     fn ready_to_start_delegates_to_project_is_complete() {
         let mut s = AppState::default();
-        assert!(!s.ready_to_start(), "incomplete project should not be ready");
+        assert!(
+            !s.ready_to_start(),
+            "incomplete project should not be ready"
+        );
         s.project.source_file = Some(PathBuf::from("/tmp/data.json"));
         s.project.pg.database = "mydb".to_string();
         s.project.pg.username = "user".to_string();
@@ -828,15 +891,20 @@ mod tests {
     #[test]
     fn pass2_parallel_default_is_in_valid_range() {
         let s = AppState::default();
-        assert!(s.project.pass2_parallel >= 1, "pass2_parallel must be at least 1");
-        assert!(s.project.pass2_parallel <= 32, "pass2_parallel should not exceed 32");
+        assert!(
+            s.project.pass2_parallel >= 1,
+            "pass2_parallel must be at least 1"
+        );
+        assert!(
+            s.project.pass2_parallel <= 32,
+            "pass2_parallel should not exceed 32"
+        );
     }
 
     #[test]
     fn pass2_parallel_matches_available_cpus_capped_at_8() {
         let s = AppState::default();
-        let cpus = std::thread::available_parallelism()
-            .map_or(4, std::num::NonZeroUsize::get);
+        let cpus = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
         assert_eq!(s.project.pass2_parallel, cpus.min(8));
     }
 
@@ -905,8 +973,7 @@ mod tests {
             rows_flushed: 120,
         });
         assert_eq!(
-            s.import.pass2_progress.rows_per_table["orders"],
-            240,
+            s.import.pass2_progress.rows_per_table["orders"], 240,
             "two identical Pass2Flush events double the count — runner must not emit both"
         );
     }
@@ -922,27 +989,42 @@ mod tests {
             table_name: "users".to_string(),
             count: 2,
         });
-        assert_eq!(s.import.pass2_progress.anomaly_counts_per_table["orders"], 5);
-        assert_eq!(s.import.pass2_progress.anomaly_counts_per_table["users"],  2);
-        assert_eq!(s.import.pass2_progress.anomaly_counts_per_table.len(),     2);
+        assert_eq!(
+            s.import.pass2_progress.anomaly_counts_per_table["orders"],
+            5
+        );
+        assert_eq!(s.import.pass2_progress.anomaly_counts_per_table["users"], 2);
+        assert_eq!(s.import.pass2_progress.anomaly_counts_per_table.len(), 2);
     }
 
     #[test]
     fn copy_complete_set_on_constraints_start() {
         let mut s = AppState::default();
-        assert!(!s.import.pass2_progress.copy_complete, "false before ConstraintsStart");
+        assert!(
+            !s.import.pass2_progress.copy_complete,
+            "false before ConstraintsStart"
+        );
 
         // Streaming + inserting events should not set it
         s.apply_progress_event(ProgressEvent::Pass2Progress {
-            rows_processed: 1000, bytes_read: 1_000_000, total_bytes: 100_000_000,
+            rows_processed: 1000,
+            bytes_read: 1_000_000,
+            total_bytes: 100_000_000,
         });
         s.apply_progress_event(ProgressEvent::Pass2Flush {
-            table_name: "users".to_string(), rows_flushed: 500,
+            table_name: "users".to_string(),
+            rows_flushed: 500,
         });
-        assert!(!s.import.pass2_progress.copy_complete, "still false after streaming/flush");
+        assert!(
+            !s.import.pass2_progress.copy_complete,
+            "still false after streaming/flush"
+        );
 
         s.apply_progress_event(ProgressEvent::ConstraintsStart { table_count: 3 });
-        assert!(s.import.pass2_progress.copy_complete, "true once ConstraintsStart fires");
+        assert!(
+            s.import.pass2_progress.copy_complete,
+            "true once ConstraintsStart fires"
+        );
     }
 
     #[test]
@@ -958,7 +1040,12 @@ mod tests {
         s.apply_progress_event(ProgressEvent::DdlDone);
         assert!(s.import.pass2_progress.ddl_complete);
         // DdlDone should have appended a log line
-        assert!(s.import.pass2_progress.log_lines.iter().any(|l| l.contains("Tables created")));
+        assert!(s
+            .import
+            .pass2_progress
+            .log_lines
+            .iter()
+            .any(|l| l.contains("Tables created")));
     }
 
     #[test]
@@ -975,7 +1062,12 @@ mod tests {
 
         s.apply_progress_event(ProgressEvent::ConstraintsDone);
         assert!(s.import.pass2_progress.constraints_complete);
-        assert!(s.import.pass2_progress.log_lines.iter().any(|l| l.contains("Constraints applied")));
+        assert!(s
+            .import
+            .pass2_progress
+            .log_lines
+            .iter()
+            .any(|l| l.contains("Constraints applied")));
     }
 
     #[test]
@@ -1004,12 +1096,28 @@ mod tests {
         // applying them one-by-one — and done must be true.
         let mut s = AppState::default();
         let batch = vec![
-            ProgressEvent::Pass2Progress { rows_processed: 5_000, bytes_read: 1024, total_bytes: 2048 },
-            ProgressEvent::Pass2Flush { table_name: "orders".to_string(), rows_flushed: 5_000 },
-            ProgressEvent::Pass2Done { total_rows: 5_000, anomaly_count: 0, constraint_warning_count: 0 },
+            ProgressEvent::Pass2Progress {
+                rows_processed: 5_000,
+                bytes_read: 1024,
+                total_bytes: 2048,
+            },
+            ProgressEvent::Pass2Flush {
+                table_name: "orders".to_string(),
+                rows_flushed: 5_000,
+            },
+            ProgressEvent::Pass2Done {
+                total_rows: 5_000,
+                anomaly_count: 0,
+                constraint_warning_count: 0,
+            },
         ];
-        for e in batch { s.apply_progress_event(e); }
-        assert!(s.import.pass2_progress.done, "Pass2Done in batch must set done=true");
+        for e in batch {
+            s.apply_progress_event(e);
+        }
+        assert!(
+            s.import.pass2_progress.done,
+            "Pass2Done in batch must set done=true"
+        );
         assert_eq!(s.import.pass2_progress.rows_processed, 5_000);
         assert_eq!(s.import.pass2_progress.rows_per_table["orders"], 5_000);
     }
@@ -1019,12 +1127,16 @@ mod tests {
         // After the channel closes (None), any pending events must be flushed.
         // This test verifies that Pass2Log in a residual batch appears in log_lines.
         let mut s = AppState::default();
-        let residual = vec![
-            ProgressEvent::Pass2Log("Import complete".to_string()),
-        ];
-        for e in residual { s.apply_progress_event(e); }
+        let residual = vec![ProgressEvent::Pass2Log("Import complete".to_string())];
+        for e in residual {
+            s.apply_progress_event(e);
+        }
         assert!(
-            s.import.pass2_progress.log_lines.iter().any(|l| l.contains("Import complete")),
+            s.import
+                .pass2_progress
+                .log_lines
+                .iter()
+                .any(|l| l.contains("Import complete")),
             "residual log event must appear after flush"
         );
     }
@@ -1032,13 +1144,19 @@ mod tests {
     #[test]
     fn pass2_progress_constraints_skipped_default_false() {
         let p = Pass2Progress::default();
-        assert!(!p.constraints_skipped, "constraints_skipped must default to false");
+        assert!(
+            !p.constraints_skipped,
+            "constraints_skipped must default to false"
+        );
     }
 
     #[test]
     fn project_state_skip_constraints_default_false() {
         let p = ProjectState::default();
-        assert!(!p.skip_constraints, "skip_constraints must default to false");
+        assert!(
+            !p.skip_constraints,
+            "skip_constraints must default to false"
+        );
     }
 
     #[test]
@@ -1050,8 +1168,10 @@ mod tests {
             anomaly_count: 0,
             constraint_warning_count: 0,
         });
-        assert!(s.import.pass2_progress.constraints_complete,
-            "constraints_complete must be forced true when constraints_skipped");
+        assert!(
+            s.import.pass2_progress.constraints_complete,
+            "constraints_complete must be forced true when constraints_skipped"
+        );
     }
 
     #[test]
@@ -1063,7 +1183,9 @@ mod tests {
             anomaly_count: 0,
             constraint_warning_count: 0,
         });
-        assert!(!s.import.pass2_progress.constraints_complete,
-            "constraints_complete must not be forced when constraints_skipped is false");
+        assert!(
+            !s.import.pass2_progress.constraints_complete,
+            "constraints_complete must not be forced when constraints_skipped is false"
+        );
     }
 }

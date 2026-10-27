@@ -35,10 +35,17 @@ pub enum CoerceResult {
     /// Value is SQL NULL
     Null,
     /// Value could not be coerced to the target type
-    Anomaly { actual_value: String, actual_type: &'static str },
+    Anomaly {
+        actual_value: String,
+        actual_type: &'static str,
+    },
     /// PG array written with at least one element replaced by `NULL`. Carries the literal and the
     /// first faulty element: the caller records one anomaly for the whole cell (#84).
-    OkWithAnomaly { value: CopyEscaped, actual_value: String, actual_type: &'static str },
+    OkWithAnomaly {
+        value: CopyEscaped,
+        actual_value: String,
+        actual_type: &'static str,
+    },
 }
 
 /// Coerce a JSON value to the COPY text-format representation for the given `PgType`.
@@ -117,25 +124,39 @@ fn coerce_pg_array(arr: &[Value], elem_type: &PgType) -> CoerceResult {
     // An element with a null byte was replaced by NULL in coerce_pg_array_element,
     // so escape_copy_text will always return Some here.
     let literal = format!("{{{}}}", parts.join(","));
-    let escaped = escape_copy_text(&literal)
-        .expect("array literal is null-byte-free by construction");
+    let escaped =
+        escape_copy_text(&literal).expect("array literal is null-byte-free by construction");
     match first_bad {
         None => CoerceResult::Ok(escaped),
-        Some((actual_value, actual_type)) => CoerceResult::OkWithAnomaly { value: escaped, actual_value, actual_type },
+        Some((actual_value, actual_type)) => CoerceResult::OkWithAnomaly {
+            value: escaped,
+            actual_value,
+            actual_type,
+        },
     }
 }
 
 /// Produce the array-literal representation of one element (no outer COPY escaping yet), or the
 /// reason it cannot be stored: the element as JSON text and the anomaly type.
 /// Text-like types are double-quoted; numeric/boolean are bare.
-fn coerce_pg_array_element(value: &Value, pg_type: &PgType) -> Result<String, (String, &'static str)> {
+fn coerce_pg_array_element(
+    value: &Value,
+    pg_type: &PgType,
+) -> Result<String, (String, &'static str)> {
     match pg_type {
-        PgType::Integer | PgType::BigInt | PgType::DoublePrecision | PgType::Boolean => match coerce(value, pg_type) {
-            CoerceResult::Ok(s) => Ok(s.as_str().to_owned()), // numeric/bool: ASCII-safe, bare in array literal
-            CoerceResult::Anomaly { actual_value, actual_type } => Err((actual_value, actual_type)),
-            // out of reach: nulls are filtered by the caller and a scalar type never yields OkWithAnomaly
-            CoerceResult::Null | CoerceResult::OkWithAnomaly { .. } => Err((value.to_string(), json_type_name(value))),
-        },
+        PgType::Integer | PgType::BigInt | PgType::DoublePrecision | PgType::Boolean => {
+            match coerce(value, pg_type) {
+                CoerceResult::Ok(s) => Ok(s.as_str().to_owned()), // numeric/bool: ASCII-safe, bare in array literal
+                CoerceResult::Anomaly {
+                    actual_value,
+                    actual_type,
+                } => Err((actual_value, actual_type)),
+                // out of reach: nulls are filtered by the caller and a scalar type never yields OkWithAnomaly
+                CoerceResult::Null | CoerceResult::OkWithAnomaly { .. } => {
+                    Err((value.to_string(), json_type_name(value)))
+                }
+            }
+        }
         // Dates, UUIDs and timestamps must be JSON strings, as for their scalar coerce_*
         // (the content of a date is not checked there either).
         PgType::Uuid | PgType::Date | PgType::Timestamp if !matches!(value, Value::String(_)) => {
@@ -150,7 +171,10 @@ fn coerce_pg_array_element(value: &Value, pg_type: &PgType) -> Result<String, (S
 /// back; the outer `escape_copy_text` then COPY-escapes the whole literal. Numbers, booleans and
 /// nested arrays/objects keep their JSON text (#83). A null byte or a `VARCHAR(n)` overflow
 /// (`max_chars`) is an anomaly, as for a scalar: `PostgreSQL` would reject the element and abort the COPY.
-fn quote_array_text(value: &Value, max_chars: Option<usize>) -> Result<String, (String, &'static str)> {
+fn quote_array_text(
+    value: &Value,
+    max_chars: Option<usize>,
+) -> Result<String, (String, &'static str)> {
     let raw = match value {
         Value::String(s) => s.clone(),
         other => other.to_string(),
@@ -194,12 +218,13 @@ fn coerce_integer(value: &Value) -> CoerceResult {
                 actual_type: "number_out_of_range",
             }
         }
-        Value::String(s) => {
-            s.trim().parse::<i32>().map_or_else(
-                |_| CoerceResult::Anomaly { actual_value: s.clone(), actual_type: "string" },
-                |i| CoerceResult::Ok(CopyEscaped::from_safe_ascii(i.to_string())),
-            )
-        }
+        Value::String(s) => s.trim().parse::<i32>().map_or_else(
+            |_| CoerceResult::Anomaly {
+                actual_value: s.clone(),
+                actual_type: "string",
+            },
+            |i| CoerceResult::Ok(CopyEscaped::from_safe_ascii(i.to_string())),
+        ),
         _ => CoerceResult::Anomaly {
             actual_value: value.to_string(),
             actual_type: json_type_name(value),
@@ -221,7 +246,9 @@ fn coerce_bigint(value: &Value) -> CoerceResult {
                     // so `f < i64::MAX as f64` correctly excludes 2^63 and above.
                     if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
                         #[allow(clippy::cast_possible_truncation)]
-                        return CoerceResult::Ok(CopyEscaped::from_safe_ascii((f as i64).to_string()));
+                        return CoerceResult::Ok(CopyEscaped::from_safe_ascii(
+                            (f as i64).to_string(),
+                        ));
                     }
                     return CoerceResult::Anomaly {
                         actual_value: value.to_string(),
@@ -234,12 +261,13 @@ fn coerce_bigint(value: &Value) -> CoerceResult {
                 actual_type: "float",
             }
         }
-        Value::String(s) => {
-            s.trim().parse::<i64>().map_or_else(
-                |_| CoerceResult::Anomaly { actual_value: s.clone(), actual_type: "string" },
-                |i| CoerceResult::Ok(CopyEscaped::from_safe_ascii(i.to_string())),
-            )
-        }
+        Value::String(s) => s.trim().parse::<i64>().map_or_else(
+            |_| CoerceResult::Anomaly {
+                actual_value: s.clone(),
+                actual_type: "string",
+            },
+            |i| CoerceResult::Ok(CopyEscaped::from_safe_ascii(i.to_string())),
+        ),
         _ => CoerceResult::Anomaly {
             actual_value: value.to_string(),
             actual_type: json_type_name(value),
@@ -253,7 +281,10 @@ fn coerce_float(value: &Value) -> CoerceResult {
         Value::Number(n) => {
             if let Some(f) = n.as_f64() {
                 return format_float(f).map_or_else(
-                    || CoerceResult::Anomaly { actual_value: value.to_string(), actual_type: "float_not_finite" },
+                    || CoerceResult::Anomaly {
+                        actual_value: value.to_string(),
+                        actual_type: "float_not_finite",
+                    },
                     |s| CoerceResult::Ok(CopyEscaped::from_safe_ascii(s)),
                 );
             }
@@ -262,15 +293,21 @@ fn coerce_float(value: &Value) -> CoerceResult {
                 actual_type: "number",
             }
         }
-        Value::String(s) => {
-            s.trim().parse::<f64>().map_or_else(
-                |_| CoerceResult::Anomaly { actual_value: s.clone(), actual_type: "string" },
-                |f| format_float(f).map_or_else(
-                    || CoerceResult::Anomaly { actual_value: value.to_string(), actual_type: "float_not_finite" },
+        Value::String(s) => s.trim().parse::<f64>().map_or_else(
+            |_| CoerceResult::Anomaly {
+                actual_value: s.clone(),
+                actual_type: "string",
+            },
+            |f| {
+                format_float(f).map_or_else(
+                    || CoerceResult::Anomaly {
+                        actual_value: value.to_string(),
+                        actual_type: "float_not_finite",
+                    },
                     |s| CoerceResult::Ok(CopyEscaped::from_safe_ascii(s)),
-                ),
-            )
-        }
+                )
+            },
+        ),
         _ => CoerceResult::Anomaly {
             actual_value: value.to_string(),
             actual_type: json_type_name(value),
@@ -280,9 +317,11 @@ fn coerce_float(value: &Value) -> CoerceResult {
 
 fn coerce_bool(value: &Value) -> CoerceResult {
     match value {
-        Value::Bool(b) => CoerceResult::Ok(CopyEscaped::from_safe_ascii(
-            if *b { "t".to_string() } else { "f".to_string() },
-        )),
+        Value::Bool(b) => CoerceResult::Ok(CopyEscaped::from_safe_ascii(if *b {
+            "t".to_string()
+        } else {
+            "f".to_string()
+        })),
         Value::String(s) => match s.to_lowercase().as_str() {
             "true" | "yes" | "on" => CoerceResult::Ok(CopyEscaped::from_safe_ascii("t")),
             "false" | "no" | "off" => CoerceResult::Ok(CopyEscaped::from_safe_ascii("f")),
@@ -309,7 +348,10 @@ fn coerce_bool(value: &Value) -> CoerceResult {
 fn coerce_uuid(value: &Value) -> CoerceResult {
     match value {
         Value::String(s) => escape_copy_text(s).map_or_else(
-            || CoerceResult::Anomaly { actual_value: value.to_string(), actual_type: "string_contains_null_byte" },
+            || CoerceResult::Anomaly {
+                actual_value: value.to_string(),
+                actual_type: "string_contains_null_byte",
+            },
             CoerceResult::Ok,
         ),
         _ => CoerceResult::Anomaly {
@@ -322,7 +364,10 @@ fn coerce_uuid(value: &Value) -> CoerceResult {
 fn coerce_date(value: &Value) -> CoerceResult {
     match value {
         Value::String(s) => escape_copy_text(s).map_or_else(
-            || CoerceResult::Anomaly { actual_value: value.to_string(), actual_type: "string_contains_null_byte" },
+            || CoerceResult::Anomaly {
+                actual_value: value.to_string(),
+                actual_type: "string_contains_null_byte",
+            },
             CoerceResult::Ok,
         ),
         _ => CoerceResult::Anomaly {
@@ -335,7 +380,10 @@ fn coerce_date(value: &Value) -> CoerceResult {
 fn coerce_timestamp(value: &Value) -> CoerceResult {
     match value {
         Value::String(s) => escape_copy_text(s).map_or_else(
-            || CoerceResult::Anomaly { actual_value: value.to_string(), actual_type: "string_contains_null_byte" },
+            || CoerceResult::Anomaly {
+                actual_value: value.to_string(),
+                actual_type: "string_contains_null_byte",
+            },
             CoerceResult::Ok,
         ),
         _ => CoerceResult::Anomaly {
@@ -348,7 +396,10 @@ fn coerce_timestamp(value: &Value) -> CoerceResult {
 fn coerce_text(value: &Value) -> CoerceResult {
     match value {
         Value::String(s) => escape_copy_text(s).map_or_else(
-            || CoerceResult::Anomaly { actual_value: value.to_string(), actual_type: "string_contains_null_byte" },
+            || CoerceResult::Anomaly {
+                actual_value: value.to_string(),
+                actual_type: "string_contains_null_byte",
+            },
             CoerceResult::Ok,
         ),
         Value::Number(n) => CoerceResult::Ok(CopyEscaped::from_safe_ascii(n.to_string())),
@@ -391,16 +442,34 @@ mod tests {
 
     #[test]
     fn test_coerce_integer() {
-        assert!(matches!(coerce(&json!(42), &PgType::Integer), CoerceResult::Ok(_)));
-        assert!(matches!(coerce(&json!("42"), &PgType::Integer), CoerceResult::Ok(_)));
-        assert!(matches!(coerce(&json!("N/A"), &PgType::Integer), CoerceResult::Anomaly { .. }));
+        assert!(matches!(
+            coerce(&json!(42), &PgType::Integer),
+            CoerceResult::Ok(_)
+        ));
+        assert!(matches!(
+            coerce(&json!("42"), &PgType::Integer),
+            CoerceResult::Ok(_)
+        ));
+        assert!(matches!(
+            coerce(&json!("N/A"), &PgType::Integer),
+            CoerceResult::Anomaly { .. }
+        ));
     }
 
     #[test]
     fn test_coerce_bool() {
-        assert!(matches!(coerce(&json!(true), &PgType::Boolean), CoerceResult::Ok(_)));
-        assert!(matches!(coerce(&json!("yes"), &PgType::Boolean), CoerceResult::Ok(_)));
-        assert!(matches!(coerce(&json!("maybe"), &PgType::Boolean), CoerceResult::Anomaly { .. }));
+        assert!(matches!(
+            coerce(&json!(true), &PgType::Boolean),
+            CoerceResult::Ok(_)
+        ));
+        assert!(matches!(
+            coerce(&json!("yes"), &PgType::Boolean),
+            CoerceResult::Ok(_)
+        ));
+        assert!(matches!(
+            coerce(&json!("maybe"), &PgType::Boolean),
+            CoerceResult::Anomaly { .. }
+        ));
     }
 
     #[test]
@@ -410,25 +479,40 @@ mod tests {
         // On ne peut pas les créer via serde_json::json!(), on passe par f64 directement
         assert!(matches!(
             coerce_float(&serde_json::Value::String("NaN".to_string())),
-            CoerceResult::Anomaly { actual_type: "float_not_finite", .. }
+            CoerceResult::Anomaly {
+                actual_type: "float_not_finite",
+                ..
+            }
         ));
         assert!(matches!(
             coerce_float(&serde_json::Value::String("Infinity".to_string())),
-            CoerceResult::Anomaly { actual_type: "float_not_finite", .. }
+            CoerceResult::Anomaly {
+                actual_type: "float_not_finite",
+                ..
+            }
         ));
         assert!(matches!(
             coerce_float(&serde_json::Value::String("-Infinity".to_string())),
-            CoerceResult::Anomaly { actual_type: "float_not_finite", .. }
+            CoerceResult::Anomaly {
+                actual_type: "float_not_finite",
+                ..
+            }
         ));
         // Les floats normaux passent toujours
-        assert!(matches!(coerce(&json!(3.14), &PgType::DoublePrecision), CoerceResult::Ok(_)));
+        assert!(matches!(
+            coerce(&json!(3.14), &PgType::DoublePrecision),
+            CoerceResult::Ok(_)
+        ));
     }
 
     #[test]
     fn test_coerce_text_null_byte() {
         assert!(matches!(
             coerce_text(&serde_json::Value::String("hello\x00world".to_string())),
-            CoerceResult::Anomaly { actual_type: "string_contains_null_byte", .. }
+            CoerceResult::Anomaly {
+                actual_type: "string_contains_null_byte",
+                ..
+            }
         ));
     }
 
@@ -441,18 +525,32 @@ mod tests {
             serde_json::Value::String("normal".to_string()),
         ];
         let result = coerce_pg_array(&arr, &PgType::Text);
-        let CoerceResult::OkWithAnomaly { value, actual_value, actual_type } = result else {
+        let CoerceResult::OkWithAnomaly {
+            value,
+            actual_value,
+            actual_type,
+        } = result
+        else {
             panic!("expected OkWithAnomaly");
         };
         assert_eq!(value.as_str(), r#"{NULL,"normal"}"#);
         assert_eq!(actual_type, "string_contains_null_byte");
-        assert!(actual_value.contains("hello"), "the faulty element is reported, got {actual_value}");
+        assert!(
+            actual_value.contains("hello"),
+            "the faulty element is reported, got {actual_value}"
+        );
     }
 
     #[test]
     fn test_null_always_null() {
-        assert!(matches!(coerce(&Value::Null, &PgType::Integer), CoerceResult::Null));
-        assert!(matches!(coerce(&Value::Null, &PgType::Text), CoerceResult::Null));
+        assert!(matches!(
+            coerce(&Value::Null, &PgType::Integer),
+            CoerceResult::Null
+        ));
+        assert!(matches!(
+            coerce(&Value::Null, &PgType::Text),
+            CoerceResult::Null
+        ));
     }
 
     #[test]
@@ -460,19 +558,28 @@ mod tests {
         // 10^20 > i64::MAX — must produce Anomaly, not silent saturating cast to i64::MAX.
         let huge_pos = serde_json::from_str::<Value>("100000000000000000000").unwrap();
         assert!(
-            matches!(coerce(&huge_pos, &PgType::BigInt), CoerceResult::Anomaly { .. }),
+            matches!(
+                coerce(&huge_pos, &PgType::BigInt),
+                CoerceResult::Anomaly { .. }
+            ),
             "positive integer overflow must be an anomaly"
         );
 
         // Negative overflow (< i64::MIN)
         let huge_neg = serde_json::from_str::<Value>("-100000000000000000000").unwrap();
         assert!(
-            matches!(coerce(&huge_neg, &PgType::BigInt), CoerceResult::Anomaly { .. }),
+            matches!(
+                coerce(&huge_neg, &PgType::BigInt),
+                CoerceResult::Anomaly { .. }
+            ),
             "negative integer overflow must be an anomaly"
         );
 
         // i64::MAX must still coerce OK
-        assert!(matches!(coerce(&json!(i64::MAX), &PgType::BigInt), CoerceResult::Ok(_)));
+        assert!(matches!(
+            coerce(&json!(i64::MAX), &PgType::BigInt),
+            CoerceResult::Ok(_)
+        ));
 
         // 1e18 is a whole-number float within i64 range — must still coerce OK
         let ok_float = serde_json::from_str::<Value>("1e18").unwrap();
@@ -495,8 +602,14 @@ mod tests {
     fn test_coerce_scalar_into_pg_array_wraps() {
         let text_arr = PgType::Array(Box::new(PgType::Text));
         assert_eq!(coerce_ok(&json!("bio"), &text_arr), r#"{"bio"}"#);
-        assert_eq!(coerce_ok(&json!(5), &PgType::Array(Box::new(PgType::Integer))), "{5}");
-        assert_eq!(coerce_ok(&json!(true), &PgType::Array(Box::new(PgType::Boolean))), "{t}");
+        assert_eq!(
+            coerce_ok(&json!(5), &PgType::Array(Box::new(PgType::Integer))),
+            "{5}"
+        );
+        assert_eq!(
+            coerce_ok(&json!(true), &PgType::Array(Box::new(PgType::Boolean))),
+            "{t}"
+        );
         // a number widened to TEXT[] is wrapped as text
         assert_eq!(coerce_ok(&json!(5), &text_arr), r#"{"5"}"#);
         assert_eq!(coerce_ok(&json!([]), &text_arr), "{}");
@@ -504,7 +617,10 @@ mod tests {
 
     #[test]
     fn test_coerce_null_into_pg_array_stays_null() {
-        assert!(matches!(coerce(&Value::Null, &PgType::Array(Box::new(PgType::Text))), CoerceResult::Null));
+        assert!(matches!(
+            coerce(&Value::Null, &PgType::Array(Box::new(PgType::Text))),
+            CoerceResult::Null
+        ));
     }
 
     // ── issue #84 : un élément non convertible → NULL dans le tableau + UNE anomalie par cellule ──
@@ -516,9 +632,11 @@ mod tests {
     /// (literal, first faulty element, anomaly type) of a cell written with at least one `NULL` element.
     fn coerce_partial(value: &Value, pg_type: &PgType) -> (String, String, &'static str) {
         match coerce(value, pg_type) {
-            CoerceResult::OkWithAnomaly { value, actual_value, actual_type } => {
-                (value.as_str().to_owned(), actual_value, actual_type)
-            }
+            CoerceResult::OkWithAnomaly {
+                value,
+                actual_value,
+                actual_type,
+            } => (value.as_str().to_owned(), actual_value, actual_type),
             _ => panic!("expected OkWithAnomaly"),
         }
     }
@@ -526,14 +644,16 @@ mod tests {
     #[test]
     fn test_pg_array_element_too_long_for_varchar_becomes_null() {
         // VARCHAR(2)[]: "abc" and "abcd" overflow, only the first one is reported
-        let (literal, bad, kind) = coerce_partial(&json!(["ab", "abc", "abcd"]), &array_of(PgType::VarChar(2)));
+        let (literal, bad, kind) =
+            coerce_partial(&json!(["ab", "abc", "abcd"]), &array_of(PgType::VarChar(2)));
         assert_eq!(literal, r#"{"ab",NULL,NULL}"#);
         assert_eq!((bad.as_str(), kind), (r#""abc""#, "string_too_long"));
     }
 
     #[test]
     fn test_pg_array_non_string_element_in_date_array_becomes_null() {
-        let (literal, bad, kind) = coerce_partial(&json!(["2024-01-01", 5]), &array_of(PgType::Date));
+        let (literal, bad, kind) =
+            coerce_partial(&json!(["2024-01-01", 5]), &array_of(PgType::Date));
         assert_eq!(literal, r#"{"2024-01-01",NULL}"#);
         assert_eq!((bad.as_str(), kind), ("5", "number"));
     }
@@ -548,14 +668,18 @@ mod tests {
 
     #[test]
     fn test_pg_array_reports_first_faulty_element_only() {
-        let (literal, bad, kind) = coerce_partial(&json!(["abc", 7, "xyz"]), &array_of(PgType::Integer));
+        let (literal, bad, kind) =
+            coerce_partial(&json!(["abc", 7, "xyz"]), &array_of(PgType::Integer));
         assert_eq!(literal, "{NULL,7,NULL}");
         assert_eq!((bad.as_str(), kind), ("abc", "string"));
     }
 
     #[test]
     fn test_pg_array_null_elements_are_not_anomalies() {
-        assert_eq!(coerce_ok(&json!([1, null, 3]), &array_of(PgType::Integer)), "{1,NULL,3}");
+        assert_eq!(
+            coerce_ok(&json!([1, null, 3]), &array_of(PgType::Integer)),
+            "{1,NULL,3}"
+        );
     }
 
     #[test]
@@ -573,20 +697,30 @@ mod tests {
         let inferred = |row: &Value| {
             let mut reg = SchemaRegistry::new(RegistryConfig::default());
             reg.observe_root("t", row.as_object().unwrap());
-            reg.finalize()[0].find_by_original("m").unwrap().pg_type.clone()
+            reg.finalize()[0]
+                .find_by_original("m")
+                .unwrap()
+                .pg_type
+                .clone()
         };
 
         // all arrays → TEXT[]: nested arrays stay JSON text (#83), no anomaly
         let all_arrays = json!({"m": [["a"], ["b"]]});
         let pg_type = inferred(&all_arrays);
         assert_eq!(pg_type, array_of(PgType::Text));
-        assert_eq!(coerce_ok(&all_arrays["m"], &pg_type), r#"{"[\\"a\\"]","[\\"b\\"]"}"#); // COPY-escaped
+        assert_eq!(
+            coerce_ok(&all_arrays["m"], &pg_type),
+            r#"{"[\\"a\\"]","[\\"b\\"]"}"#
+        ); // COPY-escaped
 
         // strings mixed with arrays → VARCHAR(2)[]: the nested array overflows, which used to abort the COPY
         let mixed = json!({"m": ["a", ["b"]]});
         let pg_type = inferred(&mixed);
         assert_eq!(pg_type, array_of(PgType::VarChar(2)));
         let (literal, _, kind) = coerce_partial(&mixed["m"], &pg_type);
-        assert_eq!((literal.as_str(), kind), (r#"{"a",NULL}"#, "string_too_long"));
+        assert_eq!(
+            (literal.as_str(), kind),
+            (r#"{"a",NULL}"#, "string_too_long")
+        );
     }
 }

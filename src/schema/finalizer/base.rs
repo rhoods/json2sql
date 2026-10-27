@@ -42,12 +42,16 @@ pub(super) fn build_base_schemas(
 }
 
 fn push_generated_columns(schema: &mut TableSchema) {
-    schema.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+    schema
+        .columns
+        .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
     if let Some(ref p) = schema.parent_table {
         schema.columns.push(ColumnSchema::parent_fk(p));
     }
     if schema.has_order_column() {
-        schema.columns.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
+        schema
+            .columns
+            .push(ColumnSchema::generated("j2s_order", PgType::BigInt));
     }
 }
 
@@ -76,7 +80,6 @@ fn build_entry_schema_base(
     let local_collisions = build_data_columns(&mut schema, entry, &pg_name);
     (schema, local_collisions)
 }
-
 
 /// Build regular data columns and array-as-column fields into `schema`.
 ///
@@ -119,11 +122,21 @@ fn build_data_columns(
 
 /// A field with mixed scalar/array occurrences is emitted only as its
 /// array column — its scalar occurrences are wrapped as one-element arrays in Pass 2 (issue #48).
-pub(super) fn is_scalar_column(entry: &TableEntry, original_field: &str, tracker: &TypeTracker) -> bool {
-    !tracker.is_object_field() && !tracker.is_array_field() && !entry.array_columns.contains_key(original_field)
+pub(super) fn is_scalar_column(
+    entry: &TableEntry,
+    original_field: &str,
+    tracker: &TypeTracker,
+) -> bool {
+    !tracker.is_object_field()
+        && !tracker.is_array_field()
+        && !entry.array_columns.contains_key(original_field)
 }
 
-fn push_array_columns(schema: &mut TableSchema, entry: &TableEntry, col_registry: &ColumnNameRegistry) {
+fn push_array_columns(
+    schema: &mut TableSchema,
+    entry: &TableEntry,
+    col_registry: &ColumnNameRegistry,
+) {
     for (original_field, elem_tracker) in &entry.array_columns {
         schema.columns.push(ColumnSchema {
             name: col_registry.resolve(original_field),

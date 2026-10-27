@@ -47,13 +47,19 @@ fn base_config(url: String, schema: String) -> PipelineConfig {
 async fn test_sibling_collapse_e2e() {
     integration::with_pg_container(|client, schema, url| async move {
         let result = run_pipeline(base_config(url, schema.clone())).await;
-        assert!(result.is_ok(), "sibling_collapse pipeline failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "sibling_collapse pipeline failed: {result:?}"
+        );
 
         let books = integration::row_count(&client, &schema, "books").await;
         assert_eq!(books, 3, "expected 3 books");
 
         let translations = integration::row_count(&client, &schema, "books_translations").await;
-        assert_eq!(translations, 12, "expected 12 translations (3 books × 4 languages)");
+        assert_eq!(
+            translations, 12,
+            "expected 12 translations (3 books × 4 languages)"
+        );
 
         // The 4 sibling tables must NOT exist — they were collapsed
         let sibling_tables: i64 = client
@@ -67,7 +73,10 @@ async fn test_sibling_collapse_e2e() {
             .await
             .unwrap()
             .get(0);
-        assert_eq!(sibling_tables, 0, "sibling tables must not exist after collapse");
+        assert_eq!(
+            sibling_tables, 0,
+            "sibling tables must not exist after collapse"
+        );
     })
     .await;
 }

@@ -89,7 +89,10 @@ pub fn sample_tables(
         .div_ceil(stride(rows, source.budget))
         .min(u64::try_from(source.budget).unwrap_or(u64::MAX));
     let rank_step = usize::try_from(sampled).unwrap_or(usize::MAX) / RANK_SAMPLE;
-    let mut tables: Vec<TableSample> = targets.iter().map(|target| empty_sample(target, rank_step)).collect();
+    let mut tables: Vec<TableSample> = targets
+        .iter()
+        .map(|target| empty_sample(target, rank_step))
+        .collect();
     visit_sampled_rows(source, |row| {
         for (target, sample) in targets.iter().zip(&mut tables) {
             observe_row(sample, row, target)?;
@@ -114,7 +117,9 @@ pub struct StoredSample {
 /// An array where the path to the table expects an object.
 pub fn observe_row(sample: &mut TableSample, row: &Value, target: &SampleTarget<'_>) -> Result<()> {
     if let Some(object) = object_at(row, target.path)? {
-        sample.presence.push_row(cells(object, target.columns).map(|cell| cell.is_some_and(is_present)));
+        sample
+            .presence
+            .push_row(cells(object, target.columns).map(|cell| cell.is_some_and(is_present)));
         sample.values.observe_row(cells(object, target.columns));
     }
     Ok(())

@@ -117,7 +117,9 @@ pub fn detect_format(path: &Path) -> Result<JsonFormat> {
     let file = File::open(path)?;
     let mut reader = BufReader::with_capacity(512 * 1024, file);
     match fmt_skip_ws(&mut reader)? {
-        None => Err(J2sError::InvalidInput("File appears to be empty".to_string())),
+        None => Err(J2sError::InvalidInput(
+            "File appears to be empty".to_string(),
+        )),
         Some(b'[') => Ok(JsonFormat::Array),
         Some(b'{') => fmt_detect_root_object(&mut reader),
         Some(other) => Err(J2sError::InvalidInput(format!(
@@ -168,7 +170,11 @@ fn fmt_read_string(reader: &mut impl BufRead) -> Result<String> {
     let mut escape_next = false;
     loop {
         match fmt_read_one(reader)? {
-            None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".into())),
+            None => {
+                return Err(J2sError::InvalidInput(
+                    "Unexpected EOF inside JSON string".into(),
+                ))
+            }
             Some(b) => {
                 if escape_next {
                     s.push(b);
@@ -225,8 +231,14 @@ fn scan_chunk_into(
             }
         } else {
             match b {
-                b'"' => { *in_string = true; buf.push(b); }
-                b'{' | b'[' => { *depth += 1; buf.push(b); }
+                b'"' => {
+                    *in_string = true;
+                    buf.push(b);
+                }
+                b'{' | b'[' => {
+                    *depth += 1;
+                    buf.push(b);
+                }
                 b'}' | b']' => {
                     *depth -= 1;
                     buf.push(b);
@@ -234,7 +246,9 @@ fn scan_chunk_into(
                         return (i + 1, Some(b));
                     }
                 }
-                _ => { buf.push(b); }
+                _ => {
+                    buf.push(b);
+                }
             }
         }
     }
@@ -252,10 +266,18 @@ fn fmt_skip_container(reader: &mut impl BufRead, closer: u8) -> Result<()> {
         let (n, found) = {
             let buf = reader.fill_buf().map_err(J2sError::Io)?;
             if buf.is_empty() {
-                return Err(J2sError::InvalidInput("Unexpected EOF inside JSON container".into()));
+                return Err(J2sError::InvalidInput(
+                    "Unexpected EOF inside JSON container".into(),
+                ));
             }
             scratch.clear();
-            scan_chunk_into(buf, &mut scratch, &mut depth, &mut in_string, &mut escape_next)
+            scan_chunk_into(
+                buf,
+                &mut scratch,
+                &mut depth,
+                &mut in_string,
+                &mut escape_next,
+            )
         }; // buf borrow ends before consume
         reader.consume(n);
         if let Some(b) = found {
@@ -276,7 +298,11 @@ fn fmt_skip_string_rest(reader: &mut impl BufRead) -> Result<()> {
     let mut escape_next = false;
     loop {
         match fmt_read_one(reader)? {
-            None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".into())),
+            None => {
+                return Err(J2sError::InvalidInput(
+                    "Unexpected EOF inside JSON string".into(),
+                ))
+            }
             Some(b) => {
                 if escape_next {
                     escape_next = false;
@@ -441,9 +467,19 @@ impl JsonLinesReader {
                 Ok(0) => return None,
                 Ok(n) => {
                     self.bytes_read += n as u64;
-                    let start = self.line_buf.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(self.line_buf.len());
-                    let end = self.line_buf.iter().rposition(|b| !b.is_ascii_whitespace()).map_or(0, |i| i + 1);
-                    if start >= end { continue; }
+                    let start = self
+                        .line_buf
+                        .iter()
+                        .position(|b| !b.is_ascii_whitespace())
+                        .unwrap_or(self.line_buf.len());
+                    let end = self
+                        .line_buf
+                        .iter()
+                        .rposition(|b| !b.is_ascii_whitespace())
+                        .map_or(0, |i| i + 1);
+                    if start >= end {
+                        continue;
+                    }
                     return Some(Ok((start, end)));
                 }
                 Err(e) => return Some(Err(J2sError::Io(e))),
@@ -570,9 +606,17 @@ impl ByteScanner {
             let (n, found) = {
                 let chunk = self.reader.fill_buf().map_err(J2sError::Io)?;
                 if chunk.is_empty() {
-                    return Err(J2sError::InvalidInput("Unexpected EOF inside JSON value".into()));
+                    return Err(J2sError::InvalidInput(
+                        "Unexpected EOF inside JSON value".into(),
+                    ));
                 }
-                scan_chunk_into(chunk, &mut self.buf, &mut depth, &mut in_string, &mut escape_next)
+                scan_chunk_into(
+                    chunk,
+                    &mut self.buf,
+                    &mut depth,
+                    &mut in_string,
+                    &mut escape_next,
+                )
             }; // chunk borrow ends before consume
             self.reader.consume(n);
             self.bytes_read += n as u64;
@@ -594,7 +638,9 @@ impl ByteScanner {
         let mut escape_next = false;
         loop {
             let Some(b) = self.read_byte()? else {
-                return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".to_string()));
+                return Err(J2sError::InvalidInput(
+                    "Unexpected EOF inside JSON string".to_string(),
+                ));
             };
             self.buf.push(b);
             if escape_next {
@@ -678,16 +724,26 @@ impl JsonArrayReader {
 impl JsonArrayReader {
     /// Return the raw bytes of the next JSON object without parsing.
     pub fn next_raw(&mut self) -> Option<Result<Vec<u8>>> {
-        if self.done { return None; }
+        if self.done {
+            return None;
+        }
 
         if !self.opened {
             loop {
                 match self.scanner.read_byte() {
                     Ok(None) => return None,
                     Err(e) => return Some(Err(e)),
-                    Ok(Some(b'[')) => { self.opened = true; break; }
+                    Ok(Some(b'[')) => {
+                        self.opened = true;
+                        break;
+                    }
                     Ok(Some(b)) if b.is_ascii_whitespace() => {}
-                    Ok(Some(b)) => return Some(Err(J2sError::InvalidInput(format!("Expected '[', found '{}'", b as char)))),
+                    Ok(Some(b)) => {
+                        return Some(Err(J2sError::InvalidInput(format!(
+                            "Expected '[', found '{}'",
+                            b as char
+                        ))))
+                    }
                 }
             }
         }
@@ -877,7 +933,11 @@ impl JsonRootWrapperReader {
         // Skip whitespace to ':'
         loop {
             match self.scanner.read_byte()? {
-                None => return Err(J2sError::InvalidInput("Unexpected EOF after wrapper key".into())),
+                None => {
+                    return Err(J2sError::InvalidInput(
+                        "Unexpected EOF after wrapper key".into(),
+                    ))
+                }
                 Some(b) if b.is_ascii_whitespace() => {}
                 Some(b':') => break,
                 Some(b) => {
@@ -891,7 +951,11 @@ impl JsonRootWrapperReader {
         // Skip whitespace to '['
         loop {
             match self.scanner.read_byte()? {
-                None => return Err(J2sError::InvalidInput("Unexpected EOF before array start".into())),
+                None => {
+                    return Err(J2sError::InvalidInput(
+                        "Unexpected EOF before array start".into(),
+                    ))
+                }
                 Some(b) if b.is_ascii_whitespace() => {}
                 Some(b'[') => return Ok(()),
                 Some(b) => {
@@ -919,7 +983,11 @@ impl JsonRootWrapperReader {
         let mut escape_next = false;
         loop {
             match self.scanner.read_byte()? {
-                None => return Err(J2sError::InvalidInput("Unexpected EOF inside JSON string".into())),
+                None => {
+                    return Err(J2sError::InvalidInput(
+                        "Unexpected EOF inside JSON string".into(),
+                    ))
+                }
                 Some(b) => {
                     if escape_next {
                         escape_next = false;
@@ -956,7 +1024,10 @@ pub enum JsonReader {
     Array(JsonArrayReader),
     RootWrapper(JsonRootWrapperReader),
     /// Whole file read at once: `pending` holds it until consumed, `size` is its length.
-    SingleObject { pending: Option<Vec<u8>>, size: u64 },
+    SingleObject {
+        pending: Option<Vec<u8>>,
+        size: u64,
+    },
 }
 
 impl JsonReader {
@@ -989,7 +1060,10 @@ impl JsonReader {
             // shortcut: loads the file in RAM; fine since one object is one row and must be parsed whole anyway.
             JsonFormat::SingleObject => {
                 let bytes = std::fs::read(path)?;
-                Ok(Self::SingleObject { size: bytes.len() as u64, pending: Some(bytes) })
+                Ok(Self::SingleObject {
+                    size: bytes.len() as u64,
+                    pending: Some(bytes),
+                })
             }
         }
     }
@@ -1009,7 +1083,13 @@ impl JsonReader {
             Self::Lines(r) => r.bytes_read(),
             Self::Array(r) => r.bytes_read(),
             Self::RootWrapper(r) => r.bytes_read(),
-            Self::SingleObject { pending, size } => if pending.is_some() { 0 } else { *size },
+            Self::SingleObject { pending, size } => {
+                if pending.is_some() {
+                    0
+                } else {
+                    *size
+                }
+            }
         }
     }
 }
@@ -1022,9 +1102,9 @@ impl Iterator for JsonReader {
             Self::Lines(r) => r.next(),
             Self::Array(r) => r.next(),
             Self::RootWrapper(r) => r.next(),
-            Self::SingleObject { pending, .. } => {
-                pending.take().map(|mut bytes| simd_json::from_slice(&mut bytes).map_err(simd_err))
-            }
+            Self::SingleObject { pending, .. } => pending
+                .take()
+                .map(|mut bytes| simd_json::from_slice(&mut bytes).map_err(simd_err)),
         }
     }
 }
@@ -1146,11 +1226,14 @@ mod tests {
         let f = tmp_file(json);
 
         let mut r1 = JsonArrayReader::open(f.path()).unwrap();
-        let parsed: Vec<serde_json::Value> = std::iter::from_fn(|| r1.next()).collect::<Result<_>>().unwrap();
+        let parsed: Vec<serde_json::Value> = std::iter::from_fn(|| r1.next())
+            .collect::<Result<_>>()
+            .unwrap();
 
         let mut r2 = JsonArrayReader::open(f.path()).unwrap();
         let raw_parsed: Vec<serde_json::Value> = std::iter::from_fn(|| r2.next_raw())
-            .collect::<Result<Vec<Vec<u8>>>>().unwrap()
+            .collect::<Result<Vec<Vec<u8>>>>()
+            .unwrap()
             .into_iter()
             .map(|mut b| simd_json::from_slice(&mut b).unwrap())
             .collect();
@@ -1166,7 +1249,8 @@ mod tests {
 
         let mut r = JsonArrayReader::open(f.path()).unwrap();
         let raws: Vec<Vec<u8>> = std::iter::from_fn(|| r.next_raw())
-            .collect::<Result<_>>().unwrap();
+            .collect::<Result<_>>()
+            .unwrap();
 
         assert_eq!(raws.len(), 2);
         let v0: serde_json::Value = simd_json::from_slice(&mut raws[0].clone()).unwrap();
@@ -1196,7 +1280,8 @@ mod tests {
 
         let mut r = JsonLinesReader::open(f.path()).unwrap();
         let raws: Vec<Vec<u8>> = std::iter::from_fn(|| r.next_raw())
-            .collect::<Result<_>>().unwrap();
+            .collect::<Result<_>>()
+            .unwrap();
 
         assert_eq!(raws.len(), 2);
         let v0: serde_json::Value = simd_json::from_slice(&mut raws[0].clone()).unwrap();
@@ -1282,7 +1367,9 @@ mod tests {
         let f = tmp_file(b"{\"meta\": {\"v\": 1}, \"foods\": [{\"id\": 1}]}");
         let err = detect_format(f.path()).unwrap_err().to_string();
         assert!(
-            err.contains("meta") && err.contains("non-array") && err.contains("wrap it in brackets"),
+            err.contains("meta")
+                && err.contains("non-array")
+                && err.contains("wrap it in brackets"),
             "error should name the key, say non-array and give the fix, got: {err}"
         );
     }
@@ -1313,7 +1400,10 @@ mod tests {
     fn test_detect_format_wrapper_key_with_escaped_quotes() {
         let f = tmp_file(b"{\"key\\\"name\": [{\"x\": 1}]}");
         let fmt = detect_format(f.path()).unwrap();
-        assert_eq!(fmt, JsonFormat::RootWrapper(vec!["key\\\"name".to_string()]));
+        assert_eq!(
+            fmt,
+            JsonFormat::RootWrapper(vec!["key\\\"name".to_string()])
+        );
     }
 
     // --- JsonRootWrapperReader tests ---
@@ -1323,8 +1413,9 @@ mod tests {
         let json = br#"{"Foods": [{"id": 1}, {"id": 2}, {"id": 3}]}"#;
         let f = tmp_file(json);
         let mut r = JsonRootWrapperReader::open(f.path(), vec!["Foods".to_string()]).unwrap();
-        let items: Vec<serde_json::Value> =
-            std::iter::from_fn(|| r.next()).collect::<Result<_>>().unwrap();
+        let items: Vec<serde_json::Value> = std::iter::from_fn(|| r.next())
+            .collect::<Result<_>>()
+            .unwrap();
         assert_eq!(items.len(), 3);
         assert_eq!(items[0]["id"], 1);
         assert_eq!(items[2]["id"], 3);
@@ -1335,15 +1426,20 @@ mod tests {
         let json = br#"{"K1": [{"a": 1}, {"a": 2}], "K2": [{"b": 10}]}"#;
         let f = tmp_file(json);
         let keys = vec!["K1".to_string(), "K2".to_string()];
-        let items: Vec<serde_json::Value> =
-            std::iter::from_fn(|| JsonRootWrapperReader::open(f.path(), keys.clone()).unwrap().next())
-                .take(0) // just checking open doesn't panic
-                .collect::<Result<_>>().unwrap();
+        let items: Vec<serde_json::Value> = std::iter::from_fn(|| {
+            JsonRootWrapperReader::open(f.path(), keys.clone())
+                .unwrap()
+                .next()
+        })
+        .take(0) // just checking open doesn't panic
+        .collect::<Result<_>>()
+        .unwrap();
         drop(items);
 
         let mut r = JsonRootWrapperReader::open(f.path(), keys).unwrap();
-        let all: Vec<serde_json::Value> =
-            std::iter::from_fn(|| r.next()).collect::<Result<_>>().unwrap();
+        let all: Vec<serde_json::Value> = std::iter::from_fn(|| r.next())
+            .collect::<Result<_>>()
+            .unwrap();
         assert_eq!(all.len(), 3);
         assert_eq!(all[0]["a"], 1);
         assert_eq!(all[1]["a"], 2);
@@ -1354,9 +1450,8 @@ mod tests {
     fn test_wrapper_reader_current_key_tracks_active_key() {
         let json = br#"{"K1": [{"a": 1}], "K2": [{"b": 2}]}"#;
         let f = tmp_file(json);
-        let mut r =
-            JsonRootWrapperReader::open(f.path(), vec!["K1".to_string(), "K2".to_string()])
-                .unwrap();
+        let mut r = JsonRootWrapperReader::open(f.path(), vec!["K1".to_string(), "K2".to_string()])
+            .unwrap();
         // Before first element: current_key is K1 (not yet advanced)
         assert_eq!(r.current_key(), Some("K1"));
         let _first = r.next_raw().unwrap().unwrap();
@@ -1371,9 +1466,8 @@ mod tests {
     fn test_wrapper_reader_bytes_read_cumulative() {
         let json = br#"{"K1": [{"a": 1}], "K2": [{"b": 2}]}"#;
         let f = tmp_file(json);
-        let mut r =
-            JsonRootWrapperReader::open(f.path(), vec!["K1".to_string(), "K2".to_string()])
-                .unwrap();
+        let mut r = JsonRootWrapperReader::open(f.path(), vec!["K1".to_string(), "K2".to_string()])
+            .unwrap();
         let _ = r.next_raw().unwrap().unwrap(); // consume K1's element
         let bytes_after_k1 = r.bytes_read();
         let _ = r.next_raw().unwrap().unwrap(); // consume K2's element
@@ -1391,8 +1485,9 @@ mod tests {
         let mut r =
             JsonRootWrapperReader::open(f.path(), vec!["Empty".to_string(), "Full".to_string()])
                 .unwrap();
-        let all: Vec<serde_json::Value> =
-            std::iter::from_fn(|| r.next()).collect::<Result<_>>().unwrap();
+        let all: Vec<serde_json::Value> = std::iter::from_fn(|| r.next())
+            .collect::<Result<_>>()
+            .unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0]["x"], 42);
     }
@@ -1402,8 +1497,9 @@ mod tests {
         let json = br#"{"Items": [{"n": 1, "s": "hello"}, {"n": 2, "s": "world"}]}"#;
         let f = tmp_file(json);
         let mut r = JsonRootWrapperReader::open(f.path(), vec!["Items".to_string()]).unwrap();
-        let raws: Vec<Vec<u8>> =
-            std::iter::from_fn(|| r.next_raw()).collect::<Result<_>>().unwrap();
+        let raws: Vec<Vec<u8>> = std::iter::from_fn(|| r.next_raw())
+            .collect::<Result<_>>()
+            .unwrap();
         assert_eq!(raws.len(), 2);
         let v0: serde_json::Value = simd_json::from_slice(&mut raws[0].clone()).unwrap();
         let v1: serde_json::Value = simd_json::from_slice(&mut raws[1].clone()).unwrap();
@@ -1416,8 +1512,9 @@ mod tests {
         let json = br#"{"Foods": [{"id": 1, "tags": ["a", "b"]}, {"id": 2, "tags": []}]}"#;
         let f = tmp_file(json);
         let mut r = JsonRootWrapperReader::open(f.path(), vec!["Foods".to_string()]).unwrap();
-        let all: Vec<serde_json::Value> =
-            std::iter::from_fn(|| r.next()).collect::<Result<_>>().unwrap();
+        let all: Vec<serde_json::Value> = std::iter::from_fn(|| r.next())
+            .collect::<Result<_>>()
+            .unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0]["tags"], serde_json::json!(["a", "b"]));
     }
@@ -1435,8 +1532,9 @@ mod tests {
     fn test_json_reader_wrapper_streams_all_elements() {
         let f = tmp_file(br#"{"K1": [{"a": 1}, {"a": 2}], "K2": [{"b": 10}]}"#);
         let (mut reader, _fmt) = JsonReader::open(f.path()).unwrap();
-        let all: Vec<serde_json::Value> =
-            std::iter::from_fn(|| reader.next()).collect::<Result<_>>().unwrap();
+        let all: Vec<serde_json::Value> = std::iter::from_fn(|| reader.next())
+            .collect::<Result<_>>()
+            .unwrap();
         assert_eq!(all.len(), 3);
     }
 
@@ -1468,7 +1566,10 @@ mod tests {
         let b1 = reader.bytes_read();
         let _ = reader.next_raw().unwrap().unwrap();
         let b2 = reader.bytes_read();
-        assert!(b1 > b0 && b2 > b1, "bytes_read must monotonically increase: {b0} < {b1} < {b2}");
+        assert!(
+            b1 > b0 && b2 > b1,
+            "bytes_read must monotonically increase: {b0} < {b1} < {b2}"
+        );
     }
 
     #[test]
@@ -1482,10 +1583,16 @@ mod tests {
         let b1 = r.bytes_read();
         let row2 = r.next_raw().unwrap().unwrap();
         let b2 = r.bytes_read();
-        assert!(b1 > b0, "bytes_read must increase after first nested object");
+        assert!(
+            b1 > b0,
+            "bytes_read must increase after first nested object"
+        );
         assert!(b2 > b1, "bytes_read must increase after second object");
-        assert!(b2 >= row1.len() as u64 + row2.len() as u64,
-            "bytes_read {b2} must be >= sum of row lengths {}", row1.len() + row2.len());
+        assert!(
+            b2 >= row1.len() as u64 + row2.len() as u64,
+            "bytes_read {b2} must be >= sum of row lengths {}",
+            row1.len() + row2.len()
+        );
     }
 
     #[test]
@@ -1502,8 +1609,11 @@ mod tests {
         assert!(b1 > b0, "bytes_read must increase after first object");
         assert!(b2 > b1, "bytes_read must increase after second object");
         // bytes_read after all rows must approach total file size
-        assert!(b2 >= row1.len() as u64 + row2.len() as u64,
-            "bytes_read {b2} must be at least sum of row lengths {}", row1.len() + row2.len());
+        assert!(
+            b2 >= row1.len() as u64 + row2.len() as u64,
+            "bytes_read {b2} must be at least sum of row lengths {}",
+            row1.len() + row2.len()
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -1563,7 +1673,13 @@ mod tests {
         let mut depth = 1u32;
         let mut in_string = false;
         let mut escape_next = false;
-        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        let (n, found) = scan_chunk_into(
+            chunk,
+            &mut buf,
+            &mut depth,
+            &mut in_string,
+            &mut escape_next,
+        );
         assert_eq!(found, Some(b'}'));
         assert_eq!(n, 5); // "ello}" = 5 bytes
         assert_eq!(&buf, b"ello}");
@@ -1577,7 +1693,13 @@ mod tests {
         let mut depth = 1u32;
         let mut in_string = false;
         let mut escape_next = false;
-        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        let (n, found) = scan_chunk_into(
+            chunk,
+            &mut buf,
+            &mut depth,
+            &mut in_string,
+            &mut escape_next,
+        );
         assert_eq!(found, None);
         assert_eq!(n, chunk.len());
         assert_eq!(&buf, b"hello world");
@@ -1591,15 +1713,30 @@ mod tests {
         let mut depth = 1u32;
         let mut in_string = true;
         let mut escape_next = false;
-        let (n1, found1) = scan_chunk_into(chunk1, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        let (n1, found1) = scan_chunk_into(
+            chunk1,
+            &mut buf,
+            &mut depth,
+            &mut in_string,
+            &mut escape_next,
+        );
         assert_eq!(found1, None);
         assert_eq!(n1, 3);
-        assert!(escape_next, "escape_next must be set after trailing backslash inside string");
+        assert!(
+            escape_next,
+            "escape_next must be set after trailing backslash inside string"
+        );
         assert!(in_string, "still inside string");
 
         // Second chunk: first byte '"' is the escaped char — must NOT close the string
         let chunk2 = b"\"cd\"";
-        let (n2, found2) = scan_chunk_into(chunk2, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        let (n2, found2) = scan_chunk_into(
+            chunk2,
+            &mut buf,
+            &mut depth,
+            &mut in_string,
+            &mut escape_next,
+        );
         assert_eq!(found2, None);
         assert_eq!(n2, 4);
         assert!(!escape_next, "escape consumed");
@@ -1614,7 +1751,13 @@ mod tests {
         let mut depth = 1u32;
         let mut in_string = false;
         let mut escape_next = false;
-        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        let (n, found) = scan_chunk_into(
+            chunk,
+            &mut buf,
+            &mut depth,
+            &mut in_string,
+            &mut escape_next,
+        );
         assert_eq!(found, Some(b'}'));
         assert_eq!(n, chunk.len());
         assert_eq!(&buf, chunk);
@@ -1629,7 +1772,13 @@ mod tests {
         let mut depth = 1u32;
         let mut in_string = false;
         let mut escape_next = false;
-        let (n, found) = scan_chunk_into(chunk, &mut buf, &mut depth, &mut in_string, &mut escape_next);
+        let (n, found) = scan_chunk_into(
+            chunk,
+            &mut buf,
+            &mut depth,
+            &mut in_string,
+            &mut escape_next,
+        );
         assert_eq!(found, Some(b'}'));
         assert_eq!(n, 4); // full chunk consumed including real '}'
         assert_eq!(depth, 0);
@@ -1662,10 +1811,9 @@ mod tests {
     #[test]
     fn test_open_with_format_root_wrapper_reads_objects() {
         let f = tmp_file(b"{\"K\":[{\"id\":1},{\"id\":2}]}");
-        let mut r = JsonReader::open_with_format(
-            f.path(),
-            JsonFormat::RootWrapper(vec!["K".to_string()]),
-        ).unwrap();
+        let mut r =
+            JsonReader::open_with_format(f.path(), JsonFormat::RootWrapper(vec!["K".to_string()]))
+                .unwrap();
         let v1: serde_json::Value = r.next().unwrap().unwrap();
         let v2: serde_json::Value = r.next().unwrap().unwrap();
         assert_eq!(v1["id"], 1);

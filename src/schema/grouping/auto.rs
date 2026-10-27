@@ -47,7 +47,10 @@ pub fn name_proposals(
     let mut tables: Vec<&TableSchema> = schemas
         .iter()
         .filter(|s| {
-            eligible(s) && s.column_groups.is_empty() && !made.contains(s.name.as_str()) && wanted(s)
+            eligible(s)
+                && s.column_groups.is_empty()
+                && !made.contains(s.name.as_str())
+                && wanted(s)
         })
         .collect();
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -60,11 +63,19 @@ pub fn name_proposals(
 
 /// The data signals of `table` from its Pass 1 sample, or why there are none: no sample, a sample whose columns are
 /// not the table's (they changed since Pass 1), or no sampled row with the table's object.
-fn signals_of(table: &TableSchema, samples: &[StoredSample]) -> std::result::Result<DataSignals, String> {
+fn signals_of(
+    table: &TableSchema,
+    samples: &[StoredSample],
+) -> std::result::Result<DataSignals, String> {
     let Some(stored) = samples.iter().find(|s| s.table == table.name) else {
         return Err("no Pass 1 sample of this table (an older snapshot?)".to_string());
     };
-    if !stored.columns.iter().map(String::as_str).eq(data_columns_by_name(table).iter().map(|c| c.name.as_str())) {
+    if !stored
+        .columns
+        .iter()
+        .map(String::as_str)
+        .eq(data_columns_by_name(table).iter().map(|c| c.name.as_str()))
+    {
         return Err("the columns of the table changed since Pass 1".to_string());
     }
     if stored.sample.presence.rows() == 0 {
@@ -97,14 +108,23 @@ fn confirmed_config(proposals: &[TableProposal]) -> SchemaConfig {
                 .iter()
                 .filter(|g| g.status == Status::Confirmed)
                 .map(|g| {
-                    let columns = g.columns.iter().map(|&c| toml::Value::String(p.columns[c].name.clone()));
+                    let columns = g
+                        .columns
+                        .iter()
+                        .map(|&c| toml::Value::String(p.columns[c].name.clone()));
                     (g.name.clone(), toml::Value::Array(columns.collect()))
                 })
                 .collect();
-            (p.table.clone(), HashMap::from([("column_groups".to_string(), toml::Value::Table(groups))]))
+            (
+                p.table.clone(),
+                HashMap::from([("column_groups".to_string(), toml::Value::Table(groups))]),
+            )
         })
         .collect();
-    SchemaConfig { group: HashMap::new(), tables }
+    SchemaConfig {
+        group: HashMap::new(),
+        tables,
+    }
 }
 
 #[cfg(test)]
@@ -116,8 +136,8 @@ mod tests {
     use crate::schema::type_tracker::PgType;
 
     const OTHER: [&str; 12] = [
-        "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow", "oyster", "pebble",
-        "saddle", "thimble",
+        "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow", "oyster",
+        "pebble", "saddle", "thimble",
     ];
 
     /// Six `kiwi_*` and six `zulu_*` columns, then twelve unrelated ones.
@@ -131,7 +151,8 @@ mod tests {
     /// A root table `name` with `j2s_id` and the given data columns.
     fn table(name: &str, columns: &[String]) -> TableSchema {
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
-        t.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        t.columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         t.columns.extend(columns.iter().map(|c| ColumnSchema {
             name: c.clone(),
             original_name: c.clone(),
@@ -162,8 +183,15 @@ mod tests {
         assert_eq!(apply(&mut schemas), []);
         assert_eq!(names(&schemas), ["t", "t_kiwi", "t_zulu"]);
         assert_eq!(schemas[0].column_groups, ["t_kiwi", "t_zulu"]);
-        assert_eq!(data_names(&schemas[1]), ["kiwi_a", "kiwi_b", "kiwi_c", "kiwi_d", "kiwi_e", "kiwi_f"]);
-        assert_eq!(data_names(&schemas[0]).len(), 12, "the unrelated columns stay");
+        assert_eq!(
+            data_names(&schemas[1]),
+            ["kiwi_a", "kiwi_b", "kiwi_c", "kiwi_d", "kiwi_e", "kiwi_f"]
+        );
+        assert_eq!(
+            data_names(&schemas[0]).len(),
+            12,
+            "the unrelated columns stay"
+        );
     }
 
     #[test]
@@ -175,7 +203,11 @@ mod tests {
         columns.extend(OTHER.iter().map(|n| (*n).to_string()));
         let mut schemas = vec![table("t", &columns)];
         assert_eq!(apply(&mut schemas), [], "the fusion is not even tried");
-        assert_eq!(names(&schemas), ["t", "t_nutriscore", "t_nutrition"], "the families, not their fusion");
+        assert_eq!(
+            names(&schemas),
+            ["t", "t_nutriscore", "t_nutrition"],
+            "the families, not their fusion"
+        );
     }
 
     #[test]
@@ -210,19 +242,30 @@ mod tests {
         for row in 0..6 {
             let cells: Vec<Option<serde_json::Value>> = sorted
                 .iter()
-                .map(|c| c.starts_with("nutri").then(|| serde_json::json!(format!("{}{row}", c.rsplit('_').next().unwrap()))))
+                .map(|c| {
+                    c.starts_with("nutri").then(|| {
+                        serde_json::json!(format!("{}{row}", c.rsplit('_').next().unwrap()))
+                    })
+                })
                 .collect();
             presence.push_row(cells.iter().map(Option::is_some));
             values.observe_row(cells.iter().map(Option::as_ref));
         }
-        StoredSample { table: "t".to_string(), columns: sorted, sample: TableSample { presence, values } }
+        StoredSample {
+            table: "t".to_string(),
+            columns: sorted,
+            sample: TableSample { presence, values },
+        }
     }
 
     #[test]
     fn the_pass_1_sample_confirms_a_fusion_the_names_alone_leave_to_confirm() {
         // #91 phase 2: the data signals come from the snapshot
         let mut schemas = vec![table("t", &fused_columns())];
-        assert_eq!(apply_name_groups(&mut schemas, &[fused_sample(&fused_columns())], |_| true).unwrap(), []);
+        assert_eq!(
+            apply_name_groups(&mut schemas, &[fused_sample(&fused_columns())], |_| true).unwrap(),
+            []
+        );
         assert_eq!(names(&schemas), ["t", "t_nutriscore_nutrition"]);
     }
 
@@ -233,23 +276,35 @@ mod tests {
         stale.columns.pop();
         let mut schemas = vec![table("t", &fused_columns())];
         apply_name_groups(&mut schemas, &[stale], |_| true).unwrap();
-        assert_eq!(names(&schemas), ["t", "t_nutriscore", "t_nutrition"], "the names alone");
+        assert_eq!(
+            names(&schemas),
+            ["t", "t_nutriscore", "t_nutrition"],
+            "the names alone"
+        );
     }
 
     #[test]
     fn a_table_already_split_is_left_as_it_is() {
         let mut schemas = vec![table("t", &wide_names())];
         let config: SchemaConfig =
-            toml::from_str("[t.column_groups]\nmine = [\"quartz\", \"bamboo\", \"violin\"]\n").unwrap();
+            toml::from_str("[t.column_groups]\nmine = [\"quartz\", \"bamboo\", \"violin\"]\n")
+                .unwrap();
         apply_column_groups(&mut schemas, &config).unwrap();
         apply(&mut schemas);
-        assert_eq!(names(&schemas), ["t", "t_mine"], "its other columns are not grouped on top");
+        assert_eq!(
+            names(&schemas),
+            ["t", "t_mine"],
+            "its other columns are not grouped on top"
+        );
     }
 
     #[test]
     fn a_group_table_is_never_split_again() {
         // Pass 2 fills the groups of a table it writes from its own object only
-        let mut parent = table("t", &OTHER.iter().map(|n| (*n).to_string()).collect::<Vec<_>>());
+        let mut parent = table(
+            "t",
+            &OTHER.iter().map(|n| (*n).to_string()).collect::<Vec<_>>(),
+        );
         parent.column_groups.push("t_big".to_string());
         let mut group = table("t_big", &wide_names());
         group.parent_table = Some("t".to_string());

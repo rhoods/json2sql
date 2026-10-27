@@ -30,12 +30,17 @@ pub async fn connect(db_url: &str) -> Result<Client> {
 /// Awaits `statement`, a query running on `client`. Dropped before it ends (Pass 2 interrupted), it
 /// asks the server to cancel the query: dropping the `Client` only closes the connection once the
 /// query is over, so the server would run it to the end, holding its locks.
-pub async fn cancel_on_drop<T>(client: &Client, statement: impl std::future::Future<Output = T>) -> T {
+pub async fn cancel_on_drop<T>(
+    client: &Client,
+    statement: impl std::future::Future<Output = T>,
+) -> T {
     struct Guard(Option<CancelToken>);
     impl Drop for Guard {
         fn drop(&mut self) {
             if let (Some(token), Ok(rt)) = (self.0.take(), tokio::runtime::Handle::try_current()) {
-                rt.spawn(async move { let _ = token.cancel_query(NoTls).await; });
+                rt.spawn(async move {
+                    let _ = token.cancel_query(NoTls).await;
+                });
             }
         }
     }

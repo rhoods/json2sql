@@ -63,15 +63,26 @@ fn emit(tx: Option<&ProgressTx>, event: ProgressEvent) {
     }
 }
 
-
-
 /// Build the column definition strings for a schema (used by all CREATE TABLE variants).
 /// Only generated infrastructure columns get NOT NULL; data columns are always nullable.
 fn build_col_defs(schema: &TableSchema) -> Vec<String> {
-    schema.columns.iter().map(|col| {
-        let null_constraint = if col.not_null && col.is_generated { " NOT NULL" } else { "" };
-        format!("    {} {}{}", quote_ident(&col.name), col.pg_type.as_sql(), null_constraint)
-    }).collect()
+    schema
+        .columns
+        .iter()
+        .map(|col| {
+            let null_constraint = if col.not_null && col.is_generated {
+                " NOT NULL"
+            } else {
+                ""
+            };
+            format!(
+                "    {} {}{}",
+                quote_ident(&col.name),
+                col.pg_type.as_sql(),
+                null_constraint
+            )
+        })
+        .collect()
 }
 
 /// Generate the CREATE TABLE SQL for a single schema.
@@ -165,19 +176,23 @@ const DDL_BATCH_SIZE: usize = 50;
 
 /// Build a single SQL string that DROPs all schemas in one `batch_execute` call.
 fn build_batch_drop_sql(schemas: &[TableSchema], pg_schema: &str) -> String {
-    schemas.iter()
-        .map(|s| format!(
-            "DROP TABLE IF EXISTS {}.{} CASCADE",
-            quote_ident(pg_schema),
-            quote_ident(&s.name)
-        ))
+    schemas
+        .iter()
+        .map(|s| {
+            format!(
+                "DROP TABLE IF EXISTS {}.{} CASCADE",
+                quote_ident(pg_schema),
+                quote_ident(&s.name)
+            )
+        })
         .collect::<Vec<_>>()
         .join(";\n")
 }
 
 /// Build a single SQL string that CREATEs all schemas in one `batch_execute` call.
 fn build_batch_create_sql(schemas: &[TableSchema], pg_schema: &str) -> String {
-    schemas.iter()
+    schemas
+        .iter()
         .map(|s| generate_create_table_no_constraints(s, pg_schema))
         .collect::<Vec<_>>()
         .join(";\n")
@@ -198,14 +213,18 @@ pub async fn create_tables_no_constraints(
 
     if drop_existing && !schemas.is_empty() {
         let drop_sql = build_batch_drop_sql(schemas, pg_schema);
-        client.batch_execute(&drop_sql).await
+        client
+            .batch_execute(&drop_sql)
+            .await
             .map_err(|e| pg_err("DROP TABLE batch", &e))?;
     }
 
     let mut done = 0usize;
     for chunk in schemas.chunks(DDL_BATCH_SIZE) {
         let create_sql = build_batch_create_sql(chunk, pg_schema);
-        client.batch_execute(&create_sql).await
+        client
+            .batch_execute(&create_sql)
+            .await
             .map_err(|e| pg_err("CREATE TABLE batch", &e))?;
         done += chunk.len();
         emit(progress_tx, ProgressEvent::DdlProgress { done, total });
@@ -236,7 +255,9 @@ pub enum ConstraintKind {
 /// shortcut: the 256 MB floor is per connection, so `conns` × 256 MB can still exceed RAM on a
 /// small machine; lower the floor or `parallel` if that shows up.
 fn calc_maintenance_work_mem_mb(available_bytes: u64, cap_mb: u64, conns: usize) -> u64 {
-    (available_bytes / 1024 / 1024 / 2 / conns.max(1) as u64).max(256).min(cap_mb)
+    (available_bytes / 1024 / 1024 / 2 / conns.max(1) as u64)
+        .max(256)
+        .min(cap_mb)
 }
 
 /// `maintenance_work_mem` one row needs for a PK sort to stay in memory: ~24 B index tuple
@@ -258,20 +279,29 @@ fn pk_mem_mb(rows: u64, budget_mb: u64, unknown_mb: u64) -> u64 {
 /// it counts JSON objects, not the rows an array or a pivot expands into (#68: a table with
 /// 53.6 M rows was counted 4.3 M).
 async fn table_sizes(client: &Client, pg_schema: &str) -> Result<HashMap<String, (u64, u64)>> {
-    let rows = client.query(
-        "SELECT c.relname::text, greatest(c.reltuples, 0)::bigint, pg_table_size(c.oid) \
+    let rows = client
+        .query(
+            "SELECT c.relname::text, greatest(c.reltuples, 0)::bigint, pg_table_size(c.oid) \
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND c.relkind = 'r'",
-        &[&pg_schema],
-    ).await.map_err(|e| pg_err("table sizes", &e))?;
-    Ok(rows.iter().map(|r| {
-        let n = |i: usize| u64::try_from(r.get::<_, i64>(i)).unwrap_or(0);
-        (r.get::<_, String>(0), (n(1), n(2)))
-    }).collect())
+            &[&pg_schema],
+        )
+        .await
+        .map_err(|e| pg_err("table sizes", &e))?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let n = |i: usize| u64::try_from(r.get::<_, i64>(i)).unwrap_or(0);
+            (r.get::<_, String>(0), (n(1), n(2)))
+        })
+        .collect())
 }
 
 /// `schemas` largest first by catalog size, so a late giant does not stall the end of a phase.
-fn largest_first<'a>(schemas: &'a [TableSchema], sizes: &HashMap<String, (u64, u64)>) -> Vec<&'a TableSchema> {
+fn largest_first<'a>(
+    schemas: &'a [TableSchema],
+    sizes: &HashMap<String, (u64, u64)>,
+) -> Vec<&'a TableSchema> {
     let mut by_size: Vec<&TableSchema> = schemas.iter().collect();
     by_size.sort_by_key(|s| std::cmp::Reverse(sizes.get(&s.name).map_or(0, |&(_, bytes)| bytes)));
     by_size
@@ -280,18 +310,27 @@ fn largest_first<'a>(schemas: &'a [TableSchema], sizes: &HashMap<String, (u64, u
 /// Configure a fresh constraints connection: set `maintenance_work_mem`, `wal_compression = lz4`,
 /// serial index builds (all non-fatal) and `synchronous_commit = off` (non-fatal on
 /// `INSUFFICIENT_PRIVILEGE`, fatal otherwise).
-async fn try_configure_constraints_conn(client: &Client, maintenance_work_mem_mb: u64) -> Result<()> {
-    if let Err(e) = client.execute(
-        &format!("SET maintenance_work_mem = '{maintenance_work_mem_mb}MB'"),
-        &[],
-    ).await {
+async fn try_configure_constraints_conn(
+    client: &Client,
+    maintenance_work_mem_mb: u64,
+) -> Result<()> {
+    if let Err(e) = client
+        .execute(
+            &format!("SET maintenance_work_mem = '{maintenance_work_mem_mb}MB'"),
+            &[],
+        )
+        .await
+    {
         eprintln!("WARNING: SET maintenance_work_mem failed — {e}");
     }
     // Index builds WAL-log every page they write: compress those images (#68). Superuser only,
     // like --tune-wal: silently skipped without the privilege; other failures (PG < 15, server
     // built without lz4) are reported.
     if let Err(e) = client.execute("SET wal_compression = lz4", &[]).await {
-        if !e.as_db_error().is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE) {
+        if !e
+            .as_db_error()
+            .is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+        {
             eprintln!("WARNING: SET wal_compression = lz4 failed — {e}");
         }
     }
@@ -300,15 +339,22 @@ async fn try_configure_constraints_conn(client: &Client, maintenance_work_mem_mb
     // which costs more than the CPU it saves on a write-bound disk. With `pk_mem_mb` sized for the
     // sort, a serial build writes no temp file at all.
     // shortcut: on fast storage with idle CPU a parallel build may win back; make it configurable then.
-    if let Err(e) = client.execute("SET max_parallel_maintenance_workers = 0", &[]).await {
+    if let Err(e) = client
+        .execute("SET max_parallel_maintenance_workers = 0", &[])
+        .await
+    {
         eprintln!("WARNING: SET max_parallel_maintenance_workers = 0 failed — {e}");
     }
     match client.execute("SET synchronous_commit = off", &[]).await {
         Ok(_) => Ok(()),
-        Err(e) if e.as_db_error().is_some_and(|db| {
-            db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE
-        }) => {
-            eprintln!("WARNING: SET synchronous_commit = off not permitted — continuing without it");
+        Err(e)
+            if e.as_db_error().is_some_and(|db| {
+                db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE
+            }) =>
+        {
+            eprintln!(
+                "WARNING: SET synchronous_commit = off not permitted — continuing without it"
+            );
             Ok(())
         }
         Err(e) => Err(J2sError::Db(e)),
@@ -320,7 +366,9 @@ async fn open_constraints_conn(db_url: &str, maintenance_work_mem_mb: u64) -> Re
     let (client, connection) = tokio_postgres::connect(db_url, tokio_postgres::NoTls)
         .await
         .map_err(|e| J2sError::DbContext(format!("constraints connection: {e}")))?;
-    tokio::spawn(async move { let _ = connection.await; });
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
     try_configure_constraints_conn(&client, maintenance_work_mem_mb).await?;
     Ok(client)
 }
@@ -337,9 +385,17 @@ async fn add_pk(
 ) -> Result<()> {
     let client = open_constraints_conn(db_url, maintenance_work_mem_mb).await?;
     let start = Instant::now();
-    cancel_on_drop(&client, client.execute(generate_add_pk_sql(schema, pg_schema).as_str(), &[])).await
-        .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {}", schema.name), &e))?;
-    eprintln!("[CONSTRAINTS] PK {}: {}ms ({maintenance_work_mem_mb} MB)", schema.name, start.elapsed().as_millis());
+    cancel_on_drop(
+        &client,
+        client.execute(generate_add_pk_sql(schema, pg_schema).as_str(), &[]),
+    )
+    .await
+    .map_err(|e| pg_err(&format!("ADD PRIMARY KEY {}", schema.name), &e))?;
+    eprintln!(
+        "[CONSTRAINTS] PK {}: {}ms ({maintenance_work_mem_mb} MB)",
+        schema.name,
+        start.elapsed().as_millis()
+    );
     constraint_progress(done, total, ptx);
     Ok(())
 }
@@ -355,7 +411,9 @@ async fn validate_fk(
     total: usize,
     ptx: Option<&ProgressTx>,
 ) -> Result<Option<ConstraintWarning>> {
-    let Some(sql) = generate_validate_fk_sql(schema, pg_schema) else { return Ok(None) };
+    let Some(sql) = generate_validate_fk_sql(schema, pg_schema) else {
+        return Ok(None);
+    };
     let client = open_constraints_conn(db_url, maintenance_work_mem_mb).await?;
     let start = Instant::now();
     let warning = match cancel_on_drop(&client, client.execute(sql.as_str(), &[])).await {
@@ -367,13 +425,22 @@ async fn validate_fk(
                 quote_ident(&schema.name),
                 quote_ident(&format!("fk_{}_parent", schema.name)),
             );
-            if let Err(drop_e) = cancel_on_drop(&client, client.execute(drop_sql.as_str(), &[])).await {
-                eprintln!("WARNING: could not drop unvalidated FK on {} — {drop_e}", schema.name);
+            if let Err(drop_e) =
+                cancel_on_drop(&client, client.execute(drop_sql.as_str(), &[])).await
+            {
+                eprintln!(
+                    "WARNING: could not drop unvalidated FK on {} — {drop_e}",
+                    schema.name
+                );
             }
             Some(to_fk_warning(&e, &schema.name))
         }
     };
-    eprintln!("[CONSTRAINTS] FK {}: {}ms", schema.name, start.elapsed().as_millis());
+    eprintln!(
+        "[CONSTRAINTS] FK {}: {}ms",
+        schema.name,
+        start.elapsed().as_millis()
+    );
     constraint_progress(done, total, ptx);
     Ok(warning)
 }
@@ -398,7 +465,10 @@ pub async fn add_constraints(
     progress_tx: Option<&ProgressTx>,
 ) -> Result<Vec<ConstraintWarning>> {
     if schemas.is_empty() {
-        emit(progress_tx, ProgressEvent::ConstraintsStart { table_count: 0 });
+        emit(
+            progress_tx,
+            ProgressEvent::ConstraintsStart { table_count: 0 },
+        );
         emit(progress_tx, ProgressEvent::ConstraintsDone);
         return Ok(Vec::new());
     }
@@ -407,7 +477,12 @@ pub async fn add_constraints(
     let total = schemas.len() + fk_count;
     let done = AtomicUsize::new(0);
 
-    emit(progress_tx, ProgressEvent::ConstraintsStart { table_count: schemas.len() });
+    emit(
+        progress_tx,
+        ProgressEvent::ConstraintsStart {
+            table_count: schemas.len(),
+        },
+    );
 
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
@@ -431,10 +506,16 @@ pub async fn add_constraints(
         usize::try_from(pk_budget_mb).unwrap_or(tokio::sync::Semaphore::MAX_PERMITS),
     );
     futures_util::stream::iter(by_size.iter().map(|s| {
-        let mem_mb = pk_mem_mb(sizes.get(&s.name).map_or(0, |&(rows, _)| rows), pk_budget_mb, pk_unknown_mb);
+        let mem_mb = pk_mem_mb(
+            sizes.get(&s.name).map_or(0, |&(rows, _)| rows),
+            pk_budget_mb,
+            pk_unknown_mb,
+        );
         let (pk_memory, done) = (&pk_memory, &done);
         async move {
-            let _permit = pk_memory.acquire_many(u32::try_from(mem_mb).unwrap_or(u32::MAX)).await
+            let _permit = pk_memory
+                .acquire_many(u32::try_from(mem_mb).unwrap_or(u32::MAX))
+                .await
                 .map_err(|e| J2sError::DbContext(format!("PK memory budget: {e}")))?;
             add_pk(s, pg_schema, db_url, mem_mb, done, total, progress_tx).await
         }
@@ -447,7 +528,9 @@ pub async fn add_constraints(
     let mut all_warnings: Vec<ConstraintWarning> = Vec::new();
     let mut to_validate: Vec<&TableSchema> = Vec::new();
     for s in &by_size {
-        let Some(sql) = generate_add_fk_sql(s, pg_schema) else { continue };
+        let Some(sql) = generate_add_fk_sql(s, pg_schema) else {
+            continue;
+        };
         match cancel_on_drop(&client, client.execute(sql.as_str(), &[])).await {
             Ok(_) => to_validate.push(s),
             Err(e) => {
@@ -459,9 +542,11 @@ pub async fn add_constraints(
     drop(client);
 
     // Phase 3 — VALIDATE, in parallel.
-    let validated: Vec<Option<ConstraintWarning>> = futures_util::stream::iter(to_validate.iter().map(|s| {
-        validate_fk(s, pg_schema, db_url, fk_mem_mb, &done, total, progress_tx)
-    }))
+    let validated: Vec<Option<ConstraintWarning>> = futures_util::stream::iter(
+        to_validate
+            .iter()
+            .map(|s| validate_fk(s, pg_schema, db_url, fk_mem_mb, &done, total, progress_tx)),
+    )
     .buffer_unordered(parallel)
     .try_collect()
     .await?;
@@ -471,7 +556,11 @@ pub async fn add_constraints(
     Ok(all_warnings)
 }
 
-fn constraint_progress(done: &std::sync::atomic::AtomicUsize, total: usize, ptx: Option<&ProgressTx>) {
+fn constraint_progress(
+    done: &std::sync::atomic::AtomicUsize,
+    total: usize,
+    ptx: Option<&ProgressTx>,
+) {
     let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     if let Some(t) = ptx {
         let _ = t.send(ProgressEvent::ConstraintsProgress { done: d, total });
@@ -483,7 +572,11 @@ fn to_fk_warning(e: &tokio_postgres::Error, table: &str) -> ConstraintWarning {
         || e.to_string(),
         |db| format!("{} (code: {})", db.message(), db.code().code()),
     );
-    ConstraintWarning { table: table.to_string(), constraint_type: ConstraintKind::ForeignKey, message: detail }
+    ConstraintWarning {
+        table: table.to_string(),
+        constraint_type: ConstraintKind::ForeignKey,
+        message: detail,
+    }
 }
 
 /// Generate a human-readable DDL preview for a single schema, including the FK constraint inline.
@@ -553,7 +646,9 @@ pub async fn set_tables_autovacuum(
         let sql = generate_autovacuum_sql(s, pg_schema, enabled);
         async move {
             let client = crate::db::connection::connect(db_url).await?;
-            client.batch_execute(&sql).await
+            client
+                .batch_execute(&sql)
+                .await
                 .map_err(|e| pg_err(&format!("autovacuum_enabled={enabled} {}", s.name), &e))
         }
     }))
@@ -566,7 +661,11 @@ pub async fn set_tables_autovacuum(
 /// Generate `VACUUM (ANALYZE)` for one table.
 #[must_use]
 pub fn generate_vacuum_analyze_sql(schema: &TableSchema, pg_schema: &str) -> String {
-    format!("VACUUM (ANALYZE) {}.{}", quote_ident(pg_schema), quote_ident(&schema.name))
+    format!(
+        "VACUUM (ANALYZE) {}.{}",
+        quote_ident(pg_schema),
+        quote_ident(&schema.name)
+    )
 }
 
 /// `VACUUM (ANALYZE)` every table right after the load, before the PKs (#68), largest first,
@@ -581,17 +680,27 @@ pub async fn vacuum_analyze_tables(
     parallel: usize,
 ) -> Result<()> {
     let sizes = table_sizes(&crate::db::connection::connect(db_url).await?, pg_schema).await?;
-    futures_util::stream::iter(largest_first(schemas, &sizes).into_iter().map(|s| async move {
-        let client = crate::db::connection::connect(db_url).await?;
-        // Two round trips: VACUUM cannot run inside a multi-statement (implicit transaction) string.
-        client.batch_execute("SET vacuum_cost_delay = 0").await
-            .map_err(|e| pg_err(&format!("VACUUM {}", s.name), &e))?;
-        let start = Instant::now();
-        cancel_on_drop(&client, client.batch_execute(&generate_vacuum_analyze_sql(s, pg_schema))).await
-            .map_err(|e| pg_err(&format!("VACUUM (ANALYZE) {}", s.name), &e))?;
-        eprintln!("[VACUUM] {}: {}ms", s.name, start.elapsed().as_millis());
-        Ok::<(), J2sError>(())
-    }))
+    futures_util::stream::iter(
+        largest_first(schemas, &sizes)
+            .into_iter()
+            .map(|s| async move {
+                let client = crate::db::connection::connect(db_url).await?;
+                // Two round trips: VACUUM cannot run inside a multi-statement (implicit transaction) string.
+                client
+                    .batch_execute("SET vacuum_cost_delay = 0")
+                    .await
+                    .map_err(|e| pg_err(&format!("VACUUM {}", s.name), &e))?;
+                let start = Instant::now();
+                cancel_on_drop(
+                    &client,
+                    client.batch_execute(&generate_vacuum_analyze_sql(s, pg_schema)),
+                )
+                .await
+                .map_err(|e| pg_err(&format!("VACUUM (ANALYZE) {}", s.name), &e))?;
+                eprintln!("[VACUUM] {}: {}ms", s.name, start.elapsed().as_millis());
+                Ok::<(), J2sError>(())
+            }),
+    )
     .buffer_unordered(parallel.max(1))
     .try_collect::<Vec<()>>()
     .await?;
@@ -613,25 +722,36 @@ mod tests {
     fn autovacuum_sql_off_quotes_identifiers() {
         let schema = TableSchema::new("my\"t".to_string(), vec!["t".to_string()], 0);
         let sql = generate_autovacuum_sql(&schema, "s", false);
-        assert_eq!(sql, r#"ALTER TABLE "s"."my""t" SET (autovacuum_enabled = false)"#);
+        assert_eq!(
+            sql,
+            r#"ALTER TABLE "s"."my""t" SET (autovacuum_enabled = false)"#
+        );
     }
 
     #[test]
     fn autovacuum_sql_on_resets() {
         let schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
-        assert_eq!(generate_autovacuum_sql(&schema, "s", true), r#"ALTER TABLE "s"."t" RESET (autovacuum_enabled)"#);
+        assert_eq!(
+            generate_autovacuum_sql(&schema, "s", true),
+            r#"ALTER TABLE "s"."t" RESET (autovacuum_enabled)"#
+        );
     }
 
     #[test]
     fn vacuum_analyze_sql_quotes_identifiers() {
         let schema = TableSchema::new("my\"t".to_string(), vec!["t".to_string()], 0);
-        assert_eq!(generate_vacuum_analyze_sql(&schema, "s"), r#"VACUUM (ANALYZE) "s"."my""t""#);
+        assert_eq!(
+            generate_vacuum_analyze_sql(&schema, "s"),
+            r#"VACUUM (ANALYZE) "s"."my""t""#
+        );
     }
 
     #[test]
     fn test_generate_create_table() {
         let mut schema = TableSchema::new("users".to_string(), vec!["users".to_string()], 0);
-        schema.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        schema
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         schema.columns.push(ColumnSchema {
             name: "name".to_string(),
             original_name: "name".to_string(),
@@ -665,7 +785,8 @@ mod tests {
 
     fn make_root_schema() -> TableSchema {
         let mut s = TableSchema::new("products".to_string(), vec!["products".to_string()], 0);
-        s.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        s.columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         s.columns.push(ColumnSchema {
             name: "title".to_string(),
             original_name: "title".to_string(),
@@ -678,9 +799,14 @@ mod tests {
     }
 
     fn make_child_schema() -> TableSchema {
-        let mut s = TableSchema::new("tags".to_string(), vec!["products".to_string(), "tags".to_string()], 1);
+        let mut s = TableSchema::new(
+            "tags".to_string(),
+            vec!["products".to_string(), "tags".to_string()],
+            1,
+        );
         s.parent_table = Some("products".to_string());
-        s.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        s.columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         s.columns.push(ColumnSchema {
             name: "j2s_parent_id".to_string(),
             original_name: "j2s_parent_id".to_string(),
@@ -727,13 +853,19 @@ mod tests {
         assert!(sql.contains("PRIMARY KEY"), "PRIMARY KEY");
         assert!(sql.contains("\"pk_products\""), "constraint name");
         assert!(sql.contains("\"products\""), "table name");
-        assert!(sql.ends_with("WITH (fillfactor = 100)"), "UUIDv7 keys append only (#68)");
+        assert!(
+            sql.ends_with("WITH (fillfactor = 100)"),
+            "UUIDv7 keys append only (#68)"
+        );
     }
 
     #[test]
     fn add_fk_sql_root_returns_none() {
         let root = make_root_schema();
-        assert!(generate_add_fk_sql(&root, "public").is_none(), "root has no parent");
+        assert!(
+            generate_add_fk_sql(&root, "public").is_none(),
+            "root has no parent"
+        );
     }
 
     #[test]
@@ -745,12 +877,18 @@ mod tests {
         assert!(sql.contains("REFERENCES"), "REFERENCES");
         assert!(sql.contains("\"products\""), "references parent");
         assert!(sql.contains("\"tags\""), "on child table");
-        assert!(sql.ends_with("NOT VALID"), "validated later, in parallel (#68)");
+        assert!(
+            sql.ends_with("NOT VALID"),
+            "validated later, in parallel (#68)"
+        );
     }
 
     #[test]
     fn validate_fk_sql_child_and_root() {
-        assert!(generate_validate_fk_sql(&make_root_schema(), "public").is_none(), "root has no parent");
+        assert!(
+            generate_validate_fk_sql(&make_root_schema(), "public").is_none(),
+            "root has no parent"
+        );
         assert_eq!(
             generate_validate_fk_sql(&make_child_schema(), "public").as_deref(),
             Some(r#"ALTER TABLE "public"."tags" VALIDATE CONSTRAINT "fk_tags_parent""#),
@@ -766,8 +904,14 @@ mod tests {
         emit(Some(&tx), ProgressEvent::DdlDone);
         emit(None, ProgressEvent::DdlDone); // None must not panic
         drop(tx);
-        assert!(matches!(rx.try_recv().unwrap(), ProgressEvent::DdlStart { table_count: 5 }));
-        assert!(matches!(rx.try_recv().unwrap(), ProgressEvent::DdlProgress { done: 1, total: 5 }));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ProgressEvent::DdlStart { table_count: 5 }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ProgressEvent::DdlProgress { done: 1, total: 5 }
+        ));
         assert!(matches!(rx.try_recv().unwrap(), ProgressEvent::DdlDone));
         assert!(rx.try_recv().is_err(), "None emit produces no event");
     }
@@ -791,13 +935,23 @@ mod tests {
         let root = make_root_schema();
         let child = make_child_schema();
         let sql = build_batch_create_sql(&[root, child], "public");
-        assert_eq!(sql.matches("CREATE TABLE").count(), 2, "one CREATE TABLE per schema");
+        assert_eq!(
+            sql.matches("CREATE TABLE").count(),
+            2,
+            "one CREATE TABLE per schema"
+        );
         assert!(sql.contains("\"products\""), "root table present");
         assert!(sql.contains("\"tags\""), "child table present");
         assert!(sql.contains(";\n"), "statements separated by semicolon");
         // No PK or FK constraints (columns only)
-        assert!(!sql.contains("PRIMARY KEY"), "no PK in no-constraints create");
-        assert!(!sql.contains("FOREIGN KEY"), "no FK in no-constraints create");
+        assert!(
+            !sql.contains("PRIMARY KEY"),
+            "no PK in no-constraints create"
+        );
+        assert!(
+            !sql.contains("FOREIGN KEY"),
+            "no FK in no-constraints create"
+        );
     }
 
     #[test]
@@ -805,7 +959,11 @@ mod tests {
         let root = make_root_schema();
         let child = make_child_schema();
         let sql = build_batch_drop_sql(&[root, child], "public");
-        assert_eq!(sql.matches("DROP TABLE IF EXISTS").count(), 2, "one DROP per schema");
+        assert_eq!(
+            sql.matches("DROP TABLE IF EXISTS").count(),
+            2,
+            "one DROP per schema"
+        );
         assert!(sql.contains("CASCADE"), "DROP includes CASCADE");
         assert!(sql.contains("\"products\""), "root table present");
         assert!(sql.contains("\"tags\""), "child table present");
@@ -822,9 +980,21 @@ mod tests {
         assert_eq!(pk_mem_mb(1_000, 4096, 1024), 64, "small table: 64 MB floor");
         // 53.6 M rows × 72 B = 3679 MB: the biggest OFF table sorts in memory under a 4 GB budget
         assert_eq!(pk_mem_mb(53_588_448, 4096, 1024), 3679);
-        assert_eq!(pk_mem_mb(1_000_000_000, 4096, 1024), 4096, "capped at the whole budget");
-        assert_eq!(pk_mem_mb(0, 4096, 1024), 1024, "unknown row count: fallback share");
-        assert_eq!(pk_mem_mb(0, 512, 1024), 512, "fallback never exceeds the budget");
+        assert_eq!(
+            pk_mem_mb(1_000_000_000, 4096, 1024),
+            4096,
+            "capped at the whole budget"
+        );
+        assert_eq!(
+            pk_mem_mb(0, 4096, 1024),
+            1024,
+            "unknown row count: fallback share"
+        );
+        assert_eq!(
+            pk_mem_mb(0, 512, 1024),
+            512,
+            "fallback never exceeds the budget"
+        );
     }
 
     #[test]
@@ -835,19 +1005,27 @@ mod tests {
     #[test]
     fn maintenance_work_mem_mb_cap_on_large_ram() {
         // 32 GB available → raw = 16384 MB → capped at 4096
-        assert_eq!(calc_maintenance_work_mem_mb(32 * 1024 * 1024 * 1024, 4096, 1), 4096);
+        assert_eq!(
+            calc_maintenance_work_mem_mb(32 * 1024 * 1024 * 1024, 4096, 1),
+            4096
+        );
     }
 
     #[test]
     fn maintenance_work_mem_mb_nominal_2gb() {
         // 2 GB available → raw = 1024 MB → no floor, no cap
-        assert_eq!(calc_maintenance_work_mem_mb(2 * 1024 * 1024 * 1024, 4096, 1), 1024);
+        assert_eq!(
+            calc_maintenance_work_mem_mb(2 * 1024 * 1024 * 1024, 4096, 1),
+            1024
+        );
     }
 
     #[test]
     fn maintenance_work_mem_mb_split_across_connections() {
         // 8 GB available, 8 connections → 4096 MB budget / 8 = 512 MB each
-        assert_eq!(calc_maintenance_work_mem_mb(8 * 1024 * 1024 * 1024, 4096, 8), 512);
+        assert_eq!(
+            calc_maintenance_work_mem_mb(8 * 1024 * 1024 * 1024, 4096, 8),
+            512
+        );
     }
-
 }

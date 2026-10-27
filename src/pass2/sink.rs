@@ -28,7 +28,9 @@ impl RowSink for MemSink {
 /// Lock is held only for the duration of `write_row` (nanoseconds — pure memory append).
 impl RowSink for Arc<Mutex<MemSink>> {
     fn write_row(&mut self, row: &[u8]) -> Result<()> {
-        self.lock().expect("sink mutex is not poisoned").write_row(row);
+        self.lock()
+            .expect("sink mutex is not poisoned")
+            .write_row(row);
         Ok(())
     }
 }

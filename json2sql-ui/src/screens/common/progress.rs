@@ -11,7 +11,9 @@ use dioxus::prelude::*;
 /// Compute a progress percentage from `done` units out of `total`.
 /// Returns 0 if total is 0, clamps to 100 if done >= total.
 pub fn progress_pct(done: u64, total: u64) -> u32 {
-    if total == 0 { return 0; }
+    if total == 0 {
+        return 0;
+    }
     ((done * 100 / total).min(100)) as u32
 }
 
@@ -19,7 +21,11 @@ pub fn progress_pct(done: u64, total: u64) -> u32 {
 /// `indeterminate` (scanning animation) only when waiting to start (pct == 0 and not done).
 /// Once progress begins, the bar fills deterministically via `width:{pct}%`.
 pub const fn progress_bar_class(done: bool, pct: u32) -> &'static str {
-    if !done && pct == 0 { "prog thick indeterminate" } else { "prog thick" }
+    if !done && pct == 0 {
+        "prog thick indeterminate"
+    } else {
+        "prog thick"
+    }
 }
 
 /// A labeled progress bar used in `AnalysisScreen` and `ImportScreen`.

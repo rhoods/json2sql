@@ -43,24 +43,27 @@ use crossbeam_channel;
 use serde_json::Value;
 use simd_json;
 
+use super::row_sample::{RowSampler, SampledRow};
 use crate::error::Result;
 use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonFormat, JsonReader};
-use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::config::SkipCascadeWarning;
 use crate::schema::finalizer::OverflowWarning;
+use crate::schema::grouping::sample::StoredSample;
+use crate::schema::naming::{ColumnCollision, TruncatedName};
 use crate::schema::registry::{RegistryConfig, SchemaRegistry};
 use crate::schema::stats::ColumnStats;
 use crate::schema::table_schema::TableSchema;
-use crate::schema::grouping::sample::StoredSample;
-use super::row_sample::{RowSampler, SampledRow};
 
 const PROGRESS_INTERVAL: u64 = 1_000;
 
 fn emit_root_wrapper_warning(format: &JsonFormat, progress_tx: Option<&ProgressTx>) {
     if let JsonFormat::RootWrapper(keys) = format {
-        let msg = format!("Root wrapper detected — streaming keys: [{}]", keys.join(", "));
+        let msg = format!(
+            "Root wrapper detected — streaming keys: [{}]",
+            keys.join(", ")
+        );
         eprintln!("{msg}");
         if let Some(tx) = progress_tx {
             let _ = tx.send(ProgressEvent::Pass1Log(msg));
@@ -120,15 +123,33 @@ pub fn run(
     };
     let mut registry = SchemaRegistry::new(config.registry.clone());
     if let Some(ref tx) = progress_tx {
-        let _ = tx.send(ProgressEvent::Pass1Log("Detecting JSON format…".to_string()));
+        let _ = tx.send(ProgressEvent::Pass1Log(
+            "Detecting JSON format…".to_string(),
+        ));
     }
     let (mut reader, format) = JsonReader::open(path)?;
     emit_root_wrapper_warning(&format, progress_tx.as_ref());
     let mut sampler = RowSampler::new(total_bytes);
-    let total_rows = scan_json_rows(&mut reader, &mut registry, config, progress.as_ref(), progress_tx.as_ref(), total_bytes, &mut sampler)?;
-    if let Some(ref bar) = progress { bar.finish(); }
+    let total_rows = scan_json_rows(
+        &mut reader,
+        &mut registry,
+        config,
+        progress.as_ref(),
+        progress_tx.as_ref(),
+        total_bytes,
+        &mut sampler,
+    )?;
+    if let Some(ref bar) = progress {
+        bar.finish();
+    }
     eprintln!("Pass 1 complete: {total_rows} rows, building schema...");
-    Ok(build_pass1_result(registry, total_rows, format, progress_tx.as_ref(), sampler.into_rows()))
+    Ok(build_pass1_result(
+        registry,
+        total_rows,
+        format,
+        progress_tx.as_ref(),
+        sampler.into_rows(),
+    ))
 }
 
 fn report_progress(
@@ -144,15 +165,28 @@ fn report_progress(
     }
     if let Some(tx) = progress_tx {
         if total_rows.is_multiple_of(PROGRESS_INTERVAL) {
-            let _ = tx.send(ProgressEvent::Pass1Progress { rows_scanned: total_rows, bytes_read, total_bytes });
+            let _ = tx.send(ProgressEvent::Pass1Progress {
+                rows_scanned: total_rows,
+                bytes_read,
+                total_bytes,
+            });
         }
     }
 }
 
-fn flush_final_progress(progress_tx: Option<&ProgressTx>, total_rows: u64, bytes_read: u64, total_bytes: u64) {
+fn flush_final_progress(
+    progress_tx: Option<&ProgressTx>,
+    total_rows: u64,
+    bytes_read: u64,
+    total_bytes: u64,
+) {
     if let Some(tx) = progress_tx {
         if total_rows > 0 && !total_rows.is_multiple_of(PROGRESS_INTERVAL) {
-            let _ = tx.send(ProgressEvent::Pass1Progress { rows_scanned: total_rows, bytes_read, total_bytes });
+            let _ = tx.send(ProgressEvent::Pass1Progress {
+                rows_scanned: total_rows,
+                bytes_read,
+                total_bytes,
+            });
         }
     }
 }
@@ -176,7 +210,11 @@ fn scan_json_rows(
                 total_rows += 1;
                 let end = reader.bytes_read();
                 if sampler.wants(end) {
-                    sampler.keep(end, reader.current_key().map(str::to_string), serde_json::to_vec(&value).unwrap_or_default());
+                    sampler.keep(
+                        end,
+                        reader.current_key().map(str::to_string),
+                        serde_json::to_vec(&value).unwrap_or_default(),
+                    );
                 }
             }
             other => {
@@ -185,7 +223,13 @@ fn scan_json_rows(
                 )));
             }
         }
-        report_progress(progress, progress_tx, total_rows, reader.bytes_read(), total_bytes);
+        report_progress(
+            progress,
+            progress_tx,
+            total_rows,
+            reader.bytes_read(),
+            total_bytes,
+        );
     }
     flush_final_progress(progress_tx, total_rows, reader.bytes_read(), total_bytes);
     Ok(total_rows)
@@ -207,10 +251,19 @@ fn build_pass1_result(
     let columns_count = schemas.iter().map(|s| s.columns.len()).sum::<usize>();
     eprintln!("Schema: {tables_count} tables, {columns_count} total columns");
     if let Some(tx) = progress_tx {
-        let _ = tx.send(ProgressEvent::Pass1Done { total_rows, tables_count, columns_count });
+        let _ = tx.send(ProgressEvent::Pass1Done {
+            total_rows,
+            tables_count,
+            columns_count,
+        });
     }
     Pass1Result {
-        schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings,
+        schemas,
+        total_rows,
+        stats,
+        truncated_names,
+        column_collisions,
+        overflow_warnings,
         skip_cascade_warnings: Vec::new(),
         detected_format: Some(format),
         group_columns: Vec::new(),
@@ -224,7 +277,9 @@ fn samples_of(schemas: &[TableSchema], sampled: Vec<SampledRow>) -> Vec<StoredSa
     // parsed one at a time: a parsed row weighs several times its bytes
     let rows = sampled.into_iter().filter_map(|row| {
         let mut bytes = row.bytes;
-        simd_json::from_slice::<Value>(&mut bytes).ok().map(|value| (row.key, value))
+        simd_json::from_slice::<Value>(&mut bytes)
+            .ok()
+            .map(|value| (row.key, value))
     });
     crate::schema::grouping::suggest::samples_of_rows(schemas, rows, count)
 }
@@ -267,12 +322,17 @@ pub fn run_inspect(
         scan_objects_with_limit(reader, &mut registry, &config.root_table, limit)?;
     let anomaly_count = registry.anomaly_iter().count();
     let schemas = registry.finalize();
-    Ok(InspectResult { schemas, rows_scanned, anomaly_count, sampled_objects })
+    Ok(InspectResult {
+        schemas,
+        rows_scanned,
+        anomaly_count,
+        sampled_objects,
+    })
 }
 
 fn build_inspect_registry(config: &Pass1Config) -> SchemaRegistry {
-    use std::collections::HashSet;
     use crate::schema::strategies::StrategyName;
+    use std::collections::HashSet;
     SchemaRegistry::new(RegistryConfig {
         text_threshold: config.registry.text_threshold,
         wide_column_threshold: usize::MAX,
@@ -304,9 +364,11 @@ fn scan_objects_with_limit(
                 rows_scanned += 1;
                 sampled_objects.push(Value::Object(obj.clone()));
             }
-            other => return Err(crate::error::J2sError::InvalidInput(format!(
-                "Expected JSON object at root level, found: {other}"
-            ))),
+            other => {
+                return Err(crate::error::J2sError::InvalidInput(format!(
+                    "Expected JSON object at root level, found: {other}"
+                )))
+            }
         }
     }
     Ok((rows_scanned, sampled_objects))
@@ -320,8 +382,7 @@ fn scan_objects_with_limit(
 #[must_use]
 pub fn effective_workers(requested: usize) -> (usize, Option<usize>) {
     let requested = requested.max(1);
-    let cap = std::thread::available_parallelism()
-        .map_or(usize::MAX, std::num::NonZero::get); // if detection fails, don't cap
+    let cap = std::thread::available_parallelism().map_or(usize::MAX, std::num::NonZero::get); // if detection fails, don't cap
     if requested > cap {
         (cap, Some(cap))
     } else {
@@ -359,20 +420,40 @@ pub fn run_parallel(
     let worker_handles = spawn_worker_threads(rx, config, num_workers);
 
     let mut sampler = RowSampler::new(total_bytes);
-    let (total_rows, reader_err, format) =
-        read_and_dispatch(path, tx, progress.as_ref(), progress_tx.as_ref(), total_bytes, &mut sampler)?;
+    let (total_rows, reader_err, format) = read_and_dispatch(
+        path,
+        tx,
+        progress.as_ref(),
+        progress_tx.as_ref(),
+        total_bytes,
+        &mut sampler,
+    )?;
 
     let (merged, worker_err) = join_and_merge_workers(worker_handles, config);
 
-    if let Some(ref bar) = progress { bar.finish(); }
+    if let Some(ref bar) = progress {
+        bar.finish();
+    }
 
     // Reader errors take priority: an I/O failure is the most actionable signal.
-    if let Some(e) = reader_err { return Err(e); }
-    if let Some(e) = worker_err { return Err(e); }
+    if let Some(e) = reader_err {
+        return Err(e);
+    }
+    if let Some(e) = worker_err {
+        return Err(e);
+    }
 
     flush_final_progress(progress_tx.as_ref(), total_rows, total_bytes, total_bytes);
-    eprintln!("Pass 1 complete (parallel, {num_workers} workers): {total_rows} rows, building schema...");
-    Ok(build_pass1_result(merged, total_rows, format, progress_tx.as_ref(), sampler.into_rows()))
+    eprintln!(
+        "Pass 1 complete (parallel, {num_workers} workers): {total_rows} rows, building schema..."
+    );
+    Ok(build_pass1_result(
+        merged,
+        total_rows,
+        format,
+        progress_tx.as_ref(),
+        sampler.into_rows(),
+    ))
 }
 
 /// Spawn `num_workers` threads, each consuming JSON object bytes from `rx` and building
@@ -399,12 +480,16 @@ fn spawn_worker_threads(
                     // simd_json mutates the slice in-place (zero-copy parsing); bytes is owned here.
                     match simd_json::from_slice::<serde_json::Value>(&mut bytes) {
                         Ok(serde_json::Value::Object(obj)) => reg.observe_root(root, &obj),
-                        Ok(other) => return Err(crate::error::J2sError::InvalidInput(format!(
-                            "Expected JSON object at root level, found: {other}"
-                        ))),
-                        Err(e) => return Err(crate::error::J2sError::InvalidInput(format!(
-                            "JSON parse error in worker: {e}"
-                        ))),
+                        Ok(other) => {
+                            return Err(crate::error::J2sError::InvalidInput(format!(
+                                "Expected JSON object at root level, found: {other}"
+                            )))
+                        }
+                        Err(e) => {
+                            return Err(crate::error::J2sError::InvalidInput(format!(
+                                "JSON parse error in worker: {e}"
+                            )))
+                        }
                     }
                 }
                 Ok(reg)
@@ -432,7 +517,9 @@ fn read_and_dispatch(
 ) -> Result<(u64, Option<crate::error::J2sError>, JsonFormat)> {
     const PROGRESS_INTERVAL: u64 = 1_000;
     if let Some(tx_prog) = progress_tx {
-        let _ = tx_prog.send(ProgressEvent::Pass1Log("Detecting JSON format…".to_string()));
+        let _ = tx_prog.send(ProgressEvent::Pass1Log(
+            "Detecting JSON format…".to_string(),
+        ));
     }
     let (mut reader, format) = JsonReader::open(path)?;
     emit_root_wrapper_warning(&format, progress_tx);
@@ -448,10 +535,15 @@ fn read_and_dispatch(
                 if sampler.wants(end) {
                     sampler.keep(end, key.clone(), bytes.clone());
                 }
-                if tx.send((key, bytes)).is_err() { break; } // all workers died
+                if tx.send((key, bytes)).is_err() {
+                    break;
+                } // all workers died
                 total_rows += 1;
             }
-            Err(e) => { reader_err = Some(e); break; }
+            Err(e) => {
+                reader_err = Some(e);
+                break;
+            }
         }
         if let Some(bar) = progress {
             bar.inc_rows(1);
@@ -479,15 +571,22 @@ fn join_and_merge_workers(
     handles: Vec<std::thread::JoinHandle<crate::error::Result<SchemaRegistry>>>,
     config: &Pass1Config,
 ) -> (SchemaRegistry, Option<crate::error::J2sError>) {
-    let join_results: Vec<_> = handles.into_iter().map(std::thread::JoinHandle::join).collect();
+    let join_results: Vec<_> = handles
+        .into_iter()
+        .map(std::thread::JoinHandle::join)
+        .collect();
 
     let mut merged = SchemaRegistry::new(config.registry.clone());
     let mut worker_errors: Vec<String> = Vec::new();
     for result in join_results {
-        match result.map_err(|_| crate::error::J2sError::Schema(
-            "Pass 1 worker thread panicked unexpectedly".to_string()
-        )) {
-            Ok(Ok(reg)) => { if worker_errors.is_empty() { merged.merge(reg); } }
+        match result.map_err(|_| {
+            crate::error::J2sError::Schema("Pass 1 worker thread panicked unexpectedly".to_string())
+        }) {
+            Ok(Ok(reg)) => {
+                if worker_errors.is_empty() {
+                    merged.merge(reg);
+                }
+            }
             Err(e) | Ok(Err(e)) => {
                 let msg = match e {
                     crate::error::J2sError::InvalidInput(m) => m,
@@ -500,7 +599,9 @@ fn join_and_merge_workers(
     let worker_err = if worker_errors.is_empty() {
         None
     } else {
-        Some(crate::error::J2sError::InvalidInput(worker_errors.join(" | ")))
+        Some(crate::error::J2sError::InvalidInput(
+            worker_errors.join(" | "),
+        ))
     };
     (merged, worker_err)
 }
@@ -513,7 +614,9 @@ mod tests {
     use std::path::Path;
 
     fn fixture(name: &str) -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
     }
 
     fn inspect_config(root: &str) -> Pass1Config {
@@ -543,7 +646,10 @@ mod tests {
     fn test_inspect_reads_all_when_limit_exceeds_file() {
         let path = fixture("users.jsonl"); // 3 rows
         let result = run_inspect(&path, &inspect_config("users"), 1000).unwrap();
-        assert_eq!(result.rows_scanned, 3, "should read all rows when limit > file size");
+        assert_eq!(
+            result.rows_scanned, 3,
+            "should read all rows when limit > file size"
+        );
     }
 
     #[test]
@@ -551,18 +657,33 @@ mod tests {
         // #84: `inspect` builds its own registry, so it must follow the engine default too
         let result = run_inspect(&fixture("users.jsonl"), &inspect_config("users"), 10).unwrap();
         let names: Vec<_> = result.schemas.iter().map(|s| s.name.as_str()).collect();
-        assert!(!names.contains(&"users_tags"), "no junction table expected, got {names:?}");
+        assert!(
+            !names.contains(&"users_tags"),
+            "no junction table expected, got {names:?}"
+        );
         let users = result.schemas.iter().find(|s| s.name == "users").unwrap();
-        let tags = users.find_by_original("tags").expect("`tags` must be a column of `users`");
-        assert!(matches!(tags.pg_type, crate::schema::type_tracker::PgType::Array(_)), "got {:?}", tags.pg_type);
+        let tags = users
+            .find_by_original("tags")
+            .expect("`tags` must be a column of `users`");
+        assert!(
+            matches!(tags.pg_type, crate::schema::type_tracker::PgType::Array(_)),
+            "got {:?}",
+            tags.pg_type
+        );
     }
 
     #[test]
     fn test_inspect_returns_schemas() {
         let path = fixture("users.jsonl");
         let result = run_inspect(&path, &inspect_config("users"), 10).unwrap();
-        assert!(!result.schemas.is_empty(), "should infer at least one table");
-        assert!(result.schemas.iter().any(|s| s.name == "users"), "root table must be present");
+        assert!(
+            !result.schemas.is_empty(),
+            "should infer at least one table"
+        );
+        assert!(
+            result.schemas.iter().any(|s| s.name == "users"),
+            "root table must be present"
+        );
     }
 
     #[test]
@@ -571,7 +692,10 @@ mod tests {
         let path = fixture("users.jsonl");
         let result = run_inspect(&path, &inspect_config("users"), 10).unwrap();
         assert!(
-            result.schemas.iter().all(|s| !matches!(s.inferred_strategy, InferredStrategy::Jsonb)),
+            result
+                .schemas
+                .iter()
+                .all(|s| !matches!(s.inferred_strategy, InferredStrategy::Jsonb)),
             "column limit guard must not be applied in inspect mode"
         );
     }
@@ -612,7 +736,10 @@ mod tests {
 
     // ── run_parallel tests ──────────────────────────────────────────────────
 
-    fn run_parallel_default(path: &std::path::Path, workers: usize) -> crate::error::Result<Pass1Result> {
+    fn run_parallel_default(
+        path: &std::path::Path,
+        workers: usize,
+    ) -> crate::error::Result<Pass1Result> {
         run_parallel(
             path,
             &Pass1Config {
@@ -637,8 +764,14 @@ mod tests {
         use std::io::Write;
         let mut f = tempfile::NamedTempFile::new().unwrap();
         for i in 0..40_000_u32 {
-            let row: serde_json::Map<String, Value> =
-                (0..24).map(|c| (format!("k{c:02}"), serde_json::json!(format!("v{}", (i + c) % 7)))).collect();
+            let row: serde_json::Map<String, Value> = (0..24)
+                .map(|c| {
+                    (
+                        format!("k{c:02}"),
+                        serde_json::json!(format!("v{}", (i + c) % 7)),
+                    )
+                })
+                .collect();
             writeln!(f, "{}", Value::Object(row)).unwrap();
         }
         f
@@ -648,24 +781,40 @@ mod tests {
     fn pass_1_keeps_the_same_bounded_sample_whatever_the_number_of_workers() {
         // #91 phase 2: the data signals come with the schema, the same for every run of the same file
         let f = wide_file();
-        let config = Pass1Config { num_workers: Some(4), ..run_config_for("users") };
-        let (one, four) = (run(f.path(), &config, None).unwrap(), run_parallel(f.path(), &config, None).unwrap());
+        let config = Pass1Config {
+            num_workers: Some(4),
+            ..run_config_for("users")
+        };
+        let (one, four) = (
+            run(f.path(), &config, None).unwrap(),
+            run_parallel(f.path(), &config, None).unwrap(),
+        );
         assert_eq!(one.samples.len(), 1);
         let (a, b) = (&one.samples[0], &four.samples[0]);
         assert_eq!((a.table.as_str(), a.columns.len()), ("users", 24));
         assert_eq!(a.columns, b.columns);
         let rows = a.sample.presence.rows();
-        assert!((10_000..=20_000).contains(&rows), "{rows} rows, at most the budget, spread over the file");
+        assert!(
+            (10_000..=20_000).contains(&rows),
+            "{rows} rows, at most the budget, spread over the file"
+        );
         assert_eq!(rows, b.sample.presence.rows());
         for c in 0..24 {
-            assert_eq!(a.sample.values.vocabulary(c), b.sample.values.vocabulary(c), "column {c}");
+            assert_eq!(
+                a.sample.values.vocabulary(c),
+                b.sample.values.vocabulary(c),
+                "column {c}"
+            );
         }
     }
 
     fn run_config_for(root: &str) -> Pass1Config {
         Pass1Config {
             root_table: root.to_string(),
-            registry: RegistryConfig { wide_column_threshold: usize::MAX, ..RegistryConfig::default() },
+            registry: RegistryConfig {
+                wide_column_threshold: usize::MAX,
+                ..RegistryConfig::default()
+            },
             num_workers: None,
         }
     }
@@ -689,7 +838,10 @@ mod tests {
         let path = fixture("users.jsonl");
         let result = run_parallel_default(&path, 2).unwrap();
         assert!(!result.schemas.is_empty());
-        assert!(result.schemas.iter().any(|s| s.name == "users"), "root table must be present");
+        assert!(
+            result.schemas.iter().any(|s| s.name == "users"),
+            "root table must be present"
+        );
     }
 
     #[test]
@@ -724,7 +876,10 @@ mod tests {
             },
             None,
         );
-        assert!(result.is_err(), "must return Err for non-object root element");
+        assert!(
+            result.is_err(),
+            "must return Err for non-object root element"
+        );
     }
 
     #[test]
@@ -758,10 +913,13 @@ mod tests {
                 // With 4 workers and 8 bad elements, each worker sees ≥1 error.
                 // Aggregation must produce a message with ≥2 "root level" occurrences.
                 let count = msg.matches("root level").count();
-                assert!(count >= 2, "expected ≥2 errors aggregated in message, got {count}: {msg}");
+                assert!(
+                    count >= 2,
+                    "expected ≥2 errors aggregated in message, got {count}: {msg}"
+                );
             }
             Err(e) => panic!("expected InvalidInput, got: {e}"),
-            Ok(_)  => panic!("expected Err"),
+            Ok(_) => panic!("expected Err"),
         }
     }
 
@@ -789,10 +947,12 @@ mod tests {
             None,
         );
         match result {
-            Err(crate::error::J2sError::InvalidInput(msg)) =>
-                assert!(msg.contains("root level"), "error must mention root level: {msg}"),
+            Err(crate::error::J2sError::InvalidInput(msg)) => assert!(
+                msg.contains("root level"),
+                "error must mention root level: {msg}"
+            ),
             Err(e) => panic!("expected InvalidInput, got: {e}"),
-            Ok(_)  => panic!("expected Err for non-object root element"),
+            Ok(_) => panic!("expected Err for non-object root element"),
         }
     }
 
@@ -894,8 +1054,14 @@ mod tests {
         let result = run(&path, &wrapper_config("wrong_name"), None).unwrap();
         let names: Vec<&str> = result.schemas.iter().map(|s| s.name.as_str()).collect();
         // SchemaRegistry normalises names; "Foods" → "foods"
-        assert!(names.contains(&"foods"), "table should be 'foods' (normalised wrapper key 'Foods'), got: {names:?}");
-        assert!(!names.contains(&"wrong_name"), "table must NOT be named after config.root_table");
+        assert!(
+            names.contains(&"foods"),
+            "table should be 'foods' (normalised wrapper key 'Foods'), got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"wrong_name"),
+            "table must NOT be named after config.root_table"
+        );
     }
 
     #[test]
@@ -903,8 +1069,14 @@ mod tests {
         let path = fixture("wrapper_multi.json");
         let result = run(&path, &wrapper_config("wrong_name"), None).unwrap();
         let names: Vec<&str> = result.schemas.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"foods"), "should have 'foods' table, got: {names:?}");
-        assert!(names.contains(&"nutrients"), "should have 'nutrients' table, got: {names:?}");
+        assert!(
+            names.contains(&"foods"),
+            "should have 'foods' table, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"nutrients"),
+            "should have 'nutrients' table, got: {names:?}"
+        );
     }
 
     #[test]
@@ -912,7 +1084,10 @@ mod tests {
         let path = fixture("wrapper_mono.json");
         let result = run_inspect(&path, &inspect_config("wrong_name"), 100).unwrap();
         let names: Vec<&str> = result.schemas.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"foods"), "inspect table should be 'foods' (normalised 'Foods'), got: {names:?}");
+        assert!(
+            names.contains(&"foods"),
+            "inspect table should be 'foods' (normalised 'Foods'), got: {names:?}"
+        );
     }
 
     #[test]
@@ -934,9 +1109,13 @@ mod tests {
                 num_workers: Some(1),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         let names: Vec<&str> = result.schemas.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"foods"), "parallel: table should be 'foods' (normalised 'Foods'), got: {names:?}");
+        assert!(
+            names.contains(&"foods"),
+            "parallel: table should be 'foods' (normalised 'Foods'), got: {names:?}"
+        );
     }
 
     #[test]
@@ -956,14 +1135,25 @@ mod tests {
         run(&path, &wrapper_config("foods"), Some(tx)).unwrap();
         let events: Vec<ProgressEvent> = {
             let mut v = Vec::new();
-            while let Ok(e) = rx.try_recv() { v.push(e); }
+            while let Ok(e) = rx.try_recv() {
+                v.push(e);
+            }
             v
         };
-        let log_msgs: Vec<&str> = events.iter().filter_map(|e| {
-            if let ProgressEvent::Pass1Log(msg) = e { Some(msg.as_str()) } else { None }
-        }).collect();
+        let log_msgs: Vec<&str> = events
+            .iter()
+            .filter_map(|e| {
+                if let ProgressEvent::Pass1Log(msg) = e {
+                    Some(msg.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert!(
-            log_msgs.iter().any(|m| m.contains("Root wrapper") && m.contains("Foods")),
+            log_msgs
+                .iter()
+                .any(|m| m.contains("Root wrapper") && m.contains("Foods")),
             "expected Pass1Log with wrapper warning, got: {log_msgs:?}"
         );
     }
@@ -987,7 +1177,8 @@ mod tests {
                 num_workers: Some(2),
             },
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.total_rows, 2);
     }
 
@@ -1005,14 +1196,20 @@ mod tests {
     fn test_run_sets_detected_format_array() {
         let path = fixture("users.json");
         let result = run(&path, &wrapper_config("users"), None).unwrap();
-        assert_eq!(result.detected_format, Some(crate::io::reader::JsonFormat::Array));
+        assert_eq!(
+            result.detected_format,
+            Some(crate::io::reader::JsonFormat::Array)
+        );
     }
 
     #[test]
     fn test_run_sets_detected_format_lines() {
         let path = fixture("users.jsonl");
         let result = run(&path, &wrapper_config("users"), None).unwrap();
-        assert_eq!(result.detected_format, Some(crate::io::reader::JsonFormat::Lines));
+        assert_eq!(
+            result.detected_format,
+            Some(crate::io::reader::JsonFormat::Lines)
+        );
     }
 
     #[test]
@@ -1021,14 +1218,27 @@ mod tests {
         let result = run(&path, &wrapper_config("foods"), None).unwrap();
         assert_eq!(
             result.detected_format,
-            Some(crate::io::reader::JsonFormat::RootWrapper(vec!["Foods".to_string()]))
+            Some(crate::io::reader::JsonFormat::RootWrapper(vec![
+                "Foods".to_string()
+            ]))
         );
     }
 
     #[test]
     fn test_run_parallel_sets_detected_format() {
         let path = fixture("users.json");
-        let result = run_parallel(&path, &Pass1Config { num_workers: Some(2), ..wrapper_config("users") }, None).unwrap();
-        assert_eq!(result.detected_format, Some(crate::io::reader::JsonFormat::Array));
+        let result = run_parallel(
+            &path,
+            &Pass1Config {
+                num_workers: Some(2),
+                ..wrapper_config("users")
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result.detected_format,
+            Some(crate::io::reader::JsonFormat::Array)
+        );
     }
 }

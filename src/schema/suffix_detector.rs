@@ -58,7 +58,10 @@ fn build_suffix_to_bases(all_keys: &[&str]) -> HashMap<String, HashSet<String>> 
 }
 
 fn collect_base_set(candidates: &[(String, HashSet<String>)]) -> HashSet<String> {
-    candidates.iter().flat_map(|(_, bases)| bases.iter().cloned()).collect()
+    candidates
+        .iter()
+        .flat_map(|(_, bases)| bases.iter().cloned())
+        .collect()
 }
 
 fn filter_by_coverage(
@@ -89,17 +92,31 @@ pub fn detect_suffix_schema(
         .into_iter()
         .filter(|(_, bases)| bases.len() >= MIN_BASES)
         .collect();
-    if candidates.is_empty() { return None; }
+    if candidates.is_empty() {
+        return None;
+    }
     let base_set = collect_base_set(&candidates);
-    if base_set.is_empty() { return None; }
+    if base_set.is_empty() {
+        return None;
+    }
     let mut retained = filter_by_coverage(candidates, &base_set, coverage_threshold);
-    if retained.is_empty() { return None; }
+    if retained.is_empty() {
+        return None;
+    }
     retained.sort_by(|a, b| a.0.cmp(&b.0));
     let total_accounted: usize = retained.iter().map(|(_, bases)| bases.len()).sum::<usize>()
-        + base_set.iter().filter(|b| key_set.contains(b.as_str())).count();
-    if total_accounted < 2 { return None; }
+        + base_set
+            .iter()
+            .filter(|b| key_set.contains(b.as_str()))
+            .count();
+    if total_accounted < 2 {
+        return None;
+    }
     let (suffix_cols, value_type) = build_suffix_cols_and_value_type(&retained, &base_set, columns);
-    Some(SuffixSchema { suffix_cols, value_type })
+    Some(SuffixSchema {
+        suffix_cols,
+        value_type,
+    })
 }
 
 /// Build `SuffixColumn` entries and the base `value` column type from retained suffix groups.
@@ -115,22 +132,36 @@ fn build_suffix_cols_and_value_type(
             .filter_map(|base| columns.get(format!("{base}{suffix}").as_str()))
             .fold(None::<PgType>, |acc, tracker| {
                 let t = tracker.to_pg_type();
-                Some(match acc { None => t, Some(a) => widen_pg_types(a, &t) })
+                Some(match acc {
+                    None => t,
+                    Some(a) => widen_pg_types(a, &t),
+                })
             })
             .unwrap_or(PgType::Text);
         let stripped = suffix.trim_start_matches('_');
         let col_name = {
             let s = sanitize_identifier(stripped);
-            if s == "value" { "norm_value".to_string() } else { s }
+            if s == "value" {
+                "norm_value".to_string()
+            } else {
+                s
+            }
         };
-        suffix_cols.push(SuffixColumn { suffix: suffix.clone(), col_name, pg_type });
+        suffix_cols.push(SuffixColumn {
+            suffix: suffix.clone(),
+            col_name,
+            pg_type,
+        });
     }
     let value_type = base_set
         .iter()
         .filter_map(|base| columns.get(base.as_str()))
         .fold(None::<PgType>, |acc, tracker| {
             let t = tracker.to_pg_type();
-            Some(match acc { None => t, Some(a) => widen_pg_types(a, &t) })
+            Some(match acc {
+                None => t,
+                Some(a) => widen_pg_types(a, &t),
+            })
         })
         .unwrap_or(PgType::Text);
     (suffix_cols, value_type)
@@ -156,8 +187,16 @@ fn build_suffix_column(raw_suffix: &str, columns: &IndexMap<String, TypeTracker>
         .unwrap_or(PgType::Text);
     let stripped = suffix.trim_start_matches('_');
     let s = sanitize_identifier(stripped);
-    let col_name = if s == "value" { "norm_value".to_string() } else { s };
-    SuffixColumn { suffix, col_name, pg_type }
+    let col_name = if s == "value" {
+        "norm_value".to_string()
+    } else {
+        s
+    };
+    SuffixColumn {
+        suffix,
+        col_name,
+        pg_type,
+    }
 }
 
 /// Used when the user declares `suffix_columns` in the TOML config.
@@ -172,7 +211,10 @@ pub fn build_suffix_schema_from_list(
         .collect();
 
     // Base value type from bare keys (keys not ending with any declared suffix)
-    let suffix_strs: HashSet<&str> = suffix_list.iter().map(std::string::String::as_str).collect();
+    let suffix_strs: HashSet<&str> = suffix_list
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
     let value_type = columns
         .iter()
         .filter(|(key, _)| !suffix_strs.iter().any(|s| key.ends_with(*s)))
@@ -185,7 +227,10 @@ pub fn build_suffix_schema_from_list(
         })
         .unwrap_or(PgType::Text);
 
-    SuffixSchema { suffix_cols, value_type }
+    SuffixSchema {
+        suffix_cols,
+        value_type,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -213,22 +258,40 @@ mod tests {
 
     #[test]
     fn test_filter_by_coverage_keeps_high_coverage() {
-        let base_set: HashSet<String> = ["a", "b", "c"].iter().map(std::string::ToString::to_string).collect();
+        let base_set: HashSet<String> = ["a", "b", "c"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         let candidates = vec![
-            ("_unit".to_string(), HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()])),
+            (
+                "_unit".to_string(),
+                HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()]),
+            ),
             ("_rare".to_string(), HashSet::from(["a".to_string()])),
         ];
         let retained = filter_by_coverage(candidates, &base_set, 0.5);
         let names: Vec<&str> = retained.iter().map(|(s, _)| s.as_str()).collect();
-        assert!(names.contains(&"_unit"), "_unit covers 3/3 = 100% — must be retained");
-        assert!(!names.contains(&"_rare"), "_rare covers 1/3 = 33% — must be filtered out");
+        assert!(
+            names.contains(&"_unit"),
+            "_unit covers 3/3 = 100% — must be retained"
+        );
+        assert!(
+            !names.contains(&"_rare"),
+            "_rare covers 1/3 = 33% — must be filtered out"
+        );
     }
 
     #[test]
     fn test_collect_base_set_unions_all_bases() {
         let candidates = vec![
-            ("_a".to_string(), HashSet::from(["x".to_string(), "y".to_string()])),
-            ("_b".to_string(), HashSet::from(["y".to_string(), "z".to_string()])),
+            (
+                "_a".to_string(),
+                HashSet::from(["x".to_string(), "y".to_string()]),
+            ),
+            (
+                "_b".to_string(),
+                HashSet::from(["y".to_string(), "z".to_string()]),
+            ),
         ];
         let base_set = collect_base_set(&candidates);
         assert_eq!(base_set.len(), 3, "x, y, z must all be in the base set");
@@ -254,7 +317,11 @@ mod tests {
         assert!(result.is_some(), "should detect suffix structure");
 
         let schema = result.unwrap();
-        let suffixes: Vec<&str> = schema.suffix_cols.iter().map(|s| s.suffix.as_str()).collect();
+        let suffixes: Vec<&str> = schema
+            .suffix_cols
+            .iter()
+            .map(|s| s.suffix.as_str())
+            .collect();
         assert!(suffixes.contains(&"_100g"), "should detect _100g");
         assert!(suffixes.contains(&"_unit"), "should detect _unit");
     }
@@ -268,7 +335,10 @@ mod tests {
         cols.insert("baz".to_string(), make_float_tracker());
 
         let result = detect_suffix_schema(&cols, 0.3, 256);
-        assert!(result.is_none(), "flat keys should not be detected as structured");
+        assert!(
+            result.is_none(),
+            "flat keys should not be detected as structured"
+        );
     }
 
     #[test]
@@ -282,9 +352,19 @@ mod tests {
         let result = detect_suffix_schema(&cols, 0.3, 256);
         assert!(result.is_some());
         let schema = result.unwrap();
-        let col_names: Vec<&str> = schema.suffix_cols.iter().map(|s| s.col_name.as_str()).collect();
+        let col_names: Vec<&str> = schema
+            .suffix_cols
+            .iter()
+            .map(|s| s.col_name.as_str())
+            .collect();
         // `_value` suffix must be renamed to avoid collision with base `value` column
-        assert!(!col_names.contains(&"value"), "should not have raw 'value' col name");
-        assert!(col_names.contains(&"norm_value"), "should have 'norm_value'");
+        assert!(
+            !col_names.contains(&"value"),
+            "should not have raw 'value' col name"
+        );
+        assert!(
+            col_names.contains(&"norm_value"),
+            "should have 'norm_value'"
+        );
     }
 }

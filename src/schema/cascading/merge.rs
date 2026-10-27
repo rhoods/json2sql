@@ -13,10 +13,9 @@
 //!   le cas de clés mixtes.
 //! - fn `extract_key_suffixes` — dérive la clé de chaque table en retirant le préfixe commun des noms.
 
-use super::super::table_schema::{SiblingGroup, SiblingSchema, TableSchema, InferredStrategy};
+use super::super::table_schema::{InferredStrategy, SiblingGroup, SiblingSchema, TableSchema};
 use super::super::wide_strategies::classify_key_shape;
 use super::scoring::pg_truncate_name;
-
 
 /// Error returned by [`build_sibling_collapse_from_siblings`].
 #[allow(dead_code)] // used by json2sql-ui::state::apply_sibling_merge
@@ -60,9 +59,14 @@ fn validate_merge_inputs(schemas: &[TableSchema], indices: &[usize]) -> Result<S
             return Err(MergeError::RoutingTable(t.name.clone()));
         }
     }
-    let parent_name = schemas[indices[0]].parent_table.as_deref()
+    let parent_name = schemas[indices[0]]
+        .parent_table
+        .as_deref()
         .expect("NoParent was checked for all tables above — parent_table is Some");
-    if indices.iter().any(|&i| schemas[i].parent_table.as_deref() != Some(parent_name)) {
+    if indices
+        .iter()
+        .any(|&i| schemas[i].parent_table.as_deref() != Some(parent_name))
+    {
         return Err(MergeError::DifferentParents);
     }
     Ok(parent_name.to_string())
@@ -85,7 +89,10 @@ pub fn build_sibling_collapse_from_siblings(
     let keys = extract_key_suffixes(&names);
     let key_refs: Vec<&str> = keys.iter().map(std::string::String::as_str).collect();
 
-    let is_numeric: Vec<bool> = keys.iter().map(|k| k.chars().all(|c| c.is_ascii_digit())).collect();
+    let is_numeric: Vec<bool> = keys
+        .iter()
+        .map(|k| k.chars().all(|c| c.is_ascii_digit()))
+        .collect();
     let has_numeric = is_numeric.iter().any(|&b| b);
     let has_non_numeric = is_numeric.iter().any(|&b| !b);
 
@@ -99,7 +106,11 @@ pub fn build_sibling_collapse_from_siblings(
         })
     };
 
-    Ok(MergeResult { parent_name, strategy, absorbed_names })
+    Ok(MergeResult {
+        parent_name,
+        strategy,
+        absorbed_names,
+    })
 }
 
 #[allow(clippy::too_many_lines)] // symmetric two-group struct construction for SiblingCollapseMulti
@@ -115,8 +126,13 @@ fn build_mixed_keyed_pivot_strategy(
     let mut numeric_keys: Vec<&str> = Vec::new();
     let mut non_numeric_keys: Vec<&str> = Vec::new();
     for (i, &num) in is_numeric.iter().enumerate() {
-        if num { numeric_names.push(names[i].to_string()); numeric_keys.push(key_refs[i]); }
-        else { non_numeric_names.push(names[i].to_string()); non_numeric_keys.push(key_refs[i]); }
+        if num {
+            numeric_names.push(names[i].to_string());
+            numeric_keys.push(key_refs[i]);
+        } else {
+            non_numeric_names.push(names[i].to_string());
+            non_numeric_keys.push(key_refs[i]);
+        }
     }
     InferredStrategy::SiblingCollapseMulti(vec![
         SiblingGroup {
@@ -147,7 +163,9 @@ fn build_mixed_keyed_pivot_strategy(
 }
 
 fn extract_key_suffixes(names: &[&str]) -> Vec<String> {
-    if names.is_empty() { return vec![]; }
+    if names.is_empty() {
+        return vec![];
+    }
     let bytes: Vec<&[u8]> = names.iter().map(|s| s.as_bytes()).collect();
     let min_len = bytes.iter().map(|b| b.len()).min().unwrap_or(0);
     let prefix_len = (0..min_len)
@@ -161,13 +179,14 @@ fn extract_key_suffixes(names: &[&str]) -> Vec<String> {
     names.iter().map(|n| n[skip..].to_string()).collect()
 }
 
-
 #[cfg(test)]
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
-    use super::*;
-    use super::super::super::table_schema::{ColumnSchema, KeyShape, TableSchema, InferredStrategy};
+    use super::super::super::table_schema::{
+        ColumnSchema, InferredStrategy, KeyShape, TableSchema,
+    };
     use super::super::super::type_tracker::PgType;
+    use super::*;
 
     fn make_parent(name: &str) -> TableSchema {
         TableSchema::new(name.to_string(), vec![name.to_string()], 0)
@@ -177,17 +196,29 @@ mod tests {
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
         t.parent_table = Some(parent.to_string());
         t.columns.push(ColumnSchema {
-            name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
-            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false,
+            name: "j2s_id".to_string(),
+            original_name: "j2s_id".to_string(),
+            pg_type: PgType::BigInt,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: false,
         });
         t.columns.push(ColumnSchema {
-            name: "j2s_parent_id".to_string(), original_name: "j2s_parent_id".to_string(),
-            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: true,
+            name: "j2s_parent_id".to_string(),
+            original_name: "j2s_parent_id".to_string(),
+            pg_type: PgType::BigInt,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: true,
         });
         for &k in data_keys {
             t.columns.push(ColumnSchema {
-                name: k.to_string(), original_name: k.to_string(),
-                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+                name: k.to_string(),
+                original_name: k.to_string(),
+                pg_type: PgType::Text,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
             });
         }
         t
@@ -197,15 +228,22 @@ mod tests {
     fn test_merge_slug_siblings_keyed_pivot() {
         let schemas = vec![
             make_parent("products_images"),
-            make_sibling("products_images_front", "products_images", &["url", "width"]),
-            make_sibling("products_images_back",  "products_images", &["url", "width"]),
+            make_sibling(
+                "products_images_front",
+                "products_images",
+                &["url", "width"],
+            ),
+            make_sibling("products_images_back", "products_images", &["url", "width"]),
         ];
         let r = build_sibling_collapse_from_siblings(&schemas, &[1, 2], "img_key").unwrap();
         assert_eq!(r.parent_name, "products_images");
         assert!(matches!(r.strategy, InferredStrategy::SiblingCollapse(_)));
         let mut absorbed = r.absorbed_names;
         absorbed.sort();
-        assert_eq!(absorbed, vec!["products_images_back", "products_images_front"]);
+        assert_eq!(
+            absorbed,
+            vec!["products_images_back", "products_images_front"]
+        );
     }
 
     #[test]
@@ -230,8 +268,8 @@ mod tests {
     fn test_merge_mixed_siblings_multikeyed_pivot() {
         let schemas = vec![
             make_parent("img"),
-            make_sibling("img_1",     "img", &["url"]),
-            make_sibling("img_2",     "img", &["url"]),
+            make_sibling("img_1", "img", &["url"]),
+            make_sibling("img_2", "img", &["url"]),
             make_sibling("img_front", "img", &["url"]),
         ];
         let r = build_sibling_collapse_from_siblings(&schemas, &[1, 2, 3], "key").unwrap();
@@ -251,10 +289,7 @@ mod tests {
 
     #[test]
     fn test_merge_error_too_few_tables() {
-        let schemas = vec![
-            make_parent("p"),
-            make_sibling("p_1", "p", &["val"]),
-        ];
+        let schemas = vec![make_parent("p"), make_sibling("p_1", "p", &["val"])];
         let err = build_sibling_collapse_from_siblings(&schemas, &[1], "key").unwrap_err();
         assert!(matches!(err, MergeError::TooFewTables(_)));
     }
@@ -283,8 +318,12 @@ mod tests {
         let mut routing = TableSchema::new("p_r".to_string(), vec!["p_r".to_string()], 1);
         routing.parent_table = Some("p".to_string());
         routing.columns.push(ColumnSchema {
-            name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
-            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false,
+            name: "j2s_id".to_string(),
+            original_name: "j2s_id".to_string(),
+            pg_type: PgType::BigInt,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: false,
         });
         let sibling = make_sibling("p_s", "p", &["val"]);
         let schemas = vec![routing, sibling];

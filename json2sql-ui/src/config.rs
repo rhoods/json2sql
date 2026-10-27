@@ -17,8 +17,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use json2sql::schema::strategies::StrategyName;
 use crate::state::ProjectState;
+use json2sql::schema::strategies::StrategyName;
 
 // ---------------------------------------------------------------------------
 // Serializable config struct (flat TOML — no nested sections)
@@ -96,7 +96,11 @@ impl ProjectConfig {
             temp_dir: p.temp_dir.clone(),
             workers: p.workers,
             pass2_parallel: p.pass2_parallel,
-            disabled_strategies: p.disabled_strategies.iter().map(|s| s.as_str().to_string()).collect(),
+            disabled_strategies: p
+                .disabled_strategies
+                .iter()
+                .map(|s| s.as_str().to_string())
+                .collect(),
             import_limit: p.import_limit,
             skip_constraints: p.skip_constraints,
             tune_wal: p.tune_wal,
@@ -118,7 +122,9 @@ impl ProjectConfig {
         p.workers = self.workers;
         p.pass2_parallel = self.pass2_parallel;
         // Silently ignore invalid entries — config file may predate a strategy rename
-        p.disabled_strategies = self.disabled_strategies.iter()
+        p.disabled_strategies = self
+            .disabled_strategies
+            .iter()
             .filter_map(|s| StrategyName::try_from(s.as_str()).ok())
             .collect::<HashSet<_>>();
         p.import_limit = self.import_limit;
@@ -180,7 +186,10 @@ mod tests {
 
     #[test]
     fn from_project_maps_all_fields_except_password() {
-        let mut p = ProjectState { source_file: Some(PathBuf::from("/tmp/data.json")), ..Default::default() };
+        let mut p = ProjectState {
+            source_file: Some(PathBuf::from("/tmp/data.json")),
+            ..Default::default()
+        };
         p.pg.host = "myhost".to_string();
         p.pg.port = 5433;
         p.pg.database = "mydb".to_string();
@@ -251,8 +260,14 @@ mod tests {
         let cfg = ProjectConfig::from_project(&p);
         let toml_str = toml::to_string(&cfg).expect("serialize");
 
-        assert!(!toml_str.contains("supersecret"), "password value must not appear in TOML");
-        assert!(!toml_str.contains("password"), "password key must not appear in TOML");
+        assert!(
+            !toml_str.contains("supersecret"),
+            "password value must not appear in TOML"
+        );
+        assert!(
+            !toml_str.contains("password"),
+            "password key must not appear in TOML"
+        );
     }
 
     #[test]
@@ -292,11 +307,17 @@ mod tests {
 
     #[test]
     fn skip_constraints_round_trips_toml() {
-        let p = ProjectState { skip_constraints: true, ..Default::default() };
+        let p = ProjectState {
+            skip_constraints: true,
+            ..Default::default()
+        };
         let cfg = ProjectConfig::from_project(&p);
         let toml_str = toml::to_string(&cfg).expect("serialize");
         let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
-        assert!(parsed.skip_constraints, "skip_constraints=true must survive TOML round-trip");
+        assert!(
+            parsed.skip_constraints,
+            "skip_constraints=true must survive TOML round-trip"
+        );
     }
 
     #[test]
@@ -305,31 +326,50 @@ mod tests {
         // (`.ok()`), so a rejected key would silently drop the whole project: it must just be ignored.
         let toml_str = "pg_host = \"db.example\"\npg_port = 5433\npg_database = \"lab\"\npg_username = \"u\"\n\
             pg_schema = \"public\"\ndrop_existing = true\nworkers = 3\npass2_parallel = 2\narray_as_pg_array = true\n";
-        let parsed: ProjectConfig = toml::from_str(toml_str).expect("a legacy project file must still load");
-        assert_eq!((parsed.pg_host.as_str(), parsed.pg_port, parsed.workers), ("db.example", 5433, 3));
+        let parsed: ProjectConfig =
+            toml::from_str(toml_str).expect("a legacy project file must still load");
+        assert_eq!(
+            (parsed.pg_host.as_str(), parsed.pg_port, parsed.workers),
+            ("db.example", 5433, 3)
+        );
         assert!(parsed.drop_existing);
     }
 
     #[test]
     fn tune_wal_round_trips_toml() {
-        let p = ProjectState { tune_wal: true, ..Default::default() };
+        let p = ProjectState {
+            tune_wal: true,
+            ..Default::default()
+        };
         let toml_str = toml::to_string(&ProjectConfig::from_project(&p)).expect("serialize");
         let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
         let mut p2 = ProjectState::default();
         parsed.apply_to(&mut p2);
-        assert!(p2.tune_wal, "tune_wal=true must survive project -> TOML -> project");
+        assert!(
+            p2.tune_wal,
+            "tune_wal=true must survive project -> TOML -> project"
+        );
     }
 
     #[test]
     fn group_columns_round_trips_toml_and_is_off_for_an_older_file() {
         // #91: the column-groups strategy is off by default
-        let p = ProjectState { group_columns: true, ..Default::default() };
-        let parsed: ProjectConfig = toml::from_str(&toml::to_string(&ProjectConfig::from_project(&p)).expect("serialize")).expect("deserialize");
+        let p = ProjectState {
+            group_columns: true,
+            ..Default::default()
+        };
+        let parsed: ProjectConfig =
+            toml::from_str(&toml::to_string(&ProjectConfig::from_project(&p)).expect("serialize"))
+                .expect("deserialize");
         let mut p2 = ProjectState::default();
         parsed.apply_to(&mut p2);
         assert!(p2.group_columns);
         let old = "pg_host = \"localhost\"\npg_port = 5432\npg_database = \"\"\npg_username = \"\"\npg_schema = \"public\"\ndrop_existing = false\nworkers = 1\npass2_parallel = 4\n";
-        assert!(!toml::from_str::<ProjectConfig>(old).expect("an older file loads").group_columns);
+        assert!(
+            !toml::from_str::<ProjectConfig>(old)
+                .expect("an older file loads")
+                .group_columns
+        );
         assert!(!ProjectState::default().group_columns);
     }
 
@@ -338,7 +378,10 @@ mod tests {
         // Simulates loading an old TOML file that doesn't have skip_constraints
         let toml_str = "pg_host = \"localhost\"\npg_port = 5432\npg_database = \"\"\npg_username = \"\"\npg_schema = \"public\"\ndrop_existing = false\nworkers = 1\npass2_parallel = 4\n";
         let parsed: ProjectConfig = toml::from_str(toml_str).expect("deserialize");
-        assert!(!parsed.skip_constraints, "skip_constraints must default to false for backward compat");
+        assert!(
+            !parsed.skip_constraints,
+            "skip_constraints must default to false for backward compat"
+        );
     }
 
     #[test]
@@ -353,7 +396,10 @@ mod tests {
 
     #[test]
     fn temp_dir_round_trips_toml() {
-        let p = ProjectState { temp_dir: Some(PathBuf::from("/data/tmp")), ..Default::default() };
+        let p = ProjectState {
+            temp_dir: Some(PathBuf::from("/data/tmp")),
+            ..Default::default()
+        };
         let cfg = ProjectConfig::from_project(&p);
         let toml_str = toml::to_string(&cfg).expect("serialize");
         let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
@@ -369,7 +415,10 @@ mod tests {
 
     #[test]
     fn import_limit_round_trips_toml() {
-        let p = ProjectState { import_limit: Some(500), ..Default::default() };
+        let p = ProjectState {
+            import_limit: Some(500),
+            ..Default::default()
+        };
         let cfg = ProjectConfig::from_project(&p);
         let toml_str = toml::to_string(&cfg).expect("serialize");
         let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
@@ -400,13 +449,17 @@ mod tests {
         let cfg = ProjectConfig::from_project(&p);
         assert!(cfg.disabled_strategies.contains(&"sibling".to_string()));
         assert!(cfg.disabled_strategies.contains(&"pivot".to_string()));
-        assert!(!cfg.disabled_strategies.contains(&"structured_pivot".to_string()));
+        assert!(!cfg
+            .disabled_strategies
+            .contains(&"structured_pivot".to_string()));
 
         let mut p2 = ProjectState::default();
         cfg.apply_to(&mut p2);
         assert!(p2.disabled_strategies.contains(&StrategyName::Sibling));
         assert!(p2.disabled_strategies.contains(&StrategyName::Pivot));
-        assert!(!p2.disabled_strategies.contains(&StrategyName::StructuredPivot));
+        assert!(!p2
+            .disabled_strategies
+            .contains(&StrategyName::StructuredPivot));
     }
 
     #[test]
@@ -417,11 +470,15 @@ mod tests {
         let cfg = ProjectConfig::from_project(&p);
         let toml_str = toml::to_string(&cfg).expect("serialize");
         let parsed: ProjectConfig = toml::from_str(&toml_str).expect("deserialize");
-        assert!(parsed.disabled_strategies.contains(&"structured_pivot".to_string()));
+        assert!(parsed
+            .disabled_strategies
+            .contains(&"structured_pivot".to_string()));
 
         let mut p2 = ProjectState::default();
         parsed.apply_to(&mut p2);
-        assert!(p2.disabled_strategies.contains(&StrategyName::StructuredPivot));
+        assert!(p2
+            .disabled_strategies
+            .contains(&StrategyName::StructuredPivot));
     }
 
     #[test]
@@ -432,6 +489,9 @@ mod tests {
         };
         let mut p = ProjectState::default();
         cfg.apply_to(&mut p);
-        assert!(p.disabled_strategies.is_empty(), "invalid strategy names must be silently ignored");
+        assert!(
+            p.disabled_strategies.is_empty(),
+            "invalid strategy names must be silently ignored"
+        );
     }
 }

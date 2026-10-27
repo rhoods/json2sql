@@ -12,18 +12,34 @@ async fn test_anomaly_detection() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies.jsonl");
         let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("people", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("people", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "people").await, 3);
         assert_eq!(p2.anomaly_collector.total_anomalies(), 1);
 
-        let null_count: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{schema}\".\"people\" WHERE \"score\" IS NULL"), &[])
-            .await.unwrap().get(0);
+        let null_count: i64 = client
+            .query_one(
+                &format!("SELECT COUNT(*) FROM \"{schema}\".\"people\" WHERE \"score\" IS NULL"),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(null_count, 1);
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -35,11 +51,16 @@ async fn test_anomaly_dir_streaming() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies.jsonl");
         let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
 
         let anomaly_dir = tempfile::TempDir::new().unwrap();
         let mut p2 = pass2::runner::run(
-            &path, &p1.schemas, &client, &url,
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
             &json2sql::pass2::Pass2Config {
                 root_table: "people".to_string(),
                 pg_schema: schema.clone(),
@@ -55,7 +76,9 @@ async fn test_anomaly_dir_streaming() {
                 tune_wal: false,
             },
             None,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         assert_eq!(p2.anomaly_collector.total_anomalies(), 1);
 
@@ -63,7 +86,10 @@ async fn test_anomaly_dir_streaming() {
         p2.anomaly_collector.finish().unwrap();
 
         let written = p2.anomaly_collector.written_paths();
-        assert!(written.contains_key("people"), "expected anomaly file for 'people'");
+        assert!(
+            written.contains_key("people"),
+            "expected anomaly file for 'people'"
+        );
 
         let file_path = &written["people"];
         assert!(file_path.exists(), "NDJSON file must exist on disk");
@@ -77,7 +103,8 @@ async fn test_anomaly_dir_streaming() {
         assert_eq!(entry["column"], "score");
         assert_eq!(entry["expected_type"], "DOUBLE PRECISION");
         assert_eq!(entry["actual_type"], "boolean");
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,22 +124,42 @@ async fn test_float_anomaly_boolean_value() {
         let items_schema = p1.schemas.iter().find(|s| s.name == "items").unwrap();
         let score_col = items_schema.find_by_original("score").unwrap();
         assert!(
-            matches!(score_col.pg_type, json2sql::schema::type_tracker::PgType::DoublePrecision),
-            "score should be inferred as DOUBLE PRECISION, got {:?}", score_col.pg_type
+            matches!(
+                score_col.pg_type,
+                json2sql::schema::type_tracker::PgType::DoublePrecision
+            ),
+            "score should be inferred as DOUBLE PRECISION, got {:?}",
+            score_col.pg_type
         );
 
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("items", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("items", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "items").await, 5);
         assert_eq!(p2.anomaly_collector.total_anomalies(), 1);
 
-        let null_count: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{schema}\".\"items\" WHERE \"score\" IS NULL"), &[])
-            .await.unwrap().get(0);
+        let null_count: i64 = client
+            .query_one(
+                &format!("SELECT COUNT(*) FROM \"{schema}\".\"items\" WHERE \"score\" IS NULL"),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(null_count, 1);
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,18 +171,34 @@ async fn test_null_byte_anomaly() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies_nullbytes.jsonl");
         let p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("people", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("people", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "people").await, 3);
         assert_eq!(p2.anomaly_collector.total_anomalies(), 1);
 
-        let null_count: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{schema}\".\"people\" WHERE \"bio\" IS NULL"), &[])
-            .await.unwrap().get(0);
+        let null_count: i64 = client
+            .query_one(
+                &format!("SELECT COUNT(*) FROM \"{schema}\".\"people\" WHERE \"bio\" IS NULL"),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(null_count, 1);
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,20 +212,50 @@ async fn test_array_element_overflow_is_an_anomaly_not_a_copy_error() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("anomalies_array.jsonl");
         let mut p1 = pass1::runner::run(&path, &common::pass1_config("items"), None).unwrap();
-        let tags = p1.schemas.iter_mut()
-            .find(|s| s.name == "items").unwrap()
-            .columns.iter_mut().find(|c| c.name == "tags").unwrap();
-        tags.pg_type = json2sql::schema::type_tracker::PgType::Array(Box::new(json2sql::schema::type_tracker::PgType::VarChar(2)));
+        let tags = p1
+            .schemas
+            .iter_mut()
+            .find(|s| s.name == "items")
+            .unwrap()
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "tags")
+            .unwrap();
+        tags.pg_type = json2sql::schema::type_tracker::PgType::Array(Box::new(
+            json2sql::schema::type_tracker::PgType::VarChar(2),
+        ));
 
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("items", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("items", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "items").await, 3);
-        assert_eq!(p2.anomaly_collector.total_anomalies(), 1, "one anomaly for the cell, not one per overflowing element");
+        assert_eq!(
+            p2.anomaly_collector.total_anomalies(),
+            1,
+            "one anomaly for the cell, not one per overflowing element"
+        );
         let cells: Vec<String> = client
-            .query(&format!("SELECT \"tags\"::text FROM \"{schema}\".\"items\" ORDER BY \"id\""), &[])
-            .await.unwrap().iter().map(|r| r.get(0)).collect();
+            .query(
+                &format!("SELECT \"tags\"::text FROM \"{schema}\".\"items\" ORDER BY \"id\""),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
         assert_eq!(cells, vec!["{ab,cd}", "{ab,NULL,NULL}", "{}"]);
-    }).await;
+    })
+    .await;
 }

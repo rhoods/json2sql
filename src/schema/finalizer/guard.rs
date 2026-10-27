@@ -57,13 +57,15 @@ fn collect_surviving_route_targets<'a>(
     let mut preliminary_excluded: std::collections::HashSet<&str> = partial_absorbed.clone();
     for schema in schemas {
         if let Some(ref parent) = schema.parent_table {
-            if absorbers.contains(parent.as_str()) || preliminary_excluded.contains(parent.as_str()) {
+            if absorbers.contains(parent.as_str()) || preliminary_excluded.contains(parent.as_str())
+            {
                 preliminary_excluded.insert(schema.name.as_str());
             }
         }
     }
     // Route targets from excluded tables are stale — only surviving tables' routes count.
-    schemas.iter()
+    schemas
+        .iter()
         .filter(|s| !preliminary_excluded.contains(s.name.as_str()))
         .flat_map(|s| s.child_routes.values().map(std::string::String::as_str))
         .collect()
@@ -71,16 +73,27 @@ fn collect_surviving_route_targets<'a>(
 
 pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {
     let absorbers: std::collections::HashSet<&str> = schemas
-        .iter().filter(|s| s.absorbs_children()).map(|s| s.name.as_str()).collect();
+        .iter()
+        .filter(|s| s.absorbs_children())
+        .map(|s| s.name.as_str())
+        .collect();
     let partial_absorbed: std::collections::HashSet<&str> = schemas
-        .iter().flat_map(|s| s.inferred_strategy.absorbed_names()).collect();
-    if absorbers.is_empty() && partial_absorbed.is_empty() { return; }
+        .iter()
+        .flat_map(|s| s.inferred_strategy.absorbed_names())
+        .collect();
+    if absorbers.is_empty() && partial_absorbed.is_empty() {
+        return;
+    }
     let route_targets = collect_surviving_route_targets(schemas, &absorbers, &partial_absorbed);
     // Pass 2: final exclusion, protecting only valid route targets.
-    let mut excluded: std::collections::HashSet<String> =
-        partial_absorbed.into_iter().map(std::string::ToString::to_string).collect();
+    let mut excluded: std::collections::HashSet<String> = partial_absorbed
+        .into_iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     for schema in schemas.iter() {
-        if route_targets.contains(schema.name.as_str()) { continue; }
+        if route_targets.contains(schema.name.as_str()) {
+            continue;
+        }
         if let Some(ref parent) = schema.parent_table {
             if absorbers.contains(parent.as_str()) || excluded.contains(parent) {
                 excluded.insert(schema.name.clone());

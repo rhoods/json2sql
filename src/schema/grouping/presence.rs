@@ -148,8 +148,16 @@ impl Presence {
     pub fn strata(&self) -> PresenceStrata {
         let masks = stratum_masks(&strata(&self.richness));
         let sizes = std::array::from_fn(|s| masks[s].iter().map(|w| w.count_ones() as usize).sum());
-        let counts = self.bits.iter().map(|column| counts_per_stratum(column, &masks)).collect();
-        PresenceStrata { masks, sizes, counts }
+        let counts = self
+            .bits
+            .iter()
+            .map(|column| counts_per_stratum(column, &masks))
+            .collect();
+        PresenceStrata {
+            masks,
+            sizes,
+            counts,
+        }
     }
 
     /// Lift of `b` given `a`, adjusted by richness (#91, phase 2): the rows where both are present over the rows
@@ -160,7 +168,11 @@ impl Presence {
         let mut observed = 0_usize;
         for (word, (l, r)) in self.bits[a].iter().zip(&self.bits[b]).enumerate() {
             let joint = l & r;
-            observed += strata.masks.iter().map(|mask| (joint & mask[word]).count_ones() as usize).sum::<usize>();
+            observed += strata
+                .masks
+                .iter()
+                .map(|mask| (joint & mask[word]).count_ones() as usize)
+                .sum::<usize>();
         }
         let expected: f64 = (0..STRATA)
             .filter(|&s| strata.sizes[s] > 0)
@@ -283,7 +295,9 @@ mod tests {
         for row in 0..200_u64 {
             let mut cells = [false; 13];
             for cell in cells.iter_mut().take(10) {
-                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
                 *cell = (seed >> 33).is_multiple_of(2);
             }
             cells[10] = row % 10 < 3;
@@ -301,10 +315,17 @@ mod tests {
         let strata = p.strata();
         let (observed, rare) = p.lift(&strata, 11, 10).unwrap();
         assert_eq!(observed, 10, "rare is present in 10 rows, all with b");
-        assert!(rare > 2.0, "1 / 0.3 without strata, less once the richer rows are discounted: {rare}");
+        assert!(
+            rare > 2.0,
+            "1 / 0.3 without strata, less once the richer rows are discounted: {rare}"
+        );
         let (_, spread) = p.lift(&strata, 12, 10).unwrap();
         assert!(spread < 0.5, "never together: {spread}");
-        assert_eq!(p.lift(&strata, 11, 10).map(|(_, l)| l), p.lift(&strata, 10, 11).map(|(_, l)| l), "symmetric");
+        assert_eq!(
+            p.lift(&strata, 11, 10).map(|(_, l)| l),
+            p.lift(&strata, 10, 11).map(|(_, l)| l),
+            "symmetric"
+        );
     }
 
     /// 43 rows x 6 columns (strata of 9, 9, 8, 9 and 8 rows) from a fixed LCG, column 1 mostly copied from column 0; expected values come

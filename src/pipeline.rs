@@ -144,7 +144,9 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
                 .to_string(),
         )
     })?;
-    let client = connect_and_create_tables(db_url, &pass1.schemas, &cfg.pg_schema, cfg.drop_existing).await?;
+    let client =
+        connect_and_create_tables(db_url, &pass1.schemas, &cfg.pg_schema, cfg.drop_existing)
+            .await?;
     let pass2 = run_pass2(&input_path, &pass1, &client, db_url, &cfg).await?;
     finalize_pass2(&pass2, &cfg)
 }
@@ -217,10 +219,7 @@ async fn ctrl_c_interrupt() {
     eprintln!("\nInterrupted — restoring PostgreSQL settings before exit...");
 }
 
-fn finalize_pass2(
-    pass2: &crate::pass2::runner::Pass2Result,
-    cfg: &PipelineConfig,
-) -> Result<()> {
+fn finalize_pass2(pass2: &crate::pass2::runner::Pass2Result, cfg: &PipelineConfig) -> Result<()> {
     report_pass2_results(pass2, cfg.anomaly_dir.as_deref());
 
     let total_anomalies = pass2.anomaly_collector.total_anomalies();
@@ -268,10 +267,10 @@ fn finalized_schema(
 /// Buffer stdin to a named temp file when no explicit input path is given.
 /// Returns `(temp_file_guard, resolved_path)`. The guard must stay alive for
 /// the duration of the pipeline so the temp file is not deleted prematurely.
-fn resolve_input(
-    input: Option<PathBuf>,
-) -> Result<(Option<tempfile::NamedTempFile>, PathBuf)> {
-    if let Some(path) = input { Ok((None, path)) } else {
+fn resolve_input(input: Option<PathBuf>) -> Result<(Option<tempfile::NamedTempFile>, PathBuf)> {
+    if let Some(path) = input {
+        Ok((None, path))
+    } else {
         eprintln!("No input specified, reading from stdin...");
         let mut temp = tempfile::NamedTempFile::new().map_err(J2sError::Io)?;
         std::io::copy(&mut std::io::stdin(), &mut temp).map_err(J2sError::Io)?;
@@ -296,7 +295,10 @@ fn load_or_infer_schema(cfg: &PipelineConfig, input_path: &Path) -> Result<Pass1
 }
 
 fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
-    eprintln!("Loading schema snapshot from '{}'...", schema_path.display());
+    eprintln!(
+        "Loading schema snapshot from '{}'...",
+        schema_path.display()
+    );
     let snap = crate::schema::persistence::load(schema_path)?;
     let mut schemas = snap.schemas;
     let skip_cascade_warnings = if snap.strategy_overrides.is_empty() {
@@ -304,7 +306,11 @@ fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
     } else {
         crate::schema::config::apply_user_overrides(&mut schemas, &snap.strategy_overrides)
     };
-    eprintln!("Snapshot loaded: {} tables, {} rows originally scanned.", schemas.len(), snap.total_rows);
+    eprintln!(
+        "Snapshot loaded: {} tables, {} rows originally scanned.",
+        schemas.len(),
+        snap.total_rows
+    );
     Ok(Pass1Result {
         schemas,
         total_rows: snap.total_rows,
@@ -321,7 +327,10 @@ fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
 
 #[allow(clippy::too_many_lines)] // verbose config struct construction, not multiple responsibilities
 fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Result> {
-    eprintln!("Pass 1: inferring schema from '{}'...", input_path.display());
+    eprintln!(
+        "Pass 1: inferring schema from '{}'...",
+        input_path.display()
+    );
     let base_cfg = Pass1Config {
         root_table: cfg.root_table.clone(),
         registry: crate::schema::registry::RegistryConfig {
@@ -346,7 +355,10 @@ fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Res
         eprintln!("Using {workers} parallel workers for schema inference.");
         crate::pass1::runner::run_parallel(
             input_path,
-            &Pass1Config { num_workers: Some(workers), ..base_cfg },
+            &Pass1Config {
+                num_workers: Some(workers),
+                ..base_cfg
+            },
             None,
         )
     } else {
@@ -361,7 +373,11 @@ fn print_schema_summary(pass1: &Pass1Result) {
             "  {} ({} columns){}",
             schema.name,
             schema.columns.len(),
-            schema.parent_table.as_deref().map(|p| format!(" → parent: {p}")).unwrap_or_default()
+            schema
+                .parent_table
+                .as_deref()
+                .map(|p| format!(" → parent: {p}"))
+                .unwrap_or_default()
         );
     }
 }
@@ -379,9 +395,15 @@ fn warn_truncated_names(names: &[TruncatedName]) {
     if names.is_empty() {
         return;
     }
-    eprintln!("\nWARNING: {} table name(s) exceeded 63 chars and were truncated:", names.len());
+    eprintln!(
+        "\nWARNING: {} table name(s) exceeded 63 chars and were truncated:",
+        names.len()
+    );
     for t in names {
-        eprintln!("  {} → {} (original: {})", t.full_name, t.pg_name, t.original_path);
+        eprintln!(
+            "  {} → {} (original: {})",
+            t.full_name, t.pg_name, t.original_path
+        );
     }
 }
 
@@ -398,9 +420,15 @@ fn warn_column_collisions(collisions: &[ColumnCollision]) {
     for collision in collisions {
         eprintln!(
             "  table '{}': {} fields all sanitize to '{}' →",
-            collision.table_name, collision.original_names.len(), collision.sanitized_name
+            collision.table_name,
+            collision.original_names.len(),
+            collision.sanitized_name
         );
-        for (orig, resolved) in collision.original_names.iter().zip(&collision.resolved_names) {
+        for (orig, resolved) in collision
+            .original_names
+            .iter()
+            .zip(&collision.resolved_names)
+        {
             eprintln!("    '{orig}' → '{resolved}'");
         }
     }
@@ -442,14 +470,21 @@ fn warn_depth(schemas: &[TableSchema], depth_limit: Option<usize>) {
     if deep.is_empty() {
         return;
     }
-    eprintln!("\nWARNING: {} table(s) exceed depth limit of {}:", deep.len(), limit);
+    eprintln!(
+        "\nWARNING: {} table(s) exceed depth limit of {}:",
+        deep.len(),
+        limit
+    );
     for s in &deep {
         eprintln!("  {} (depth {})", s.name, s.depth);
     }
 }
 
 /// Apply schema config overrides, save snapshot, split into column groups, and emit stats report.
-fn post_process_schema(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<Vec<crate::schema::config::ConfigWarning>> {
+fn post_process_schema(
+    pass1: &mut Pass1Result,
+    cfg: &PipelineConfig,
+) -> Result<Vec<crate::schema::config::ConfigWarning>> {
     let warnings = apply_schema_config(pass1, cfg)?;
     save_schema_snapshot(pass1, cfg)?;
     apply_group_columns(pass1, cfg)?;
@@ -467,13 +502,18 @@ fn apply_group_columns(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<
     }
     let left_to_toml = toml_column_group_tables(cfg)?;
     let ticked = pass1.group_columns.clone();
-    let warnings = crate::schema::grouping::auto::apply_name_groups(&mut pass1.schemas, &pass1.samples, |t| {
-        (cfg.group_columns || ticked.contains(&t.name)) && !left_to_toml.contains(&t.name)
-    })?;
+    let warnings = crate::schema::grouping::auto::apply_name_groups(
+        &mut pass1.schemas,
+        &pass1.samples,
+        |t| (cfg.group_columns || ticked.contains(&t.name)) && !left_to_toml.contains(&t.name),
+    )?;
     crate::schema::column_groups::reindex_stats(&pass1.schemas, &mut pass1.stats);
     for w in warnings {
         let message = w.to_message();
-        eprintln!("WARNING: group-columns: {}", message.strip_prefix("schema-config: ").unwrap_or(&message));
+        eprintln!(
+            "WARNING: group-columns: {}",
+            message.strip_prefix("schema-config: ").unwrap_or(&message)
+        );
     }
     Ok(())
 }
@@ -481,7 +521,9 @@ fn apply_group_columns(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<
 /// The tables whose section of the `--schema-config` TOML has a `column_groups` key.
 // shortcut: reads the small TOML a second time after apply_schema_config; pass the parsed config down if it grows.
 fn toml_column_group_tables(cfg: &PipelineConfig) -> Result<HashSet<String>> {
-    let Some(ref path) = cfg.schema_config else { return Ok(HashSet::new()) };
+    let Some(ref path) = cfg.schema_config else {
+        return Ok(HashSet::new());
+    };
     let config = crate::schema::config::SchemaConfig::from_file(path)?;
     Ok(config
         .tables
@@ -491,9 +533,17 @@ fn toml_column_group_tables(cfg: &PipelineConfig) -> Result<HashSet<String>> {
         .collect())
 }
 
-fn apply_schema_config(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<Vec<crate::schema::config::ConfigWarning>> {
-    let Some(ref config_path) = cfg.schema_config else { return Ok(vec![]) };
-    eprintln!("\nApplying schema overrides from '{}'...", config_path.display());
+fn apply_schema_config(
+    pass1: &mut Pass1Result,
+    cfg: &PipelineConfig,
+) -> Result<Vec<crate::schema::config::ConfigWarning>> {
+    let Some(ref config_path) = cfg.schema_config else {
+        return Ok(vec![]);
+    };
+    eprintln!(
+        "\nApplying schema overrides from '{}'...",
+        config_path.display()
+    );
     let config = crate::schema::config::SchemaConfig::from_file(config_path)?;
     let warnings = crate::schema::config::apply_overrides_complete(&mut pass1.schemas, &config)?;
     crate::schema::column_groups::reindex_stats(&pass1.schemas, &mut pass1.stats);
@@ -502,7 +552,9 @@ fn apply_schema_config(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<
 }
 
 fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()> {
-    let Some(ref out_path) = cfg.schema_output else { return Ok(()) };
+    let Some(ref out_path) = cfg.schema_output else {
+        return Ok(());
+    };
     let snapshot = crate::schema::persistence::SchemaSnapshot {
         version: crate::schema::persistence::format_version(&pass1.schemas),
         total_rows: pass1.total_rows,
@@ -548,7 +600,10 @@ fn print_dry_run_ddl(
 ) {
     println!("-- DDL generated by json2sql (dry-run, no database connection)\n");
     for schema in schemas {
-        println!("{};", crate::db::ddl::generate_create_table(schema, pg_schema, drop_existing));
+        println!(
+            "{};",
+            crate::db::ddl::generate_create_table(schema, pg_schema, drop_existing)
+        );
         println!();
     }
     for schema in schemas {
@@ -582,17 +637,16 @@ fn aggregate_anomaly_stats(
         let e = by_table.entry(s.table.clone()).or_insert((0, s.total_rows));
         e.0 += s.anomaly_count;
     }
-    let mut stats: Vec<(String, u64, u64)> =
-        by_table.into_iter().map(|(t, (anom, rows))| (t, anom, rows)).collect();
+    let mut stats: Vec<(String, u64, u64)> = by_table
+        .into_iter()
+        .map(|(t, (anom, rows))| (t, anom, rows))
+        .collect();
     stats.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     stats
 }
 
 /// Print the import summary (rows per table + top anomaly tables).
-fn report_pass2_results(
-    pass2: &crate::pass2::runner::Pass2Result,
-    anomaly_dir: Option<&Path>,
-) {
+fn report_pass2_results(pass2: &crate::pass2::runner::Pass2Result, anomaly_dir: Option<&Path>) {
     eprintln!("\n=== Import Summary ===");
     let mut table_names: Vec<&String> = pass2.rows_per_table.keys().collect();
     table_names.sort();
@@ -612,17 +666,23 @@ fn report_pass2_results(
         eprintln!("\nAnomalies by table (top 10):");
         for (table, anom, rows) in table_stats.iter().take(10) {
             #[allow(clippy::cast_precision_loss)]
-            let rate = if *rows > 0 { *anom as f64 / *rows as f64 * 100.0 } else { 0.0 };
+            let rate = if *rows > 0 {
+                *anom as f64 / *rows as f64 * 100.0
+            } else {
+                0.0
+            };
             eprintln!("  {table:40} {anom:>8} anomalies / {rows:>10} rows ({rate:.2}%)");
         }
         if table_stats.len() > 10 {
-            eprintln!("  ... and {} more tables with anomalies", table_stats.len() - 10);
+            eprintln!(
+                "  ... and {} more tables with anomalies",
+                table_stats.len() - 10
+            );
         }
         if let Some(dir) = anomaly_dir {
             eprintln!("\nAnomaly files written to: {}", dir.display());
         }
     }
-
 }
 
 #[cfg(test)]
@@ -688,21 +748,30 @@ mod tests {
     #[test]
     fn pipeline_config_skip_constraints_false_means_run_constraints() {
         let cfg = minimal_pipeline_cfg(None);
-        assert!(!cfg.skip_constraints, "default skip_constraints must be false");
+        assert!(
+            !cfg.skip_constraints,
+            "default skip_constraints must be false"
+        );
     }
 
     #[test]
     fn pipeline_config_skip_constraints_true_propagates() {
-        let cfg = PipelineConfig { skip_constraints: true, ..minimal_pipeline_cfg(None) };
-        assert!(cfg.skip_constraints, "skip_constraints must be settable to true");
+        let cfg = PipelineConfig {
+            skip_constraints: true,
+            ..minimal_pipeline_cfg(None)
+        };
+        assert!(
+            cfg.skip_constraints,
+            "skip_constraints must be settable to true"
+        );
     }
 
     /// Objects with two families of six columns and twelve unrelated ones, all filled.
     fn wide_jsonl(rows: usize) -> tempfile::NamedTempFile {
         use std::io::Write;
         const OTHER: [&str; 12] = [
-            "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow", "oyster", "pebble",
-            "saddle", "thimble",
+            "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow",
+            "oyster", "pebble", "saddle", "thimble",
         ];
         let names: Vec<String> = ('a'..='f')
             .flat_map(|c| [format!("kiwi_{c}"), format!("zulu_{c}")])
@@ -710,15 +779,20 @@ mod tests {
             .collect();
         let mut file = tempfile::NamedTempFile::new().unwrap();
         for i in 0..rows {
-            let object: serde_json::Map<String, serde_json::Value> =
-                names.iter().map(|n| (n.clone(), serde_json::json!(format!("v{}", i % 5)))).collect();
+            let object: serde_json::Map<String, serde_json::Value> = names
+                .iter()
+                .map(|n| (n.clone(), serde_json::json!(format!("v{}", i % 5))))
+                .collect();
             writeln!(file, "{}", serde_json::Value::Object(object)).unwrap();
         }
         file
     }
 
     fn cfg_for(file: &tempfile::NamedTempFile) -> PipelineConfig {
-        PipelineConfig { input: Some(file.path().to_path_buf()), ..minimal_pipeline_cfg(None) }
+        PipelineConfig {
+            input: Some(file.path().to_path_buf()),
+            ..minimal_pipeline_cfg(None)
+        }
     }
 
     #[test]
@@ -726,18 +800,34 @@ mod tests {
         let file = wide_jsonl(60);
         let s = suggest_groups(cfg_for(&file), None).unwrap();
         assert_eq!(s.tables, ["root"]);
-        let parsed: toml::Table = toml::from_str(&s.toml).unwrap_or_else(|e| panic!("{e}\n{}", s.toml));
+        let parsed: toml::Table =
+            toml::from_str(&s.toml).unwrap_or_else(|e| panic!("{e}\n{}", s.toml));
         let groups = parsed["root"]["column_groups"].as_table().unwrap();
-        assert!(groups.contains_key("kiwi") && groups.contains_key("zulu"), "{:?}", groups.keys().collect::<Vec<_>>());
-        assert!(s.report.contains("Data signals: on, 60 rows sampled"), "{}", s.report);
+        assert!(
+            groups.contains_key("kiwi") && groups.contains_key("zulu"),
+            "{:?}",
+            groups.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            s.report.contains("Data signals: on, 60 rows sampled"),
+            "{}",
+            s.report
+        );
     }
 
     #[test]
     fn suggest_groups_limit_bounds_the_sampled_root_rows() {
         let file = wide_jsonl(60);
-        let cfg = PipelineConfig { limit: Some(25), ..cfg_for(&file) };
+        let cfg = PipelineConfig {
+            limit: Some(25),
+            ..cfg_for(&file)
+        };
         let s = suggest_groups(cfg, None).unwrap();
-        assert!(s.report.contains("Data signals: on, 25 rows sampled"), "{}", s.report);
+        assert!(
+            s.report.contains("Data signals: on, 25 rows sampled"),
+            "{}",
+            s.report
+        );
     }
 
     #[test]
@@ -759,7 +849,9 @@ mod tests {
         let s = suggest_groups(cfg_for(&file), None).unwrap();
         assert_eq!(s.tables, ["root", "root_props"]);
         assert_eq!(
-            s.report.matches("Data signals: on, 60 rows sampled").count(),
+            s.report
+                .matches("Data signals: on, 60 rows sampled")
+                .count(),
             2,
             "{}",
             s.report
@@ -775,19 +867,31 @@ mod tests {
 
     /// `cfg_for(file)` with `--group-columns`.
     fn grouped(file: &tempfile::NamedTempFile) -> PipelineConfig {
-        PipelineConfig { group_columns: true, ..cfg_for(file) }
+        PipelineConfig {
+            group_columns: true,
+            ..cfg_for(file)
+        }
     }
 
     fn with_toml(cfg: PipelineConfig, text: &str) -> (PipelineConfig, tempfile::NamedTempFile) {
         let toml = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(toml.path(), text).unwrap();
-        (PipelineConfig { schema_config: Some(toml.path().to_path_buf()), ..cfg }, toml)
+        (
+            PipelineConfig {
+                schema_config: Some(toml.path().to_path_buf()),
+                ..cfg
+            },
+            toml,
+        )
     }
 
     #[test]
     fn group_columns_splits_the_wide_tables_by_their_names() {
         let file = wide_jsonl(60);
-        assert_eq!(table_names(grouped(&file)), ["root", "root_kiwi", "root_zulu"]);
+        assert_eq!(
+            table_names(grouped(&file)),
+            ["root", "root_kiwi", "root_zulu"]
+        );
     }
 
     #[test]
@@ -802,7 +906,10 @@ mod tests {
     #[test]
     fn the_column_groups_of_the_toml_win_over_the_strategy() {
         let file = wide_jsonl(60);
-        let (cfg, _toml) = with_toml(grouped(&file), "[root.column_groups]\nmine = [\"quartz\", \"bamboo\", \"violin\"]\n");
+        let (cfg, _toml) = with_toml(
+            grouped(&file),
+            "[root.column_groups]\nmine = [\"quartz\", \"bamboo\", \"violin\"]\n",
+        );
         assert_eq!(table_names(cfg), ["root", "root_mine"]);
     }
 
@@ -818,11 +925,17 @@ mod tests {
         // #91 D1: a later TOML must still be able to win, so the automatic groups are never in a snapshot
         let file = wide_jsonl(60);
         let snapshot = tempfile::NamedTempFile::new().unwrap();
-        let cfg = PipelineConfig { schema_output: Some(snapshot.path().to_path_buf()), ..grouped(&file) };
+        let cfg = PipelineConfig {
+            schema_output: Some(snapshot.path().to_path_buf()),
+            ..grouped(&file)
+        };
         assert_eq!(table_names(cfg).len(), 3);
         let saved = crate::schema::persistence::load(snapshot.path()).unwrap();
         assert_eq!(saved.schemas.len(), 1);
-        assert_eq!(saved.version, crate::schema::persistence::SCHEMA_FORMAT_VERSION);
+        assert_eq!(
+            saved.version,
+            crate::schema::persistence::SCHEMA_FORMAT_VERSION
+        );
     }
 
     #[test]
@@ -830,8 +943,11 @@ mod tests {
         let file = wide_jsonl(60);
         let mut cfg = grouped(&file);
         let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
-        let tables: Vec<(&str, &str)> =
-            pass1.stats.iter().map(|s| (s.table_name.as_str(), s.column_name.as_str())).collect();
+        let tables: Vec<(&str, &str)> = pass1
+            .stats
+            .iter()
+            .map(|s| (s.table_name.as_str(), s.column_name.as_str()))
+            .collect();
         assert!(tables.contains(&("root_kiwi", "kiwi_a")), "{tables:?}");
         assert!(!tables.contains(&("root", "kiwi_a")), "{tables:?}");
     }
@@ -858,7 +974,10 @@ mod tests {
     /// Runs `cfg` once to save its snapshot, and returns the snapshot file.
     fn snapshot_of(cfg: PipelineConfig) -> tempfile::NamedTempFile {
         let snapshot = tempfile::NamedTempFile::new().unwrap();
-        table_names(PipelineConfig { schema_output: Some(snapshot.path().to_path_buf()), ..cfg });
+        table_names(PipelineConfig {
+            schema_output: Some(snapshot.path().to_path_buf()),
+            ..cfg
+        });
         snapshot
     }
 
@@ -881,7 +1000,10 @@ mod tests {
     fn a_snapshot_is_split_without_reading_the_input() {
         let file = wide_jsonl(60);
         let snapshot = snapshot_of(cfg_for(&file));
-        assert_eq!(table_names(from_snapshot(&snapshot, true)), ["root", "root_kiwi", "root_zulu"]);
+        assert_eq!(
+            table_names(from_snapshot(&snapshot, true)),
+            ["root", "root_kiwi", "root_zulu"]
+        );
     }
 
     #[test]
@@ -900,16 +1022,26 @@ mod tests {
     #[test]
     fn a_snapshot_split_by_the_toml_keeps_its_groups_and_the_other_tables_are_split() {
         let file = two_wide_jsonl(60);
-        let (cfg, _toml) =
-            with_toml(cfg_for(&file), "[root_props.column_groups]\nmine = [\"fillera\", \"fillerb\", \"fillerc\"]\n");
+        let (cfg, _toml) = with_toml(
+            cfg_for(&file),
+            "[root_props.column_groups]\nmine = [\"fillera\", \"fillerb\", \"fillerc\"]\n",
+        );
         let snapshot = snapshot_of(cfg);
         assert_eq!(
-            crate::schema::persistence::load(snapshot.path()).unwrap().version,
+            crate::schema::persistence::load(snapshot.path())
+                .unwrap()
+                .version,
             crate::schema::persistence::COLUMN_GROUPS_FORMAT_VERSION
         );
         assert_eq!(
             sorted(table_names(from_snapshot(&snapshot, true))),
-            ["root", "root_kiwi", "root_props", "root_props_mine", "root_zulu"]
+            [
+                "root",
+                "root_kiwi",
+                "root_props",
+                "root_props_mine",
+                "root_zulu"
+            ]
         );
     }
 
@@ -918,15 +1050,18 @@ mod tests {
     fn fused_jsonl(rows: usize) -> tempfile::NamedTempFile {
         use std::io::Write;
         const OTHER: [&str; 12] = [
-            "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow", "oyster", "pebble",
-            "saddle", "thimble",
+            "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow",
+            "oyster", "pebble", "saddle", "thimble",
         ];
         let mut file = tempfile::NamedTempFile::new().unwrap();
         for i in 0..rows {
             let mut row = serde_json::Map::new();
             for p in ["nutrition", "nutriscore"] {
                 for suffix in ["fat", "sugar", "salt", "fiber"] {
-                    row.insert(format!("{p}_{suffix}"), serde_json::json!(format!("{suffix}{}", i % 6)));
+                    row.insert(
+                        format!("{p}_{suffix}"),
+                        serde_json::json!(format!("{suffix}{}", i % 6)),
+                    );
                 }
             }
             for n in OTHER {
@@ -941,9 +1076,16 @@ mod tests {
     fn group_columns_applies_the_fusions_the_data_of_pass_1_confirm() {
         // #91 phase 2: one pass over the file, and the fusion the names alone leave to confirm is applied
         let file = fused_jsonl(60);
-        assert_eq!(table_names(grouped(&file)), ["root", "root_nutriscore_nutrition"]);
+        assert_eq!(
+            table_names(grouped(&file)),
+            ["root", "root_nutriscore_nutrition"]
+        );
         let snapshot = snapshot_of(cfg_for(&file));
-        assert_eq!(table_names(from_snapshot(&snapshot, true)), ["root", "root_nutriscore_nutrition"], "from the snapshot too");
+        assert_eq!(
+            table_names(from_snapshot(&snapshot, true)),
+            ["root", "root_nutriscore_nutrition"],
+            "from the snapshot too"
+        );
     }
 
     #[test]
@@ -952,10 +1094,17 @@ mod tests {
         let file = fused_jsonl(60);
         let s = suggest_groups(cfg_for(&file), None).unwrap();
         let parsed: toml::Table = toml::from_str(&s.toml).unwrap();
-        let mut proposed: Vec<String> =
-            parsed["root"]["column_groups"].as_table().unwrap().keys().map(|g| format!("root_{g}")).collect();
+        let mut proposed: Vec<String> = parsed["root"]["column_groups"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .map(|g| format!("root_{g}"))
+            .collect();
         proposed.sort();
-        let mut applied: Vec<String> = table_names(grouped(&file)).into_iter().filter(|t| t != "root").collect();
+        let mut applied: Vec<String> = table_names(grouped(&file))
+            .into_iter()
+            .filter(|t| t != "root")
+            .collect();
         applied.sort();
         assert_eq!(applied, proposed);
     }
@@ -967,7 +1116,13 @@ mod tests {
         let snapshot = snapshot_of(cfg_for(&file));
         let saved = crate::schema::persistence::load(snapshot.path()).unwrap();
         assert_eq!(saved.samples.len(), 1);
-        assert_eq!((saved.samples[0].table.as_str(), saved.samples[0].sample.presence.rows()), ("root", 60));
+        assert_eq!(
+            (
+                saved.samples[0].table.as_str(),
+                saved.samples[0].sample.presence.rows()
+            ),
+            ("root", 60)
+        );
         let mut cfg = from_snapshot(&snapshot, false);
         let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
         assert_eq!(pass1.samples.len(), 1);
@@ -983,11 +1138,21 @@ mod tests {
         saved.group_columns = vec!["root_props".to_string()];
         crate::schema::persistence::write_snapshot(&saved, snapshot.path(), false).unwrap();
         let resaved = tempfile::NamedTempFile::new().unwrap();
-        let cfg = PipelineConfig { schema_output: Some(resaved.path().to_path_buf()), ..from_snapshot(&snapshot, false) };
-        assert_eq!(sorted(table_names(cfg)), ["root", "root_props", "root_props_kiwi", "root_props_zulu"]);
+        let cfg = PipelineConfig {
+            schema_output: Some(resaved.path().to_path_buf()),
+            ..from_snapshot(&snapshot, false)
+        };
+        assert_eq!(
+            sorted(table_names(cfg)),
+            ["root", "root_props", "root_props_kiwi", "root_props_zulu"]
+        );
         let again = crate::schema::persistence::load(resaved.path()).unwrap();
         assert_eq!(again.group_columns, ["root_props"]);
-        assert_eq!(again.schemas.len(), 2, "the groups themselves are never saved");
+        assert_eq!(
+            again.schemas.len(),
+            2,
+            "the groups themselves are never saved"
+        );
     }
 
     /// A model folder with the words `kiwi`, `zulu` and `quartz` as rows of two dimensions.
@@ -1013,36 +1178,62 @@ mod tests {
     fn suggest_groups_with_a_model_suggests_groups_for_the_columns_that_stay() {
         let (file, model) = (wide_jsonl(60), toy_model());
         let s = suggest_groups(cfg_for(&file), Some(model.path())).unwrap();
-        assert!(s.report.contains("- `quartz` → `kiwi` (0.71), `zulu` (0.71)"), "{}", s.report);
+        assert!(
+            s.report
+                .contains("- `quartz` → `kiwi` (0.71), `zulu` (0.71)"),
+            "{}",
+            s.report
+        );
     }
 
     #[test]
     fn suggest_groups_reads_the_model_before_the_long_pass_1() {
         let missing = std::path::Path::new("/nonexistent/model");
-        let cfg = PipelineConfig { input: Some("/nonexistent/input.json".into()), ..minimal_pipeline_cfg(None) };
+        let cfg = PipelineConfig {
+            input: Some("/nonexistent/input.json".into()),
+            ..minimal_pipeline_cfg(None)
+        };
         let err = suggest_groups(cfg, Some(missing)).unwrap_err().to_string();
-        assert!(err.contains("/nonexistent/model"), "the model fails first: {err}");
+        assert!(
+            err.contains("/nonexistent/model"),
+            "the model fails first: {err}"
+        );
     }
 
     #[test]
     fn suggest_groups_without_a_wide_table_says_what_is_needed() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), "{\"id\": 1}\n{\"id\": 2}\n").unwrap();
-        let err = suggest_groups(cfg_for(&file), None).unwrap_err().to_string();
+        let err = suggest_groups(cfg_for(&file), None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("at least 20 data columns"), "{err}");
     }
 
     #[test]
     fn pass1_turns_scalar_arrays_into_array_columns() {
         // #84: no caller can ask for junction tables any more
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/users.jsonl");
-        let cfg = PipelineConfig { root_table: "users".to_string(), ..minimal_pipeline_cfg(None) };
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/users.jsonl");
+        let cfg = PipelineConfig {
+            root_table: "users".to_string(),
+            ..minimal_pipeline_cfg(None)
+        };
         let pass1 = run_pass1_workers(&path, &cfg).unwrap();
         let names: Vec<_> = pass1.schemas.iter().map(|s| s.name.as_str()).collect();
-        assert!(!names.contains(&"users_tags"), "no junction table expected, got {names:?}");
+        assert!(
+            !names.contains(&"users_tags"),
+            "no junction table expected, got {names:?}"
+        );
         let users = pass1.schemas.iter().find(|s| s.name == "users").unwrap();
-        let tags = users.find_by_original("tags").expect("`tags` must be a column of `users`");
-        assert!(matches!(tags.pg_type, crate::schema::type_tracker::PgType::Array(_)), "got {:?}", tags.pg_type);
+        let tags = users
+            .find_by_original("tags")
+            .expect("`tags` must be a column of `users`");
+        assert!(
+            matches!(tags.pg_type, crate::schema::type_tracker::PgType::Array(_)),
+            "got {:?}",
+            tags.pg_type
+        );
     }
 
     #[test]
@@ -1058,7 +1249,9 @@ mod tests {
         use crate::schema::table_schema::ColumnSchema;
         use crate::schema::type_tracker::PgType;
         let mut parent = TableSchema::new("items".to_string(), vec!["items".to_string()], 0);
-        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        parent
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         for name in ["x1", "x2", "x3", "y1"] {
             parent.columns.push(ColumnSchema {
                 name: name.to_string(),
@@ -1088,12 +1281,19 @@ mod tests {
         let mut pass1 = minimal_pass1(vec![splittable_items()]);
         pass1.stats = vec![stat_of("items", "x1"), stat_of("items", "y1")];
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), "[items.column_groups]\nalpha = [\"x1\", \"x2\", \"x3\"]\n").unwrap();
+        std::fs::write(
+            tmp.path(),
+            "[items.column_groups]\nalpha = [\"x1\", \"x2\", \"x3\"]\n",
+        )
+        .unwrap();
         let cfg = minimal_pipeline_cfg(Some(tmp.path().to_path_buf()));
         assert_eq!(apply_schema_config(&mut pass1, &cfg).unwrap(), []);
         assert_eq!(pass1.schemas.len(), 2);
-        let stats: Vec<(&str, &str)> =
-            pass1.stats.iter().map(|s| (s.table_name.as_str(), s.column_name.as_str())).collect();
+        let stats: Vec<(&str, &str)> = pass1
+            .stats
+            .iter()
+            .map(|s| (s.table_name.as_str(), s.column_name.as_str()))
+            .collect();
         assert_eq!(stats, [("items", "y1"), ("items_alpha", "x1")]);
     }
 
@@ -1102,12 +1302,17 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "[ghost_table]\nage = \"INTEGER\"\n").unwrap();
 
-        let mut pass1 = minimal_pass1(vec![
-            TableSchema::new("real_table".to_string(), vec!["real_table".to_string()], 0),
-        ]);
+        let mut pass1 = minimal_pass1(vec![TableSchema::new(
+            "real_table".to_string(),
+            vec!["real_table".to_string()],
+            0,
+        )]);
         let cfg = minimal_pipeline_cfg(Some(tmp.path().to_path_buf()));
         let warnings = apply_schema_config(&mut pass1, &cfg).unwrap();
-        assert_eq!(warnings, vec![ConfigWarning::UnknownTable("ghost_table".to_string())]);
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::UnknownTable("ghost_table".to_string())]
+        );
     }
 
     fn summary(table: &str, anomaly_count: u64, total_rows: u64) -> AnomalySummary {
@@ -1137,10 +1342,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_anomaly_stats_merges_same_table() {
-        let summaries = vec![
-            summary("t", 3, 10),
-            summary("t", 7, 10),
-        ];
+        let summaries = vec![summary("t", 3, 10), summary("t", 7, 10)];
         let stats = aggregate_anomaly_stats(&summaries);
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0], ("t".to_string(), 10, 10));
@@ -1148,10 +1350,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_anomaly_stats_tie_broken_by_name() {
-        let summaries = vec![
-            summary("z", 5, 100),
-            summary("a", 5, 100),
-        ];
+        let summaries = vec![summary("z", 5, 100), summary("a", 5, 100)];
         let stats = aggregate_anomaly_stats(&summaries);
         assert_eq!(stats[0].0, "a");
         assert_eq!(stats[1].0, "z");

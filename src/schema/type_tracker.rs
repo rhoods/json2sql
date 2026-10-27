@@ -1,5 +1,9 @@
 //! Per-column type inference: accumulates observed JSON types across all rows and
-#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 //! resolves them to a single `PostgreSQL` type.
 //!
 //! [`TypeTracker`] counts occurrences of each [`InferredType`] variant as the JSON is
@@ -41,20 +45,20 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(usize)]
 pub enum InferredType {
-    Null      = 0,
-    Boolean   = 1,
-    Integer   = 2,  // fits in i32
-    BigInt    = 3,  // requires i64
-    Float     = 4,  // f64
-    Uuid      = 5,
-    Date      = 6,
+    Null = 0,
+    Boolean = 1,
+    Integer = 2, // fits in i32
+    BigInt = 3,  // requires i64
+    Float = 4,   // f64
+    Uuid = 5,
+    Date = 6,
     Timestamp = 7,
-    Varchar   = 8,  // string, max_len <= text_threshold
-    Text      = 9,  // string, max_len > text_threshold
+    Varchar = 8, // string, max_len <= text_threshold
+    Text = 9,    // string, max_len > text_threshold
     /// Nested object → becomes a child table (not stored as a column)
-    Object    = 10,
+    Object = 10,
     /// Array → becomes a child table (of objects) or a PG array column (of scalars)
-    Array     = 11,
+    Array = 11,
 }
 
 impl InferredType {
@@ -192,7 +196,7 @@ impl TypeTracker {
     /// Used to combine per-worker `TypeTrackers` after parallel Pass 1.
     pub fn merge(&mut self, other: &Self) {
         self.total_count += other.total_count;
-        self.null_count  += other.null_count;
+        self.null_count += other.null_count;
         for i in 0..InferredType::COUNT {
             self.type_counts[i] += other.type_counts[i];
         }
@@ -243,7 +247,15 @@ impl TypeTracker {
         // max_len tracks observed string lengths only. For mixed string+numeric fields,
         // pass2 also formats numbers as strings — use conservative upper bounds so VarChar
         // is always wide enough without false positives in the anomaly detector.
-        let num_repr_len = if has_float { 25u32 } else if has_bigint { 20u32 } else if has_int { 11u32 } else { 0u32 };
+        let num_repr_len = if has_float {
+            25u32
+        } else if has_bigint {
+            20u32
+        } else if has_int {
+            11u32
+        } else {
+            0u32
+        };
         let effective_max = self.max_len.max(num_repr_len);
         if effective_max > self.text_threshold {
             PgType::Text
@@ -256,7 +268,11 @@ impl TypeTracker {
         let has = |t: InferredType| self.type_counts[t as usize] > 0;
 
         if has(InferredType::Text) || has(InferredType::Varchar) {
-            return self.string_pg_type(has(InferredType::Float), has(InferredType::BigInt), has(InferredType::Integer));
+            return self.string_pg_type(
+                has(InferredType::Float),
+                has(InferredType::BigInt),
+                has(InferredType::Integer),
+            );
         }
 
         // Numeric widening: float > bigint > int
@@ -312,7 +328,11 @@ impl TypeTracker {
             .skip(1) // skip Null slot — tracked via null_count
             .filter_map(|&t| {
                 let c = self.type_counts[t as usize];
-                if c > 0 { Some((t, c)) } else { None }
+                if c > 0 {
+                    Some((t, c))
+                } else {
+                    None
+                }
             })
     }
 
@@ -375,16 +395,28 @@ fn infer_string_type(s: &str) -> InferredType {
     match b.len() {
         // UUID is exactly 36 bytes: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
         36 => {
-            if is_uuid(s) { InferredType::Uuid } else { InferredType::Varchar }
+            if is_uuid(s) {
+                InferredType::Uuid
+            } else {
+                InferredType::Varchar
+            }
         }
         // Date is exactly 10 bytes: YYYY-MM-DD
         10 => {
-            if is_date_bytes(b) { InferredType::Date } else { InferredType::Varchar }
+            if is_date_bytes(b) {
+                InferredType::Date
+            } else {
+                InferredType::Varchar
+            }
         }
         // Timestamp needs at least 16 bytes: YYYY-MM-DDTHH:MM
         // (exclude 36 since we've already handled it above and it can't be a valid timestamp)
         n if n >= 16 => {
-            if is_timestamp(s) { InferredType::Timestamp } else { InferredType::Varchar }
+            if is_timestamp(s) {
+                InferredType::Timestamp
+            } else {
+                InferredType::Varchar
+            }
         }
         _ => InferredType::Varchar,
     }
@@ -414,16 +446,27 @@ fn is_timestamp(s: &str) -> bool {
     if b.len() < 16 {
         return false;
     }
-    is_date_bytes(&b[..10]) && (b[10] == b'T' || b[10] == b' ') && is_digit(b[11]) && is_digit(b[12]) && b[13] == b':' && is_digit(b[14]) && is_digit(b[15])
+    is_date_bytes(&b[..10])
+        && (b[10] == b'T' || b[10] == b' ')
+        && is_digit(b[11])
+        && is_digit(b[12])
+        && b[13] == b':'
+        && is_digit(b[14])
+        && is_digit(b[15])
 }
 
 const fn is_date_bytes(b: &[u8]) -> bool {
     b.len() >= 10
-        && is_digit(b[0]) && is_digit(b[1]) && is_digit(b[2]) && is_digit(b[3])
+        && is_digit(b[0])
+        && is_digit(b[1])
+        && is_digit(b[2])
+        && is_digit(b[3])
         && b[4] == b'-'
-        && is_digit(b[5]) && is_digit(b[6])
+        && is_digit(b[5])
+        && is_digit(b[6])
         && b[7] == b'-'
-        && is_digit(b[8]) && is_digit(b[9])
+        && is_digit(b[8])
+        && is_digit(b[9])
 }
 
 #[inline]
@@ -462,7 +505,7 @@ mod tests {
     fn test_varchar_sizing() {
         let mut t = TypeTracker::new(256);
         t.observe(&json!("hello")); // len 5
-        // max_len=5, sized = ceil(5 * 1.2) = 6
+                                    // max_len=5, sized = ceil(5 * 1.2) = 6
         assert_eq!(t.to_pg_type(), PgType::VarChar(6));
     }
 
@@ -576,7 +619,7 @@ mod tests {
         let mut t = TypeTracker::new(256);
         t.observe(&json!("N/A")); // 3 bytes
         t.observe(&json!(9_999_999_999_i64)); // bigint
-        // effective_max = max(3, 20) = 20 → ceil(20 * 1.2) = 24
+                                              // effective_max = max(3, 20) = 20 → ceil(20 * 1.2) = 24
         assert_eq!(t.to_pg_type(), PgType::VarChar(24));
     }
 
@@ -607,25 +650,37 @@ mod tests {
     #[allow(clippy::approx_constant)] // 3.14 is an arbitrary test float, not pi
     fn test_merge_parity() {
         let values = vec![
-            json!(1), json!(2), json!(null), json!("hello"),
-            json!(true), json!(3.14), json!(null), json!("world"),
+            json!(1),
+            json!(2),
+            json!(null),
+            json!("hello"),
+            json!(true),
+            json!(3.14),
+            json!(null),
+            json!("world"),
         ];
 
         // Single tracker
         let mut single = TypeTracker::new(256);
-        for v in &values { single.observe(v); }
+        for v in &values {
+            single.observe(v);
+        }
 
         // Two separate trackers, merged
         let mut a = TypeTracker::new(256);
         let mut b = TypeTracker::new(256);
-        for v in &values[..4] { a.observe(v); }
-        for v in &values[4..] { b.observe(v); }
+        for v in &values[..4] {
+            a.observe(v);
+        }
+        for v in &values[4..] {
+            b.observe(v);
+        }
         a.merge(&b);
 
         assert_eq!(a.total_count, single.total_count);
-        assert_eq!(a.null_count,  single.null_count);
+        assert_eq!(a.null_count, single.null_count);
         assert_eq!(a.type_counts, single.type_counts);
-        assert_eq!(a.max_len,     single.max_len);
+        assert_eq!(a.max_len, single.max_len);
         assert_eq!(a.to_pg_type(), single.to_pg_type());
     }
 }

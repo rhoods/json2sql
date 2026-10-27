@@ -368,8 +368,9 @@ mod tests {
     #[test]
     fn dropping_the_rank_sample_of_non_numeric_columns_keeps_the_rank_correlations() {
         // #91 phase 2: the rank sample of a text column is NaN only, and the bulk of a stored sample
-        let rows: Vec<Vec<Value>> =
-            (0..60_i64).map(|i| vec![json!(i), json!(3 * i + 1), json!(format!("w{}", i % 7))]).collect();
+        let rows: Vec<Vec<Value>> = (0..60_i64)
+            .map(|i| vec![json!(i), json!(3 * i + 1), json!(format!("w{}", i % 7))])
+            .collect();
         let mut p = profile(3, 1, &rows);
         let before = crate::schema::grouping::numeric::rank_correlations(&p);
         p.drop_unranked();

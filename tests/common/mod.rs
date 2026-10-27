@@ -80,17 +80,21 @@ pub async fn row_count(client: &tokio_postgres::Client, schema: &str, table: &st
 
 /// Total number of elements stored in an array column (`SUM(cardinality(column))`, NULL cells count for 0).
 #[allow(dead_code)]
-pub async fn array_elements(client: &tokio_postgres::Client, schema: &str, table: &str, column: &str) -> i64 {
-    let sql = format!("SELECT COALESCE(SUM(cardinality(\"{column}\")), 0)::bigint FROM \"{schema}\".\"{table}\"");
+pub async fn array_elements(
+    client: &tokio_postgres::Client,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> i64 {
+    let sql = format!(
+        "SELECT COALESCE(SUM(cardinality(\"{column}\")), 0)::bigint FROM \"{schema}\".\"{table}\""
+    );
     client.query_one(&sql, &[]).await.unwrap().get::<_, i64>(0)
 }
 
 pub async fn drop_schema(client: &tokio_postgres::Client, schema: &str) {
     let _ = client
-        .execute(
-            &format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"),
-            &[],
-        )
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
         .await;
 }
 

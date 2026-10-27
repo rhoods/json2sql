@@ -34,7 +34,11 @@ pub fn total_memory_bytes() -> Option<u64> {
     let mut sys = System::new();
     sys.refresh_memory();
     let total = sys.total_memory();
-    if total == 0 { None } else { Some(total) }
+    if total == 0 {
+        None
+    } else {
+        Some(total)
+    }
 }
 
 /// Returns `true` when the process RSS exceeds `threshold_pct` percent of
@@ -43,7 +47,9 @@ pub fn total_memory_bytes() -> Option<u64> {
 #[must_use]
 pub fn ram_pressure_exceeded(threshold_pct: u8) -> bool {
     let Some(rss) = rss_bytes() else { return false };
-    let Some(total) = total_memory_bytes() else { return false };
+    let Some(total) = total_memory_bytes() else {
+        return false;
+    };
     rss >= total * u64::from(threshold_pct) / 100
 }
 
@@ -55,7 +61,10 @@ mod tests {
     #[test]
     fn rss_bytes_is_nonzero() {
         let rss = rss_bytes();
-        assert!(rss.is_some(), "rss_bytes must return Some on a running process");
+        assert!(
+            rss.is_some(),
+            "rss_bytes must return Some on a running process"
+        );
         assert!(rss.unwrap() > 0, "RSS must be positive");
     }
 
@@ -69,7 +78,10 @@ mod tests {
     #[test]
     fn rss_does_not_exceed_total() {
         if let (Some(rss), Some(total)) = (rss_bytes(), total_memory_bytes()) {
-            assert!(rss <= total, "RSS ({rss}) must not exceed total RAM ({total})");
+            assert!(
+                rss <= total,
+                "RSS ({rss}) must not exceed total RAM ({total})"
+            );
         }
     }
 

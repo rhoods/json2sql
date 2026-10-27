@@ -1,11 +1,14 @@
 #![allow(clippy::disallowed_methods)]
 mod common;
 
-use json2sql::{db, pass1, pass2};
 use json2sql::schema::registry::RegistryConfig;
-use json2sql::schema::wide_strategies::{apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys, apply_structured_pivot_columns, apply_wide_strategy_columns};
-use json2sql::schema::table_schema::{SiblingSchema, SuffixColumn, SuffixSchema, InferredStrategy};
+use json2sql::schema::table_schema::{InferredStrategy, SiblingSchema, SuffixColumn, SuffixSchema};
 use json2sql::schema::type_tracker::PgType;
+use json2sql::schema::wide_strategies::{
+    apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys,
+    apply_structured_pivot_columns, apply_wide_strategy_columns,
+};
+use json2sql::{db, pass1, pass2};
 
 // ---------------------------------------------------------------------------
 // InferredStrategy::Pivot (EAV) sur une table enfant.
@@ -29,67 +32,113 @@ async fn test_pivot_strategy() {
 
         let mut schemas = p1.schemas;
         apply_wide_strategy_columns(
-            schemas.iter_mut().find(|s| s.name == "products_nutrients")
+            schemas
+                .iter_mut()
+                .find(|s| s.name == "products_nutrients")
                 .expect("products_nutrients not found"),
             InferredStrategy::Pivot,
         );
 
-        let nutrients_schema = schemas.iter().find(|s| s.name == "products_nutrients").unwrap();
+        let nutrients_schema = schemas
+            .iter()
+            .find(|s| s.name == "products_nutrients")
+            .unwrap();
         let data_cols: Vec<_> = nutrients_schema.data_columns().collect();
-        assert_eq!(data_cols.len(), 2, "Pivot: exactement 2 colonnes de données (key, value)");
-        assert!(data_cols.iter().any(|c| c.name == "key"), "colonne 'key' absente");
-        assert!(data_cols.iter().any(|c| c.name == "value"), "colonne 'value' absente");
+        assert_eq!(
+            data_cols.len(),
+            2,
+            "Pivot: exactement 2 colonnes de données (key, value)"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "key"),
+            "colonne 'key' absente"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "value"),
+            "colonne 'value' absente"
+        );
 
-        let fk_col_name = nutrients_schema.columns.iter()
+        let fk_col_name = nutrients_schema
+            .columns
+            .iter()
             .find(|c| c.is_parent_fk)
             .map(|c| c.name.clone())
             .expect("products_nutrients must have a parent FK column");
 
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
-            .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("products", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         // Widget:4 + Gadget:4 + Doohickey:3 = 11 paires EAV
         assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("products_nutrients").unwrap(), 11);
         assert_eq!(common::row_count(&client, &schema, "products").await, 3);
-        assert_eq!(common::row_count(&client, &schema, "products_nutrients").await, 11);
+        assert_eq!(
+            common::row_count(&client, &schema, "products_nutrients").await,
+            11
+        );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
         // Widget a bien 4 lignes EAV
-        let widget_count: i64 = client.query_one(
-            &format!(
-                "SELECT COUNT(*) FROM \"{schema}\".\"products_nutrients\" n \
+        let widget_count: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM \"{schema}\".\"products_nutrients\" n \
                  JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Widget'",
-            ),
-            &[],
-        ).await.unwrap().get(0);
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(widget_count, 4);
 
         // Gadget → protein = 15
-        let gadget_protein: i64 = client.query_one(
-            &format!(
-                "SELECT CAST(n.value AS bigint) FROM \"{schema}\".\"products_nutrients\" n \
+        let gadget_protein: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT CAST(n.value AS bigint) FROM \"{schema}\".\"products_nutrients\" n \
                  JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Gadget' AND n.key = 'protein'",
-            ),
-            &[],
-        ).await.unwrap().get(0);
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(gadget_protein, 15);
 
         // Doohickey : pas de ligne 'carbs'
-        let doohickey_carbs: i64 = client.query_one(
-            &format!(
-                "SELECT COUNT(*) FROM \"{schema}\".\"products_nutrients\" n \
+        let doohickey_carbs: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM \"{schema}\".\"products_nutrients\" n \
                  JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Doohickey' AND n.key = 'carbs'",
-            ),
-            &[],
-        ).await.unwrap().get(0);
-        assert_eq!(doohickey_carbs, 0, "Doohickey ne doit pas avoir de ligne 'carbs'");
-    }).await;
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            doohickey_carbs, 0,
+            "Doohickey ne doit pas avoir de ligne 'carbs'"
+        );
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,46 +159,75 @@ async fn test_jsonb_strategy() {
 
         let mut schemas = p1.schemas;
         apply_wide_strategy_columns(
-            schemas.iter_mut().find(|s| s.name == "products_attrs")
+            schemas
+                .iter_mut()
+                .find(|s| s.name == "products_attrs")
                 .expect("products_attrs not found — naming regression in pass1?"),
             InferredStrategy::Jsonb,
         );
 
         let attrs_schema = schemas.iter().find(|s| s.name == "products_attrs").unwrap();
         let data_cols: Vec<_> = attrs_schema.data_columns().collect();
-        assert_eq!(data_cols.len(), 1, "Jsonb strategy: exactly one data column expected");
+        assert_eq!(
+            data_cols.len(),
+            1,
+            "Jsonb strategy: exactly one data column expected"
+        );
         assert_eq!(data_cols[0].name, "data");
         assert!(
-            matches!(data_cols[0].pg_type, json2sql::schema::type_tracker::PgType::Jsonb),
+            matches!(
+                data_cols[0].pg_type,
+                json2sql::schema::type_tracker::PgType::Jsonb
+            ),
             "data column must be PgType::Jsonb"
         );
 
-        let fk_col_name = attrs_schema.columns.iter()
+        let fk_col_name = attrs_schema
+            .columns
+            .iter()
             .find(|c| c.is_parent_fk)
             .map(|c| c.name.clone())
             .expect("products_attrs must have a parent FK column");
-        schemas.iter().find(|s| s.name == "products")
+        schemas
+            .iter()
+            .find(|s| s.name == "products")
             .and_then(|s| s.columns.iter().find(|c| c.name == "j2s_id"))
             .expect("products must have a j2s_id column");
         let products_id_col = "j2s_id";
 
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
         let tables_created: i64 = client
             .query_one(
                 "SELECT COUNT(*) FROM information_schema.tables \
                  WHERE table_schema = $1 AND table_name IN ('products', 'products_attrs')",
                 &[&schema],
-            ).await.unwrap().get("count");
+            )
+            .await
+            .unwrap()
+            .get("count");
         assert_eq!(tables_created, 2);
 
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
-            .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("products", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("products_attrs").unwrap(), 3);
         assert_eq!(common::row_count(&client, &schema, "products").await, 3);
-        assert_eq!(common::row_count(&client, &schema, "products_attrs").await, 3);
+        assert_eq!(
+            common::row_count(&client, &schema, "products_attrs").await,
+            3
+        );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
         let sql_all = format!(
@@ -165,19 +243,46 @@ async fn test_jsonb_strategy() {
         let rows = client.query(&sql_all, &[]).await.unwrap();
         assert_eq!(rows.len(), 3);
 
-        let widget = rows.iter().find(|r| r.get::<_, &str>("name") == "Widget").expect("Widget not found");
-        assert_eq!(widget.get::<_, Option<String>>("color").as_deref(), Some("red"));
-        assert_eq!(widget.get::<_, Option<String>>("weight").as_deref(), Some("100"));
+        let widget = rows
+            .iter()
+            .find(|r| r.get::<_, &str>("name") == "Widget")
+            .expect("Widget not found");
+        assert_eq!(
+            widget.get::<_, Option<String>>("color").as_deref(),
+            Some("red")
+        );
+        assert_eq!(
+            widget.get::<_, Option<String>>("weight").as_deref(),
+            Some("100")
+        );
 
-        let gadget = rows.iter().find(|r| r.get::<_, &str>("name") == "Gadget").expect("Gadget not found");
-        assert_eq!(gadget.get::<_, Option<String>>("speed").as_deref(), Some("42"));
-        assert_eq!(gadget.get::<_, Option<String>>("color").as_deref(), Some("blue"));
+        let gadget = rows
+            .iter()
+            .find(|r| r.get::<_, &str>("name") == "Gadget")
+            .expect("Gadget not found");
+        assert_eq!(
+            gadget.get::<_, Option<String>>("speed").as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            gadget.get::<_, Option<String>>("color").as_deref(),
+            Some("blue")
+        );
 
-        let doohickey = rows.iter().find(|r| r.get::<_, &str>("name") == "Doohickey").expect("Doohickey not found");
-        assert!(doohickey.get::<_, Option<String>>("color").is_none(),
-            "clé absente dans JSONB doit retourner NULL");
-        assert_eq!(doohickey.get::<_, Option<String>>("size").as_deref(), Some("large"));
-    }).await;
+        let doohickey = rows
+            .iter()
+            .find(|r| r.get::<_, &str>("name") == "Doohickey")
+            .expect("Doohickey not found");
+        assert!(
+            doohickey.get::<_, Option<String>>("color").is_none(),
+            "clé absente dans JSONB doit retourner NULL"
+        );
+        assert_eq!(
+            doohickey.get::<_, Option<String>>("size").as_deref(),
+            Some("large")
+        );
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -324,87 +429,152 @@ async fn test_structured_pivot_strategy() {
         let path = common::fixture("structured_pivot.jsonl");
         let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
 
-        assert!(p1.schemas.iter().any(|s| s.name == "products_nutrients"),
-            "products_nutrients doit exister après pass1");
+        assert!(
+            p1.schemas.iter().any(|s| s.name == "products_nutrients"),
+            "products_nutrients doit exister après pass1"
+        );
 
         let suffix_schema = SuffixSchema {
             suffix_cols: vec![
-                SuffixColumn { suffix: "_100g".to_string(),    col_name: "per_100g".to_string(),    pg_type: PgType::Integer },
-                SuffixColumn { suffix: "_serving".to_string(), col_name: "per_serving".to_string(), pg_type: PgType::Integer },
+                SuffixColumn {
+                    suffix: "_100g".to_string(),
+                    col_name: "per_100g".to_string(),
+                    pg_type: PgType::Integer,
+                },
+                SuffixColumn {
+                    suffix: "_serving".to_string(),
+                    col_name: "per_serving".to_string(),
+                    pg_type: PgType::Integer,
+                },
             ],
             value_type: PgType::Integer,
         };
 
         let mut schemas = p1.schemas;
         apply_structured_pivot_columns(
-            schemas.iter_mut().find(|s| s.name == "products_nutrients")
+            schemas
+                .iter_mut()
+                .find(|s| s.name == "products_nutrients")
                 .expect("products_nutrients not found"),
             suffix_schema,
         );
 
-        let nutrients_schema = schemas.iter().find(|s| s.name == "products_nutrients").unwrap();
+        let nutrients_schema = schemas
+            .iter()
+            .find(|s| s.name == "products_nutrients")
+            .unwrap();
         let data_cols: Vec<_> = nutrients_schema.data_columns().collect();
-        assert_eq!(data_cols.len(), 4, "StructuredPivot: 4 colonnes de données (name, value, per_100g, per_serving)");
-        assert!(data_cols.iter().any(|c| c.name == "name"),       "colonne 'name' absente");
-        assert!(data_cols.iter().any(|c| c.name == "value"),      "colonne 'value' absente");
-        assert!(data_cols.iter().any(|c| c.name == "per_100g"),   "colonne 'per_100g' absente");
-        assert!(data_cols.iter().any(|c| c.name == "per_serving"),"colonne 'per_serving' absente");
-        assert!(matches!(nutrients_schema.inferred_strategy, InferredStrategy::StructuredPivot(_)));
+        assert_eq!(
+            data_cols.len(),
+            4,
+            "StructuredPivot: 4 colonnes de données (name, value, per_100g, per_serving)"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "name"),
+            "colonne 'name' absente"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "value"),
+            "colonne 'value' absente"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "per_100g"),
+            "colonne 'per_100g' absente"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "per_serving"),
+            "colonne 'per_serving' absente"
+        );
+        assert!(matches!(
+            nutrients_schema.inferred_strategy,
+            InferredStrategy::StructuredPivot(_)
+        ));
 
-        let fk_col_name = nutrients_schema.columns.iter()
+        let fk_col_name = nutrients_schema
+            .columns
+            .iter()
             .find(|c| c.is_parent_fk)
             .map(|c| c.name.clone())
             .expect("products_nutrients must have a parent FK column");
 
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
-            .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("products", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         // Widget:2 + Gadget:2 + Doohickey:1 = 5 lignes
         assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("products_nutrients").unwrap(), 5);
         assert_eq!(common::row_count(&client, &schema, "products").await, 3);
-        assert_eq!(common::row_count(&client, &schema, "products_nutrients").await, 5);
+        assert_eq!(
+            common::row_count(&client, &schema, "products_nutrients").await,
+            5
+        );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
         // Widget calories : value=100, per_100g=200, per_serving=150
-        let row = client.query_one(
-            &format!(
-                "SELECT n.value, n.per_100g, n.per_serving \
+        let row = client
+            .query_one(
+                &format!(
+                    "SELECT n.value, n.per_100g, n.per_serving \
                  FROM \"{schema}\".\"products_nutrients\" n \
                  JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Widget' AND n.name = 'calories'",
-            ),
-            &[],
-        ).await.unwrap();
-        assert_eq!(row.get::<_, Option<i32>>("value"),      Some(100));
-        assert_eq!(row.get::<_, Option<i32>>("per_100g"),   Some(200));
-        assert_eq!(row.get::<_, Option<i32>>("per_serving"),Some(150));
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, Option<i32>>("value"), Some(100));
+        assert_eq!(row.get::<_, Option<i32>>("per_100g"), Some(200));
+        assert_eq!(row.get::<_, Option<i32>>("per_serving"), Some(150));
 
         // Gadget fat : per_serving NULL (clé absente dans la fixture)
-        let gadget_fat = client.query_one(
-            &format!(
-                "SELECT n.per_serving FROM \"{schema}\".\"products_nutrients\" n \
+        let gadget_fat = client
+            .query_one(
+                &format!(
+                    "SELECT n.per_serving FROM \"{schema}\".\"products_nutrients\" n \
                  JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Gadget' AND n.name = 'fat'",
-            ),
-            &[],
-        ).await.unwrap();
-        assert!(gadget_fat.get::<_, Option<i32>>("per_serving").is_none(),
-            "Gadget fat.per_serving doit être NULL");
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            gadget_fat.get::<_, Option<i32>>("per_serving").is_none(),
+            "Gadget fat.per_serving doit être NULL"
+        );
 
         // Doohickey : exactement 1 ligne (pas de fat)
-        let doohickey_count: i64 = client.query_one(
-            &format!(
-                "SELECT COUNT(*) FROM \"{schema}\".\"products_nutrients\" n \
+        let doohickey_count: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM \"{schema}\".\"products_nutrients\" n \
                  JOIN \"{schema}\".\"products\" p ON n.{fk_col_name} = p.j2s_id \
                  WHERE p.name = 'Doohickey'",
-            ),
-            &[],
-        ).await.unwrap().get(0);
-        assert_eq!(doohickey_count, 1, "Doohickey doit avoir exactement 1 ligne nutriment");
-    }).await;
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            doohickey_count, 1,
+            "Doohickey doit avoir exactement 1 ligne nutriment"
+        );
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -426,78 +596,150 @@ async fn test_auto_split_strategy() {
         let path = common::fixture("auto_split.jsonl");
         // wide_column_threshold=3 : 5 colonnes scalaires > 3 → wide
         // stable_threshold=0.80, rare_threshold=0.30
-        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
-            root_table: "products".to_string(),
-            registry: RegistryConfig { wide_column_threshold: 3, stable_threshold: 0.80, rare_threshold: 0.30, ..Default::default() },
-            num_workers: None,
-        }, None).unwrap();
+        let p1 = pass1::runner::run(
+            &path,
+            &pass1::runner::Pass1Config {
+                root_table: "products".to_string(),
+                registry: RegistryConfig {
+                    wide_column_threshold: 3,
+                    stable_threshold: 0.80,
+                    rare_threshold: 0.30,
+                    ..Default::default()
+                },
+                num_workers: None,
+            },
+            None,
+        )
+        .unwrap();
 
-        assert!(p1.schemas.iter().any(|s| s.name == "products"),         "products manquant");
-        assert!(p1.schemas.iter().any(|s| s.name == "products_wide"),    "products_wide manquant");
-        assert!(p1.schemas.iter().any(|s| s.name == "products_details"), "products_details manquant");
+        assert!(
+            p1.schemas.iter().any(|s| s.name == "products"),
+            "products manquant"
+        );
+        assert!(
+            p1.schemas.iter().any(|s| s.name == "products_wide"),
+            "products_wide manquant"
+        );
+        assert!(
+            p1.schemas.iter().any(|s| s.name == "products_details"),
+            "products_details manquant"
+        );
 
         let products_schema = p1.schemas.iter().find(|s| s.name == "products").unwrap();
         assert!(
-            matches!(products_schema.inferred_strategy, InferredStrategy::AutoSplit { .. }),
+            matches!(
+                products_schema.inferred_strategy,
+                InferredStrategy::AutoSplit { .. }
+            ),
             "products doit avoir la stratégie AutoSplit"
         );
 
         // Après AutoSplit, seules id et name restent dans products (stables)
         let stable_cols: Vec<_> = products_schema.data_columns().collect();
-        assert_eq!(stable_cols.len(), 2, "products doit avoir 2 colonnes stables (id, name)");
-        assert!(stable_cols.iter().any(|c| c.original_name == "id"),   "colonne id absente");
-        assert!(stable_cols.iter().any(|c| c.original_name == "name"), "colonne name absente");
+        assert_eq!(
+            stable_cols.len(),
+            2,
+            "products doit avoir 2 colonnes stables (id, name)"
+        );
+        assert!(
+            stable_cols.iter().any(|c| c.original_name == "id"),
+            "colonne id absente"
+        );
+        assert!(
+            stable_cols.iter().any(|c| c.original_name == "name"),
+            "colonne name absente"
+        );
 
         let schemas = p1.schemas;
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
-            .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("products", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(*p2.rows_per_table.get("products").unwrap(),         5);
+        assert_eq!(*p2.rows_per_table.get("products").unwrap(), 5);
         assert_eq!(*p2.rows_per_table.get("products_details").unwrap(), 5);
         // Widget+Gadget+Doohickey × 2 medium keys (tag_a, tag_b) = 6
-        assert_eq!(*p2.rows_per_table.get("products_wide").unwrap(),    6);
-        assert_eq!(common::row_count(&client, &schema, "products").await,         5);
-        assert_eq!(common::row_count(&client, &schema, "products_details").await, 5);
-        assert_eq!(common::row_count(&client, &schema, "products_wide").await,    6);
+        assert_eq!(*p2.rows_per_table.get("products_wide").unwrap(), 6);
+        assert_eq!(common::row_count(&client, &schema, "products").await, 5);
+        assert_eq!(
+            common::row_count(&client, &schema, "products_details").await,
+            5
+        );
+        assert_eq!(
+            common::row_count(&client, &schema, "products_wide").await,
+            6
+        );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
         // Widget a bien tag_a="x1" et tag_b="y1" dans products_wide
-        let wide_rows = client.query(
-            &format!(
-                "SELECT w.key, w.value::text AS val \
+        let wide_rows = client
+            .query(
+                &format!(
+                    "SELECT w.key, w.value::text AS val \
                  FROM \"{schema}\".\"products_wide\" w \
                  JOIN \"{schema}\".\"products\" p ON w.j2s_products_id = p.j2s_id \
                  WHERE p.name = 'Widget' \
                  ORDER BY w.key",
-            ),
-            &[],
-        ).await.unwrap();
-        assert_eq!(wide_rows.len(), 2, "Widget doit avoir 2 lignes dans products_wide");
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            wide_rows.len(),
+            2,
+            "Widget doit avoir 2 lignes dans products_wide"
+        );
         assert_eq!(wide_rows[0].get::<_, &str>("key"), "tag_a");
         assert_eq!(wide_rows[0].get::<_, &str>("val"), "x1");
         assert_eq!(wide_rows[1].get::<_, &str>("key"), "tag_b");
         assert_eq!(wide_rows[1].get::<_, &str>("val"), "y1");
 
         // Thingamajig : aucune ligne dans products_wide (pas de tag_a/tag_b)
-        let thingamajig_wide: i64 = client.query_one(
-            &format!(
-                "SELECT COUNT(*) FROM \"{schema}\".\"products_wide\" w \
+        let thingamajig_wide: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM \"{schema}\".\"products_wide\" w \
                  JOIN \"{schema}\".\"products\" p ON w.j2s_products_id = p.j2s_id \
                  WHERE p.name = 'Thingamajig'",
-            ),
-            &[],
-        ).await.unwrap().get(0);
-        assert_eq!(thingamajig_wide, 0, "Thingamajig ne doit pas avoir de lignes dans products_wide");
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            thingamajig_wide, 0,
+            "Thingamajig ne doit pas avoir de lignes dans products_wide"
+        );
 
         // rare_key (Whatsit) ne doit pas apparaître dans products_wide
-        let rare_key_count: i64 = client.query_one(
-            &format!("SELECT COUNT(*) FROM \"{schema}\".\"products_wide\" WHERE key = 'rare_key'"),
-            &[],
-        ).await.unwrap().get(0);
-        assert_eq!(rare_key_count, 0, "rare_key ne doit pas être écrit dans products_wide");
-    }).await;
+        let rare_key_count: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM \"{schema}\".\"products_wide\" WHERE key = 'rare_key'"
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            rare_key_count, 0,
+            "rare_key ne doit pas être écrit dans products_wide"
+        );
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -527,70 +769,121 @@ async fn test_keyed_pivot_strategy() {
         let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
 
         // fr/en/de sont absorbés → exactement 2 schemas
-        assert_eq!(p1.schemas.len(), 2, "fr/en/de doivent être absorbés, 2 schemas attendus");
-        assert!(p1.schemas.iter().any(|s| s.name == "products"),              "products manquant");
-        assert!(p1.schemas.iter().any(|s| s.name == "products_translations"), "products_translations manquant");
-
-        let translations_schema = p1.schemas.iter()
-            .find(|s| s.name == "products_translations").unwrap();
+        assert_eq!(
+            p1.schemas.len(),
+            2,
+            "fr/en/de doivent être absorbés, 2 schemas attendus"
+        );
         assert!(
-            matches!(translations_schema.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            p1.schemas.iter().any(|s| s.name == "products"),
+            "products manquant"
+        );
+        assert!(
+            p1.schemas.iter().any(|s| s.name == "products_translations"),
+            "products_translations manquant"
+        );
+
+        let translations_schema = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "products_translations")
+            .unwrap();
+        assert!(
+            matches!(
+                translations_schema.inferred_strategy,
+                InferredStrategy::SiblingCollapse(_)
+            ),
             "products_translations doit avoir la stratégie SiblingCollapse"
         );
 
         let data_cols: Vec<_> = translations_schema.data_columns().collect();
-        assert!(data_cols.iter().any(|c| c.name == "lang_code"), "colonne lang_code absente");
-        assert!(data_cols.iter().any(|c| c.name == "label"),     "colonne label absente");
-        assert!(data_cols.iter().any(|c| c.name == "desc"),      "colonne desc absente");
+        assert!(
+            data_cols.iter().any(|c| c.name == "lang_code"),
+            "colonne lang_code absente"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "label"),
+            "colonne label absente"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "desc"),
+            "colonne desc absente"
+        );
 
         let schemas = p1.schemas;
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
         // Vérifier que les tables fr/en/de ne sont PAS créées en base
-        let sibling_tables: i64 = client.query_one(
-            "SELECT COUNT(*) FROM information_schema.tables \
+        let sibling_tables: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM information_schema.tables \
              WHERE table_schema = $1 AND table_name IN \
              ('products_translations_fr','products_translations_en','products_translations_de')",
-            &[&schema],
-        ).await.unwrap().get(0);
-        assert_eq!(sibling_tables, 0, "tables siblings ne doivent pas être créées");
+                &[&schema],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            sibling_tables, 0,
+            "tables siblings ne doivent pas être créées"
+        );
 
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
-            .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("products", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(*p2.rows_per_table.get("products").unwrap(),              2);
+        assert_eq!(*p2.rows_per_table.get("products").unwrap(), 2);
         assert_eq!(*p2.rows_per_table.get("products_translations").unwrap(), 6);
-        assert_eq!(common::row_count(&client, &schema, "products").await,              2);
-        assert_eq!(common::row_count(&client, &schema, "products_translations").await, 6);
+        assert_eq!(common::row_count(&client, &schema, "products").await, 2);
+        assert_eq!(
+            common::row_count(&client, &schema, "products_translations").await,
+            6
+        );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
         // Widget/fr → label="Bonjour", desc="Rouge"
-        let widget_fr = client.query_one(
-            &format!(
-                "SELECT t.label, t.desc \
+        let widget_fr = client
+            .query_one(
+                &format!(
+                    "SELECT t.label, t.desc \
                  FROM \"{schema}\".\"products_translations\" t \
                  JOIN \"{schema}\".\"products\" p ON t.j2s_products_id = p.j2s_id \
                  WHERE p.name = 'Widget' AND t.lang_code = 'fr'",
-            ),
-            &[],
-        ).await.unwrap();
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
         assert_eq!(widget_fr.get::<_, &str>("label"), "Bonjour");
-        assert_eq!(widget_fr.get::<_, &str>("desc"),  "Rouge");
+        assert_eq!(widget_fr.get::<_, &str>("desc"), "Rouge");
 
         // Gadget/de → desc="Blau"
-        let gadget_de = client.query_one(
-            &format!(
-                "SELECT t.desc FROM \"{schema}\".\"products_translations\" t \
+        let gadget_de = client
+            .query_one(
+                &format!(
+                    "SELECT t.desc FROM \"{schema}\".\"products_translations\" t \
                  JOIN \"{schema}\".\"products\" p ON t.j2s_products_id = p.j2s_id \
                  WHERE p.name = 'Gadget' AND t.lang_code = 'de'",
-            ),
-            &[],
-        ).await.unwrap();
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
         assert_eq!(gadget_de.get::<_, &str>("desc"), "Blau");
 
         // Widget/fr → verify all data is in typed columns
-
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -617,13 +910,30 @@ async fn test_keyed_pivot_pure_container() {
         let p1 = pass1::runner::run(&path, &common::pass1_config("graph"), None).unwrap();
 
         // gcf_* et NC_* absorbés → exactement 2 schemas
-        assert_eq!(p1.schemas.len(), 2, "2 schemas attendus (graph + graph_genomes)");
-        assert!(p1.schemas.iter().any(|s| s.name == "graph"),         "table graph manquante");
-        assert!(p1.schemas.iter().any(|s| s.name == "graph_genomes"), "table graph_genomes manquante");
-
-        let genomes_schema = p1.schemas.iter().find(|s| s.name == "graph_genomes").unwrap();
+        assert_eq!(
+            p1.schemas.len(),
+            2,
+            "2 schemas attendus (graph + graph_genomes)"
+        );
         assert!(
-            matches!(genomes_schema.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            p1.schemas.iter().any(|s| s.name == "graph"),
+            "table graph manquante"
+        );
+        assert!(
+            p1.schemas.iter().any(|s| s.name == "graph_genomes"),
+            "table graph_genomes manquante"
+        );
+
+        let genomes_schema = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "graph_genomes")
+            .unwrap();
+        assert!(
+            matches!(
+                genomes_schema.inferred_strategy,
+                InferredStrategy::SiblingCollapse(_)
+            ),
             "graph_genomes doit avoir SiblingCollapse"
         );
 
@@ -637,15 +947,26 @@ async fn test_keyed_pivot_pure_container() {
         );
 
         let schemas = p1.schemas;
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("graph", &schema), None)
-        .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("graph", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(*p2.rows_per_table.get("graph").unwrap(),         2);
+        assert_eq!(*p2.rows_per_table.get("graph").unwrap(), 2);
         assert_eq!(*p2.rows_per_table.get("graph_genomes").unwrap(), 6);
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -672,68 +993,128 @@ async fn test_normalize_dynamic_keys_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("normalize_dynamic_keys.jsonl");
         // sibling_threshold=10 : 5 tables images < 10 → pas d'auto-détection SiblingCollapse
-        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
-            root_table: "products".to_string(),
-            registry: RegistryConfig { sibling_threshold: 10, ..Default::default() },
-            num_workers: None,
-        }, None).unwrap();
+        let p1 = pass1::runner::run(
+            &path,
+            &pass1::runner::Pass1Config {
+                root_table: "products".to_string(),
+                registry: RegistryConfig {
+                    sibling_threshold: 10,
+                    ..Default::default()
+                },
+                num_workers: None,
+            },
+            None,
+        )
+        .unwrap();
 
-        assert!(p1.schemas.iter().any(|s| s.name == "products_images"),
-            "products_images doit exister après pass1");
+        assert!(
+            p1.schemas.iter().any(|s| s.name == "products_images"),
+            "products_images doit exister après pass1"
+        );
 
         let mut schemas = p1.schemas;
-        apply_normalize_dynamic_keys(&mut schemas, "products_images", "image_id".to_string()).unwrap();
+        apply_normalize_dynamic_keys(&mut schemas, "products_images", "image_id".to_string())
+            .unwrap();
 
         // Les 5 tables images enfants doivent être absorbées
-        assert_eq!(schemas.len(), 2, "2 schemas attendus après absorption des enfants");
-        assert!(schemas.iter().any(|s| s.name == "products"),        "products manquant");
-        assert!(schemas.iter().any(|s| s.name == "products_images"), "products_images manquant");
-
-        let images_schema = schemas.iter().find(|s| s.name == "products_images").unwrap();
+        assert_eq!(
+            schemas.len(),
+            2,
+            "2 schemas attendus après absorption des enfants"
+        );
         assert!(
-            matches!(images_schema.inferred_strategy, InferredStrategy::NormalizeDynamicKeys { .. }),
+            schemas.iter().any(|s| s.name == "products"),
+            "products manquant"
+        );
+        assert!(
+            schemas.iter().any(|s| s.name == "products_images"),
+            "products_images manquant"
+        );
+
+        let images_schema = schemas
+            .iter()
+            .find(|s| s.name == "products_images")
+            .unwrap();
+        assert!(
+            matches!(
+                images_schema.inferred_strategy,
+                InferredStrategy::NormalizeDynamicKeys { .. }
+            ),
             "products_images doit avoir la stratégie NormalizeDynamicKeys"
         );
 
         let data_cols: Vec<_> = images_schema.data_columns().collect();
-        assert!(data_cols.iter().any(|c| c.name == "image_id"), "colonne image_id absente");
-        assert!(data_cols.iter().any(|c| c.name == "url"),      "colonne url absente");
-        assert!(data_cols.iter().any(|c| c.name == "width"),    "colonne width absente");
+        assert!(
+            data_cols.iter().any(|c| c.name == "image_id"),
+            "colonne image_id absente"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "url"),
+            "colonne url absente"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "width"),
+            "colonne width absente"
+        );
 
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None)
-            .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("products", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(*p2.rows_per_table.get("products").unwrap(),        3);
+        assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
         // Widget:2 + Gadget:1 + Doohickey:2 = 5
         assert_eq!(*p2.rows_per_table.get("products_images").unwrap(), 5);
-        assert_eq!(common::row_count(&client, &schema, "products").await,        3);
-        assert_eq!(common::row_count(&client, &schema, "products_images").await, 5);
+        assert_eq!(common::row_count(&client, &schema, "products").await, 3);
+        assert_eq!(
+            common::row_count(&client, &schema, "products_images").await,
+            5
+        );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
         // Widget a bien 2 images
-        let widget_count: i64 = client.query_one(
-            &format!(
-                "SELECT COUNT(*) FROM \"{schema}\".\"products_images\" i \
+        let widget_count: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM \"{schema}\".\"products_images\" i \
                  JOIN \"{schema}\".\"products\" p ON i.j2s_products_id = p.j2s_id \
                  WHERE p.name = 'Widget'",
-            ),
-            &[],
-        ).await.unwrap().get(0);
-        assert_eq!(widget_count, 2, "Widget doit avoir 2 lignes dans products_images");
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            widget_count, 2,
+            "Widget doit avoir 2 lignes dans products_images"
+        );
 
         // img_789 → url="http://c.com", width=1024
-        let img_789 = client.query_one(
-            &format!(
-                "SELECT i.url, i.width FROM \"{schema}\".\"products_images\" i \
+        let img_789 = client
+            .query_one(
+                &format!(
+                    "SELECT i.url, i.width FROM \"{schema}\".\"products_images\" i \
                  WHERE i.image_id = 'img_789'",
-            ),
-            &[],
-        ).await.unwrap();
-        assert_eq!(img_789.get::<_, &str>("url"),   "http://c.com");
-        assert_eq!(img_789.get::<_, i32>("width"),  1024);
-    }).await;
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(img_789.get::<_, &str>("url"), "http://c.com");
+        assert_eq!(img_789.get::<_, i32>("width"), 1024);
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -832,92 +1213,152 @@ async fn test_keyed_pivot_array_strategy() {
         let p1 = pass1::runner::run(&path, &common::pass1_config("graph"), None).unwrap();
 
         // gcf_001/002/003 absorbés → exactement 2 schemas
-        assert_eq!(p1.schemas.len(), 2, "les tables gcf_* doivent être absorbées, 2 schemas attendus");
-        assert!(p1.schemas.iter().any(|s| s.name == "graph"),         "table graph manquante");
-        assert!(p1.schemas.iter().any(|s| s.name == "graph_genomes"), "table graph_genomes manquante");
+        assert_eq!(
+            p1.schemas.len(),
+            2,
+            "les tables gcf_* doivent être absorbées, 2 schemas attendus"
+        );
+        assert!(
+            p1.schemas.iter().any(|s| s.name == "graph"),
+            "table graph manquante"
+        );
+        assert!(
+            p1.schemas.iter().any(|s| s.name == "graph_genomes"),
+            "table graph_genomes manquante"
+        );
 
-        let genomes_schema = p1.schemas.iter().find(|s| s.name == "graph_genomes").unwrap();
+        let genomes_schema = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "graph_genomes")
+            .unwrap();
 
         // La stratégie doit être SiblingCollapse avec array_children=true
         match &genomes_schema.inferred_strategy {
-            InferredStrategy::SiblingCollapse(SiblingSchema { array_children: true, .. }) => {}
+            InferredStrategy::SiblingCollapse(SiblingSchema {
+                array_children: true,
+                ..
+            }) => {}
             other => panic!("expected SiblingCollapse(array_children=true), got {other:?}"),
         }
 
         // j2s_order doit être présent parmi les colonnes générées
         assert!(
-            genomes_schema.columns.iter().any(|c| c.is_generated && c.name == "j2s_order"),
+            genomes_schema
+                .columns
+                .iter()
+                .any(|c| c.is_generated && c.name == "j2s_order"),
             "j2s_order manquant dans graph_genomes"
         );
 
         // Colonnes de données : key + length + source + target
         let data_cols: Vec<_> = genomes_schema.data_columns().collect();
-        assert!(data_cols.iter().any(|c| c.name == "key"),    "colonne key absente");
-        assert!(data_cols.iter().any(|c| c.name == "length"), "colonne length absente");
-        assert!(data_cols.iter().any(|c| c.name == "source"), "colonne source absente");
-        assert!(data_cols.iter().any(|c| c.name == "target"), "colonne target absente");
+        assert!(
+            data_cols.iter().any(|c| c.name == "key"),
+            "colonne key absente"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "length"),
+            "colonne length absente"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "source"),
+            "colonne source absente"
+        );
+        assert!(
+            data_cols.iter().any(|c| c.name == "target"),
+            "colonne target absente"
+        );
 
         let schemas = p1.schemas;
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
         // Vérifier que les tables gcf_* ne sont PAS créées en base
-        let gcf_tables: i64 = client.query_one(
-            "SELECT COUNT(*) FROM information_schema.tables \
+        let gcf_tables: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM information_schema.tables \
              WHERE table_schema = $1 AND table_name LIKE 'graph_genomes_gcf_%'",
-            &[&schema],
-        ).await.unwrap().get(0);
+                &[&schema],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(gcf_tables, 0, "les tables gcf_* ne doivent pas être créées");
 
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("graph", &schema), None)
-        .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("graph", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         // graph : 2 lignes
         // graph_genomes : id=1 → gcf_001×2 + gcf_002×1 + gcf_003×1 = 4; id=2 → 3 = 7 total
-        assert_eq!(*p2.rows_per_table.get("graph").unwrap(),         2);
+        assert_eq!(*p2.rows_per_table.get("graph").unwrap(), 2);
         assert_eq!(*p2.rows_per_table.get("graph_genomes").unwrap(), 7);
-        assert_eq!(common::row_count(&client, &schema, "graph").await,         2);
-        assert_eq!(common::row_count(&client, &schema, "graph_genomes").await, 7);
+        assert_eq!(common::row_count(&client, &schema, "graph").await, 2);
+        assert_eq!(
+            common::row_count(&client, &schema, "graph_genomes").await,
+            7
+        );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
         // id=1 / gcf_001 → 2 lignes (j2s_order 0 et 1)
-        let gcf001_count: i64 = client.query_one(
-            &format!(
-                "SELECT COUNT(*) FROM \"{schema}\".\"graph_genomes\" g \
+        let gcf001_count: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM \"{schema}\".\"graph_genomes\" g \
                  JOIN \"{schema}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
                  WHERE r.id = 1 AND g.key = 'gcf_001'",
-            ),
-            &[],
-        ).await.unwrap().get(0);
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(gcf001_count, 2, "id=1/gcf_001 doit avoir 2 lignes");
 
         // order=0 → length=100, source="A", target="B"
-        let first = client.query_one(
-            &format!(
-                "SELECT g.length, g.source, g.target \
+        let first = client
+            .query_one(
+                &format!(
+                    "SELECT g.length, g.source, g.target \
                  FROM \"{schema}\".\"graph_genomes\" g \
                  JOIN \"{schema}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
                  WHERE r.id = 1 AND g.key = 'gcf_001' AND g.j2s_order = 0",
-            ),
-            &[],
-        ).await.unwrap();
-        assert_eq!(first.get::<_, i32>("length"),  100);
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.get::<_, i32>("length"), 100);
         assert_eq!(first.get::<_, &str>("source"), "A");
         assert_eq!(first.get::<_, &str>("target"), "B");
 
         // order=1 → length=150, source="C", target="D"
-        let second = client.query_one(
-            &format!(
-                "SELECT g.length, g.source, g.target \
+        let second = client
+            .query_one(
+                &format!(
+                    "SELECT g.length, g.source, g.target \
                  FROM \"{schema}\".\"graph_genomes\" g \
                  JOIN \"{schema}\".\"graph\" r ON g.j2s_graph_id = r.j2s_id \
                  WHERE r.id = 1 AND g.key = 'gcf_001' AND g.j2s_order = 1",
-            ),
-            &[],
-        ).await.unwrap();
-        assert_eq!(second.get::<_, i32>("length"),  150);
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.get::<_, i32>("length"), 150);
         assert_eq!(second.get::<_, &str>("source"), "C");
         assert_eq!(second.get::<_, &str>("target"), "D");
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -927,24 +1368,37 @@ async fn test_keyed_pivot_array_strategy() {
 // disable sibling → aucune table SiblingCollapse dans le résultat
 #[test]
 fn test_disable_sibling_no_keyed_pivot_integration() {
-    use std::collections::HashSet;
     use json2sql::schema::strategies::StrategyName;
     use json2sql::schema::table_schema::InferredStrategy;
+    use std::collections::HashSet;
 
     let path = common::fixture("keyed_pivot.jsonl");
     // Avec sibling activé : SiblingCollapse attendu
     let p1_normal = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
-    assert!(p1_normal.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::SiblingCollapse(_))),
-        "sibling enabled → SiblingCollapse attendu dans le schema normal");
+    assert!(
+        p1_normal
+            .schemas
+            .iter()
+            .any(|s| matches!(s.inferred_strategy, InferredStrategy::SiblingCollapse(_))),
+        "sibling enabled → SiblingCollapse attendu dans le schema normal"
+    );
 
     // Avec sibling désactivé : aucun SiblingCollapse
     let config_disabled = pass1::runner::Pass1Config {
-        registry: RegistryConfig { disabled_strategies: HashSet::from([StrategyName::Sibling]), ..Default::default() },
+        registry: RegistryConfig {
+            disabled_strategies: HashSet::from([StrategyName::Sibling]),
+            ..Default::default()
+        },
         ..common::pass1_config("products")
     };
     let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
-    assert!(!p1_disabled.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::SiblingCollapse(_))),
-        "sibling disabled → aucun SiblingCollapse dans le schema");
+    assert!(
+        !p1_disabled
+            .schemas
+            .iter()
+            .any(|s| matches!(s.inferred_strategy, InferredStrategy::SiblingCollapse(_))),
+        "sibling disabled → aucun SiblingCollapse dans le schema"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -965,16 +1419,27 @@ async fn test_jsonb_strategy_root_table() {
         let mut schemas = p1.schemas;
         // Apply Jsonb to the root table — each root object becomes a JSONB blob.
         apply_wide_strategy_columns(
-            schemas.iter_mut().find(|s| s.name == "products").expect("products not found"),
+            schemas
+                .iter_mut()
+                .find(|s| s.name == "products")
+                .expect("products not found"),
             InferredStrategy::Jsonb,
         );
 
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
         let p2 = pass2::runner::run(
-            &path, &schemas, &client, &url,
-            &common::pass2_config("products", &schema), None,
-        ).await.unwrap();
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("products", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         // Root table: 3 rows, each as a JSONB blob.
         assert_eq!(*p2.rows_per_table.get("products").unwrap_or(&0), 3);
@@ -982,55 +1447,87 @@ async fn test_jsonb_strategy_root_table() {
 
         // Child table still populated via recursion from the root Jsonb path.
         assert_eq!(*p2.rows_per_table.get("products_attrs").unwrap_or(&0), 3);
-        assert_eq!(common::row_count(&client, &schema, "products_attrs").await, 3);
+        assert_eq!(
+            common::row_count(&client, &schema, "products_attrs").await,
+            3
+        );
 
         // Root JSONB blob contains the full object — verify via JSONB field access.
-        let rows = client.query(
-            &format!(
+        let rows = client
+            .query(
+                &format!(
                 "SELECT data->>'name' AS name FROM \"{schema}\".\"products\" ORDER BY data->>'name'"
             ),
-            &[],
-        ).await.unwrap();
+                &[],
+            )
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 3);
         let names: Vec<&str> = rows.iter().map(|r| r.get("name")).collect();
         assert!(names.contains(&"Widget"), "Widget manquant dans JSONB root");
         assert!(names.contains(&"Gadget"), "Gadget manquant dans JSONB root");
-        assert!(names.contains(&"Doohickey"), "Doohickey manquant dans JSONB root");
+        assert!(
+            names.contains(&"Doohickey"),
+            "Doohickey manquant dans JSONB root"
+        );
 
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
-    }).await;
+    })
+    .await;
 }
 
 // disable pivot → InferredStrategy::Jsonb au lieu de Pivot pour les tables homogènes.
 // wide_column_threshold=3 : nutrients a 4 colonnes homogènes (int) → Pivot automatique.
 #[test]
 fn test_disable_pivot_gives_jsonb_integration() {
-    use std::collections::HashSet;
     use json2sql::schema::strategies::StrategyName;
     use json2sql::schema::table_schema::InferredStrategy;
+    use std::collections::HashSet;
 
     let path = common::fixture("pivot_eav.jsonl");
     // Config avec wide_column_threshold=3 pour déclencher la détection wide sur nutrients
     let base_config = pass1::runner::Pass1Config {
-        registry: RegistryConfig { wide_column_threshold: 3, ..Default::default() },
+        registry: RegistryConfig {
+            wide_column_threshold: 3,
+            ..Default::default()
+        },
         ..common::pass1_config("products")
     };
 
     // Avec pivot activé : Pivot attendu sur products_nutrients
     let p1_normal = pass1::runner::run(&path, &base_config, None).unwrap();
-    assert!(p1_normal.schemas.iter().any(|s| s.inferred_strategy == InferredStrategy::Pivot),
-        "pivot enabled → InferredStrategy::Pivot attendu sur products_nutrients");
+    assert!(
+        p1_normal
+            .schemas
+            .iter()
+            .any(|s| s.inferred_strategy == InferredStrategy::Pivot),
+        "pivot enabled → InferredStrategy::Pivot attendu sur products_nutrients"
+    );
 
     // Avec pivot désactivé : Jsonb à la place
     let config_disabled = pass1::runner::Pass1Config {
-        registry: RegistryConfig { disabled_strategies: HashSet::from([StrategyName::Pivot]), wide_column_threshold: 3, ..Default::default() },
+        registry: RegistryConfig {
+            disabled_strategies: HashSet::from([StrategyName::Pivot]),
+            wide_column_threshold: 3,
+            ..Default::default()
+        },
         ..common::pass1_config("products")
     };
     let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
-    assert!(!p1_disabled.schemas.iter().any(|s| s.inferred_strategy == InferredStrategy::Pivot),
-        "pivot disabled → aucun InferredStrategy::Pivot, Jsonb attendu");
-    assert!(p1_disabled.schemas.iter().any(|s| s.inferred_strategy == InferredStrategy::Jsonb),
-        "pivot disabled → InferredStrategy::Jsonb attendu");
+    assert!(
+        !p1_disabled
+            .schemas
+            .iter()
+            .any(|s| s.inferred_strategy == InferredStrategy::Pivot),
+        "pivot disabled → aucun InferredStrategy::Pivot, Jsonb attendu"
+    );
+    assert!(
+        p1_disabled
+            .schemas
+            .iter()
+            .any(|s| s.inferred_strategy == InferredStrategy::Jsonb),
+        "pivot disabled → InferredStrategy::Jsonb attendu"
+    );
 }
 
 // disable structured_pivot → suffix detection skippée → fallback suggest_wide_strategy.
@@ -1039,13 +1536,16 @@ fn test_disable_pivot_gives_jsonb_integration() {
 // Activé : StructuredPivot. Désactivé : Pivot (all-numeric fallback).
 #[test]
 fn test_disable_structured_pivot_gives_pivot_integration() {
-    use std::collections::HashSet;
     use json2sql::schema::strategies::StrategyName;
     use json2sql::schema::table_schema::InferredStrategy;
+    use std::collections::HashSet;
 
     let path = common::fixture("structured_pivot.jsonl");
     let base_config = pass1::runner::Pass1Config {
-        registry: RegistryConfig { wide_column_threshold: 4, ..Default::default() },
+        registry: RegistryConfig {
+            wide_column_threshold: 4,
+            ..Default::default()
+        },
         ..common::pass1_config("products")
     };
 
@@ -1058,16 +1558,26 @@ fn test_disable_structured_pivot_gives_pivot_integration() {
 
     // structured_pivot désactivé : aucun StructuredPivot, Pivot à la place (all-numeric)
     let config_disabled = pass1::runner::Pass1Config {
-        registry: RegistryConfig { disabled_strategies: HashSet::from([StrategyName::StructuredPivot]), wide_column_threshold: 4, ..Default::default() },
+        registry: RegistryConfig {
+            disabled_strategies: HashSet::from([StrategyName::StructuredPivot]),
+            wide_column_threshold: 4,
+            ..Default::default()
+        },
         ..common::pass1_config("products")
     };
     let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
     assert!(
-        !p1_disabled.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::StructuredPivot(_))),
+        !p1_disabled
+            .schemas
+            .iter()
+            .any(|s| matches!(s.inferred_strategy, InferredStrategy::StructuredPivot(_))),
         "structured_pivot disabled → aucun InferredStrategy::StructuredPivot"
     );
     assert!(
-        p1_disabled.schemas.iter().any(|s| s.inferred_strategy == InferredStrategy::Pivot),
+        p1_disabled
+            .schemas
+            .iter()
+            .any(|s| s.inferred_strategy == InferredStrategy::Pivot),
         "structured_pivot disabled → InferredStrategy::Pivot attendu (fallback all-numeric)"
     );
 }
@@ -1104,47 +1614,90 @@ async fn test_pivot_identity_companion_split_no_real_child() {
 
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("pivot_split_no_child.jsonl");
-        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
-            root_table: "produits".to_string(),
-            registry: RegistryConfig { wide_column_threshold: 1, stable_threshold: 0.5, rare_threshold: 0.15, ..Default::default() },
-            num_workers: None,
-        }, None).unwrap();
+        let p1 = pass1::runner::run(
+            &path,
+            &pass1::runner::Pass1Config {
+                root_table: "produits".to_string(),
+                registry: RegistryConfig {
+                    wide_column_threshold: 1,
+                    stable_threshold: 0.5,
+                    rare_threshold: 0.15,
+                    ..Default::default()
+                },
+                num_workers: None,
+            },
+            None,
+        )
+        .unwrap();
 
         // `produits` (racine) reste en Columns — ratio stable 100% (id, name toujours présents).
-        let produits_schema = p1.schemas.iter().find(|s| s.name == "produits")
+        let produits_schema = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "produits")
             .expect("produits manquant");
-        assert_eq!(produits_schema.inferred_strategy, InferredStrategy::Columns,
-            "produits doit rester Columns (ratio stable 100%, pas de split)");
-        assert_eq!(produits_schema.data_columns().count(), 2, "produits doit garder id + name");
+        assert_eq!(
+            produits_schema.inferred_strategy,
+            InferredStrategy::Columns,
+            "produits doit rester Columns (ratio stable 100%, pas de split)"
+        );
+        assert_eq!(
+            produits_schema.data_columns().count(),
+            2,
+            "produits doit garder id + name"
+        );
 
         // 3 tables attendues : produits, produits_nutriments (identité), produits_nutriments_pivot (compagnon).
-        assert_eq!(p1.schemas.len(), 3,
+        assert_eq!(
+            p1.schemas.len(),
+            3,
             "3 tables attendues (produits + identité + compagnon) — trouvé : {:?}",
-            p1.schemas.iter().map(|s| &s.name).collect::<Vec<_>>());
+            p1.schemas.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
 
-        let identity = p1.schemas.iter().find(|s| s.name == "produits_nutriments")
+        let identity = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "produits_nutriments")
             .expect("produits_nutriments (identité) manquante");
-        let companion = p1.schemas.iter().find(|s| s.name == "produits_nutriments_pivot")
+        let companion = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "produits_nutriments_pivot")
             .expect("produits_nutriments_pivot (compagnon) manquant");
 
         // Identité : rétention inconditionnelle à zéro colonne de donnée — même calcium/iron migrent.
-        assert_eq!(identity.data_columns().count(), 0,
-            "identité doit avoir 0 colonne de donnée — toutes les clés migrent vers le compagnon");
+        assert_eq!(
+            identity.data_columns().count(),
+            0,
+            "identité doit avoir 0 colonne de donnée — toutes les clés migrent vers le compagnon"
+        );
 
         // Compagnon : (key, value) EAV.
         let companion_data_cols: Vec<_> = companion.data_columns().collect();
-        assert_eq!(companion_data_cols.len(), 2, "compagnon : exactement (key, value)");
+        assert_eq!(
+            companion_data_cols.len(),
+            2,
+            "compagnon : exactement (key, value)"
+        );
         assert!(companion_data_cols.iter().any(|c| c.name == "key"));
         assert!(companion_data_cols.iter().any(|c| c.name == "value"));
 
         // medium_keys doit contenir TOUTES les clés (stables + rares), aucune droppée.
         match &identity.inferred_strategy {
-            InferredStrategy::AutoSplit { medium_keys, wide_table_name, .. } => {
+            InferredStrategy::AutoSplit {
+                medium_keys,
+                wide_table_name,
+                ..
+            } => {
                 assert_eq!(
                     medium_keys.clone(),
                     HashSet::from([
-                        "calcium".to_string(), "iron".to_string(),
-                        "selenium".to_string(), "iodine".to_string(), "zinc".to_string(),
+                        "calcium".to_string(),
+                        "iron".to_string(),
+                        "selenium".to_string(),
+                        "iodine".to_string(),
+                        "zinc".to_string(),
                     ]),
                     "medium_keys doit contenir les 5 clés — aucune rétention, aucun drop"
                 );
@@ -1154,54 +1707,101 @@ async fn test_pivot_identity_companion_split_no_real_child() {
         }
 
         // Compagnon FK → identité (pas directement vers produits).
-        let companion_fk = companion.columns.iter().find(|c| c.is_parent_fk)
+        let companion_fk = companion
+            .columns
+            .iter()
+            .find(|c| c.is_parent_fk)
             .expect("compagnon doit avoir une FK vers son parent");
-        let identity_fk = identity.columns.iter().find(|c| c.is_parent_fk)
+        let identity_fk = identity
+            .columns
+            .iter()
+            .find(|c| c.is_parent_fk)
             .expect("identité doit avoir une FK vers produits");
 
         let schemas = p1.schemas.clone();
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("produits", &schema), None)
-            .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("produits", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(p2.anomaly_collector.total_anomalies(), 0, "aucune anomalie attendue");
+        assert_eq!(
+            p2.anomaly_collector.total_anomalies(),
+            0,
+            "aucune anomalie attendue"
+        );
         assert_eq!(*p2.rows_per_table.get("produits").unwrap(), 10);
-        assert_eq!(*p2.rows_per_table.get("produits_nutriments").unwrap(), 10,
-            "identité : une ligne d'ancrage par occurrence");
+        assert_eq!(
+            *p2.rows_per_table.get("produits_nutriments").unwrap(),
+            10,
+            "identité : une ligne d'ancrage par occurrence"
+        );
         // calcium×10 + iron×10 + selenium×1 + iodine×1 + zinc×1 = 23
-        assert_eq!(*p2.rows_per_table.get("produits_nutriments_pivot").unwrap(), 23);
+        assert_eq!(
+            *p2.rows_per_table.get("produits_nutriments_pivot").unwrap(),
+            23
+        );
 
         assert_eq!(common::row_count(&client, &schema, "produits").await, 10);
-        assert_eq!(common::row_count(&client, &schema, "produits_nutriments").await, 10);
-        assert_eq!(common::row_count(&client, &schema, "produits_nutriments_pivot").await, 23);
+        assert_eq!(
+            common::row_count(&client, &schema, "produits_nutriments").await,
+            10
+        );
+        assert_eq!(
+            common::row_count(&client, &schema, "produits_nutriments_pivot").await,
+            23
+        );
 
         // La clé rare "selenium" (P1) n'est pas droppée et sa valeur traverse intacte.
-        let selenium_value: i64 = client.query_one(
-            &format!(
+        let selenium_value: i64 =
+            client
+                .query_one(
+                    &format!(
                 "SELECT CAST(c.value AS bigint) FROM \"{s}\".\"produits_nutriments_pivot\" c \
                  JOIN \"{s}\".\"produits_nutriments\" i ON c.{cfk} = i.j2s_id \
                  JOIN \"{s}\".\"produits\" p ON i.{ifk} = p.j2s_id \
                  WHERE p.name = 'P1' AND c.key = 'selenium'",
                 s = schema, cfk = companion_fk.name, ifk = identity_fk.name,
             ),
-            &[],
-        ).await.unwrap().get(0);
-        assert_eq!(selenium_value, 1, "selenium (clé rare) doit atteindre le compagnon avec sa valeur intacte");
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+        assert_eq!(
+            selenium_value, 1,
+            "selenium (clé rare) doit atteindre le compagnon avec sa valeur intacte"
+        );
 
         // P4 n'a aucune ligne 'selenium' (n'a jamais eu cette clé).
-        let p4_selenium: i64 = client.query_one(
-            &format!(
-                "SELECT COUNT(*) FROM \"{s}\".\"produits_nutriments_pivot\" c \
+        let p4_selenium: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM \"{s}\".\"produits_nutriments_pivot\" c \
                  JOIN \"{s}\".\"produits_nutriments\" i ON c.{cfk} = i.j2s_id \
                  JOIN \"{s}\".\"produits\" p ON i.{ifk} = p.j2s_id \
                  WHERE p.name = 'P4' AND c.key = 'selenium'",
-                s = schema, cfk = companion_fk.name, ifk = identity_fk.name,
-            ),
-            &[],
-        ).await.unwrap().get(0);
+                    s = schema,
+                    cfk = companion_fk.name,
+                    ifk = identity_fk.name,
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(p4_selenium, 0, "P4 ne doit pas avoir de ligne 'selenium'");
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1230,13 +1830,19 @@ async fn test_pivot_identity_companion_split_no_real_child() {
 fn test_object_array_eligible_for_wide_strategy() {
     let path = common::fixture("wide_object_array.jsonl");
     let config = pass1::runner::Pass1Config {
-        registry: RegistryConfig { wide_column_threshold: 2, ..Default::default() },
+        registry: RegistryConfig {
+            wide_column_threshold: 2,
+            ..Default::default()
+        },
         ..common::pass1_config("produits")
     };
 
     let p1 = pass1::runner::run(&path, &config, None).unwrap();
 
-    let avis_schema = p1.schemas.iter().find(|s| s.name == "produits_avis")
+    let avis_schema = p1
+        .schemas
+        .iter()
+        .find(|s| s.name == "produits_avis")
         .expect("produits_avis manquant");
     assert_eq!(
         avis_schema.child_kind,
@@ -1244,7 +1850,8 @@ fn test_object_array_eligible_for_wide_strategy() {
         "produits_avis doit être ChildKind::ObjectArray"
     );
     assert_ne!(
-        avis_schema.inferred_strategy, InferredStrategy::Columns,
+        avis_schema.inferred_strategy,
+        InferredStrategy::Columns,
         "produits_avis (ObjectArray, 6 colonnes > seuil 2) doit maintenant être éligible \
          au wide-table strategy — plus jamais bloqué en Columns"
     );
@@ -1273,73 +1880,141 @@ fn test_object_array_eligible_for_wide_strategy() {
 async fn test_pivot_split_with_real_object_array_child() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("pivot_split_real_child.jsonl");
-        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
-            root_table: "produits".to_string(),
-            registry: RegistryConfig { wide_column_threshold: 1, stable_threshold: 0.5, rare_threshold: 0.15, ..Default::default() },
-            num_workers: None,
-        }, None).unwrap();
+        let p1 = pass1::runner::run(
+            &path,
+            &pass1::runner::Pass1Config {
+                root_table: "produits".to_string(),
+                registry: RegistryConfig {
+                    wide_column_threshold: 1,
+                    stable_threshold: 0.5,
+                    rare_threshold: 0.15,
+                    ..Default::default()
+                },
+                num_workers: None,
+            },
+            None,
+        )
+        .unwrap();
 
         // 4 tables : produits, identité, compagnon, ET historique (vrai enfant préservé).
-        assert_eq!(p1.schemas.len(), 4,
+        assert_eq!(
+            p1.schemas.len(),
+            4,
             "4 tables attendues (produits + identité + compagnon + historique) — trouvé : {:?}",
-            p1.schemas.iter().map(|s| &s.name).collect::<Vec<_>>());
+            p1.schemas.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
 
-        let identity = p1.schemas.iter().find(|s| s.name == "produits_nutriments")
+        let identity = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "produits_nutriments")
             .expect("produits_nutriments (identité) manquante");
-        let historique = p1.schemas.iter().find(|s| s.name == "produits_nutriments_historique")
+        let historique = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "produits_nutriments_historique")
             .expect("produits_nutriments_historique (vrai enfant) manquante — absorbée/droppée ?");
 
         // historique.parent_fk doit référencer l'identité (pas produits directement).
-        assert_eq!(historique.parent_table.as_deref(), Some("produits_nutriments"),
-            "historique doit être rattachée à l'identité produits_nutriments");
-        let historique_fk = historique.columns.iter().find(|c| c.is_parent_fk)
+        assert_eq!(
+            historique.parent_table.as_deref(),
+            Some("produits_nutriments"),
+            "historique doit être rattachée à l'identité produits_nutriments"
+        );
+        let historique_fk = historique
+            .columns
+            .iter()
+            .find(|c| c.is_parent_fk)
             .expect("historique doit avoir une FK");
-        let identity_fk = identity.columns.iter().find(|c| c.is_parent_fk)
+        let identity_fk = identity
+            .columns
+            .iter()
+            .find(|c| c.is_parent_fk)
             .expect("identité doit avoir une FK vers produits");
 
         let schemas = p1.schemas.clone();
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("produits", &schema), None)
-            .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("produits", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(p2.anomaly_collector.total_anomalies(), 0,
-            "0 anomalie attendue — historique ne doit plus être coercée en texte dans value");
+        assert_eq!(
+            p2.anomaly_collector.total_anomalies(),
+            0,
+            "0 anomalie attendue — historique ne doit plus être coercée en texte dans value"
+        );
         assert_eq!(*p2.rows_per_table.get("produits").unwrap(), 10);
         assert_eq!(*p2.rows_per_table.get("produits_nutriments").unwrap(), 10);
-        assert_eq!(*p2.rows_per_table.get("produits_nutriments_pivot").unwrap(), 23);
+        assert_eq!(
+            *p2.rows_per_table.get("produits_nutriments_pivot").unwrap(),
+            23
+        );
         // P2 a 2 entrées, les 9 autres en ont 1 chacune = 11.
-        assert_eq!(*p2.rows_per_table.get("produits_nutriments_historique").unwrap(), 11);
+        assert_eq!(
+            *p2.rows_per_table
+                .get("produits_nutriments_historique")
+                .unwrap(),
+            11
+        );
 
-        assert_eq!(common::row_count(&client, &schema, "produits_nutriments_historique").await, 11);
+        assert_eq!(
+            common::row_count(&client, &schema, "produits_nutriments_historique").await,
+            11
+        );
 
         // Les 2 entrées d'historique de P2 sont bien rattachées à l'identité de P2, pas à un
         // ancêtre commun ou à une ligne du compagnon.
-        let p2_historique_count: i64 = client.query_one(
-            &format!(
-                "SELECT COUNT(*) FROM \"{s}\".\"produits_nutriments_historique\" h \
+        let p2_historique_count: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM \"{s}\".\"produits_nutriments_historique\" h \
                  JOIN \"{s}\".\"produits_nutriments\" i ON h.{hfk} = i.j2s_id \
                  JOIN \"{s}\".\"produits\" p ON i.{ifk} = p.j2s_id \
                  WHERE p.name = 'P2'",
-                s = schema, hfk = historique_fk.name, ifk = identity_fk.name,
-            ),
-            &[],
-        ).await.unwrap().get(0);
-        assert_eq!(p2_historique_count, 2, "P2 doit avoir 2 entrées d'historique");
+                    s = schema,
+                    hfk = historique_fk.name,
+                    ifk = identity_fk.name,
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            p2_historique_count, 2,
+            "P2 doit avoir 2 entrées d'historique"
+        );
 
         // Round-trip d'une valeur : le labo de la 1ère entrée de P1.
-        let p1_labo: String = client.query_one(
-            &format!(
-                "SELECT h.labo FROM \"{s}\".\"produits_nutriments_historique\" h \
+        let p1_labo: String = client
+            .query_one(
+                &format!(
+                    "SELECT h.labo FROM \"{s}\".\"produits_nutriments_historique\" h \
                  JOIN \"{s}\".\"produits_nutriments\" i ON h.{hfk} = i.j2s_id \
                  JOIN \"{s}\".\"produits\" p ON i.{ifk} = p.j2s_id \
                  WHERE p.name = 'P1'",
-                s = schema, hfk = historique_fk.name, ifk = identity_fk.name,
-            ),
-            &[],
-        ).await.unwrap().get(0);
+                    s = schema,
+                    hfk = historique_fk.name,
+                    ifk = identity_fk.name,
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(p1_labo, "LabA");
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1450,48 +2125,84 @@ async fn test_pivot_split_object_array_parent_with_real_grandchild() {
 async fn test_object_array_heterogeneous_jsonb_end_to_end() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("wide_object_array_jsonb.jsonl");
-        let p1 = pass1::runner::run(&path, &pass1::runner::Pass1Config {
-            root_table: "produits".to_string(),
-            registry: RegistryConfig { wide_column_threshold: 2, ..Default::default() },
-            num_workers: None,
-        }, None).unwrap();
+        let p1 = pass1::runner::run(
+            &path,
+            &pass1::runner::Pass1Config {
+                root_table: "produits".to_string(),
+                registry: RegistryConfig {
+                    wide_column_threshold: 2,
+                    ..Default::default()
+                },
+                num_workers: None,
+            },
+            None,
+        )
+        .unwrap();
 
-        let avis = p1.schemas.iter().find(|s| s.name == "produits_avis")
+        let avis = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "produits_avis")
             .expect("produits_avis manquant");
-        assert_eq!(avis.inferred_strategy, InferredStrategy::Jsonb,
-            "score/comment/verified hétérogènes → Jsonb attendu");
+        assert_eq!(
+            avis.inferred_strategy,
+            InferredStrategy::Jsonb,
+            "score/comment/verified hétérogènes → Jsonb attendu"
+        );
         assert_eq!(avis.data_columns().count(), 1, "une seule colonne data");
         assert!(avis.find_by_original("data").is_some());
         // DDL : j2s_id, j2s_produits_id, j2s_order, data — 4 colonnes au total.
-        assert_eq!(avis.columns.len(), 4, "j2s_id + parent_fk + j2s_order + data");
-        assert!(avis.columns.iter().any(|c| c.original_name == "j2s_order"),
-            "j2s_order doit être présent sur une table ObjectArray, même en Jsonb");
+        assert_eq!(
+            avis.columns.len(),
+            4,
+            "j2s_id + parent_fk + j2s_order + data"
+        );
+        assert!(
+            avis.columns.iter().any(|c| c.original_name == "j2s_order"),
+            "j2s_order doit être présent sur une table ObjectArray, même en Jsonb"
+        );
 
         let schemas = p1.schemas.clone();
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
 
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("produits", &schema), None)
-            .await.unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("produits", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
         assert_eq!(*p2.rows_per_table.get("produits").unwrap(), 6);
         // 6 produits, P2 a 2 avis, les 5 autres en ont 1 = 7.
         assert_eq!(*p2.rows_per_table.get("produits_avis").unwrap(), 7);
-        assert_eq!(common::row_count(&client, &schema, "produits_avis").await, 7);
+        assert_eq!(
+            common::row_count(&client, &schema, "produits_avis").await,
+            7
+        );
 
         // Round-trip + j2s_order : les 2 avis de P2, dans l'ordre.
-        let rows = client.query(
-            &format!(
-                "SELECT a.j2s_order, \
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT a.j2s_order, \
                         a.data->>'score'    AS score, \
                         a.data->>'comment'  AS comment, \
                         a.data->>'verified' AS verified \
                  FROM \"{schema}\".\"produits_avis\" a \
                  JOIN \"{schema}\".\"produits\" p ON a.j2s_produits_id = p.j2s_id \
                  WHERE p.name = 'P2' ORDER BY a.j2s_order",
-            ),
-            &[],
-        ).await.unwrap();
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 2, "P2 doit avoir 2 lignes dans produits_avis");
         assert_eq!(rows[0].get::<_, i64>("j2s_order"), 0);
         assert_eq!(rows[0].get::<_, &str>("score"), "20");
@@ -1501,5 +2212,6 @@ async fn test_object_array_heterogeneous_jsonb_end_to_end() {
         assert_eq!(rows[1].get::<_, &str>("score"), "25");
         assert_eq!(rows[1].get::<_, &str>("comment"), "pas mal");
         assert_eq!(rows[1].get::<_, &str>("verified"), "true");
-    }).await;
+    })
+    .await;
 }

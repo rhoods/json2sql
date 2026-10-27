@@ -62,17 +62,21 @@ fn table_toml(proposal: &TableProposal) -> String {
 /// One comment line per column the data tie to the group at `at`, after it: a candidate, never an active member.
 fn candidates_toml(proposal: &TableProposal, at: usize) -> String {
     use std::fmt::Write as _;
-    proposal.attachments.iter().filter(|a| a.group == at).fold(String::new(), |mut out, a| {
-        // writing to a String cannot fail
-        let _ = writeln!(
-            out,
-            "# might join {}, to confirm: {} (lift {:.2})",
-            proposal.groups[at].name,
-            quoted(&proposal.columns[a.column].name),
-            a.lift
-        );
-        out
-    })
+    proposal
+        .attachments
+        .iter()
+        .filter(|a| a.group == at)
+        .fold(String::new(), |mut out, a| {
+            // writing to a String cannot fail
+            let _ = writeln!(
+                out,
+                "# might join {}, to confirm: {} (lift {:.2})",
+                proposal.groups[at].name,
+                quoted(&proposal.columns[a.column].name),
+                a.lift
+            );
+            out
+        })
 }
 
 /// A comment line with the status and evidence, then the group as a TOML array wrapped at [`WIDTH`]; the whole
@@ -188,16 +192,23 @@ fn attachments_markdown(proposal: &TableProposal) -> String {
     if proposal.attachments.is_empty() {
         return String::new();
     }
-    let lines = proposal.attachments.iter().fold(String::new(), |mut out, a| {
-        use std::fmt::Write as _;
-        // writing to a String cannot fail
-        let _ = writeln!(
-            out,
-            "- `{}` → `{}` (lift {:.2}, next group {:.2}, {} rows)",
-            proposal.columns[a.column].name, proposal.groups[a.group].name, a.lift, a.next, a.rows
-        );
-        out
-    });
+    let lines = proposal
+        .attachments
+        .iter()
+        .fold(String::new(), |mut out, a| {
+            use std::fmt::Write as _;
+            // writing to a String cannot fail
+            let _ = writeln!(
+                out,
+                "- `{}` → `{}` (lift {:.2}, next group {:.2}, {} rows)",
+                proposal.columns[a.column].name,
+                proposal.groups[a.group].name,
+                a.lift,
+                a.next,
+                a.rows
+            );
+            out
+        });
     format!(
         "\n### Columns that might join a group (to confirm)\n\nThe data alone: the group is filled with these columns far more often than the richness of the records explains (richness-adjusted lift). A hint, never applied.\n\n{lines}"
     )
@@ -563,13 +574,29 @@ mod tests {
     fn the_candidates_to_join_a_group_are_shown_to_confirm_and_never_active() {
         // #91 T8: in the report, and as a comment under their group in the TOML
         let mut p = proposal("products");
-        p.attachments = vec![Attachment { column: 8, group: 0, lift: 2.534, next: 1.08, rows: 5152 }];
+        p.attachments = vec![Attachment {
+            column: 8,
+            group: 0,
+            lift: 2.534,
+            next: 1.08,
+            rows: 5152,
+        }];
         let md = to_markdown(std::slice::from_ref(&p));
         assert!(md.contains("### Columns that might join a group"), "{md}");
-        assert!(md.contains("- `col_8` → `alpha` (lift 2.53, next group 1.08, 5152 rows)"), "{md}");
+        assert!(
+            md.contains("- `col_8` → `alpha` (lift 2.53, next group 1.08, 5152 rows)"),
+            "{md}"
+        );
         let toml = to_toml(std::slice::from_ref(&p));
-        assert!(toml.contains("# might join alpha, to confirm: \"col_8\" (lift 2.53)"), "{toml}");
-        assert_eq!(array(&parse(&toml), "products", "alpha"), ["col_0", "col_1", "col_2", "col_3"], "not in the group");
+        assert!(
+            toml.contains("# might join alpha, to confirm: \"col_8\" (lift 2.53)"),
+            "{toml}"
+        );
+        assert_eq!(
+            array(&parse(&toml), "products", "alpha"),
+            ["col_0", "col_1", "col_2", "col_3"],
+            "not in the group"
+        );
         assert!(!to_markdown(&[proposal("products")]).contains("might join"));
     }
 

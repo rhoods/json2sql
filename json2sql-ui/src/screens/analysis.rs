@@ -15,18 +15,22 @@ use dioxus::prelude::*;
 
 use json2sql::io::progress_event::ProgressEvent;
 
-use crate::screens::{strategy_badge, progress_pct, ProgressBar};
+use crate::screens::{progress_pct, strategy_badge, ProgressBar};
 use crate::state::{
-    format_bytes, AppState, AppScreen,
-    PASS1_TEXT_THRESHOLD, PASS1_WIDE_COLUMN_THRESHOLD, PASS1_SIBLING_THRESHOLD,
-    PASS1_SIBLING_JACCARD, PASS1_STABLE_THRESHOLD, PASS1_RARE_THRESHOLD,
+    format_bytes, AppScreen, AppState, PASS1_RARE_THRESHOLD, PASS1_SIBLING_JACCARD,
+    PASS1_SIBLING_THRESHOLD, PASS1_STABLE_THRESHOLD, PASS1_TEXT_THRESHOLD,
+    PASS1_WIDE_COLUMN_THRESHOLD,
 };
 
 #[allow(clippy::cast_precision_loss)]
 fn format_count(n: u64) -> String {
-    if n >= 1_000_000 { format!("{:.1}M rec/s", n as f64 / 1_000_000.0) }
-    else if n >= 1_000 { format!("{:.1}K rec/s", n as f64 / 1_000.0) }
-    else { format!("{n} rec/s") }
+    if n >= 1_000_000 {
+        format!("{:.1}M rec/s", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K rec/s", n as f64 / 1_000.0)
+    } else {
+        format!("{n} rec/s")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -37,16 +41,21 @@ fn format_count(n: u64) -> String {
 #[component]
 pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
     // ── Elapsed timer ─────────────────────────────────────────────────────
-    let elapsed_secs = crate::screens::use_elapsed_timer(move || state.read().schema.pass1_progress.done);
+    let elapsed_secs =
+        crate::screens::use_elapsed_timer(move || state.read().schema.pass1_progress.done);
 
     // ── Pass 1 runner ────────────────────────────────────────────────────
     // once-flag: set synchronously (before first await) to prevent double-launch
     // if Dioxus remounts this component before abort_handle is written.
     let mut once = use_signal(|| false);
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
-        if *once.peek() { return; }
+        if *once.peek() {
+            return;
+        }
         once.set(true);
-        if state.read().abort_handle.is_some() { return; }
+        if state.read().abort_handle.is_some() {
+            return;
+        }
         state.write().schema.pass1_progress = crate::state::Pass1Progress::default();
 
         let (source_file, root_table, workers) = {
@@ -55,7 +64,8 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 state.write().cancel();
                 return;
             };
-            let root = path.file_stem()
+            let root = path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .map_or_else(|| "root".to_string(), std::string::ToString::to_string);
             let workers = state.read().project.workers;
@@ -97,7 +107,9 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         while let Some(event) = rx.recv().await {
             let done = matches!(event, ProgressEvent::Pass1Done { .. });
             state.write().apply_progress_event(event);
-            if done { break; }
+            if done {
+                break;
+            }
         }
 
         match handle.await {
@@ -112,8 +124,17 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 s.schema.pass1_samples = result.samples;
                 s.schema.schema_snapshot_loaded = false;
                 if s.project.group_columns {
-                    s.schema.group_columns = crate::screens::splittable_tables(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.pass1_samples);
-                    let shown = crate::screens::build_effective_schemas(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.group_columns, &s.schema.pass1_samples);
+                    s.schema.group_columns = crate::screens::splittable_tables(
+                        &s.schema.schemas,
+                        &s.schema.strategy_overrides,
+                        &s.schema.pass1_samples,
+                    );
+                    let shown = crate::screens::build_effective_schemas(
+                        &s.schema.schemas,
+                        &s.schema.strategy_overrides,
+                        &s.schema.group_columns,
+                        &s.schema.pass1_samples,
+                    );
                     let line = format!(
                         "Column groups: {} table(s) split into {} group table(s) — schema: {} tables, {} columns",
                         s.schema.group_columns.len(),
@@ -125,7 +146,11 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 }
             }
             Ok(Err(e)) => {
-                state.write().schema.pass1_progress.push_log(format!("Pass 1 error: {e}"));
+                state
+                    .write()
+                    .schema
+                    .pass1_progress
+                    .push_log(format!("Pass 1 error: {e}"));
             }
             Err(_) => {}
         }
@@ -136,48 +161,82 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
     // ── Derived values ────────────────────────────────────────────────────
     let mut progress = state.read().schema.pass1_progress.clone();
     // the tables of the import: with the column groups ticked (#91)
-    let schemas   = {
+    let schemas = {
         let s = state.read();
-        crate::screens::build_effective_schemas(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.group_columns, &s.schema.pass1_samples)
+        crate::screens::build_effective_schemas(
+            &s.schema.schemas,
+            &s.schema.strategy_overrides,
+            &s.schema.group_columns,
+            &s.schema.pass1_samples,
+        )
     };
-    let done      = progress.done;
+    let done = progress.done;
     if done && !schemas.is_empty() {
         // the end-of-pass counts are those of the tables shown, column groups included (#91)
         progress.tables_count = schemas.len();
         progress.columns_count = schemas.iter().map(|t| t.columns.len()).sum();
     }
-    let elapsed   = *elapsed_secs.read();
-    let workers   = state.read().project.workers;
+    let elapsed = *elapsed_secs.read();
+    let workers = state.read().project.workers;
 
-    let pct: u32 = if done { 100 }
-        else if progress.total_bytes > 0 {
-            progress_pct(progress.bytes_read, progress.total_bytes)
-        } else if progress.rows_scanned > 0 {
-            #[allow(clippy::cast_possible_truncation)]
-            { ((progress.rows_scanned / 1_000) as u32).min(89) }
-        } else { 0 };
+    let pct: u32 = if done {
+        100
+    } else if progress.total_bytes > 0 {
+        progress_pct(progress.bytes_read, progress.total_bytes)
+    } else if progress.rows_scanned > 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            ((progress.rows_scanned / 1_000) as u32).min(89)
+        }
+    } else {
+        0
+    };
 
-    let rate = if elapsed > 0 { progress.rows_scanned / u64::from(elapsed) } else { 0 };
+    let rate = if elapsed > 0 {
+        progress.rows_scanned / u64::from(elapsed)
+    } else {
+        0
+    };
     let eta_str = if pct > 0 && pct < 100 && elapsed > 0 {
         let remaining = u64::from(elapsed) * (100 - u64::from(pct)) / u64::from(pct);
         format!("~{:02}:{:02}", remaining / 60, remaining % 60)
-    } else if done { "done".to_string() } else { "—".to_string() };
+    } else if done {
+        "done".to_string()
+    } else {
+        "—".to_string()
+    };
 
     let elapsed_str = format!("{:02}:{:02}", elapsed / 60, elapsed % 60);
     let rows_str = if progress.rows_scanned > 0 {
         let n = progress.rows_scanned;
         #[allow(clippy::cast_precision_loss)]
-        if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
-        else if n >= 1_000 { format!("{}K", n / 1_000) }
-        else { n.to_string() }
-    } else { "0".to_string() };
+        if n >= 1_000_000 {
+            format!("{:.1}M", n as f64 / 1_000_000.0)
+        } else if n >= 1_000 {
+            format!("{}K", n / 1_000)
+        } else {
+            n.to_string()
+        }
+    } else {
+        "0".to_string()
+    };
 
     let file_pct_str = if progress.total_bytes > 0 {
         format_bytes(progress.bytes_read)
-    } else { String::new() };
+    } else {
+        String::new()
+    };
 
-    let status_label = if done { "Schema ready" } else { "Analyzing schema" };
-    let scanning_label = if done { "Pass 1 complete" } else { "Pass 1 · scanning" };
+    let status_label = if done {
+        "Schema ready"
+    } else {
+        "Analyzing schema"
+    };
+    let scanning_label = if done {
+        "Pass 1 complete"
+    } else {
+        "Pass 1 · scanning"
+    };
 
     #[allow(clippy::cast_precision_loss)]
     let cols_str = if progress.columns_count >= 1_000_000 {
@@ -188,7 +247,10 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         progress.columns_count.to_string()
     };
     let cols_avg_str = if progress.tables_count > 0 {
-        format!("avg {} / table", progress.columns_count / progress.tables_count.max(1))
+        format!(
+            "avg {} / table",
+            progress.columns_count / progress.tables_count.max(1)
+        )
     } else {
         "—".to_string()
     };

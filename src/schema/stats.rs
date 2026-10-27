@@ -50,13 +50,18 @@ fn write_column_line(col: &ColumnStats, writer: &mut dyn std::io::Write) -> std:
         writeln!(
             writer,
             "  {:<30} {:<22} {} non-null  ** MIXED: {} **",
-            col.column_name, col.pg_type.as_sql(), col.non_null_count(), histogram.join(", ")
+            col.column_name,
+            col.pg_type.as_sql(),
+            col.non_null_count(),
+            histogram.join(", ")
         )
     } else {
         writeln!(
             writer,
             "  {:<30} {:<22} {} non-null",
-            col.column_name, col.pg_type.as_sql(), col.non_null_count(),
+            col.column_name,
+            col.pg_type.as_sql(),
+            col.non_null_count(),
         )
     }
 }

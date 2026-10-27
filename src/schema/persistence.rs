@@ -172,12 +172,14 @@ fn parse_snapshot(data: &[u8]) -> Result<SchemaSnapshot> {
 pub fn load(path: &Path) -> Result<SchemaSnapshot> {
     let data = std::fs::read(path).map_err(J2sError::Io)?;
     let mut snapshot = parse_snapshot(&data)?;
-    if snapshot.version != SCHEMA_FORMAT_VERSION && snapshot.version != COLUMN_GROUPS_FORMAT_VERSION {
+    if snapshot.version != SCHEMA_FORMAT_VERSION && snapshot.version != COLUMN_GROUPS_FORMAT_VERSION
+    {
         if snapshot.version == 1 {
             return Err(J2sError::InvalidInput(
                 "Schema snapshot v1 is no longer supported — table names used a wider budget \
                  that could cause PostgreSQL constraint name collisions. \
-                 Please re-run Pass 1 to regenerate a v2 snapshot.".to_string()
+                 Please re-run Pass 1 to regenerate a v2 snapshot."
+                    .to_string(),
             ));
         }
         return Err(J2sError::InvalidInput(format!(
@@ -229,7 +231,18 @@ mod tests {
         let mut overrides: HashMap<String, UserOverride> = HashMap::new();
         overrides.insert("my_table".to_string(), UserOverride::Jsonb);
 
-        save_with_overrides(&[], 0, &[], &[], &[], &[], &overrides, JsonFormat::Lines, tmp.path()).unwrap();
+        save_with_overrides(
+            &[],
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &overrides,
+            JsonFormat::Lines,
+            tmp.path(),
+        )
+        .unwrap();
         let loaded = load(tmp.path()).unwrap();
 
         assert!(matches!(
@@ -248,7 +261,10 @@ mod tests {
         std::fs::write(tmp.path(), json).unwrap();
         let loaded = load(tmp.path()).unwrap();
         assert!(
-            matches!(loaded.strategy_overrides.get("products"), Some(UserOverride::Skip)),
+            matches!(
+                loaded.strategy_overrides.get("products"),
+                Some(UserOverride::Skip)
+            ),
             "\"Ignore\" must deserialize as UserOverride::Skip"
         );
     }
@@ -260,19 +276,31 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
 
-        let err = load(tmp.path()).err().expect("expected an error for v1 snapshot");
+        let err = load(tmp.path())
+            .err()
+            .expect("expected an error for v1 snapshot");
         let msg = err.to_string();
         assert!(msg.contains("v1"), "error should mention v1, got: {msg}");
-        assert!(msg.contains("Pass 1") || msg.contains("re-run") || msg.contains("regenerate"),
-            "error should tell user to re-run Pass 1, got: {msg}");
+        assert!(
+            msg.contains("Pass 1") || msg.contains("re-run") || msg.contains("regenerate"),
+            "error should tell user to re-run Pass 1, got: {msg}"
+        );
     }
 
     /// JSON of a snapshot holding one `users_tags` child table of the given kind.
     fn snapshot_json_with_child(kind: crate::schema::table_schema::ChildKind) -> String {
-        let mut child = TableSchema::new("users_tags".to_string(), vec!["users".to_string(), "tags".to_string()], 1);
+        let mut child = TableSchema::new(
+            "users_tags".to_string(),
+            vec!["users".to_string(), "tags".to_string()],
+            1,
+        );
         child.parent_table = Some("users".to_string());
         child.child_kind = Some(kind);
-        serde_json::to_string(&SchemaSnapshot { schemas: vec![child], ..empty_snapshot() }).unwrap()
+        serde_json::to_string(&SchemaSnapshot {
+            schemas: vec![child],
+            ..empty_snapshot()
+        })
+        .unwrap()
     }
 
     #[test]
@@ -280,14 +308,27 @@ mod tests {
         use crate::schema::table_schema::ChildKind;
         // Snapshots made before #84 can hold junction tables (`child_kind: "ScalarArray"`), a variant that no
         // longer exists: the user must be told to re-run Pass 1, not shown a raw serde error.
-        let json = snapshot_json_with_child(ChildKind::ObjectArray).replace("\"ObjectArray\"", "\"ScalarArray\"");
-        assert!(json.contains("\"ScalarArray\""), "test setup: the snapshot must hold a ScalarArray child");
+        let json = snapshot_json_with_child(ChildKind::ObjectArray)
+            .replace("\"ObjectArray\"", "\"ScalarArray\"");
+        assert!(
+            json.contains("\"ScalarArray\""),
+            "test setup: the snapshot must hold a ScalarArray child"
+        );
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
 
-        let msg = load(tmp.path()).err().expect("an old junction snapshot must be refused").to_string();
-        assert!(msg.contains("re-run Pass 1") && msg.contains("junction"), "got: {msg}");
-        assert!(!msg.contains("unknown variant"), "the raw serde error must not leak: {msg}");
+        let msg = load(tmp.path())
+            .err()
+            .expect("an old junction snapshot must be refused")
+            .to_string();
+        assert!(
+            msg.contains("re-run Pass 1") && msg.contains("junction"),
+            "got: {msg}"
+        );
+        assert!(
+            !msg.contains("unknown variant"),
+            "the raw serde error must not leak: {msg}"
+        );
     }
 
     #[test]
@@ -297,7 +338,10 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), snapshot_json_with_child(ChildKind::ObjectArray)).unwrap();
         let loaded = load(tmp.path()).expect("a snapshot without junction tables still loads");
-        assert_eq!((loaded.version, loaded.schemas.len()), (SCHEMA_FORMAT_VERSION, 1));
+        assert_eq!(
+            (loaded.version, loaded.schemas.len()),
+            (SCHEMA_FORMAT_VERSION, 1)
+        );
     }
 
     #[test]
@@ -315,14 +359,33 @@ mod tests {
         let plain = TableSchema::new("items".to_string(), vec!["items".to_string()], 0);
         let mut split = plain.clone();
         split.column_groups.push("items_alpha".to_string());
-        let (a, b) = (tempfile::NamedTempFile::new().unwrap(), tempfile::NamedTempFile::new().unwrap());
-        save(std::slice::from_ref(&plain), 0, &[], &[], &[], &[], JsonFormat::Lines, a.path()).unwrap();
+        let (a, b) = (
+            tempfile::NamedTempFile::new().unwrap(),
+            tempfile::NamedTempFile::new().unwrap(),
+        );
+        save(
+            std::slice::from_ref(&plain),
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            JsonFormat::Lines,
+            a.path(),
+        )
+        .unwrap();
         save(&[split], 0, &[], &[], &[], &[], JsonFormat::Lines, b.path()).unwrap();
-        assert_eq!(load(a.path()).unwrap().version, 2, "snapshots without groups stay what they were");
+        assert_eq!(
+            load(a.path()).unwrap().version,
+            2,
+            "snapshots without groups stay what they were"
+        );
         let loaded = load(b.path()).unwrap();
         assert_eq!(loaded.version, 3);
         assert_eq!(loaded.schemas[0].column_groups, ["items_alpha"]);
-        assert!(!std::fs::read_to_string(a.path()).unwrap().contains("column_groups"));
+        assert!(!std::fs::read_to_string(a.path())
+            .unwrap()
+            .contains("column_groups"));
     }
 
     #[test]
@@ -341,15 +404,27 @@ mod tests {
     fn the_tables_ticked_for_column_groups_round_trip_and_are_absent_when_empty() {
         // #91 D3: the per-table switches of the UI; the automatic groups themselves are never saved
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let ticked = SchemaSnapshot { group_columns: vec!["products".to_string()], ..empty_snapshot() };
+        let ticked = SchemaSnapshot {
+            group_columns: vec!["products".to_string()],
+            ..empty_snapshot()
+        };
         write_snapshot(&ticked, tmp.path(), false).unwrap();
         let loaded = load(tmp.path()).unwrap();
-        assert_eq!((loaded.version, loaded.group_columns), (SCHEMA_FORMAT_VERSION, vec!["products".to_string()]));
+        assert_eq!(
+            (loaded.version, loaded.group_columns),
+            (SCHEMA_FORMAT_VERSION, vec!["products".to_string()])
+        );
         write_snapshot(&empty_snapshot(), tmp.path(), false).unwrap();
-        assert!(!std::fs::read_to_string(tmp.path()).unwrap().contains("group_columns"));
+        assert!(!std::fs::read_to_string(tmp.path())
+            .unwrap()
+            .contains("group_columns"));
         let old = r#"{"version":2,"total_rows":0,"schemas":[],"truncated_names":[],"column_collisions":[],"stats":[]}"#;
         std::fs::write(tmp.path(), old).unwrap();
-        assert_eq!(load(tmp.path()).unwrap().group_columns.len(), 0, "older snapshots have no switch");
+        assert_eq!(
+            load(tmp.path()).unwrap().group_columns.len(),
+            0,
+            "older snapshots have no switch"
+        );
     }
 
     /// The sample of a table of three columns: a vocabulary, numbers with gaps (NaN in the rank sample), presence.
@@ -360,11 +435,27 @@ mod tests {
         let mut presence = Presence::new(3);
         let mut values = ValueProfile::new(3, 1);
         for i in 0..40_i64 {
-            let cells = [serde_json::json!(format!("w{}", i % 6)), if i % 3 == 0 { serde_json::Value::Null } else { serde_json::json!(i) }, serde_json::json!(i * 2)];
-            presence.push_row(cells.iter().map(crate::schema::grouping::sample::is_present));
+            let cells = [
+                serde_json::json!(format!("w{}", i % 6)),
+                if i % 3 == 0 {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(i)
+                },
+                serde_json::json!(i * 2),
+            ];
+            presence.push_row(
+                cells
+                    .iter()
+                    .map(crate::schema::grouping::sample::is_present),
+            );
             values.observe_row(cells.iter().map(Some));
         }
-        StoredSample { table: "items".to_string(), columns: vec!["a".into(), "b".into(), "c".into()], sample: TableSample { presence, values } }
+        StoredSample {
+            table: "items".to_string(),
+            columns: vec!["a".into(), "b".into(), "c".into()],
+            sample: TableSample { presence, values },
+        }
     }
 
     #[test]
@@ -373,21 +464,44 @@ mod tests {
         use crate::schema::grouping::proposal::DataSignals;
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let sample = stored_sample();
-        write_snapshot(&SchemaSnapshot { samples: vec![sample.clone()], ..empty_snapshot() }, tmp.path(), false).unwrap();
+        write_snapshot(
+            &SchemaSnapshot {
+                samples: vec![sample.clone()],
+                ..empty_snapshot()
+            },
+            tmp.path(),
+            false,
+        )
+        .unwrap();
         let loaded = load(tmp.path()).unwrap();
-        assert_eq!(loaded.version, SCHEMA_FORMAT_VERSION, "an optional field, no new version");
+        assert_eq!(
+            loaded.version, SCHEMA_FORMAT_VERSION,
+            "an optional field, no new version"
+        );
         let got = &loaded.samples[0];
-        assert_eq!((got.table.as_str(), got.columns.clone()), ("items", sample.columns.clone()));
+        assert_eq!(
+            (got.table.as_str(), got.columns.clone()),
+            ("items", sample.columns.clone())
+        );
         let (a, b) = (&sample.sample, &got.sample);
         assert_eq!(a.presence.rows(), b.presence.rows());
         for c in 0..3 {
             assert_eq!(a.presence.present_count(c), b.presence.present_count(c));
             assert_eq!(a.values.vocabulary(c), b.values.vocabulary(c));
-            assert_eq!(format!("{:?}", a.values.ranked(c)), format!("{:?}", b.values.ranked(c)), "NaN gaps survive");
+            assert_eq!(
+                format!("{:?}", a.values.ranked(c)),
+                format!("{:?}", b.values.ranked(c)),
+                "NaN gaps survive"
+            );
         }
-        assert_eq!(format!("{:?}", DataSignals::new(a).rows()), format!("{:?}", DataSignals::new(b).rows()));
+        assert_eq!(
+            format!("{:?}", DataSignals::new(a).rows()),
+            format!("{:?}", DataSignals::new(b).rows())
+        );
         write_snapshot(&empty_snapshot(), tmp.path(), false).unwrap();
-        assert!(!std::fs::read_to_string(tmp.path()).unwrap().contains("samples"));
+        assert!(!std::fs::read_to_string(tmp.path())
+            .unwrap()
+            .contains("samples"));
         assert_eq!(load(tmp.path()).unwrap().samples.len(), 0);
     }
 
@@ -415,11 +529,21 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
         let loaded = load(tmp.path()).unwrap();
-        let products = loaded.schemas.iter().find(|s| s.name == "products").unwrap();
-        assert_eq!(products.ui_override(), Some(&UserOverride::Skip),
-            "strategy_overrides from root must be migrated into ui_override");
-        assert_eq!(products.inferred_strategy, InferredStrategy::Columns,
-            "inferred_strategy must not be mutated during migration");
+        let products = loaded
+            .schemas
+            .iter()
+            .find(|s| s.name == "products")
+            .unwrap();
+        assert_eq!(
+            products.ui_override(),
+            Some(&UserOverride::Skip),
+            "strategy_overrides from root must be migrated into ui_override"
+        );
+        assert_eq!(
+            products.inferred_strategy,
+            InferredStrategy::Columns,
+            "inferred_strategy must not be mutated during migration"
+        );
     }
 
     #[test]
@@ -442,7 +566,11 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
         let loaded = load(tmp.path()).unwrap();
-        let products = loaded.schemas.iter().find(|s| s.name == "products").unwrap();
+        let products = loaded
+            .schemas
+            .iter()
+            .find(|s| s.name == "products")
+            .unwrap();
         assert_eq!(products.ui_override(), Some(&UserOverride::Pivot),
             "existing ui_override on schema must not be overwritten by strategy_overrides migration");
     }
@@ -466,7 +594,11 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
         let loaded = load(tmp.path()).unwrap();
-        let products = loaded.schemas.iter().find(|s| s.name == "products").unwrap();
+        let products = loaded
+            .schemas
+            .iter()
+            .find(|s| s.name == "products")
+            .unwrap();
         assert_eq!(*products.effective_strategy(), InferredStrategy::Pivot);
     }
 
@@ -487,7 +619,11 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
         let loaded = load(tmp.path()).unwrap();
-        let products = loaded.schemas.iter().find(|s| s.name == "products").unwrap();
+        let products = loaded
+            .schemas
+            .iter()
+            .find(|s| s.name == "products")
+            .unwrap();
         assert_eq!(
             *products.effective_strategy(),
             InferredStrategy::Ignore,
@@ -500,10 +636,26 @@ mod tests {
         use crate::schema::finalizer::OverflowWarning;
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let warnings = vec![
-            OverflowWarning { table_name: "wide_table".to_string(), original_column_count: 1700 },
-            OverflowWarning { table_name: "another_wide".to_string(), original_column_count: 1800 },
+            OverflowWarning {
+                table_name: "wide_table".to_string(),
+                original_column_count: 1700,
+            },
+            OverflowWarning {
+                table_name: "another_wide".to_string(),
+                original_column_count: 1800,
+            },
         ];
-        save(&[], 0, &[], &[], &[], &warnings, JsonFormat::Array, tmp.path()).unwrap();
+        save(
+            &[],
+            0,
+            &[],
+            &[],
+            &[],
+            &warnings,
+            JsonFormat::Array,
+            tmp.path(),
+        )
+        .unwrap();
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(loaded.overflow_warnings.len(), 2);
         assert_eq!(loaded.overflow_warnings[0].table_name, "wide_table");
@@ -518,17 +670,34 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
         let loaded = load(tmp.path()).unwrap();
-        assert!(loaded.overflow_warnings.is_empty(), "old snapshots must deserialize with empty overflow_warnings");
+        assert!(
+            loaded.overflow_warnings.is_empty(),
+            "old snapshots must deserialize with empty overflow_warnings"
+        );
     }
 
     #[test]
     fn save_with_overrides_leaves_no_tmp_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("schema.json");
-        save_with_overrides(&[], 0, &[], &[], &[], &[], &std::collections::HashMap::new(), JsonFormat::Lines, &path).unwrap();
+        save_with_overrides(
+            &[],
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &std::collections::HashMap::new(),
+            JsonFormat::Lines,
+            &path,
+        )
+        .unwrap();
         assert!(path.exists(), "target file must exist after save");
         let tmp = path.with_extension("json.tmp");
-        assert!(!tmp.exists(), ".tmp file must be cleaned up after atomic save");
+        assert!(
+            !tmp.exists(),
+            ".tmp file must be cleaned up after atomic save"
+        );
     }
 
     #[test]
@@ -536,12 +705,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("schema.json");
         // Write an initial valid snapshot
-        save_with_overrides(&[], 10, &[], &[], &[], &[], &std::collections::HashMap::new(), JsonFormat::Lines, &path).unwrap();
+        save_with_overrides(
+            &[],
+            10,
+            &[],
+            &[],
+            &[],
+            &[],
+            &std::collections::HashMap::new(),
+            JsonFormat::Lines,
+            &path,
+        )
+        .unwrap();
         // Overwrite with a different value
-        save_with_overrides(&[], 42, &[], &[], &[], &[], &std::collections::HashMap::new(), JsonFormat::Lines, &path).unwrap();
+        save_with_overrides(
+            &[],
+            42,
+            &[],
+            &[],
+            &[],
+            &[],
+            &std::collections::HashMap::new(),
+            JsonFormat::Lines,
+            &path,
+        )
+        .unwrap();
         // The file must be readable and contain the new value
         let loaded = load(&path).unwrap();
-        assert_eq!(loaded.total_rows, 42, "overwrite must produce a complete, readable file");
+        assert_eq!(
+            loaded.total_rows, 42,
+            "overwrite must produce a complete, readable file"
+        );
     }
 
     // --- detected_format field tests ---
@@ -560,11 +754,17 @@ mod tests {
         use crate::io::reader::JsonFormat;
         let tmp = tempfile::NamedTempFile::new().unwrap();
         save_with_overrides(
-            &[], 0, &[], &[], &[], &[],
+            &[],
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
             &std::collections::HashMap::new(),
             JsonFormat::RootWrapper(vec!["K".to_string()]),
             tmp.path(),
-        ).unwrap();
+        )
+        .unwrap();
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(
             loaded.detected_format,
@@ -579,7 +779,10 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
         let loaded = load(tmp.path()).unwrap();
-        assert!(loaded.detected_format.is_none(), "old snapshots must deserialize detected_format as None");
+        assert!(
+            loaded.detected_format.is_none(),
+            "old snapshots must deserialize detected_format as None"
+        );
     }
 
     #[test]
@@ -599,13 +802,19 @@ mod tests {
         use crate::io::reader::JsonFormat;
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let mut snap = empty_snapshot();
-        snap.detected_format = Some(JsonFormat::RootWrapper(vec!["K1".to_string(), "K2".to_string()]));
+        snap.detected_format = Some(JsonFormat::RootWrapper(vec![
+            "K1".to_string(),
+            "K2".to_string(),
+        ]));
         let json = serde_json::to_string_pretty(&snap).unwrap();
         std::fs::write(tmp.path(), &json).unwrap();
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(
             loaded.detected_format,
-            Some(JsonFormat::RootWrapper(vec!["K1".to_string(), "K2".to_string()]))
+            Some(JsonFormat::RootWrapper(vec![
+                "K1".to_string(),
+                "K2".to_string()
+            ]))
         );
     }
 }

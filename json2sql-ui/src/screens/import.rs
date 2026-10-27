@@ -27,10 +27,13 @@ use crate::worker_client::{connect_with_retry, spawn_worker, SocketEventReader, 
 pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     #[allow(dead_code)]
     #[derive(PartialEq)]
-    enum ImportMsg { Cancel }
+    enum ImportMsg {
+        Cancel,
+    }
 
     // ── Elapsed timer ─────────────────────────────────────────────────────
-    let elapsed_secs = crate::screens::use_elapsed_timer(move || state.read().import.pass2_progress.done);
+    let elapsed_secs =
+        crate::screens::use_elapsed_timer(move || state.read().import.pass2_progress.done);
 
     // ── Pass 2 runner — subprocess worker ────────────────────────────────
     let mut once = use_signal(|| false);
@@ -64,9 +67,11 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 match connect_with_retry(path, 3, std::time::Duration::from_millis(100)).await {
                     Ok(s) => s,
                     Err(e) => {
-                        state.write().import.pass2_progress.push_log(
-                            format!("Cannot reconnect to worker: {e}")
-                        );
+                        state
+                            .write()
+                            .import
+                            .pass2_progress
+                            .push_log(format!("Cannot reconnect to worker: {e}"));
                         return;
                     }
                 };
@@ -76,10 +81,25 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
             // Normal mode: spawn a new worker subprocess.
 
             // Extract all fields needed to build WorkerConfig (one locked read).
-            let (source_file, root_table, pg_password, pg_host, pg_port, pg_database, pg_user,
-                 schemas, drop_existing, anomaly_dir, pg_schema, pass2_parallel, import_limit,
-                 verbose_logs, hint_format, skip_constraints_flag, tune_wal) =
-            {
+            let (
+                source_file,
+                root_table,
+                pg_password,
+                pg_host,
+                pg_port,
+                pg_database,
+                pg_user,
+                schemas,
+                drop_existing,
+                anomaly_dir,
+                pg_schema,
+                pass2_parallel,
+                import_limit,
+                verbose_logs,
+                hint_format,
+                skip_constraints_flag,
+                tune_wal,
+            ) = {
                 let source_file_opt = state.read().project.source_file.clone();
                 let Some(path) = source_file_opt else {
                     state.write().cancel();
@@ -128,9 +148,11 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                     |d| d.join("json2sql-worker"),
                 ),
                 Err(e) => {
-                    state.write().import.pass2_progress.push_log(
-                        format!("Cannot locate worker binary: {e}")
-                    );
+                    state
+                        .write()
+                        .import
+                        .pass2_progress
+                        .push_log(format!("Cannot locate worker binary: {e}"));
                     return;
                 }
             };
@@ -189,7 +211,11 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
                 s.worker_kill = WorkerKillHandle::new(handle.child);
                 s.resume_socket = Some(worker_cfg.socket_path.clone());
             }
-            (SocketEventReader::new(handle.read_half), Some(handle.write_half), result_file)
+            (
+                SocketEventReader::new(handle.read_half),
+                Some(handle.write_half),
+                result_file,
+            )
         };
 
         // Throttle UI updates to ~5 Hz — reduces DOM patch frequency on large files.
@@ -271,7 +297,9 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
         // Flush residual events buffered between the last tick and socket close.
         if !pending.is_empty() {
             let mut s = state.write();
-            for e in pending { s.apply_progress_event(e); }
+            for e in pending {
+                s.apply_progress_event(e);
+            }
         }
 
         // If the socket closed without Pass2Done, read the result file to get the
@@ -302,24 +330,30 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
 
     // ── Derived values ────────────────────────────────────────────────────
     let import_limit_display = state.read().project.import_limit;
-    let progress      = state.read().import.pass2_progress.clone();
-    let done          = progress.done;
-    let elapsed       = *elapsed_secs.read();
+    let progress = state.read().import.pass2_progress.clone();
+    let done = progress.done;
+    let elapsed = *elapsed_secs.read();
     // the tables the worker created (overrides and column groups applied), not the tables of Pass 1
-    let tables_total  = progress.ddl_table_count as u64;
+    let tables_total = progress.ddl_table_count as u64;
 
     // Phase 0 — DDL (tables created / total)
     let pct_0: u32 = if progress.ddl_complete {
         100
     } else {
-        progress_pct(progress.ddl_done as u64, progress.ddl_table_count.max(1) as u64)
+        progress_pct(
+            progress.ddl_done as u64,
+            progress.ddl_table_count.max(1) as u64,
+        )
     };
     let label_0 = if progress.ddl_complete {
         format!("{} tables · done", progress.ddl_table_count)
     } else if progress.ddl_table_count == 0 {
         "Waiting…".to_string()
     } else {
-        format!("{} / {} tables", progress.ddl_done, progress.ddl_table_count)
+        format!(
+            "{} / {} tables",
+            progress.ddl_done, progress.ddl_table_count
+        )
     };
 
     // Phase A — streaming (bytes_read / total_bytes)
@@ -334,13 +368,20 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     // Phase B — COPY (tables flushed / tables total)
     // Use copy_complete to handle empty tables (they never emit Pass2Flush).
     let tables_done = progress.rows_per_table.len() as u64;
-    let pct_b: u32 = if progress.copy_complete || done { 100 } else { progress_pct(tables_done, tables_total) };
+    let pct_b: u32 = if progress.copy_complete || done {
+        100
+    } else {
+        progress_pct(tables_done, tables_total)
+    };
 
     // Phase D — constraints (PK + FK applied)
     let pct_d: u32 = if progress.constraints_complete || progress.constraints_skipped {
         100
     } else {
-        progress_pct(progress.constraints_done as u64, progress.constraints_total.max(1) as u64)
+        progress_pct(
+            progress.constraints_done as u64,
+            progress.constraints_total.max(1) as u64,
+        )
     };
     let label_d = if progress.constraints_skipped {
         "Skipped".to_string()
@@ -349,7 +390,10 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     } else if progress.constraints_total == 0 {
         "Waiting…".to_string()
     } else {
-        format!("{} / {} ops", progress.constraints_done, progress.constraints_total)
+        format!(
+            "{} / {} ops",
+            progress.constraints_done, progress.constraints_total
+        )
     };
 
     let elapsed_str = format!("{:02}:{:02}", elapsed / 60, elapsed % 60);
@@ -366,16 +410,21 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     let label_a = if streaming_done {
         format!("{} · done", format_bytes(progress.total_bytes))
     } else {
-        format!("{} / {} · {}",
+        format!(
+            "{} / {} · {}",
             format_bytes(progress.bytes_read),
             format_bytes(progress.total_bytes),
-            elapsed_str)
+            elapsed_str
+        )
     };
 
     let label_b = if done {
         format!("{tables_total} tables · {}", progress.rows_processed)
     } else {
-        format!("{tables_done} / {tables_total} tables · {} rows so far", progress.rows_processed)
+        format!(
+            "{tables_done} / {tables_total} tables · {} rows so far",
+            progress.rows_processed
+        )
     };
 
     let mut table_rows: Vec<(String, u64)> = progress
@@ -386,11 +435,14 @@ pub fn ImportScreen(mut state: Signal<AppState>) -> Element {
     table_rows.sort_by_key(|r| std::cmp::Reverse(r.1));
     // Totaux calculés sur le jeu complet avant le cap — le success banner et label_b
     // doivent refléter le total réel, pas seulement les 100 premières tables.
-    let total_rows: u64   = table_rows.iter().map(|(_, n)| n).sum();
-    let table_count       = table_rows.len();
-    let hidden_tables     = table_count.saturating_sub(100);
+    let total_rows: u64 = table_rows.iter().map(|(_, n)| n).sum();
+    let table_count = table_rows.len();
+    let hidden_tables = table_count.saturating_sub(100);
     table_rows.truncate(100);
-    let anomaly_dir_label = state.read().project.anomaly_dir
+    let anomaly_dir_label = state
+        .read()
+        .project
+        .anomaly_dir
         .as_ref()
         .map(|p| p.display().to_string());
 

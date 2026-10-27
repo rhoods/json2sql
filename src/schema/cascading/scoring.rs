@@ -52,10 +52,7 @@ pub fn child_compatibility_score(
     }
 
     // Only consider keys present in ≥ 2 siblings.
-    let shared: Vec<&Vec<usize>> = key_to_children
-        .values()
-        .filter(|v| v.len() >= 2)
-        .collect();
+    let shared: Vec<&Vec<usize>> = key_to_children.values().filter(|v| v.len() >= 2).collect();
 
     if shared.is_empty() {
         return 1.0;
@@ -102,11 +99,22 @@ pub(super) fn greedy_schema_clusters(
             } else if seed_pure || other_cols.is_empty() {
                 0.0
             } else {
-                let inter = seed_cols.iter().filter(|&&c| other_cols.contains(c)).count();
+                let inter = seed_cols
+                    .iter()
+                    .filter(|&&c| other_cols.contains(c))
+                    .count();
                 let union = seed_cols.len() + other_cols.len() - inter;
-                if union == 0 { 1.0 } else { inter as f64 / union as f64 }
+                if union == 0 {
+                    1.0
+                } else {
+                    inter as f64 / union as f64
+                }
             };
-            if j >= min_jaccard { cluster.push(i); } else { remaining.push(i); }
+            if j >= min_jaccard {
+                cluster.push(i);
+            } else {
+                remaining.push(i);
+            }
         }
         unassigned = remaining;
         if cluster.len() >= min_size {
@@ -132,7 +140,8 @@ pub(super) fn siblings_key_prefix(schemas: &[TableSchema], indices: &[usize]) ->
         .take_while(|&i| keys.iter().all(|k| k[i] == keys[0][i]))
         .count();
     let raw = std::str::from_utf8(&keys[0][..prefix_len]).unwrap_or("");
-    raw.trim_end_matches(|c: char| c == '_' || c.is_ascii_digit()).to_string()
+    raw.trim_end_matches(|c: char| c == '_' || c.is_ascii_digit())
+        .to_string()
 }
 
 /// Returns a suffix guaranteed not to produce a name collision with existing schemas.
@@ -142,7 +151,11 @@ pub(super) fn unique_cluster_suffix(
     desired_suffix: &str,
     schemas: &[TableSchema],
 ) -> String {
-    let taken = |suffix: &str| schemas.iter().any(|s| s.name == format!("{parent_name}_{suffix}"));
+    let taken = |suffix: &str| {
+        schemas
+            .iter()
+            .any(|s| s.name == format!("{parent_name}_{suffix}"))
+    };
     if !taken(desired_suffix) {
         return desired_suffix.to_string();
     }
@@ -197,7 +210,9 @@ fn noise_filtered_col_sets<'a>(
         .map(|&i| {
             schemas[i]
                 .data_columns()
-                .filter(|c| col_freq.get(c.original_name.as_str()).copied().unwrap_or(0) >= min_presence)
+                .filter(|c| {
+                    col_freq.get(c.original_name.as_str()).copied().unwrap_or(0) >= min_presence
+                })
                 .map(|c| c.original_name.as_str())
                 .collect()
         })
@@ -205,7 +220,12 @@ fn noise_filtered_col_sets<'a>(
     if filtered.iter().all(std::collections::HashSet::is_empty) {
         indices
             .iter()
-            .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
+            .map(|&i| {
+                schemas[i]
+                    .data_columns()
+                    .map(|c| c.original_name.as_str())
+                    .collect()
+            })
             .collect()
     } else {
         filtered
@@ -220,7 +240,12 @@ fn build_jaccard_col_sets<'a>(
     if !all_data_bearing {
         return indices
             .iter()
-            .map(|&i| schemas[i].data_columns().map(|c| c.original_name.as_str()).collect())
+            .map(|&i| {
+                schemas[i]
+                    .data_columns()
+                    .map(|c| c.original_name.as_str())
+                    .collect()
+            })
             .collect();
     }
     noise_filtered_col_sets(schemas, indices)
@@ -246,10 +271,16 @@ fn min_jaccard_from_col_sets(col_sets: &[std::collections::HashSet<&str>]) -> f6
         for other in col_sets.iter().skip(1) {
             let intersection = reference.iter().filter(|&&c| other.contains(c)).count();
             let union = reference.len() + other.len() - intersection;
-            let j_val = if union == 0 { 1.0 } else { intersection as f64 / union as f64 };
+            let j_val = if union == 0 {
+                1.0
+            } else {
+                intersection as f64 / union as f64
+            };
             if j_val < min_j {
                 min_j = j_val;
-                if min_j == 0.0 { return 0.0; }
+                if min_j == 0.0 {
+                    return 0.0;
+                }
             }
         }
         return min_j;
@@ -257,12 +288,21 @@ fn min_jaccard_from_col_sets(col_sets: &[std::collections::HashSet<&str>]) -> f6
     let mut min_j = 1.0_f64;
     for i in 0..col_sets.len() {
         for j in (i + 1)..col_sets.len() {
-            let intersection = col_sets[i].iter().filter(|&&c| col_sets[j].contains(c)).count();
+            let intersection = col_sets[i]
+                .iter()
+                .filter(|&&c| col_sets[j].contains(c))
+                .count();
             let union = col_sets[i].len() + col_sets[j].len() - intersection;
-            let j_val = if union == 0 { 1.0 } else { intersection as f64 / union as f64 };
+            let j_val = if union == 0 {
+                1.0
+            } else {
+                intersection as f64 / union as f64
+            };
             if j_val < min_j {
                 min_j = j_val;
-                if min_j == 0.0 { return 0.0; }
+                if min_j == 0.0 {
+                    return 0.0;
+                }
             }
         }
     }
@@ -271,43 +311,64 @@ fn min_jaccard_from_col_sets(col_sets: &[std::collections::HashSet<&str>]) -> f6
 
 #[must_use]
 pub fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
-    if indices.len() < 2 { return 1.0; }
+    if indices.len() < 2 {
+        return 1.0;
+    }
     // Sort by name so col_sets[0] is always the alphabetically-first sibling —
     // deterministic regardless of call-site ordering.
     let mut sorted: Vec<usize> = indices.to_vec();
     sorted.sort_unstable_by_key(|&i| &schemas[i].name);
     let indices = sorted.as_slice();
     // Fast path 1: pure containers — every sibling has no data columns.
-    if indices.iter().all(|&i| schemas[i].data_columns().next().is_none()) { return 1.0; }
+    if indices
+        .iter()
+        .all(|&i| schemas[i].data_columns().next().is_none())
+    {
+        return 1.0;
+    }
     // Noise filter: when ALL siblings have data columns, filter out columns present
     // in fewer than max(2, len/20) schemas. Intentionally disabled when any sibling
     // is a pure container so Jaccard correctly signals heterogeneous groups.
-    let all_data_bearing = indices.iter().all(|&i| schemas[i].data_columns().next().is_some());
+    let all_data_bearing = indices
+        .iter()
+        .all(|&i| schemas[i].data_columns().next().is_some());
     let col_sets = build_jaccard_col_sets(schemas, indices, all_data_bearing);
     min_jaccard_from_col_sets(&col_sets)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::table_schema::{ColumnSchema, TableSchema};
     use super::super::super::type_tracker::PgType;
+    use super::*;
 
     fn make_sibling(name: &str, parent: &str, data_keys: &[&str]) -> TableSchema {
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
         t.parent_table = Some(parent.to_string());
         t.columns.push(ColumnSchema {
-            name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
-            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false,
+            name: "j2s_id".to_string(),
+            original_name: "j2s_id".to_string(),
+            pg_type: PgType::BigInt,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: false,
         });
         t.columns.push(ColumnSchema {
-            name: "j2s_parent_id".to_string(), original_name: "j2s_parent_id".to_string(),
-            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: true,
+            name: "j2s_parent_id".to_string(),
+            original_name: "j2s_parent_id".to_string(),
+            pg_type: PgType::BigInt,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: true,
         });
         for &k in data_keys {
             t.columns.push(ColumnSchema {
-                name: k.to_string(), original_name: k.to_string(),
-                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+                name: k.to_string(),
+                original_name: k.to_string(),
+                pg_type: PgType::Text,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
             });
         }
         t
@@ -331,7 +392,10 @@ mod tests {
         assert!(name.len() > 63, "precondition: raw must exceed MAX");
         let result = pg_truncate_name(&name);
         assert!(result.len() <= 63, "truncated name must fit PG MAX_IDENT");
-        assert!(std::str::from_utf8(result.as_bytes()).is_ok(), "result must be valid UTF-8");
+        assert!(
+            std::str::from_utf8(result.as_bytes()).is_ok(),
+            "result must be valid UTF-8"
+        );
     }
 
     #[test]

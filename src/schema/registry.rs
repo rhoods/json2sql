@@ -23,13 +23,13 @@
 //!   pas fusionné, il est recalculé par `finalize()`.
 //! - fn `SchemaRegistry::anomaly_iter` — délègue à `SchemaObserver::anomaly_iter`.
 
-use std::collections::HashSet;
 use serde_json::Value;
+use std::collections::HashSet;
 
 use super::finalizer::{OverflowWarning, SchemaFinalizer};
+use super::inspector;
 use super::naming::{ColumnCollision, NamingRegistry, TruncatedName};
 use super::observer::SchemaObserver;
-use super::inspector;
 use super::stats::ColumnStats;
 use super::strategies::StrategyName;
 use super::type_tracker::TypeTracker;
@@ -104,11 +104,22 @@ impl SchemaRegistry {
 
     /// Like `finalize`, but also applies the PG 1600-column guard and returns overflow warnings.
     /// Used by `runner::build_pass1_result` so the guard runs inside the finalizer, not outside.
-    pub fn finalize_with_pg_guard(&mut self) -> (Vec<crate::schema::table_schema::TableSchema>, Vec<OverflowWarning>) {
+    pub fn finalize_with_pg_guard(
+        &mut self,
+    ) -> (
+        Vec<crate::schema::table_schema::TableSchema>,
+        Vec<OverflowWarning>,
+    ) {
         self.finalize_inner(true)
     }
 
-    fn finalize_inner(&mut self, apply_pg_guard: bool) -> (Vec<crate::schema::table_schema::TableSchema>, Vec<OverflowWarning>) {
+    fn finalize_inner(
+        &mut self,
+        apply_pg_guard: bool,
+    ) -> (
+        Vec<crate::schema::table_schema::TableSchema>,
+        Vec<OverflowWarning>,
+    ) {
         let finalizer = SchemaFinalizer::new(
             self.wide_column_threshold,
             self.sibling_threshold,
@@ -156,16 +167,17 @@ impl SchemaRegistry {
     }
 }
 
-
 #[cfg(test)]
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use crate::schema::cascading::scoring::{child_compatibility_score, pairwise_jaccard_min};
     use crate::schema::finalizer::*;
-    use crate::schema::table_schema::{ChildKind, ColumnSchema, TableSchema, InferredStrategy};
+    use crate::schema::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
     use crate::schema::type_tracker::PgType;
-    use crate::schema::wide_strategies::{apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys};
+    use crate::schema::wide_strategies::{
+        apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys,
+    };
     use serde_json::json;
 
     fn make_root(value: &Value) -> &serde_json::Map<String, Value> {
@@ -204,9 +216,20 @@ mod tests {
         let obj = json!({"id": 1, "tags": ["rust", "sql"]});
         reg.observe_root("users", make_root(&obj));
         let schemas = reg.finalize();
-        assert_eq!(schemas.len(), 1, "got {:?}", schemas.iter().map(|s| &s.name).collect::<Vec<_>>());
-        let tags = schemas[0].find_by_original("tags").expect("`tags` must be a column of `users`");
-        assert!(matches!(tags.pg_type, PgType::Array(_)), "got {:?}", tags.pg_type);
+        assert_eq!(
+            schemas.len(),
+            1,
+            "got {:?}",
+            schemas.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        let tags = schemas[0]
+            .find_by_original("tags")
+            .expect("`tags` must be a column of `users`");
+        assert!(
+            matches!(tags.pg_type, PgType::Array(_)),
+            "got {:?}",
+            tags.pg_type
+        );
     }
 
     #[test]
@@ -236,7 +259,10 @@ mod tests {
     #[test]
     fn test_wide_object_pivot_homogeneous() {
         // 3 numeric keys → threshold=2 → Pivot suggéré → split identité/compagnon (issue #45).
-        let mut reg = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            wide_column_threshold: 2,
+            ..Default::default()
+        });
         let obj = json!({
             "id": 1,
             "nutrients": {
@@ -249,13 +275,24 @@ mod tests {
         let schemas = reg.finalize();
 
         // Identité : garde le nom, colonnes générées seulement (rétention inconditionnelle à zéro).
-        let identity = schemas.iter().find(|s| s.name == "ingredient_nutrients")
+        let identity = schemas
+            .iter()
+            .find(|s| s.name == "ingredient_nutrients")
             .expect("identity table should exist");
-        assert!(matches!(&identity.inferred_strategy, InferredStrategy::AutoSplit { .. }));
-        assert_eq!(identity.data_columns().count(), 0, "identity retains no data column");
+        assert!(matches!(
+            &identity.inferred_strategy,
+            InferredStrategy::AutoSplit { .. }
+        ));
+        assert_eq!(
+            identity.data_columns().count(),
+            0,
+            "identity retains no data column"
+        );
 
         // Compagnon : (key, value) EAV, toutes les clés.
-        let companion = schemas.iter().find(|s| s.name == "ingredient_nutrients_pivot")
+        let companion = schemas
+            .iter()
+            .find(|s| s.name == "ingredient_nutrients_pivot")
             .expect("companion table should exist");
         assert_eq!(companion.inferred_strategy, InferredStrategy::Pivot);
         assert!(companion.find_by_original("key").is_some());
@@ -266,7 +303,10 @@ mod tests {
     #[test]
     fn test_wide_object_jsonb_heterogeneous() {
         // Mixed types (string + numeric) → should get InferredStrategy::Jsonb
-        let mut reg = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            wide_column_threshold: 2,
+            ..Default::default()
+        });
         let obj = json!({
             "id": 1,
             "meta": {
@@ -294,7 +334,10 @@ mod tests {
         // "children silently absorbed". The only table parented to the identity must be its own
         // `_pivot` companion — a real orphaned child (if the split ever mis-parents one) would
         // show up here as an extra, unexpected entry.
-        let mut reg = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            wide_column_threshold: 2,
+            ..Default::default()
+        });
         let obj = json!({
             "id": 1,
             "nutrients": {
@@ -312,7 +355,8 @@ mod tests {
             .map(|s| s.name.as_str())
             .collect();
         assert_eq!(
-            children_of_identity, vec!["ingredient_nutrients_pivot"],
+            children_of_identity,
+            vec!["ingredient_nutrients_pivot"],
             "only the companion should be parented to the identity — no orphan real child"
         );
     }
@@ -328,10 +372,16 @@ mod tests {
     fn test_jaccard_large_pure_containers_fast() {
         // Each genome child has one contig sub-object (making the genome a pure container).
         let run = |n: usize| {
-            let mut reg = SchemaRegistry::new(RegistryConfig { sibling_jaccard: 0.0, ..Default::default() });
+            let mut reg = SchemaRegistry::new(RegistryConfig {
+                sibling_jaccard: 0.0,
+                ..Default::default()
+            });
             let mut genomes = serde_json::Map::new();
             for i in 0..n {
-                genomes.insert(format!("gcf_{i:05}"), json!({ format!("nc_{i:05}"): { "is_circular": false } }));
+                genomes.insert(
+                    format!("gcf_{i:05}"),
+                    json!({ format!("nc_{i:05}"): { "is_circular": false } }),
+                );
             }
             let root = json!({ "id": 1, "genomes": Value::Object(genomes) });
             reg.observe_root("root", make_root(&root));
@@ -363,7 +413,10 @@ mod tests {
     /// 500 homogeneous siblings (identical schemas) → all similar → collapsed into `SiblingCollapse`.
     #[test]
     fn test_jaccard_large_homogeneous_collapses() {
-        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_jaccard: 0.0, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            sibling_jaccard: 0.0,
+            ..Default::default()
+        });
 
         let mut langs = serde_json::Map::new();
         for i in 0..500usize {
@@ -397,17 +450,17 @@ mod tests {
             items.insert(format!("item_{i:03}"), json!({ "a": 1, "b": 2, "c": 3 }));
         }
         // 1 outlier with completely different columns {x, y, z}
-        items.insert("item_outlier".to_string(), json!({ "x": 10, "y": 20, "z": 30 }));
+        items.insert(
+            "item_outlier".to_string(),
+            json!({ "x": 10, "y": 20, "z": 30 }),
+        );
 
         let root = json!({ "id": 1, "items": Value::Object(items) });
         reg.observe_root("root", make_root(&root));
 
         let schemas = reg.finalize();
         let items_schema = schemas.iter().find(|s| s.name == "root_items");
-        assert!(
-            items_schema.is_some(),
-            "root_items table must exist"
-        );
+        assert!(items_schema.is_some(), "root_items table must exist");
         assert!(
             !matches!(
                 items_schema.unwrap().inferred_strategy,
@@ -429,12 +482,9 @@ mod tests {
         // All siblings are pure containers → must return 1.0.
         let schemas: Vec<TableSchema> = (0..5)
             .map(|i| {
-                let mut s = TableSchema::new(
-                    format!("s{i}"),
-                    vec![format!("s{}", i)],
-                    1,
-                );
-                s.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+                let mut s = TableSchema::new(format!("s{i}"), vec![format!("s{}", i)], 1);
+                s.columns
+                    .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
                 s
             })
             .collect();
@@ -474,16 +524,25 @@ mod tests {
         reg.observe_root("root", make_root(&obj));
         let schemas = reg.finalize();
 
-        let child = schemas.iter().find(|s| s.name.contains("v1_0")).unwrap_or_else(|| {
-            panic!("table with v1_0 not found — got: {:?}", schemas.iter().map(|s| &s.name).collect::<Vec<_>>())
-        });
+        let child = schemas
+            .iter()
+            .find(|s| s.name.contains("v1_0"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "table with v1_0 not found — got: {:?}",
+                    schemas.iter().map(|s| &s.name).collect::<Vec<_>>()
+                )
+            });
         assert_eq!(
             child.depth, 1,
-            "direct child with dotted name must be at depth 1, got depth {}", child.depth
+            "direct child with dotted name must be at depth 1, got depth {}",
+            child.depth
         );
         assert_eq!(
-            child.parent_table.as_deref(), Some("root"),
-            "parent must be root, got {:?}", child.parent_table
+            child.parent_table.as_deref(),
+            Some("root"),
+            "parent must be root, got {:?}",
+            child.parent_table
         );
     }
 
@@ -495,12 +554,19 @@ mod tests {
         reg.observe_root("root", make_root(&obj));
         let schemas = reg.finalize();
 
-        let child = schemas.iter().find(|s| s.name.contains("v1_0")).unwrap_or_else(|| {
-            panic!("table with v1_0 not found — got: {:?}", schemas.iter().map(|s| &s.name).collect::<Vec<_>>())
-        });
+        let child = schemas
+            .iter()
+            .find(|s| s.name.contains("v1_0"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "table with v1_0 not found — got: {:?}",
+                    schemas.iter().map(|s| &s.name).collect::<Vec<_>>()
+                )
+            });
         assert_eq!(
             child.depth, 1,
-            "direct array child with dotted name must be at depth 1, got depth {}", child.depth
+            "direct array child with dotted name must be at depth 1, got depth {}",
+            child.depth
         );
     }
 
@@ -517,26 +583,43 @@ mod tests {
 
         // Single registry
         let mut single = SchemaRegistry::new(RegistryConfig::default());
-        for row in &rows { single.observe_root("users", make_root(row)); }
+        for row in &rows {
+            single.observe_root("users", make_root(row));
+        }
         let schemas_single = single.finalize();
 
         // Split across two registries, then merge
         let mut reg_a = SchemaRegistry::new(RegistryConfig::default());
         let mut reg_b = SchemaRegistry::new(RegistryConfig::default());
-        for row in &rows[..2] { reg_a.observe_root("users", make_root(row)); }
-        for row in &rows[2..] { reg_b.observe_root("users", make_root(row)); }
+        for row in &rows[..2] {
+            reg_a.observe_root("users", make_root(row));
+        }
+        for row in &rows[2..] {
+            reg_b.observe_root("users", make_root(row));
+        }
         reg_a.merge(reg_b);
         let schemas_merged = reg_a.finalize();
 
-        assert_eq!(schemas_single.len(), schemas_merged.len(), "table count must match");
+        assert_eq!(
+            schemas_single.len(),
+            schemas_merged.len(),
+            "table count must match"
+        );
         let s = schemas_single.iter().find(|s| s.name == "users").unwrap();
         let m = schemas_merged.iter().find(|s| s.name == "users").unwrap();
         assert_eq!(s.columns.len(), m.columns.len(), "column count must match");
         for col in &s.columns {
-            let mc = m.columns.iter().find(|c| c.name == col.name)
+            let mc = m
+                .columns
+                .iter()
+                .find(|c| c.name == col.name)
                 .unwrap_or_else(|| panic!("column {} missing from merged schema", col.name));
             assert_eq!(col.pg_type, mc.pg_type, "pg_type mismatch for {}", col.name);
-            assert_eq!(col.not_null, mc.not_null, "not_null mismatch for {}", col.name);
+            assert_eq!(
+                col.not_null, mc.not_null,
+                "not_null mismatch for {}",
+                col.name
+            );
         }
     }
 
@@ -550,26 +633,40 @@ mod tests {
         ];
 
         let mut single = SchemaRegistry::new(RegistryConfig::default());
-        for row in &rows { single.observe_root("users", make_root(row)); }
+        for row in &rows {
+            single.observe_root("users", make_root(row));
+        }
         let schemas_single = single.finalize();
 
         let mut reg_a = SchemaRegistry::new(RegistryConfig::default());
         let mut reg_b = SchemaRegistry::new(RegistryConfig::default());
-        for row in &rows[..2] { reg_a.observe_root("users", make_root(row)); }
-        for row in &rows[2..] { reg_b.observe_root("users", make_root(row)); }
+        for row in &rows[..2] {
+            reg_a.observe_root("users", make_root(row));
+        }
+        for row in &rows[2..] {
+            reg_b.observe_root("users", make_root(row));
+        }
         reg_a.merge(reg_b);
         let schemas_merged = reg_a.finalize();
 
         assert_eq!(
-            schemas_single.len(), schemas_merged.len(),
+            schemas_single.len(),
+            schemas_merged.len(),
             "table count: single={}, merged={}",
-            schemas_single.len(), schemas_merged.len()
+            schemas_single.len(),
+            schemas_merged.len()
         );
         for s in &schemas_single {
-            let m = schemas_merged.iter().find(|ms| ms.name == s.name)
+            let m = schemas_merged
+                .iter()
+                .find(|ms| ms.name == s.name)
                 .unwrap_or_else(|| panic!("table {} missing from merged schema", s.name));
-            assert_eq!(s.columns.len(), m.columns.len(),
-                "column count mismatch for table {}", s.name);
+            assert_eq!(
+                s.columns.len(),
+                m.columns.len(),
+                "column count mismatch for table {}",
+                s.name
+            );
         }
     }
 
@@ -578,21 +675,38 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn make_parent_child(parent_name: &str, child_name: &str) -> Vec<TableSchema> {
-        let mut parent = TableSchema::new(parent_name.to_string(), vec![parent_name.to_string()], 0);
-        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        let mut parent =
+            TableSchema::new(parent_name.to_string(), vec![parent_name.to_string()], 0);
+        parent
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         parent.columns.push(ColumnSchema {
-            name: "name".to_string(), original_name: "name".to_string(),
-            pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+            name: "name".to_string(),
+            original_name: "name".to_string(),
+            pg_type: PgType::Text,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
         });
 
-        let mut child = TableSchema::new(child_name.to_string(), vec![parent_name.to_string(), child_name.to_string()], 1);
+        let mut child = TableSchema::new(
+            child_name.to_string(),
+            vec![parent_name.to_string(), child_name.to_string()],
+            1,
+        );
         child.parent_table = Some(parent_name.to_string());
         child.child_kind = Some(ChildKind::Object);
-        child.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        child
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         child.columns.push(ColumnSchema::parent_fk(parent_name));
         child.columns.push(ColumnSchema {
-            name: "val".to_string(), original_name: "val".to_string(),
-            pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+            name: "val".to_string(),
+            original_name: "val".to_string(),
+            pg_type: PgType::Text,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
         });
 
         vec![parent, child]
@@ -611,7 +725,10 @@ mod tests {
         // Remove the child — users has no Object children
         schemas.retain(|s| s.name != "en");
         let result = apply_normalize_dynamic_keys(&mut schemas, "users", "lang".to_string());
-        assert!(result.is_err(), "should return Err when no Object children found");
+        assert!(
+            result.is_err(),
+            "should return Err when no Object children found"
+        );
     }
 
     #[test]
@@ -625,7 +742,10 @@ mod tests {
     fn test_apply_flatten_table_not_found_returns_err() {
         let mut schemas = make_parent_child("users", "addr");
         let result = apply_flatten(&mut schemas, "nonexistent", "", 1);
-        assert!(result.is_err(), "should return Err when child table not found");
+        assert!(
+            result.is_err(),
+            "should return Err when child table not found"
+        );
     }
 
     #[test]
@@ -633,7 +753,10 @@ mod tests {
         let mut schemas = make_parent_child("users", "addr");
         // Try to flatten a root table (no parent)
         let result = apply_flatten(&mut schemas, "users", "", 1);
-        assert!(result.is_err(), "should return Err when flattening a root table");
+        assert!(
+            result.is_err(),
+            "should return Err when flattening a root table"
+        );
     }
 
     #[test]
@@ -641,21 +764,30 @@ mod tests {
         let mut schemas = make_parent_child("users", "addr");
         let result = apply_flatten(&mut schemas, "addr", "", 1);
         assert!(result.is_ok());
-        assert!(!schemas.iter().any(|s| s.name == "addr"), "child should be removed after flatten");
+        assert!(
+            !schemas.iter().any(|s| s.name == "addr"),
+            "child should be removed after flatten"
+        );
     }
 
     #[test]
     fn test_apply_jsonb_flatten_table_not_found_returns_err() {
         let mut schemas = make_parent_child("users", "meta");
         let result = apply_jsonb_flatten(&mut schemas, "nonexistent");
-        assert!(result.is_err(), "should return Err when child table not found");
+        assert!(
+            result.is_err(),
+            "should return Err when child table not found"
+        );
     }
 
     #[test]
     fn test_apply_jsonb_flatten_root_table_returns_err() {
         let mut schemas = make_parent_child("users", "meta");
         let result = apply_jsonb_flatten(&mut schemas, "users");
-        assert!(result.is_err(), "should return Err when inlining a root table");
+        assert!(
+            result.is_err(),
+            "should return Err when inlining a root table"
+        );
     }
 
     #[test]
@@ -663,7 +795,10 @@ mod tests {
         let mut schemas = make_parent_child("users", "meta");
         let result = apply_jsonb_flatten(&mut schemas, "meta");
         assert!(result.is_ok());
-        assert!(!schemas.iter().any(|s| s.name == "meta"), "child should be removed after jsonb flatten");
+        assert!(
+            !schemas.iter().any(|s| s.name == "meta"),
+            "child should be removed after jsonb flatten"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -672,7 +807,8 @@ mod tests {
 
     fn make_wide_schema(name: &str, parent: Option<&str>, data_col_count: usize) -> TableSchema {
         let mut s = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
-        s.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        s.columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         if let Some(p) = parent {
             s.columns.push(ColumnSchema::parent_fk(p));
             s.parent_table = Some(p.to_string());
@@ -704,7 +840,10 @@ mod tests {
         assert_eq!(data.len(), 1);
         assert_eq!(data[0].name, "data");
         assert!(matches!(data[0].pg_type, PgType::Jsonb));
-        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::Jsonb));
+        assert!(matches!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::Jsonb
+        ));
     }
 
     #[test]
@@ -714,13 +853,21 @@ mod tests {
         // 1599 data + 1 generated = 1600 total → must NOT be converted.
         let mut schemas = vec![make_wide_schema("t", None, PG_MAX_COLUMNS - 1)];
         let warnings = apply_column_limit_guard(&mut schemas);
-        assert!(warnings.is_empty(), "{} data cols (root) must not trigger the guard", PG_MAX_COLUMNS - 1);
+        assert!(
+            warnings.is_empty(),
+            "{} data cols (root) must not trigger the guard",
+            PG_MAX_COLUMNS - 1
+        );
         assert_eq!(schemas[0].data_columns().count(), PG_MAX_COLUMNS - 1);
 
         // 1600 data + 1 generated = 1601 total → must be converted.
         let mut schemas2 = vec![make_wide_schema("t", None, PG_MAX_COLUMNS)];
         let warnings2 = apply_column_limit_guard(&mut schemas2);
-        assert_eq!(warnings2.len(), 1, "{PG_MAX_COLUMNS} data cols (root) must trigger the guard");
+        assert_eq!(
+            warnings2.len(),
+            1,
+            "{PG_MAX_COLUMNS} data cols (root) must trigger the guard"
+        );
 
         // Child table has 2 generated cols (j2s_id + j2s_parent_id).
         // Max safe data cols = PG_MAX_COLUMNS - 2 = 1598.
@@ -729,20 +876,29 @@ mod tests {
             make_wide_schema("child", Some("parent"), PG_MAX_COLUMNS - 2),
         ];
         let warnings3 = apply_column_limit_guard(&mut schemas3);
-        assert!(warnings3.is_empty(), "{} data cols (child) must not trigger the guard", PG_MAX_COLUMNS - 2);
+        assert!(
+            warnings3.is_empty(),
+            "{} data cols (child) must not trigger the guard",
+            PG_MAX_COLUMNS - 2
+        );
 
         let mut schemas4 = vec![
             make_wide_schema("parent", None, 5),
             make_wide_schema("child", Some("parent"), PG_MAX_COLUMNS - 1),
         ];
         let warnings4 = apply_column_limit_guard(&mut schemas4);
-        assert_eq!(warnings4.len(), 1, "{} data cols (child) must trigger the guard", PG_MAX_COLUMNS - 1);
+        assert_eq!(
+            warnings4.len(),
+            1,
+            "{} data cols (child) must trigger the guard",
+            PG_MAX_COLUMNS - 1
+        );
     }
 
     #[test]
     fn test_column_limit_guard_preserves_children() {
         let parent = make_wide_schema("parent", None, 1601);
-        let child  = make_wide_schema("child", Some("parent"), 10);
+        let child = make_wide_schema("child", Some("parent"), 10);
         let mut schemas = vec![parent, child];
 
         let warnings = apply_column_limit_guard(&mut schemas);
@@ -750,13 +906,17 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(schemas.len(), 2, "child table must not be removed");
         assert_eq!(schemas[1].name, "child");
-        assert_eq!(schemas[1].data_columns().count(), 10, "child columns must be untouched");
+        assert_eq!(
+            schemas[1].data_columns().count(),
+            10,
+            "child columns must be untouched"
+        );
     }
 
     #[test]
     fn test_column_limit_guard_converts_child_independently() {
         let parent = make_wide_schema("parent", None, 10);
-        let child  = make_wide_schema("child", Some("parent"), 1601);
+        let child = make_wide_schema("child", Some("parent"), 1601);
         let mut schemas = vec![parent, child];
 
         let warnings = apply_column_limit_guard(&mut schemas);
@@ -767,7 +927,10 @@ mod tests {
         assert_eq!(schemas[0].data_columns().count(), 10);
         // Child converted
         assert_eq!(schemas[1].data_columns().count(), 1);
-        assert!(matches!(schemas[1].inferred_strategy, InferredStrategy::Jsonb));
+        assert!(matches!(
+            schemas[1].inferred_strategy,
+            InferredStrategy::Jsonb
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -776,12 +939,20 @@ mod tests {
 
     #[test]
     fn test_run_with_guard_enabled_returns_overflow_warnings() {
-        use indexmap::IndexMap;
         use crate::schema::naming::NamingRegistry;
         use crate::schema::strategies::StrategyName;
+        use indexmap::IndexMap;
         use std::collections::HashSet;
 
-        let finalizer = SchemaFinalizer::new(256, 3, 0.5, 0.10, 0.001, HashSet::<StrategyName>::new(), true);
+        let finalizer = SchemaFinalizer::new(
+            256,
+            3,
+            0.5,
+            0.10,
+            0.001,
+            HashSet::<StrategyName>::new(),
+            true,
+        );
         let mut naming = NamingRegistry::default();
         let (schemas, _collisions, warnings) = finalizer.run(&IndexMap::new(), 256, &mut naming);
         // Empty input: no schemas, no warnings.
@@ -791,14 +962,22 @@ mod tests {
 
     #[test]
     fn test_run_with_guard_disabled_returns_no_warnings_for_wide_table() {
-        use indexmap::IndexMap;
         use crate::schema::naming::NamingRegistry;
         use crate::schema::strategies::StrategyName;
+        use indexmap::IndexMap;
         use std::collections::HashSet;
 
         // Guard disabled: run() must not produce OverflowWarnings even for wide tables.
         // (The actual wide-table conversion is tested via apply_column_limit_guard directly.)
-        let finalizer = SchemaFinalizer::new(256, 3, 0.5, 0.10, 0.001, HashSet::<StrategyName>::new(), false);
+        let finalizer = SchemaFinalizer::new(
+            256,
+            3,
+            0.5,
+            0.10,
+            0.001,
+            HashSet::<StrategyName>::new(),
+            false,
+        );
         let mut naming = NamingRegistry::default();
         let (_schemas, _collisions, warnings) = finalizer.run(&IndexMap::new(), 256, &mut naming);
         assert!(warnings.is_empty());
@@ -834,17 +1013,28 @@ mod tests {
             "parent must be converted to Jsonb by the guard"
         );
         exclude_absorbed_children(&mut schemas);
-        assert_eq!(schemas.len(), 1, "child must be removed after parent becomes Jsonb");
+        assert_eq!(
+            schemas.len(),
+            1,
+            "child must be removed after parent becomes Jsonb"
+        );
     }
 
     // -----------------------------------------------------------------------
     // child_compatibility_score
     // -----------------------------------------------------------------------
 
-    fn make_schema_with_cols(name: &str, parent: Option<&str>, cols: &[&str], depth: usize) -> TableSchema {
+    fn make_schema_with_cols(
+        name: &str,
+        parent: Option<&str>,
+        cols: &[&str],
+        depth: usize,
+    ) -> TableSchema {
         let mut s = TableSchema::new(
             name.to_string(),
-            name.split('_').map(std::string::ToString::to_string).collect(),
+            name.split('_')
+                .map(std::string::ToString::to_string)
+                .collect(),
             depth,
         );
         s.parent_table = parent.map(std::string::ToString::to_string);
@@ -859,7 +1049,10 @@ mod tests {
             });
         }
         // Set path.last() to the last segment for key lookups
-        s.path = name.split('_').map(std::string::ToString::to_string).collect();
+        s.path = name
+            .split('_')
+            .map(std::string::ToString::to_string)
+            .collect();
         s
     }
 
@@ -869,12 +1062,11 @@ mod tests {
         // Siblings A, B have no children → vacuously compatible
         let a = make_schema_with_cols("p_a", Some("p"), &["col1", "col2"], 1);
         let b = make_schema_with_cols("p_b", Some("p"), &["col1", "col2"], 1);
-        let schemas = vec![
-            make_schema_with_cols("p", None, &[], 0),
-            a, b,
-        ];
-        let obj_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
-        let arr_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let schemas = vec![make_schema_with_cols("p", None, &[], 0), a, b];
+        let obj_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        let arr_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
         let score = child_compatibility_score(&schemas, &[1, 2], &obj_map, &arr_map);
         assert_eq!(score, 1.0);
     }
@@ -884,9 +1076,9 @@ mod tests {
     fn child_compat_shared_compatible_children_is_high() {
         // A has child A_k (col1, col2), B has child B_k (col1, col2) → same schema, compat ≈ 1.0
         let mut schemas = vec![
-            make_schema_with_cols("p", None, &[], 0),       // 0
-            make_schema_with_cols("p_a", Some("p"), &["col1"], 1),  // 1
-            make_schema_with_cols("p_b", Some("p"), &["col1"], 1),  // 2
+            make_schema_with_cols("p", None, &[], 0),              // 0
+            make_schema_with_cols("p_a", Some("p"), &["col1"], 1), // 1
+            make_schema_with_cols("p_b", Some("p"), &["col1"], 1), // 2
             make_schema_with_cols("p_a_k", Some("p_a"), &["col1", "col2"], 2), // 3
             make_schema_with_cols("p_b_k", Some("p_b"), &["col1", "col2"], 2), // 4
         ];
@@ -894,10 +1086,12 @@ mod tests {
         schemas[3].path = vec!["p".to_string(), "a".to_string(), "k".to_string()];
         schemas[4].path = vec!["p".to_string(), "b".to_string(), "k".to_string()];
 
-        let mut obj_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let mut obj_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
         obj_map.insert("p_a".to_string(), vec![3]);
         obj_map.insert("p_b".to_string(), vec![4]);
-        let arr_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let arr_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
 
         let score = child_compatibility_score(&schemas, &[1, 2], &obj_map, &arr_map);
         assert_eq!(score, 1.0, "identical child schemas → compat = 1.0");
@@ -917,10 +1111,12 @@ mod tests {
         schemas[3].path = vec!["p".to_string(), "a".to_string(), "k".to_string()];
         schemas[4].path = vec!["p".to_string(), "b".to_string(), "k".to_string()];
 
-        let mut obj_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let mut obj_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
         obj_map.insert("p_a".to_string(), vec![3]);
         obj_map.insert("p_b".to_string(), vec![4]);
-        let arr_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let arr_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
 
         let score = child_compatibility_score(&schemas, &[1, 2], &obj_map, &arr_map);
         assert_eq!(score, 0.0, "disjoint child schemas → compat = 0.0");
@@ -940,13 +1136,18 @@ mod tests {
         schemas[3].path = vec!["p".to_string(), "a".to_string(), "k1".to_string()];
         schemas[4].path = vec!["p".to_string(), "b".to_string(), "k2".to_string()];
 
-        let mut obj_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let mut obj_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
         obj_map.insert("p_a".to_string(), vec![3]);
         obj_map.insert("p_b".to_string(), vec![4]);
-        let arr_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let arr_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
 
         let score = child_compatibility_score(&schemas, &[1, 2], &obj_map, &arr_map);
-        assert_eq!(score, 1.0, "no shared child keys → compat = 1.0 (unshared keys do not penalise)");
+        assert_eq!(
+            score, 1.0,
+            "no shared child keys → compat = 1.0 (unshared keys do not penalise)"
+        );
     }
 
     // ── Dot-in-key regression tests ──────────────────────────────────────────
@@ -980,7 +1181,8 @@ mod tests {
         let schemas = reg.finalize();
         // root + two distinct children = 3 schemas total
         assert_eq!(
-            schemas.len(), 3,
+            schemas.len(),
+            3,
             "expected root + 2 distinct child tables, got: {:?}",
             schemas.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
@@ -1012,22 +1214,34 @@ mod tests {
 
         let fwd = run(&fields_fwd);
         let rev = run(&fields_rev);
-        assert_eq!(fwd, rev, "schema names must be identical regardless of observation order");
+        assert_eq!(
+            fwd, rev,
+            "schema names must be identical regardless of observation order"
+        );
     }
 
     /// With threshold=2, a pair of 2 identical siblings must be auto-merged into a `SiblingCollapse`.
     #[test]
     fn test_sibling_threshold_two_detects_pair() {
-        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            sibling_threshold: 2,
+            ..Default::default()
+        });
         let obj = json!({ "nutriscore": {
             "2021": { "grade": "b", "score": 45 },
             "2023": { "grade": "b", "score": 45 }
         }});
         reg.observe_root("products", make_root(&obj));
         let schemas = reg.finalize();
-        let nutriscore = schemas.iter().find(|s| s.name == "products_nutriscore").unwrap();
+        let nutriscore = schemas
+            .iter()
+            .find(|s| s.name == "products_nutriscore")
+            .unwrap();
         assert!(
-            matches!(nutriscore.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            matches!(
+                nutriscore.inferred_strategy,
+                InferredStrategy::SiblingCollapse(_)
+            ),
             "2 identical siblings with threshold=2 must become SiblingCollapse, got: {:?}",
             nutriscore.inferred_strategy
         );
@@ -1043,9 +1257,15 @@ mod tests {
         }});
         reg.observe_root("products", make_root(&obj));
         let schemas = reg.finalize();
-        let nutriscore = schemas.iter().find(|s| s.name == "products_nutriscore").unwrap();
+        let nutriscore = schemas
+            .iter()
+            .find(|s| s.name == "products_nutriscore")
+            .unwrap();
         assert!(
-            !matches!(nutriscore.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            !matches!(
+                nutriscore.inferred_strategy,
+                InferredStrategy::SiblingCollapse(_)
+            ),
             "2 siblings with threshold=3 must NOT become SiblingCollapse"
         );
     }
@@ -1056,7 +1276,10 @@ mod tests {
     fn test_schema_clustering_non_mixed_two_groups() {
         // threshold=2, min_jaccard=0.5
         // "front_*" siblings have {imgid, rev}, "ingr_*" have {angle, x} → disjoint
-        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            sibling_threshold: 2,
+            ..Default::default()
+        });
         let obj = json!({
             "dict": {
                 "front_fr": { "imgid": "1", "rev": "3" },
@@ -1074,14 +1297,21 @@ mod tests {
             dict.inferred_strategy
         );
         if let InferredStrategy::SiblingCollapseMulti(groups) = &dict.inferred_strategy {
-            assert_eq!(groups.len(), 2, "must produce exactly 2 pivot groups (front + ingr)");
+            assert_eq!(
+                groups.len(),
+                2,
+                "must produce exactly 2 pivot groups (front + ingr)"
+            );
         }
     }
 
     /// Mixed group: numeric ok + non-numeric heterogeneous → numeric merged + clusters for non-numeric.
     #[test]
     fn test_schema_clustering_mixed_numeric_plus_clusters() {
-        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            sibling_threshold: 2,
+            ..Default::default()
+        });
         let obj = json!({
             "images": {
                 "1": { "uploader": "u1", "uploaded_t": 123 },
@@ -1102,7 +1332,12 @@ mod tests {
         );
         if let InferredStrategy::SiblingCollapseMulti(groups) = &images.inferred_strategy {
             // numeric group + 2 non-numeric clusters = 3 total
-            assert_eq!(groups.len(), 3, "must produce 3 groups (num + front + ingr), got {}", groups.len());
+            assert_eq!(
+                groups.len(),
+                3,
+                "must produce 3 groups (num + front + ingr), got {}",
+                groups.len()
+            );
         }
     }
 
@@ -1117,7 +1352,10 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn test_keyed_pivot_orphan_children_merged_by_post_pass() {
-        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            sibling_threshold: 2,
+            ..Default::default()
+        });
         let obj = json!({
             "selected": {
                 "front": {
@@ -1137,7 +1375,10 @@ mod tests {
 
         let selected = schemas.iter().find(|s| s.name == "root_selected").unwrap();
         assert!(
-            matches!(selected.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            matches!(
+                selected.inferred_strategy,
+                InferredStrategy::SiblingCollapse(_)
+            ),
             "root_selected must remain SiblingCollapse (type key), got: {:?}",
             selected.inferred_strategy
         );
@@ -1197,7 +1438,10 @@ mod tests {
     /// {"2": [...], "3": [...], "4": [...]} is ONE table with three array columns, no key/value `SiblingCollapse`.
     #[test]
     fn test_scalar_array_siblings_become_columns_of_one_table() {
-        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            sibling_threshold: 2,
+            ..Default::default()
+        });
         let obj = json!({
             "markers": {
                 "2": [1, 2],
@@ -1207,16 +1451,25 @@ mod tests {
         });
         reg.observe_root("product", make_root(&obj));
         let schemas = reg.finalize();
-        let markers = schemas.iter().find(|s| s.name == "product_markers").unwrap();
+        let markers = schemas
+            .iter()
+            .find(|s| s.name == "product_markers")
+            .unwrap();
         assert!(
             matches!(markers.inferred_strategy, InferredStrategy::Columns),
             "array siblings must stay plain columns, got: {:?}",
             markers.inferred_strategy
         );
-        let array_columns = markers.data_columns().filter(|c| matches!(c.pg_type, PgType::Array(_))).count();
+        let array_columns = markers
+            .data_columns()
+            .filter(|c| matches!(c.pg_type, PgType::Array(_)))
+            .count();
         assert_eq!(array_columns, 3, "one array column per key");
         assert!(
-            !schemas.iter().any(|s| matches!(s.name.as_str(), "product_markers_2" | "product_markers_3" | "product_markers_4")),
+            !schemas.iter().any(|s| matches!(
+                s.name.as_str(),
+                "product_markers_2" | "product_markers_3" | "product_markers_4"
+            )),
             "no table per key"
         );
     }
@@ -1224,7 +1477,10 @@ mod tests {
     /// A single array key (below threshold=2) is one array column and must NOT trigger a merge.
     #[test]
     fn test_scalar_array_single_child_not_merged() {
-        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            sibling_threshold: 2,
+            ..Default::default()
+        });
         let obj = json!({
             "markers": {
                 "2": [1, 2, 3]
@@ -1232,9 +1488,15 @@ mod tests {
         });
         reg.observe_root("product", make_root(&obj));
         let schemas = reg.finalize();
-        let markers = schemas.iter().find(|s| s.name == "product_markers").unwrap();
+        let markers = schemas
+            .iter()
+            .find(|s| s.name == "product_markers")
+            .unwrap();
         assert!(
-            !matches!(markers.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
+            !matches!(
+                markers.inferred_strategy,
+                InferredStrategy::SiblingCollapse(_)
+            ),
             "a single array key must NOT become SiblingCollapse, got: {:?}",
             markers.inferred_strategy
         );
@@ -1250,42 +1512,91 @@ mod tests {
             "de": { "name": "baz", "val": 3 }
         }});
 
-        let mut reg_normal = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
+        let mut reg_normal = SchemaRegistry::new(RegistryConfig {
+            sibling_threshold: 2,
+            ..Default::default()
+        });
         reg_normal.observe_root("root", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
-        let langs_normal = schemas_normal.iter().find(|s| s.name == "root_langs").unwrap();
-        assert!(matches!(langs_normal.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-            "sibling enabled → SiblingCollapse expected");
+        let langs_normal = schemas_normal
+            .iter()
+            .find(|s| s.name == "root_langs")
+            .unwrap();
+        assert!(
+            matches!(
+                langs_normal.inferred_strategy,
+                InferredStrategy::SiblingCollapse(_)
+            ),
+            "sibling enabled → SiblingCollapse expected"
+        );
 
-        let mut reg_disabled = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, disabled_strategies: HashSet::from([StrategyName::Sibling]), ..Default::default() });
+        let mut reg_disabled = SchemaRegistry::new(RegistryConfig {
+            sibling_threshold: 2,
+            disabled_strategies: HashSet::from([StrategyName::Sibling]),
+            ..Default::default()
+        });
         reg_disabled.observe_root("root", make_root(&obj));
         let schemas_disabled = reg_disabled.finalize();
-        let langs_disabled = schemas_disabled.iter().find(|s| s.name == "root_langs").unwrap();
-        assert!(!matches!(langs_disabled.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-            "sibling disabled → no SiblingCollapse");
+        let langs_disabled = schemas_disabled
+            .iter()
+            .find(|s| s.name == "root_langs")
+            .unwrap();
+        assert!(
+            !matches!(
+                langs_disabled.inferred_strategy,
+                InferredStrategy::SiblingCollapse(_)
+            ),
+            "sibling disabled → no SiblingCollapse"
+        );
     }
 
     #[test]
     fn test_disable_pivot_gives_jsonb() {
         let obj = json!({ "nutrients": { "vit_c": 10.5, "iron": 2.3, "calcium": 50.0 } });
 
-        let mut reg_normal = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
+        let mut reg_normal = SchemaRegistry::new(RegistryConfig {
+            wide_column_threshold: 2,
+            ..Default::default()
+        });
         reg_normal.observe_root("item", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
         // Pivot enabled → identité/compagnon split (issue #45) : identité en AutoSplit,
         // compagnon "item_nutrients_pivot" en Pivot.
-        let nutrients_normal = schemas_normal.iter().find(|s| s.name == "item_nutrients").unwrap();
-        assert!(matches!(&nutrients_normal.inferred_strategy, InferredStrategy::AutoSplit { .. }),
-            "pivot enabled → identity split into AutoSplit expected");
-        assert!(schemas_normal.iter().any(|s| s.name == "item_nutrients_pivot" && s.inferred_strategy == InferredStrategy::Pivot),
-            "pivot enabled → companion item_nutrients_pivot expected");
+        let nutrients_normal = schemas_normal
+            .iter()
+            .find(|s| s.name == "item_nutrients")
+            .unwrap();
+        assert!(
+            matches!(
+                &nutrients_normal.inferred_strategy,
+                InferredStrategy::AutoSplit { .. }
+            ),
+            "pivot enabled → identity split into AutoSplit expected"
+        );
+        assert!(
+            schemas_normal
+                .iter()
+                .any(|s| s.name == "item_nutrients_pivot"
+                    && s.inferred_strategy == InferredStrategy::Pivot),
+            "pivot enabled → companion item_nutrients_pivot expected"
+        );
 
-        let mut reg_disabled = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, disabled_strategies: HashSet::from([StrategyName::Pivot]), ..Default::default() });
+        let mut reg_disabled = SchemaRegistry::new(RegistryConfig {
+            wide_column_threshold: 2,
+            disabled_strategies: HashSet::from([StrategyName::Pivot]),
+            ..Default::default()
+        });
         reg_disabled.observe_root("item", make_root(&obj));
         let schemas_disabled = reg_disabled.finalize();
-        let nutrients_disabled = schemas_disabled.iter().find(|s| s.name == "item_nutrients").unwrap();
-        assert_eq!(nutrients_disabled.inferred_strategy, InferredStrategy::Jsonb,
-            "pivot disabled → Jsonb for homogeneous wide table");
+        let nutrients_disabled = schemas_disabled
+            .iter()
+            .find(|s| s.name == "item_nutrients")
+            .unwrap();
+        assert_eq!(
+            nutrients_disabled.inferred_strategy,
+            InferredStrategy::Jsonb,
+            "pivot disabled → Jsonb for homogeneous wide table"
+        );
     }
 
     #[test]
@@ -1303,30 +1614,47 @@ mod tests {
                 "cluster_2": { "sizes": { "0": {"w":150,"h":250}, "1": {"w":350,"h":450}, "num": {"w":550,"h":650} } }
             }
         });
-        let mut reg = SchemaRegistry::new(RegistryConfig { sibling_threshold: 2, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            sibling_threshold: 2,
+            ..Default::default()
+        });
         for _ in 0..4 {
             reg.observe_root("root", make_root(&obj));
         }
         let schemas = reg.finalize();
         let mut seen = std::collections::HashSet::new();
         for s in &schemas {
-            assert!(seen.insert(s.name.clone()),
-                "duplicate table name after finalize(): '{}' — regression for 42P16 bug", s.name);
+            assert!(
+                seen.insert(s.name.clone()),
+                "duplicate table name after finalize(): '{}' — regression for 42P16 bug",
+                s.name
+            );
         }
     }
 
     #[test]
     fn test_no_disabled_strategies_no_regression() {
         let obj = json!({ "nutrients": { "vit_c": 10.5, "iron": 2.3, "calcium": 50.0 } });
-        let mut reg = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 2, ..Default::default() });
+        let mut reg = SchemaRegistry::new(RegistryConfig {
+            wide_column_threshold: 2,
+            ..Default::default()
+        });
         reg.observe_root("item", make_root(&obj));
         let schemas = reg.finalize();
         // empty disabled set → default Pivot behavior unchanged, i.e. still the identity/companion
         // split introduced by issue #45 (not the pre-#45 flat Pivot layout).
         let nutrients = schemas.iter().find(|s| s.name == "item_nutrients").unwrap();
-        assert!(matches!(&nutrients.inferred_strategy, InferredStrategy::AutoSplit { .. }),
-            "empty disabled set → default Pivot behavior (split) unchanged");
-        assert!(schemas.iter().any(|s| s.name == "item_nutrients_pivot" && s.inferred_strategy == InferredStrategy::Pivot));
+        assert!(
+            matches!(
+                &nutrients.inferred_strategy,
+                InferredStrategy::AutoSplit { .. }
+            ),
+            "empty disabled set → default Pivot behavior (split) unchanged"
+        );
+        assert!(schemas
+            .iter()
+            .any(|s| s.name == "item_nutrients_pivot"
+                && s.inferred_strategy == InferredStrategy::Pivot));
     }
 
     #[test]
@@ -1340,44 +1668,95 @@ mod tests {
         });
 
         // Default: StructuredPivot expected
-        let mut reg_normal = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 3, sibling_threshold: usize::MAX, ..Default::default() });
+        let mut reg_normal = SchemaRegistry::new(RegistryConfig {
+            wide_column_threshold: 3,
+            sibling_threshold: usize::MAX,
+            ..Default::default()
+        });
         reg_normal.observe_root("products", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
-        let nutrients_normal = schemas_normal.iter().find(|s| s.name == "products_nutrients").unwrap();
-        assert!(matches!(nutrients_normal.inferred_strategy, InferredStrategy::StructuredPivot(_)),
-            "structured_pivot enabled → StructuredPivot expected, got: {:?}", nutrients_normal.inferred_strategy);
+        let nutrients_normal = schemas_normal
+            .iter()
+            .find(|s| s.name == "products_nutrients")
+            .unwrap();
+        assert!(
+            matches!(
+                nutrients_normal.inferred_strategy,
+                InferredStrategy::StructuredPivot(_)
+            ),
+            "structured_pivot enabled → StructuredPivot expected, got: {:?}",
+            nutrients_normal.inferred_strategy
+        );
 
         // With structured_pivot disabled: fall through to Pivot or Jsonb
-        let mut reg_disabled = SchemaRegistry::new(RegistryConfig { wide_column_threshold: 3, sibling_threshold: usize::MAX, disabled_strategies: HashSet::from([StrategyName::StructuredPivot]), ..Default::default() });
+        let mut reg_disabled = SchemaRegistry::new(RegistryConfig {
+            wide_column_threshold: 3,
+            sibling_threshold: usize::MAX,
+            disabled_strategies: HashSet::from([StrategyName::StructuredPivot]),
+            ..Default::default()
+        });
         reg_disabled.observe_root("products", make_root(&obj));
         let schemas_disabled = reg_disabled.finalize();
-        let nutrients_disabled = schemas_disabled.iter().find(|s| s.name == "products_nutrients").unwrap();
-        assert!(!matches!(nutrients_disabled.inferred_strategy, InferredStrategy::StructuredPivot(_)),
-            "structured_pivot disabled → no StructuredPivot, got: {:?}", nutrients_disabled.inferred_strategy);
+        let nutrients_disabled = schemas_disabled
+            .iter()
+            .find(|s| s.name == "products_nutrients")
+            .unwrap();
+        assert!(
+            !matches!(
+                nutrients_disabled.inferred_strategy,
+                InferredStrategy::StructuredPivot(_)
+            ),
+            "structured_pivot disabled → no StructuredPivot, got: {:?}",
+            nutrients_disabled.inferred_strategy
+        );
     }
 
     // ── issue #48 : tableaux de scalaires + occurrences mixtes scalaire/array ──
 
     fn pg_array_reg(wide_column_threshold: usize) -> SchemaRegistry {
-        SchemaRegistry::new(RegistryConfig { wide_column_threshold, ..Default::default() })
+        SchemaRegistry::new(RegistryConfig {
+            wide_column_threshold,
+            ..Default::default()
+        })
     }
 
     fn assert_single_array_col(schema: &crate::schema::table_schema::TableSchema, field: &str) {
-        let cols: Vec<_> = schema.columns.iter().filter(|c| c.original_name == field).collect();
-        assert_eq!(cols.len(), 1, "'{field}' must yield exactly one column in '{}', got {cols:?}", schema.name);
-        assert!(matches!(cols[0].pg_type, PgType::Array(_)), "'{field}' must be a PG array, got {:?}", cols[0].pg_type);
+        let cols: Vec<_> = schema
+            .columns
+            .iter()
+            .filter(|c| c.original_name == field)
+            .collect();
+        assert_eq!(
+            cols.len(),
+            1,
+            "'{field}' must yield exactly one column in '{}', got {cols:?}",
+            schema.name
+        );
+        assert!(
+            matches!(cols[0].pg_type, PgType::Array(_)),
+            "'{field}' must be a PG array, got {:?}",
+            cols[0].pg_type
+        );
     }
 
     #[test]
     fn pg_array_mixed_field_flat_table_single_array_column() {
         let mut reg = pg_array_reg(usize::MAX);
-        for v in [json!({"id": 1, "tags": "bio"}), json!({"id": 2, "tags": ["bio", "vegan"]}), json!({"id": 3, "tags": "local"})] {
+        for v in [
+            json!({"id": 1, "tags": "bio"}),
+            json!({"id": 2, "tags": ["bio", "vegan"]}),
+            json!({"id": 3, "tags": "local"}),
+        ] {
             reg.observe_root("products", make_root(&v));
         }
         let schemas = reg.finalize();
         let products = schemas.iter().find(|s| s.name == "products").unwrap();
         assert_single_array_col(products, "tags");
-        assert!(reg.column_collisions().is_empty(), "no spurious collision: {:?}", reg.column_collisions());
+        assert!(
+            reg.column_collisions().is_empty(),
+            "no spurious collision: {:?}",
+            reg.column_collisions()
+        );
     }
 
     #[test]
@@ -1412,7 +1791,10 @@ mod tests {
         };
         assert_single_array_col(root, "pure");
         assert_single_array_col(root, "mixed");
-        assert!(!medium_keys.contains("pure") && !medium_keys.contains("mixed"), "array fields leaked into medium_keys: {medium_keys:?}");
+        assert!(
+            !medium_keys.contains("pure") && !medium_keys.contains("mixed"),
+            "array fields leaked into medium_keys: {medium_keys:?}"
+        );
     }
 
     #[test]
@@ -1420,22 +1802,34 @@ mod tests {
         // non-root wide object → identity/companion split (retention zero): the pg-array field
         // cannot live in the scalar EAV companion, it must stay on the identity table.
         let mut reg = pg_array_reg(2);
-        let v = json!({"nutrients": {"vit_c": 10.5, "iron": 2.3, "calcium": 50.0, "tags": ["x", "y"]}});
+        let v =
+            json!({"nutrients": {"vit_c": 10.5, "iron": 2.3, "calcium": 50.0, "tags": ["x", "y"]}});
         reg.observe_root("item", make_root(&v));
         let schemas = reg.finalize();
         let identity = schemas.iter().find(|s| s.name == "item_nutrients").unwrap();
         let InferredStrategy::AutoSplit { medium_keys, .. } = &identity.inferred_strategy else {
-            panic!("identity must be AutoSplit, got {:?}", identity.inferred_strategy);
+            panic!(
+                "identity must be AutoSplit, got {:?}",
+                identity.inferred_strategy
+            );
         };
         assert_single_array_col(identity, "tags");
-        assert!(!medium_keys.contains("tags"), "array field leaked into companion keys: {medium_keys:?}");
+        assert!(
+            !medium_keys.contains("tags"),
+            "array field leaked into companion keys: {medium_keys:?}"
+        );
     }
 
     // ── issue #84 : la décision « table large » ne juge que les colonnes scalaires ──
     // Thresholds 10 (IHM) and 15 (CLI), 40 rows (below 10 rows the "high stable ratio → Columns"
     // branch is skipped). Column names have no `_`, so no StructuredPivot suffix is ever detected.
 
-    fn observe_rows(reg: &mut SchemaRegistry, root: &str, rows: usize, build: impl Fn(usize) -> Value) {
+    fn observe_rows(
+        reg: &mut SchemaRegistry,
+        root: &str,
+        rows: usize,
+        build: impl Fn(usize) -> Value,
+    ) {
         for i in 0..rows {
             reg.observe_root(root, make_root(&build(i)));
         }
@@ -1444,20 +1838,33 @@ mod tests {
     /// `scalars` integer fields `s0..` and `arrays` array fields `a0..`, all present on every row.
     fn dense_row(i: usize, scalars: usize, arrays: usize) -> Value {
         let mut obj = serde_json::Map::new();
-        for s in 0..scalars { obj.insert(format!("s{s}"), json!(i)); }
-        for a in 0..arrays { obj.insert(format!("a{a}"), json!(["x", "y"])); }
+        for s in 0..scalars {
+            obj.insert(format!("s{s}"), json!(i));
+        }
+        for a in 0..arrays {
+            obj.insert(format!("a{a}"), json!(["x", "y"]));
+        }
         Value::Object(obj)
     }
 
     /// The root stays one plain `Columns` table with all its columns: nothing split off to a companion.
     fn assert_kept_as_columns(schemas: &[TableSchema], data_columns: usize, threshold: usize) {
         let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(schemas.len(), 1, "threshold {threshold}: no companion table expected, got {names:?}");
+        assert_eq!(
+            schemas.len(),
+            1,
+            "threshold {threshold}: no companion table expected, got {names:?}"
+        );
         assert!(
             matches!(schemas[0].inferred_strategy, InferredStrategy::Columns),
-            "threshold {threshold}: must stay Columns, got {:?}", schemas[0].inferred_strategy
+            "threshold {threshold}: must stay Columns, got {:?}",
+            schemas[0].inferred_strategy
         );
-        assert_eq!(schemas[0].data_columns().count(), data_columns, "threshold {threshold}");
+        assert_eq!(
+            schemas[0].data_columns().count(),
+            data_columns,
+            "threshold {threshold}"
+        );
     }
 
     #[test]
@@ -1496,14 +1903,22 @@ mod tests {
         for threshold in [10, 15] {
             let mut reg = pg_array_reg(threshold);
             observe_rows(&mut reg, "root", 40, |i| {
-                let keys: serde_json::Map<String, Value> = (0..30).map(|k| (format!("k{k}"), json!(["x"]))).collect();
+                let keys: serde_json::Map<String, Value> =
+                    (0..30).map(|k| (format!("k{k}"), json!(["x"]))).collect();
                 json!({"id": i, "d": keys})
             });
             let schemas = reg.finalize();
             let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
-            assert!(!names.iter().any(|n| n.ends_with("_pivot")), "threshold {threshold}: empty companion in {names:?}");
+            assert!(
+                !names.iter().any(|n| n.ends_with("_pivot")),
+                "threshold {threshold}: empty companion in {names:?}"
+            );
             let d = schemas.iter().find(|s| s.name == "root_d").unwrap();
-            assert!(matches!(d.inferred_strategy, InferredStrategy::Columns), "threshold {threshold}: {:?}", d.inferred_strategy);
+            assert!(
+                matches!(d.inferred_strategy, InferredStrategy::Columns),
+                "threshold {threshold}: {:?}",
+                d.inferred_strategy
+            );
             assert_eq!(d.data_columns().count(), 30, "threshold {threshold}");
         }
     }
@@ -1516,17 +1931,35 @@ mod tests {
         let mut reg = pg_array_reg(10);
         observe_rows(&mut reg, "root", 40, |i| {
             let mut obj = serde_json::Map::new();
-            for s in 0..5 { obj.insert(format!("s{s}"), json!(i)); }
-            if i < 2 { for r in 0..6 { obj.insert(format!("r{r}"), json!(i)); } }
-            for m in 0..2 { obj.insert(format!("m{m}"), if i < 2 { json!([i, i + 1]) } else { json!(i) }); }
+            for s in 0..5 {
+                obj.insert(format!("s{s}"), json!(i));
+            }
+            if i < 2 {
+                for r in 0..6 {
+                    obj.insert(format!("r{r}"), json!(i));
+                }
+            }
+            for m in 0..2 {
+                obj.insert(
+                    format!("m{m}"),
+                    if i < 2 { json!([i, i + 1]) } else { json!(i) },
+                );
+            }
             Value::Object(obj)
         });
         let schemas = reg.finalize();
         let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"root_pivot"), "the 11 scalars must go to a companion, got {names:?}");
+        assert!(
+            names.contains(&"root_pivot"),
+            "the 11 scalars must go to a companion, got {names:?}"
+        );
         let root = schemas.iter().find(|s| s.name == "root").unwrap();
         assert_eq!(root.data_columns().count(), 2);
-        assert!(root.data_columns().all(|c| matches!(c.pg_type, PgType::Array(_))), "identity keeps only the arrays");
+        assert!(
+            root.data_columns()
+                .all(|c| matches!(c.pg_type, PgType::Array(_))),
+            "identity keeps only the arrays"
+        );
     }
 
     #[test]
@@ -1538,8 +1971,16 @@ mod tests {
         reg.finalize();
         let stats = reg.collect_stats();
         let codes: Vec<_> = stats.iter().filter(|s| s.column_name == "codes").collect();
-        assert_eq!(codes.len(), 1, "mixed field must appear once in the schema report: {codes:?}");
-        assert_eq!(codes[0].pg_type, PgType::Array(Box::new(PgType::Text)), "report type must match the DDL");
+        assert_eq!(
+            codes.len(),
+            1,
+            "mixed field must appear once in the schema report: {codes:?}"
+        );
+        assert_eq!(
+            codes[0].pg_type,
+            PgType::Array(Box::new(PgType::Text)),
+            "report type must match the DDL"
+        );
     }
 
     #[test]
@@ -1563,23 +2004,39 @@ mod tests {
             reg.observe_root("products", make_root(&v));
         }
         let schemas = reg.finalize();
-        let cols: Vec<_> = schemas[0].columns.iter().filter(|c| c.original_name == "tags").collect();
+        let cols: Vec<_> = schemas[0]
+            .columns
+            .iter()
+            .filter(|c| c.original_name == "tags")
+            .collect();
         assert_eq!(cols.len(), 1);
-        assert!(!matches!(cols[0].pg_type, PgType::Array(_)), "got {:?}", cols[0].pg_type);
+        assert!(
+            !matches!(cols[0].pg_type, PgType::Array(_)),
+            "got {:?}",
+            cols[0].pg_type
+        );
     }
 
     #[test]
     fn pg_array_scalar_and_object_array_unchanged() {
         // array of objects keeps the ObjectArray child-table route, even with the flag on.
         let mut reg = pg_array_reg(usize::MAX);
-        for v in [json!({"items": "none"}), json!({"items": [{"a": 1}, {"a": 2}]})] {
+        for v in [
+            json!({"items": "none"}),
+            json!({"items": [{"a": 1}, {"a": 2}]}),
+        ] {
             reg.observe_root("products", make_root(&v));
         }
         let schemas = reg.finalize();
         let products = schemas.iter().find(|s| s.name == "products").unwrap();
-        let items = products.find_by_original("items").expect("scalar column kept");
+        let items = products
+            .find_by_original("items")
+            .expect("scalar column kept");
         assert!(!matches!(items.pg_type, PgType::Array(_)));
-        let child = schemas.iter().find(|s| s.name == "products_items").expect("ObjectArray child table");
+        let child = schemas
+            .iter()
+            .find(|s| s.name == "products_items")
+            .expect("ObjectArray child table");
         assert_eq!(child.child_kind, Some(ChildKind::ObjectArray));
     }
 }

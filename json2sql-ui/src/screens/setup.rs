@@ -9,9 +9,9 @@
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 use dioxus::prelude::*;
 
-use json2sql::schema::strategies::StrategyName;
 use crate::screens::{pick_file, pick_folder, PickResult};
 use crate::state::{format_bytes, AppScreen, AppState};
+use json2sql::schema::strategies::StrategyName;
 
 // ---------------------------------------------------------------------------
 // Component
@@ -21,18 +21,22 @@ use crate::state::{format_bytes, AppScreen, AppState};
 #[component]
 pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     // ── Accordion state ───────────────────────────────────────────────────
-    let init_workers   = state.read().project.workers;
-    let init_p2        = state.read().project.pass2_parallel;
-    let init_step: usize = if state.read().project.source_file.is_none() { 0 }
-        else if !state.read().project.pg.is_complete() { 2 }
-        else { 3 };
+    let init_workers = state.read().project.workers;
+    let init_p2 = state.read().project.pass2_parallel;
+    let init_step: usize = if state.read().project.source_file.is_none() {
+        0
+    } else if !state.read().project.pg.is_complete() {
+        2
+    } else {
+        3
+    };
 
     let mut active_step: Signal<usize> = use_signal(|| init_step);
 
     // Pass 1 / Pass 2 parallel toggle + saved value (for restore on re-enable)
-    let mut p1_on   = use_signal(|| init_workers > 1);
+    let mut p1_on = use_signal(|| init_workers > 1);
     let mut p1_save = use_signal(|| init_workers.max(4));
-    let mut p2_on   = use_signal(|| init_p2 > 1);
+    let mut p2_on = use_signal(|| init_p2 > 1);
     let mut p2_save = use_signal(|| init_p2.max(4));
 
     // ── Async file-size probe ─────────────────────────────────────────────
@@ -41,45 +45,59 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
         let path = state.read().project.source_file.clone();
         spawn(async move {
             let size = tokio::task::spawn_blocking(move || {
-                path.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len())
+                path.as_ref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len())
             })
-            .await.ok().flatten();
+            .await
+            .ok()
+            .flatten();
             source_size.set(size);
         });
     });
 
     // ── Dialog guards ─────────────────────────────────────────────────────
-    let mut picking_source  = use_signal(|| false);
+    let mut picking_source = use_signal(|| false);
     let mut picking_anomaly = use_signal(|| false);
-    let mut picking_schema  = use_signal(|| false);
+    let mut picking_schema = use_signal(|| false);
     let mut picker_error: Signal<Option<String>> = use_signal(|| None);
-    let mut load_error:   Signal<Option<String>> = use_signal(|| None);
+    let mut load_error: Signal<Option<String>> = use_signal(|| None);
 
     // ── Derived values ────────────────────────────────────────────────────
-    let source_file     = state.read().project.source_file.clone();
-    let source_label    = source_file.as_ref()
-        .and_then(|p| p.file_name()).map_or_else(|| "No file selected".to_string(), |n| n.to_string_lossy().into_owned());
-    let size_bytes      = *source_size.read();
-    let size_label      = size_bytes.map(format_bytes);
-    let source_large    = size_bytes.is_some_and(|b| b > 5 * 1_073_741_824);
+    let source_file = state.read().project.source_file.clone();
+    let source_label = source_file
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map_or_else(
+            || "No file selected".to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+    let size_bytes = *source_size.read();
+    let size_label = size_bytes.map(format_bytes);
+    let source_large = size_bytes.is_some_and(|b| b > 5 * 1_073_741_824);
 
     let snapshot_loaded = state.read().schema.schema_snapshot_loaded;
     let snapshot_tables = state.read().schema.schemas.len();
 
-    let pg_ok      = state.read().project.pg_ok;
+    let pg_ok = state.read().project.pg_ok;
     let pg_testing = state.read().project.pg_testing;
-    let pg_host    = state.read().project.pg.host.clone();
-    let pg_db      = state.read().project.pg.database.clone();
-    let pg_schema  = state.read().project.pg_schema.clone();
+    let pg_host = state.read().project.pg.host.clone();
+    let pg_db = state.read().project.pg.database.clone();
+    let pg_schema = state.read().project.pg_schema.clone();
     let schema_invalid = !pg_schema.chars().all(|c| c.is_alphanumeric() || c == '_');
-    let drop_existing   = state.read().project.drop_existing;
-    let workers         = state.read().project.workers;
-    let pass2_parallel  = state.read().project.pass2_parallel;
+    let drop_existing = state.read().project.drop_existing;
+    let workers = state.read().project.workers;
+    let pass2_parallel = state.read().project.pass2_parallel;
     let available_cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
 
     let anomaly_dir = state.read().project.anomaly_dir.clone();
-    let anomaly_label = anomaly_dir.as_ref()
-        .and_then(|p| p.file_name()).map_or_else(|| "None (anomalies discarded)".to_string(), |n| n.to_string_lossy().into_owned());
+    let anomaly_label = anomaly_dir
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map_or_else(
+            || "None (anomalies discarded)".to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
 
     let import_limit = state.read().project.import_limit;
     let verbose_logs = state.read().project.verbose_logs;
@@ -87,17 +105,42 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
 
     let step1_done = source_file.is_some();
     let step2_done = true; // optional — always OK
-    let step3_done = state.read().project.pg.is_complete()
-        && !pg_schema.is_empty() && !schema_invalid;
-    let complete_count = [step1_done, step2_done, step3_done].iter().filter(|&&b| b).count();
+    let step3_done =
+        state.read().project.pg.is_complete() && !pg_schema.is_empty() && !schema_invalid;
+    let complete_count = [step1_done, step2_done, step3_done]
+        .iter()
+        .filter(|&&b| b)
+        .count();
     let ready = state.read().ready_to_start();
 
     // Step-card CSS class (done / active / todo)
     let act = *active_step.read();
-    let s1_class = if act == 0 { "step-card active" } else if step1_done { "step-card done" } else { "step-card todo" };
-    let s2_class = if act == 1 { "step-card active" } else if step2_done { "step-card done" } else { "step-card todo" };
-    let s3_class = if act == 2 { "step-card active" } else if step3_done { "step-card done" } else { "step-card todo" };
-    let s4_class = if act == 3 { "step-card active" } else { "step-card todo" };
+    let s1_class = if act == 0 {
+        "step-card active"
+    } else if step1_done {
+        "step-card done"
+    } else {
+        "step-card todo"
+    };
+    let s2_class = if act == 1 {
+        "step-card active"
+    } else if step2_done {
+        "step-card done"
+    } else {
+        "step-card todo"
+    };
+    let s3_class = if act == 2 {
+        "step-card active"
+    } else if step3_done {
+        "step-card done"
+    } else {
+        "step-card todo"
+    };
+    let s4_class = if act == 3 {
+        "step-card active"
+    } else {
+        "step-card todo"
+    };
 
     let p1_class = if *p1_on.read() { "toggle on" } else { "toggle" };
     let p2_class = if *p2_on.read() { "toggle on" } else { "toggle" };
@@ -820,15 +863,22 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
 
 #[component]
 fn PgConnectionForm(mut state: Signal<AppState>) -> Element {
-    let pg_ok      = state.read().project.pg_ok;
+    let pg_ok = state.read().project.pg_ok;
     let pg_testing = state.read().project.pg_testing;
-    let pg_error   = state.read().project.pg_error.clone();
-    let pg_host    = state.read().project.pg.host.clone();
-    let pg_port    = { let p = state.read().project.pg.port; if p == 0 { String::new() } else { p.to_string() } };
-    let pg_db      = state.read().project.pg.database.clone();
-    let pg_user    = state.read().project.pg.username.clone();
-    let pg_pass    = state.read().project.pg.password.clone();
-    let pg_schema  = state.read().project.pg_schema.clone();
+    let pg_error = state.read().project.pg_error.clone();
+    let pg_host = state.read().project.pg.host.clone();
+    let pg_port = {
+        let p = state.read().project.pg.port;
+        if p == 0 {
+            String::new()
+        } else {
+            p.to_string()
+        }
+    };
+    let pg_db = state.read().project.pg.database.clone();
+    let pg_user = state.read().project.pg.username.clone();
+    let pg_pass = state.read().project.pg.password.clone();
+    let pg_schema = state.read().project.pg_schema.clone();
     let schema_invalid = !pg_schema.chars().all(|c| c.is_alphanumeric() || c == '_');
 
     rsx! {
@@ -980,4 +1030,3 @@ fn PgConnectionForm(mut state: Signal<AppState>) -> Element {
         }
     }
 }
-

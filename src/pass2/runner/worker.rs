@@ -27,7 +27,9 @@ fn collect_above_threshold(
 ) -> Vec<(String, bytes::Bytes, u64)> {
     let mut result = Vec::new();
     for (table_id, sink) in sinks.iter_mut() {
-        if sink.buf.is_empty() { continue; }
+        if sink.buf.is_empty() {
+            continue;
+        }
         if sink.buf.len() as u64 >= threshold {
             let bytes = std::mem::take(&mut sink.buf).freeze();
             let rows = std::mem::replace(&mut sink.row_count, 0);
@@ -48,10 +50,22 @@ async fn process_worker_item_diskless(
     mem_flush_threshold: u64,
 ) -> Result<()> {
     let obj = parse_json_object(&mut bytes)?;
-    insert_object(path_map, &mut InsertCtx { sinks, anomalies: proxy }, root_schema, &obj, Uuid::now_v7(), None, None)?;
+    insert_object(
+        path_map,
+        &mut InsertCtx {
+            sinks,
+            anomalies: proxy,
+        },
+        root_schema,
+        &obj,
+        Uuid::now_v7(),
+        None,
+        None,
+    )?;
     for (table_id, chunk, rows) in collect_above_threshold(sinks, mem_flush_threshold) {
-        flush_tx.send((table_id, chunk, rows)).await
-            .map_err(|_| J2sError::InvalidInput("flusher channel closed unexpectedly".to_string()))?;
+        flush_tx.send((table_id, chunk, rows)).await.map_err(|_| {
+            J2sError::InvalidInput("flusher channel closed unexpectedly".to_string())
+        })?;
     }
     Ok(())
 }
@@ -81,11 +95,22 @@ pub(super) async fn run_worker_diskless(
     config: WorkerDisklessConfig,
 ) -> Result<()> {
     use std::sync::atomic::Ordering;
-    let WorkerDisklessConfig { anomaly_tx, path_map, root_schema, cancel, flush_tx, pause_flag, error_flag, mem_flush_threshold } = config;
+    let WorkerDisklessConfig {
+        anomaly_tx,
+        path_map,
+        root_schema,
+        cancel,
+        flush_tx,
+        pause_flag,
+        error_flag,
+        mem_flush_threshold,
+    } = config;
     let mut proxy = AnomalyProxy::new(anomaly_tx);
     loop {
         if error_flag.load(Ordering::Acquire) {
-            return Err(J2sError::InvalidInput("flusher reported a fatal PG error — aborting worker".to_string()));
+            return Err(J2sError::InvalidInput(
+                "flusher reported a fatal PG error — aborting worker".to_string(),
+            ));
         }
         if pause_flag.load(Ordering::Relaxed) {
             // Spin without draining: flusher has 512 MB+ of its own buffered data and needs to
@@ -93,29 +118,50 @@ pub(super) async fn run_worker_diskless(
             // total_buffered and delay the resume. Flusher controls the pause lifecycle.
             // Sleep, not yield: N spinning workers burned ~1 core each while paused (#65 run).
             // `cancel`: an aborted flusher never clears the pause (#80).
-            while pause_flag.load(Ordering::Relaxed) && !error_flag.load(Ordering::Acquire) && !cancel.is_cancelled() {
+            while pause_flag.load(Ordering::Relaxed)
+                && !error_flag.load(Ordering::Acquire)
+                && !cancel.is_cancelled()
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         }
         if error_flag.load(Ordering::Acquire) {
-            return Err(J2sError::InvalidInput("flusher reported a fatal PG error — aborting worker".to_string()));
+            return Err(J2sError::InvalidInput(
+                "flusher reported a fatal PG error — aborting worker".to_string(),
+            ));
         }
         let (key, bytes) = tokio::select! {
             () = cancel.cancelled() => break,
             msg = rx.recv() => match msg { Some(b) => b, None => break },
         };
-        let effective_root: &TableSchema = key.as_deref()
+        let effective_root: &TableSchema = key
+            .as_deref()
             .and_then(|k| path_map.get(k))
             .unwrap_or(&root_schema);
-        process_worker_item_diskless(bytes, &mut sinks, &mut proxy, &flush_tx, &path_map, effective_root, mem_flush_threshold).await?;
+        process_worker_item_diskless(
+            bytes,
+            &mut sinks,
+            &mut proxy,
+            &flush_tx,
+            &path_map,
+            effective_root,
+            mem_flush_threshold,
+        )
+        .await?;
     }
     // Final flush: drain remaining sink buffers
     for (table_id, sink) in &mut sinks {
-        if sink.buf.is_empty() { continue; }
+        if sink.buf.is_empty() {
+            continue;
+        }
         let chunk = std::mem::take(&mut sink.buf).freeze();
         let rows = std::mem::replace(&mut sink.row_count, 0);
-        flush_tx.send((table_id.clone(), chunk, rows)).await
-            .map_err(|_| J2sError::InvalidInput("flusher channel closed at worker teardown".to_string()))?;
+        flush_tx
+            .send((table_id.clone(), chunk, rows))
+            .await
+            .map_err(|_| {
+                J2sError::InvalidInput("flusher channel closed at worker teardown".to_string())
+            })?;
     }
     Ok(())
 }
@@ -135,9 +181,9 @@ fn parse_json_object(bytes: &mut [u8]) -> Result<serde_json::Map<String, Value>>
 #[cfg(test)]
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
-    use std::collections::HashMap;
     use crate::pass2::runner::test_support::make_schema_with_rows;
     use crate::schema::table_schema::TableSchema;
+    use std::collections::HashMap;
 
     /// Verifies that the worker exits its pause spin when `error_flag` is set externally (Err), or
     /// when the load is cancelled (Ok, #80: an aborted flusher never clears the pause), even if
@@ -145,22 +191,22 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // single test case with verbose setup
     async fn worker_exits_pause_spin_on_error_flag_or_cancel() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
 
         for cancelled in [false, true] {
             let schema = make_schema_with_rows("root", 0);
             let sep = crate::schema::PATH_SEP.to_string();
-            let path_map = Arc::new(HashMap::from([
-                (schema.path.join(&sep), schema.clone()),
-            ]));
+            let path_map = Arc::new(HashMap::from([(schema.path.join(&sep), schema.clone())]));
             let root_schema = Arc::new(schema);
-            let (anomaly_tx, _) = tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
-            let (flush_tx, _flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(1);
+            let (anomaly_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
+            let (flush_tx, _flush_rx) =
+                tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(1);
             let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<(Option<String>, Vec<u8>)>(1);
             let cancel = tokio_util::sync::CancellationToken::new();
             let error_flag = Arc::new(AtomicBool::new(false)); // starts false
-            let pause_flag = Arc::new(AtomicBool::new(true));  // starts true → worker enters spin
+            let pause_flag = Arc::new(AtomicBool::new(true)); // starts true → worker enters spin
 
             let worker_handle = tokio::spawn(super::run_worker_diskless(
                 item_rx,
@@ -180,30 +226,38 @@ mod tests {
             tokio::task::yield_now().await;
             tokio::task::yield_now().await;
             // Neither clears pause_flag: the spin itself must check both.
-            if cancelled { cancel.cancel(); } else { error_flag.store(true, Ordering::Release); }
+            if cancelled {
+                cancel.cancel();
+            } else {
+                error_flag.store(true, Ordering::Release);
+            }
 
-            let result = tokio::time::timeout(
-                std::time::Duration::from_millis(200),
-                worker_handle,
-            ).await;
-            assert!(result.is_ok(), "worker must not hang in the pause spin (cancelled: {cancelled})");
-            assert_eq!(result.unwrap().unwrap().is_ok(), cancelled, "error_flag → Err, cancel → Ok");
+            let result =
+                tokio::time::timeout(std::time::Duration::from_millis(200), worker_handle).await;
+            assert!(
+                result.is_ok(),
+                "worker must not hang in the pause spin (cancelled: {cancelled})"
+            );
+            assert_eq!(
+                result.unwrap().unwrap().is_ok(),
+                cancelled,
+                "error_flag → Err, cancel → Ok"
+            );
         }
     }
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // single test case with verbose setup
     async fn worker_returns_err_immediately_when_error_flag_preset() {
-        use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
 
         let schema = make_schema_with_rows("root", 0);
         let sep = crate::schema::PATH_SEP.to_string();
-        let path_map = Arc::new(HashMap::from([
-            (schema.path.join(&sep), schema.clone()),
-        ]));
+        let path_map = Arc::new(HashMap::from([(schema.path.join(&sep), schema.clone())]));
         let root_schema = Arc::new(schema);
-        let (anomaly_tx, _) = tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
+        let (anomaly_tx, _) =
+            tokio::sync::mpsc::unbounded_channel::<crate::anomaly::collector::AnomalyEvent>();
         let (flush_tx, _flush_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, u64)>(1);
         let (_item_tx, item_rx) = tokio::sync::mpsc::channel::<(Option<String>, Vec<u8>)>(1);
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -226,9 +280,13 @@ mod tests {
                     mem_flush_threshold: 64 * 1024 * 1024,
                 },
             ),
-        ).await;
+        )
+        .await;
         assert!(result.is_ok(), "worker must not hang");
-        assert!(result.unwrap().is_err(), "worker must return Err when error_flag is set");
+        assert!(
+            result.unwrap().is_err(),
+            "worker must return Err when error_flag is set"
+        );
     }
 
     #[test]
@@ -276,7 +334,10 @@ mod tests {
         let mut sinks = HashMap::new();
         sinks.insert("t".to_string(), make_mem_sink_with_data("t", b"small\n"));
         let result = super::collect_above_threshold(&mut sinks, 1000);
-        assert!(result.is_empty(), "sink below threshold must not be collected");
+        assert!(
+            result.is_empty(),
+            "sink below threshold must not be collected"
+        );
         assert!(!sinks["t"].buf.is_empty(), "sink must retain its data");
     }
 
@@ -291,15 +352,24 @@ mod tests {
         assert_eq!(&bytes[..], b"row\n");
         assert_eq!(*rows, 1);
         // Sink must be reset
-        assert!(sinks["t"].buf.is_empty(), "sink buf must be cleared after collection");
+        assert!(
+            sinks["t"].buf.is_empty(),
+            "sink buf must be cleared after collection"
+        );
         assert_eq!(sinks["t"].row_count, 0, "sink row_count must be reset");
     }
 
     #[test]
     fn collect_above_threshold_only_above_threshold_collected() {
         let mut sinks = HashMap::new();
-        sinks.insert("big".to_string(), make_mem_sink_with_data("big", b"lots of data here\n"));
-        sinks.insert("small".to_string(), make_mem_sink_with_data("small", b"x\n"));
+        sinks.insert(
+            "big".to_string(),
+            make_mem_sink_with_data("big", b"lots of data here\n"),
+        );
+        sinks.insert(
+            "small".to_string(),
+            make_mem_sink_with_data("small", b"x\n"),
+        );
         // threshold=10 → "big" (18 bytes) collected; "small" (2 bytes) kept
         let result = super::collect_above_threshold(&mut sinks, 10);
         assert_eq!(result.len(), 1);

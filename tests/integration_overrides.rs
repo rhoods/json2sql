@@ -1,9 +1,9 @@
 #![allow(clippy::disallowed_methods)]
 mod common;
 
-use json2sql::{db, pass1, pass2};
 use json2sql::schema::config::{apply_overrides, SchemaConfig};
 use json2sql::schema::table_schema::InferredStrategy;
+use json2sql::{db, pass1, pass2};
 
 // ---------------------------------------------------------------------------
 // Override de type valide : score FLOAT → TEXT.
@@ -168,43 +168,83 @@ async fn test_override_strategy_pivot_flat_path_unchanged() {
         let path = common::fixture("users.jsonl");
         let mut p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
 
-        let pre_address = p1.schemas.iter().find(|s| s.name == "people_address").unwrap();
-        assert_eq!(pre_address.inferred_strategy, InferredStrategy::Columns,
-            "people_address doit être Columns avant override (2 colonnes, sous le seuil wide)");
+        let pre_address = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "people_address")
+            .unwrap();
+        assert_eq!(
+            pre_address.inferred_strategy,
+            InferredStrategy::Columns,
+            "people_address doit être Columns avant override (2 colonnes, sous le seuil wide)"
+        );
 
         let config = SchemaConfig::from_file(&common::fixture("override_pivot.toml")).unwrap();
         let warnings = apply_overrides(&mut p1.schemas, &config).unwrap();
-        assert!(warnings.is_empty(), "aucun warning attendu, obtenu : {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "aucun warning attendu, obtenu : {warnings:?}"
+        );
 
-        let address = p1.schemas.iter().find(|s| s.name == "people_address").unwrap();
+        let address = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "people_address")
+            .unwrap();
         // ui_override prioritaire — inferred_strategy n'est jamais muté par un override manuel.
-        assert_eq!(address.inferred_strategy, InferredStrategy::Columns, "inferred_strategy inchangé");
+        assert_eq!(
+            address.inferred_strategy,
+            InferredStrategy::Columns,
+            "inferred_strategy inchangé"
+        );
         assert_eq!(*address.effective_strategy(), InferredStrategy::Pivot);
         // Chemin plat : (key, value) sur LA MÊME table, pas de split identité/compagnon.
-        assert_eq!(address.data_columns().count(), 2, "(key, value) — table plate, pas de split");
+        assert_eq!(
+            address.data_columns().count(),
+            2,
+            "(key, value) — table plate, pas de split"
+        );
         assert!(
             !p1.schemas.iter().any(|s| s.name == "people_address_pivot"),
             "aucun compagnon _pivot ne doit être créé pour un override manuel"
         );
 
         let schemas = p1.schemas.clone();
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
-        let p2 = pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("people", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &schemas,
+            &client,
+            &url,
+            &common::pass2_config("people", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
         // street + city = 2 paires EAV par personne × 3 personnes = 6.
         assert_eq!(*p2.rows_per_table.get("people_address").unwrap(), 6);
-        assert_eq!(common::row_count(&client, &schema, "people_address").await, 6);
+        assert_eq!(
+            common::row_count(&client, &schema, "people_address").await,
+            6
+        );
 
-        let alice_city: String = client.query_one(
-            &format!(
-                "SELECT a.value FROM \"{schema}\".\"people_address\" a \
+        let alice_city: String = client
+            .query_one(
+                &format!(
+                    "SELECT a.value FROM \"{schema}\".\"people_address\" a \
                  JOIN \"{schema}\".\"people\" p ON a.j2s_people_id = p.j2s_id \
                  WHERE p.name = 'Alice' AND a.key = 'city'",
-            ),
-            &[],
-        ).await.unwrap().get(0);
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(alice_city, "Springfield");
-    }).await;
+    })
+    .await;
 }

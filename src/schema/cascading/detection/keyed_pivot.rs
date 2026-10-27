@@ -12,9 +12,11 @@
 //! - fn `collect_pivot_co_siblings` — reparente les enfants absorbés.
 //! - fn `reparent_and_update_routes` — met à jour `child_routes` du parent.
 
-use super::super::super::wide_strategies::{build_union_columns, classify_key_shape};
-use super::super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, KeyShape, SiblingSchema, TableSchema};
+use super::super::super::table_schema::{
+    ChildKind, ColumnSchema, InferredStrategy, KeyShape, SiblingSchema, TableSchema,
+};
 use super::super::super::type_tracker::PgType;
+use super::super::super::wide_strategies::{build_union_columns, classify_key_shape};
 use super::super::scoring::{pairwise_jaccard_min, unique_cluster_suffix};
 use super::{cascade, CoSiblingGroup};
 
@@ -37,7 +39,12 @@ fn resolve_pivot_key_info(
         .iter()
         .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
         .collect();
-    let key_shape = classify_key_shape(&keys.iter().map(std::string::String::as_str).collect::<Vec<_>>());
+    let key_shape = classify_key_shape(
+        &keys
+            .iter()
+            .map(std::string::String::as_str)
+            .collect::<Vec<_>>(),
+    );
     let key_col_name = match &key_shape {
         KeyShape::Numeric => "key_id".to_string(),
         KeyShape::IsoLang => "lang_code".to_string(),
@@ -49,7 +56,6 @@ fn resolve_pivot_key_info(
     let sub_pivot_name = format!("{parent_name}_{suffix}");
     (key_col_name, key_shape, union_cols, sub_pivot_name)
 }
-
 
 fn build_sub_pivot_schema(
     sub_pivot_name: String,
@@ -70,7 +76,6 @@ fn build_sub_pivot_schema(
     schema
 }
 
-
 fn process_keyed_pivot_work_item(
     schemas: &mut [TableSchema],
     parent_idx: usize,
@@ -80,7 +85,9 @@ fn process_keyed_pivot_work_item(
     arr_map: &std::collections::HashMap<String, Vec<usize>>,
 ) -> Option<(TableSchema, Vec<CoSiblingGroup>)> {
     let jaccard = pairwise_jaccard_min(schemas, child_indices);
-    if jaccard < min_jaccard { return None; }
+    if jaccard < min_jaccard {
+        return None;
+    }
     let parent_name = schemas[parent_idx].name.clone();
     let parent_depth = schemas[parent_idx].depth;
     let mut sub_path = schemas[parent_idx].path.clone();
@@ -88,15 +95,35 @@ fn process_keyed_pivot_work_item(
     let (key_col_name, key_shape, union_cols, sub_pivot_name) =
         resolve_pivot_key_info(schemas, child_indices, &parent_name);
     let fk_col = format!("j2s_{parent_name}_id");
-    let sibling_schema = SiblingSchema { key_col_name: key_col_name.clone(), key_shape, array_children: false };
+    let sibling_schema = SiblingSchema {
+        key_col_name: key_col_name.clone(),
+        key_shape,
+        array_children: false,
+    };
     let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
-    let co_sibs = collect_pivot_co_siblings(schemas, child_indices, &sub_pivot_name, obj_map, arr_map);
+    let co_sibs =
+        collect_pivot_co_siblings(schemas, child_indices, &sub_pivot_name, obj_map, arr_map);
     reparent_and_update_routes(schemas, parent_idx, child_indices, &sub_pivot_name);
     let source_row_count: u64 = child_indices.iter().map(|&i| schemas[i].row_count).sum();
-    eprintln!("  SiblingCollapse post-pass: {} ({} orphan tables → sub-pivot {})", parent_name, child_indices.len(), sub_pivot_name);
-    Some((build_sub_pivot_schema(sub_pivot_name, parent_name, sub_path, parent_depth, cols, sibling_schema, source_row_count), co_sibs))
+    eprintln!(
+        "  SiblingCollapse post-pass: {} ({} orphan tables → sub-pivot {})",
+        parent_name,
+        child_indices.len(),
+        sub_pivot_name
+    );
+    Some((
+        build_sub_pivot_schema(
+            sub_pivot_name,
+            parent_name,
+            sub_path,
+            parent_depth,
+            cols,
+            sibling_schema,
+            source_row_count,
+        ),
+        co_sibs,
+    ))
 }
-
 
 /// parent's `child_routes` to point to the sub-pivot.  Their own children are returned as
 /// `CoSiblingGroup`s for an additional cascade wave.
@@ -112,9 +139,14 @@ pub(super) fn run_keyed_pivot_children_wave(
     let mut co_siblings: Vec<CoSiblingGroup> = Vec::new();
 
     for (parent_idx, child_indices) in work {
-        if let Some((t_schema, co_sibs)) =
-            process_keyed_pivot_work_item(schemas, parent_idx, &child_indices, min_jaccard, &obj_map, &arr_map)
-        {
+        if let Some((t_schema, co_sibs)) = process_keyed_pivot_work_item(
+            schemas,
+            parent_idx,
+            &child_indices,
+            min_jaccard,
+            &obj_map,
+            &arr_map,
+        ) {
             new_schemas.push(t_schema);
             co_siblings.extend(co_sibs);
         }
@@ -124,7 +156,6 @@ pub(super) fn run_keyed_pivot_children_wave(
     co_siblings
 }
 
-
 fn collect_pivot_co_siblings(
     schemas: &mut [TableSchema],
     child_indices: &[usize],
@@ -132,7 +163,8 @@ fn collect_pivot_co_siblings(
     obj_map: &std::collections::HashMap<String, Vec<usize>>,
     arr_map: &std::collections::HashMap<String, Vec<usize>>,
 ) -> Vec<CoSiblingGroup> {
-    let children_by_key = cascade::collect_children_by_key(schemas, child_indices, obj_map, arr_map);
+    let children_by_key =
+        cascade::collect_children_by_key(schemas, child_indices, obj_map, arr_map);
     let mut result = Vec::new();
     for (json_key, siblings, arr) in children_by_key {
         if siblings.len() >= 2 {
@@ -148,7 +180,6 @@ fn collect_pivot_co_siblings(
     }
     result
 }
-
 
 /// Collect (`parent_idx`, `sorted_child_indices`) for `SiblingCollapse` parents with enough Columns children.
 ///
@@ -166,8 +197,11 @@ fn collect_keyed_pivot_work_items(
             if !matches!(s.inferred_strategy, InferredStrategy::SiblingCollapse(_)) {
                 return None;
             }
-            let routed: std::collections::HashSet<&str> =
-                s.child_routes.values().map(std::string::String::as_str).collect();
+            let routed: std::collections::HashSet<&str> = s
+                .child_routes
+                .values()
+                .map(std::string::String::as_str)
+                .collect();
             let mut children: Vec<usize> = obj_map
                 .get(&s.name)
                 .into_iter()
@@ -176,13 +210,14 @@ fn collect_keyed_pivot_work_items(
                 .filter(|&i| matches!(schemas[i].inferred_strategy, InferredStrategy::Columns))
                 .filter(|&i| routed.contains(schemas[i].name.as_str()))
                 .collect();
-            if children.len() < threshold { return None; }
+            if children.len() < threshold {
+                return None;
+            }
             children.sort_unstable_by_key(|&i| &schemas[i].name);
             Some((parent_idx, children))
         })
         .collect()
 }
-
 
 /// Build the column list for a sub-pivot `SiblingCollapse` table.
 fn build_sub_pivot_columns(
@@ -213,7 +248,6 @@ fn build_sub_pivot_columns(
     cols
 }
 
-
 /// Re-parent absorbed children to `sub_pivot_name` and update `parent`'s `child_routes`.
 fn reparent_and_update_routes(
     schemas: &mut [TableSchema],
@@ -221,8 +255,10 @@ fn reparent_and_update_routes(
     child_indices: &[usize],
     sub_pivot_name: &str,
 ) {
-    let absorbed_names: std::collections::HashSet<String> =
-        child_indices.iter().map(|&i| schemas[i].name.clone()).collect();
+    let absorbed_names: std::collections::HashSet<String> = child_indices
+        .iter()
+        .map(|&i| schemas[i].name.clone())
+        .collect();
     for &i in child_indices {
         schemas[i].parent_table = Some(sub_pivot_name.to_string());
     }
@@ -233,17 +269,14 @@ fn reparent_and_update_routes(
     }
 }
 
-
-
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::super::table_schema::InferredStrategy;
+    use super::*;
 
     #[test]
     fn test_build_sub_pivot_schema_wires_fields() {
-        use crate::schema::table_schema::{SiblingSchema, KeyShape};
+        use crate::schema::table_schema::{KeyShape, SiblingSchema};
         let sib = SiblingSchema {
             key_col_name: "key".to_string(),
             key_shape: KeyShape::Slug,
@@ -261,12 +294,15 @@ mod tests {
         assert_eq!(schema.name, "p_pivot");
         assert_eq!(schema.parent_table.as_deref(), Some("p"));
         assert_eq!(schema.depth, 2);
-        assert!(matches!(schema.inferred_strategy, InferredStrategy::SiblingCollapse(_)));
+        assert!(matches!(
+            schema.inferred_strategy,
+            InferredStrategy::SiblingCollapse(_)
+        ));
     }
 
     #[test]
     fn build_sub_pivot_schema_propagates_row_count() {
-        use crate::schema::table_schema::{SiblingSchema, KeyShape};
+        use crate::schema::table_schema::{KeyShape, SiblingSchema};
         let sib = SiblingSchema {
             key_col_name: "key".to_string(),
             key_shape: KeyShape::Slug,
@@ -281,6 +317,9 @@ mod tests {
             sib,
             42_000,
         );
-        assert_eq!(schema.row_count, 42_000, "sub_pivot row_count must equal source_row_count");
+        assert_eq!(
+            schema.row_count, 42_000,
+            "sub_pivot row_count must equal source_row_count"
+        );
     }
 }

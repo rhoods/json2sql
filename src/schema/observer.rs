@@ -24,9 +24,9 @@
 use indexmap::IndexMap;
 use serde_json::Value;
 
-use super::PATH_SEP;
 use super::table_schema::ChildKind;
 use super::type_tracker::{widen_pg_types, PgType, TypeTracker};
+use super::PATH_SEP;
 
 /// One entry per table discovered during Pass 1 observation, keyed by PATH_SEP-joined path.
 #[derive(Debug)]
@@ -78,7 +78,9 @@ impl TableEntry {
     pub(crate) fn array_column_type(&self, field: &str, elem_tracker: &TypeTracker) -> PgType {
         let elem_type = self.columns.get(field).map_or_else(
             || elem_tracker.to_pg_type(),
-            |scalar_tracker| widen_pg_types(elem_tracker.to_pg_type(), &scalar_tracker.to_pg_type()),
+            |scalar_tracker| {
+                widen_pg_types(elem_tracker.to_pg_type(), &scalar_tracker.to_pg_type())
+            },
         );
         PgType::Array(Box::new(elem_type))
     }
@@ -145,7 +147,9 @@ impl SchemaObserver {
                         let threshold = self.text_threshold;
                         self.tables
                             .get_mut(&path_key)
-                            .expect("invariant: path_key was popped from stack, must exist in tables")
+                            .expect(
+                                "invariant: path_key was popped from stack, must exist in tables",
+                            )
                             .observe_field(field, scalar, threshold);
                     }
                 }
@@ -166,17 +170,33 @@ impl SchemaObserver {
             self.ensure_table_key(child_key, path_key, Some(ChildKind::ObjectArray));
             let mut objs: Vec<&serde_json::Map<String, Value>> = arr
                 .iter()
-                .filter_map(|v| if let Value::Object(o) = v { Some(o) } else { None })
+                .filter_map(|v| {
+                    if let Value::Object(o) = v {
+                        Some(o)
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             if let Some(last) = objs.pop() {
-                for obj in objs { stack.push((child_key.to_string(), obj)); }
+                for obj in objs {
+                    stack.push((child_key.to_string(), obj));
+                }
                 stack.push((child_key.to_string(), last));
             }
         } else {
             let threshold = self.text_threshold;
-            let entry = self.tables.get_mut(path_key).expect("invariant: path_key was popped from stack, must exist in tables");
-            let tracker = entry.array_columns.entry(field.to_string()).or_insert_with(|| TypeTracker::new(threshold));
-            for item in arr { tracker.observe(item); }
+            let entry = self
+                .tables
+                .get_mut(path_key)
+                .expect("invariant: path_key was popped from stack, must exist in tables");
+            let tracker = entry
+                .array_columns
+                .entry(field.to_string())
+                .or_insert_with(|| TypeTracker::new(threshold));
+            for item in arr {
+                tracker.observe(item);
+            }
         }
     }
 
@@ -208,7 +228,10 @@ impl SchemaObserver {
 
     fn ensure_table_key(&mut self, key: &str, parent_key: &str, child_kind: Option<ChildKind>) {
         self.tables.entry(key.to_string()).or_insert_with(|| {
-            let path: Vec<String> = key.split(PATH_SEP).map(std::string::ToString::to_string).collect();
+            let path: Vec<String> = key
+                .split(PATH_SEP)
+                .map(std::string::ToString::to_string)
+                .collect();
             TableEntry::new(path, parent_key.to_string(), child_kind)
         });
     }

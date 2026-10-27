@@ -281,7 +281,10 @@ impl DataSignals {
 
     /// Rows where `a` is present, and the richness-adjusted lift of `b` given `a` with the rows where both are.
     pub fn lift(&self, a: usize, b: usize) -> (usize, Option<(usize, f64)>) {
-        (self.presence.present_count(a), self.presence.lift(&self.strata, a, b))
+        (
+            self.presence.present_count(a),
+            self.presence.lift(&self.strata, a, b),
+        )
     }
 
     /// Rows of the sample.
@@ -381,7 +384,9 @@ pub fn propose(
         .collect();
     add_cohesion(&mut groups, &names.stems);
     let ungrouped = ungrouped_columns(&groups, columns.len());
-    let attachments = data.ok().map_or_else(Vec::new, |signals| attachments(&groups, &ungrouped, signals));
+    let attachments = data.ok().map_or_else(Vec::new, |signals| {
+        attachments(&groups, &ungrouped, signals)
+    });
     let families = family_notes(&names, &originals);
     Ok(TableProposal {
         table: table.to_string(),
@@ -414,8 +419,15 @@ fn attachments(groups: &[Group], ungrouped: &[usize], data: &DataSignals) -> Vec
             let next = scored.get(1).map_or(0.0, |s| s.0);
             let rows = data.lift(column, groups[group].columns[0]).0;
             let enough_rows = rows > 0 && rows * 100 >= ATTACH_ROWS_PERCENT * data.rows();
-            (lift >= ATTACH_LIFT && enough_rows && lift >= ATTACH_MARGIN * next)
-                .then_some(Attachment { column, group, lift, next, rows })
+            (lift >= ATTACH_LIFT && enough_rows && lift >= ATTACH_MARGIN * next).then_some(
+                Attachment {
+                    column,
+                    group,
+                    lift,
+                    next,
+                    rows,
+                },
+            )
         })
         .collect()
 }
@@ -423,8 +435,15 @@ fn attachments(groups: &[Group], ungrouped: &[usize], data: &DataSignals) -> Vec
 /// The lift of the members of a group given `column`, averaged over the members where it is defined; 0 for none.
 #[allow(clippy::cast_precision_loss)] // a few dozen members
 fn mean_lift(data: &DataSignals, column: usize, members: &[usize]) -> f64 {
-    let lifts: Vec<f64> = members.iter().filter_map(|&m| data.lift(column, m).1.map(|(_, lift)| lift)).collect();
-    if lifts.is_empty() { 0.0 } else { lifts.iter().sum::<f64>() / lifts.len() as f64 }
+    let lifts: Vec<f64> = members
+        .iter()
+        .filter_map(|&m| data.lift(column, m).1.map(|(_, lift)| lift))
+        .collect();
+    if lifts.is_empty() {
+        0.0
+    } else {
+        lifts.iter().sum::<f64>() / lifts.len() as f64
+    }
 }
 
 /// Puts the cohesion of the names first among the evidence of each group.
@@ -547,7 +566,11 @@ pub fn avoid_taken_names(proposal: &mut TableProposal, taken: &mut HashSet<Strin
         while taken.contains(&group_table_name(&proposal.table, &group.name)) {
             group.name = nth_name(root, n);
             n += 1;
-            if siblings.iter().enumerate().any(|(other, name)| other != at && *name == group.name) {
+            if siblings
+                .iter()
+                .enumerate()
+                .any(|(other, name)| other != at && *name == group.name)
+            {
                 group.name.clone_from(&base);
             }
         }
@@ -640,7 +663,9 @@ fn unique_name(used: &mut HashSet<String>, wanted: &str) -> String {
 fn root_word(name: &str) -> &str {
     let unnumbered = name
         .rsplit_once('_')
-        .filter(|(head, n)| head.ends_with("_cols") && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .filter(|(head, n)| {
+            head.ends_with("_cols") && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+        })
         .map_or(name, |(head, _)| head);
     unnumbered.strip_suffix("_cols").unwrap_or(name)
 }
@@ -960,7 +985,10 @@ mod tests {
             .collect();
         avoid_taken_names(&mut p, &mut taken);
         let names: Vec<&str> = p.groups.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(names, ["nutrition_cols_2", "nutriscore", "nutriscore_nutrition"]);
+        assert_eq!(
+            names,
+            ["nutrition_cols_2", "nutriscore", "nutriscore_nutrition"]
+        );
         assert_eq!(
             p.groups[2].replaces,
             ["nutrition_cols_2", "nutriscore"],
@@ -996,7 +1024,10 @@ mod tests {
         avoid_taken_names(&mut p, &mut taken);
         assert_eq!(p.groups[0].name, "nutrition_cols");
         let name = group_table_name(&p.table, "nutrition_cols");
-        assert!(name.len() <= 53 && name != group_table_name(&p.table, "nutrition"), "{name}");
+        assert!(
+            name.len() <= 53 && name != group_table_name(&p.table, "nutrition"),
+            "{name}"
+        );
     }
 
     #[test]
@@ -1169,9 +1200,18 @@ mod tests {
 
     /// `rows` rows: the family `kiwi_*` is filled in a tenth of them, `lonely` in one row out of `lonely_every` of those.
     fn lonely_with_kiwi_in(rows: u64, lonely_every: u64) -> (Vec<ColumnName>, DataSignals) {
-        let mut names: Vec<String> = ["red", "blue", "green", "gold"].iter().map(|c| format!("kiwi_{c}")).collect();
+        let mut names: Vec<String> = ["red", "blue", "green", "gold"]
+            .iter()
+            .map(|c| format!("kiwi_{c}"))
+            .collect();
         names.push("lonely".to_string());
-        names.extend(["quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow", "oyster", "pebble", "saddle", "thimble"].map(String::from));
+        names.extend(
+            [
+                "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow",
+                "oyster", "pebble", "saddle", "thimble",
+            ]
+            .map(String::from),
+        );
         let mut presence = Presence::new(names.len());
         let mut values = ValueProfile::new(names.len(), 1);
         let mut seed = 5_u64;
@@ -1182,7 +1222,9 @@ mod tests {
                     0..=3 => kiwi,
                     4 => kiwi && row % lonely_every == 0,
                     _ => {
-                        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                        seed = seed
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
                         (seed >> 33).is_multiple_of(2)
                     }
                 })
@@ -1191,7 +1233,10 @@ mod tests {
             values.observe_row(std::iter::repeat_n(None, names.len()));
         }
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        (columns(&refs), DataSignals::new(&TableSample { presence, values }))
+        (
+            columns(&refs),
+            DataSignals::new(&TableSample { presence, values }),
+        )
     }
 
     #[test]
@@ -1199,8 +1244,16 @@ mod tests {
         // #91 T8: a candidate to confirm, shown and never applied
         let (cols, data) = lonely_with_kiwi();
         let p = propose("t", cols, Ok(&data), &LexicalParams::default()).unwrap();
-        let kiwi = p.groups.iter().position(|g| g.name == "kiwi").expect("the kiwi family");
-        assert_eq!(p.groups[kiwi].columns, [0, 1, 2, 3], "the group keeps its own columns");
+        let kiwi = p
+            .groups
+            .iter()
+            .position(|g| g.name == "kiwi")
+            .expect("the kiwi family");
+        assert_eq!(
+            p.groups[kiwi].columns,
+            [0, 1, 2, 3],
+            "the group keeps its own columns"
+        );
         assert!(p.ungrouped.contains(&4));
         assert_eq!(p.attachments.len(), 1, "{:?}", p.attachments);
         let a = &p.attachments[0];
@@ -1212,13 +1265,25 @@ mod tests {
     fn a_column_in_less_than_one_percent_of_the_rows_is_no_candidate() {
         // 8 rows out of 2 000: too few to tell a link from noise
         let (cols, data) = lonely_with_kiwi_in(2_000, 250);
-        assert_eq!(propose("t", cols, Ok(&data), &LexicalParams::default()).unwrap().attachments.len(), 0);
+        assert_eq!(
+            propose("t", cols, Ok(&data), &LexicalParams::default())
+                .unwrap()
+                .attachments
+                .len(),
+            0
+        );
     }
 
     #[test]
     fn without_data_signals_there_is_no_candidate() {
         let (cols, _) = lonely_with_kiwi();
-        assert_eq!(propose("t", cols, Err("test"), &LexicalParams::default()).unwrap().attachments.len(), 0);
+        assert_eq!(
+            propose("t", cols, Err("test"), &LexicalParams::default())
+                .unwrap()
+                .attachments
+                .len(),
+            0
+        );
     }
 
     #[test]

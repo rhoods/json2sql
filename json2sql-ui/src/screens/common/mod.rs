@@ -16,16 +16,19 @@ mod timer;
 pub use timer::use_elapsed_timer;
 
 mod file_picker;
-pub use file_picker::{PickResult, pick_file, pick_folder, pick_save_file};
+pub use file_picker::{pick_file, pick_folder, pick_save_file, PickResult};
 
 mod strategy_badges;
-pub use strategy_badges::{strategy_label, strategy_badge, user_override_badge};
+pub use strategy_badges::{strategy_badge, strategy_label, user_override_badge};
 
 mod progress;
 pub use progress::{progress_pct, ProgressBar};
 
 mod overrides;
-pub use overrides::{build_effective_schemas, display_schemas, group_preview, skip_cascade_names, splittable_tables, GroupPreview, PreviewGroup};
+pub use overrides::{
+    build_effective_schemas, display_schemas, group_preview, skip_cascade_names, splittable_tables,
+    GroupPreview, PreviewGroup,
+};
 
 mod table_rows;
-pub use table_rows::{TableRowViewModel, TableRowsCtx, build_table_rows};
+pub use table_rows::{build_table_rows, TableRowViewModel, TableRowsCtx};

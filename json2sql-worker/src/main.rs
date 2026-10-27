@@ -17,7 +17,7 @@ mod pipeline;
 mod serve;
 mod summary;
 
-use json2sql::ipc::{WorkerConfig, WorkerResult, lockfile_path};
+use json2sql::ipc::{lockfile_path, WorkerConfig, WorkerResult};
 
 // ---------------------------------------------------------------------------
 // Lockfile guard
@@ -61,9 +61,11 @@ impl LockfileGuard {
 fn spawn_signal_cancel(cancel: cancel::CancelToken) {
     use tokio::signal::unix::{signal, SignalKind};
     tokio::spawn(async move {
-        let (Ok(mut term), Ok(mut int), Ok(mut hup)) =
-            (signal(SignalKind::terminate()), signal(SignalKind::interrupt()), signal(SignalKind::hangup()))
-        else {
+        let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::hangup()),
+        ) else {
             eprintln!("json2sql-worker: cannot install signal handlers — SIGTERM will kill without cleanup");
             return;
         };
@@ -144,7 +146,10 @@ async fn main() {
         }
     };
 
-    eprintln!("json2sql-worker: started, socket={}", cfg.socket_path.display());
+    eprintln!(
+        "json2sql-worker: started, socket={}",
+        cfg.socket_path.display()
+    );
 
     #[cfg(unix)]
     {
@@ -194,8 +199,8 @@ async fn main() {
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use json2sql::ipc::new_socket_path;
+    use std::path::PathBuf;
 
     fn minimal_config(socket_path: PathBuf, result_file: PathBuf) -> WorkerConfig {
         WorkerConfig {
@@ -271,7 +276,10 @@ mod tests {
     #[test]
     fn write_result_is_atomic_no_tmp_left_on_success() {
         let dir = std::env::temp_dir();
-        let dest = dir.join(format!("json2sql-result-atomic-{}.json", uuid::Uuid::now_v7()));
+        let dest = dir.join(format!(
+            "json2sql-result-atomic-{}.json",
+            uuid::Uuid::now_v7()
+        ));
         let tmp = dest.with_extension("tmp");
         let result = WorkerResult {
             status: "error".to_string(),
@@ -292,10 +300,25 @@ mod tests {
     #[test]
     fn write_result_overwrites_existing_file() {
         let dir = std::env::temp_dir();
-        let dest = dir.join(format!("json2sql-result-overwrite-{}.json", uuid::Uuid::now_v7()));
-        let r1 = WorkerResult { status: "error".to_string(), total_rows: 0, anomaly_count: 0, constraint_warning_count: 0, message: None };
+        let dest = dir.join(format!(
+            "json2sql-result-overwrite-{}.json",
+            uuid::Uuid::now_v7()
+        ));
+        let r1 = WorkerResult {
+            status: "error".to_string(),
+            total_rows: 0,
+            anomaly_count: 0,
+            constraint_warning_count: 0,
+            message: None,
+        };
         write_result(&dest, &r1).expect("first write");
-        let r2 = WorkerResult { status: "success".to_string(), total_rows: 99, anomaly_count: 0, constraint_warning_count: 0, message: None };
+        let r2 = WorkerResult {
+            status: "success".to_string(),
+            total_rows: 99,
+            anomaly_count: 0,
+            constraint_warning_count: 0,
+            message: None,
+        };
         write_result(&dest, &r2).expect("second write");
         let content = std::fs::read_to_string(&dest).expect("read back");
         let back: WorkerResult = serde_json::from_str(&content).expect("deserialize");
@@ -307,7 +330,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn bind_socket_creates_socket_file() {
-        let path = std::env::temp_dir().join(format!("json2sql-test-{}.sock", uuid::Uuid::now_v7()));
+        let path =
+            std::env::temp_dir().join(format!("json2sql-test-{}.sock", uuid::Uuid::now_v7()));
         let _listener = bind_socket(&path).expect("bind must succeed");
         assert!(path.exists(), "socket file must exist after bind");
         let _ = std::fs::remove_file(&path);
@@ -316,7 +340,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn bind_socket_removes_stale_socket() {
-        let path = std::env::temp_dir().join(format!("json2sql-test-stale-{}.sock", uuid::Uuid::now_v7()));
+        let path =
+            std::env::temp_dir().join(format!("json2sql-test-stale-{}.sock", uuid::Uuid::now_v7()));
         std::fs::write(&path, b"stale").expect("write stale file");
         let _listener = bind_socket(&path).expect("bind must succeed even with stale file");
         assert!(path.exists(), "socket file must exist after bind");
@@ -327,9 +352,12 @@ mod tests {
     #[tokio::test]
     async fn bind_socket_accepts_connection() {
         use tokio::net::UnixStream;
-        let path = std::env::temp_dir().join(format!("json2sql-test-conn-{}.sock", uuid::Uuid::now_v7()));
+        let path =
+            std::env::temp_dir().join(format!("json2sql-test-conn-{}.sock", uuid::Uuid::now_v7()));
         let _listener = bind_socket(&path).expect("bind must succeed");
-        UnixStream::connect(&path).await.expect("client connect must succeed");
+        UnixStream::connect(&path)
+            .await
+            .expect("client connect must succeed");
         let _ = std::fs::remove_file(&path);
     }
 

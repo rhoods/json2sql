@@ -10,8 +10,8 @@
 //! Fonctions :
 //! - fn `TableListPanel` — composant unique : rend les lignes déjà construites (purement présentationnel)
 #![allow(clippy::disallowed_methods)]
-use dioxus::prelude::*;
 use crate::screens::TableRowViewModel;
+use dioxus::prelude::*;
 
 #[component]
 pub fn TableListPanel(

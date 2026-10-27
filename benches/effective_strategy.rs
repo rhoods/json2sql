@@ -14,7 +14,11 @@ fn schema_no_override() -> TableSchema {
 }
 
 fn schema_ui_override_flatten() -> TableSchema {
-    let mut s = TableSchema::new("products_nutrients".to_string(), vec!["products".to_string(), "nutrients".to_string()], 1);
+    let mut s = TableSchema::new(
+        "products_nutrients".to_string(),
+        vec!["products".to_string(), "nutrients".to_string()],
+        1,
+    );
     s.set_ui_override(Some(UserOverride::Flatten {
         prefix: "nutrients_".into(),
         max_depth: 1,

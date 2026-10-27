@@ -41,16 +41,25 @@ mod design_css_tests {
     #[test]
     fn design_css_contains_strat_btn_component() {
         let css = design_css();
-        assert!(css.contains(".strat-btn"), "missing strat-btn radio-style button");
+        assert!(
+            css.contains(".strat-btn"),
+            "missing strat-btn radio-style button"
+        );
         assert!(css.contains(".strat-list"), "missing strat-list container");
     }
 
     #[test]
     fn design_css_contains_split_layout() {
         let css = design_css();
-        assert!(css.contains(".split-3"), "missing split-3 three-pane layout");
+        assert!(
+            css.contains(".split-3"),
+            "missing split-3 three-pane layout"
+        );
         assert!(css.contains(".splitter"), "missing splitter drag handle");
-        assert!(css.contains(".pane.collapsed"), "missing collapsed pane state");
+        assert!(
+            css.contains(".pane.collapsed"),
+            "missing collapsed pane state"
+        );
     }
 
     #[test]
@@ -58,7 +67,10 @@ mod design_css_tests {
         let css = design_css();
         assert!(css.contains(".step-card"), "missing step-card component");
         assert!(css.contains(".step-head"), "missing step-head");
-        assert!(css.contains(".step-card.active"), "missing active step state");
+        assert!(
+            css.contains(".step-card.active"),
+            "missing active step state"
+        );
         assert!(css.contains(".step-card.done"), "missing done step state");
     }
 

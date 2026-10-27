@@ -69,7 +69,11 @@ pub(super) fn validate_run_params(parallel: usize) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_watermarks(ram_high: f64, ram_low: f64, mem_flush_threshold: u64) -> Result<()> {
+pub(super) fn validate_watermarks(
+    ram_high: f64,
+    ram_low: f64,
+    mem_flush_threshold: u64,
+) -> Result<()> {
     if !ram_high.is_finite() || ram_high <= 0.0 || ram_high > 1.0 {
         return Err(J2sError::InvalidInput(format!(
             "ram_high_watermark must be in (0.0, 1.0], got {ram_high}"
@@ -98,10 +102,14 @@ pub(super) fn validate_watermarks(ram_high: f64, ram_low: f64, mem_flush_thresho
 pub(super) async fn try_set_synchronous_commit_off(conn: &Client) -> Result<()> {
     match conn.execute("SET synchronous_commit = off", &[]).await {
         Ok(_) => Ok(()),
-        Err(e) if e.as_db_error().is_some_and(|db| {
-            db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE
-        }) => {
-            eprintln!("WARNING: SET synchronous_commit = off not permitted — continuing without it");
+        Err(e)
+            if e.as_db_error().is_some_and(|db| {
+                db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE
+            }) =>
+        {
+            eprintln!(
+                "WARNING: SET synchronous_commit = off not permitted — continuing without it"
+            );
             Ok(())
         }
         Err(e) => Err(J2sError::Db(e)),
@@ -110,7 +118,9 @@ pub(super) async fn try_set_synchronous_commit_off(conn: &Client) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::{Pass2Config, validate_run_params, validate_watermarks, effective_worker_threshold};
+    use super::{
+        effective_worker_threshold, validate_run_params, validate_watermarks, Pass2Config,
+    };
     use super::{DEFAULT_RAM_HIGH_WATERMARK, DEFAULT_RAM_LOW_WATERMARK};
 
     // -------------------------------------------------------------------------
@@ -123,7 +133,8 @@ mod tests {
             DEFAULT_RAM_HIGH_WATERMARK,
             DEFAULT_RAM_LOW_WATERMARK,
             64 * 1024 * 1024,
-        ).is_ok());
+        )
+        .is_ok());
     }
 
     #[test]
@@ -275,7 +286,10 @@ mod tests {
             skip_constraints: false,
             tune_wal: false,
         };
-        assert!(!cfg.skip_constraints, "skip_constraints: false means constraints must run");
+        assert!(
+            !cfg.skip_constraints,
+            "skip_constraints: false means constraints must run"
+        );
     }
 
     #[test]
@@ -294,7 +308,10 @@ mod tests {
             skip_constraints: true,
             tune_wal: false,
         };
-        assert!(cfg.skip_constraints, "skip_constraints: true means constraints must be skipped");
+        assert!(
+            cfg.skip_constraints,
+            "skip_constraints: true means constraints must be skipped"
+        );
     }
 
     #[test]
@@ -328,18 +345,27 @@ mod tests {
 
     #[test]
     fn effective_worker_threshold_divides_by_parallel() {
-        assert_eq!(effective_worker_threshold(64 * 1024 * 1024, 8), 8 * 1024 * 1024);
+        assert_eq!(
+            effective_worker_threshold(64 * 1024 * 1024, 8),
+            8 * 1024 * 1024
+        );
     }
 
     #[test]
     fn effective_worker_threshold_single_worker_unchanged() {
-        assert_eq!(effective_worker_threshold(64 * 1024 * 1024, 1), 64 * 1024 * 1024);
+        assert_eq!(
+            effective_worker_threshold(64 * 1024 * 1024, 1),
+            64 * 1024 * 1024
+        );
     }
 
     #[test]
     fn effective_worker_threshold_16_workers_reproduces_fix() {
         // 64 MB / 16 workers = 4 MB per worker — tables flush before deadlock
-        assert_eq!(effective_worker_threshold(64 * 1024 * 1024, 16), 4 * 1024 * 1024);
+        assert_eq!(
+            effective_worker_threshold(64 * 1024 * 1024, 16),
+            4 * 1024 * 1024
+        );
     }
 
     #[test]

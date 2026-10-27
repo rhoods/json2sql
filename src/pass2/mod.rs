@@ -8,6 +8,6 @@ pub mod insert;
 pub mod runner;
 pub use runner::Pass2Config;
 pub mod sink;
-pub mod traversal;
 #[cfg(test)]
 pub mod test_utils;
+pub mod traversal;

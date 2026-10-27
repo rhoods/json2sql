@@ -101,7 +101,10 @@ mod tests {
         s.push(make_log("second"));
         s.push(ProgressEvent::DdlStart { table_count: 3 });
         assert_eq!(s.len(), 3);
-        assert!(matches!(&s.snapshot()[2], ProgressEvent::DdlStart { table_count: 3 }));
+        assert!(matches!(
+            &s.snapshot()[2],
+            ProgressEvent::DdlStart { table_count: 3 }
+        ));
     }
 
     #[test]
@@ -124,7 +127,11 @@ mod tests {
         for i in 0..5 {
             s.push(make_log(&format!("msg{i}")));
         }
-        s.push(ProgressEvent::Pass2Done { total_rows: 5, anomaly_count: 0, constraint_warning_count: 0 });
+        s.push(ProgressEvent::Pass2Done {
+            total_rows: 5,
+            anomaly_count: 0,
+            constraint_warning_count: 0,
+        });
         assert_eq!(s.snapshot().len(), 6);
         assert!(s.is_done());
     }

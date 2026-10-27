@@ -40,12 +40,12 @@ use crate::error::Result;
 use crate::pass2::coercer::{coerce, CoerceResult};
 use crate::pass2::sink::RowSink;
 use crate::schema::grouping::sample::is_present;
+use crate::schema::table_schema::{InferredStrategy, TableSchema};
 use crate::schema::PATH_SEP;
-use crate::schema::table_schema::{TableSchema, InferredStrategy};
 
 use super::traversal::{
-    insert_array, insert_jsonb_object, insert_sibling_collapse_object, insert_sibling_collapse_multi,
-    insert_normalize_dynamic_keys, insert_pivot_object, insert_structured_pivot_object,
+    insert_array, insert_jsonb_object, insert_normalize_dynamic_keys, insert_pivot_object,
+    insert_sibling_collapse_multi, insert_sibling_collapse_object, insert_structured_pivot_object,
     route_multi_collapse_children,
 };
 
@@ -66,10 +66,12 @@ fn column_value<'a>(
 ) -> &'a Value {
     schema.flatten_sources.get(col.name.as_str()).map_or_else(
         || obj.get(&col.original_name).unwrap_or(&Value::Null),
-        |source_field| obj.get(source_field.as_str())
-            .and_then(|v| v.as_object())
-            .and_then(|nested| nested.get(col.original_name.as_str()))
-            .unwrap_or(&Value::Null),
+        |source_field| {
+            obj.get(source_field.as_str())
+                .and_then(|v| v.as_object())
+                .and_then(|nested| nested.get(col.original_name.as_str()))
+                .unwrap_or(&Value::Null)
+        },
     )
 }
 
@@ -102,7 +104,11 @@ fn push_data_col<A: AnomalyCollect>(
     match coerce(json_val, &col.pg_type) {
         CoerceResult::Ok(s) => builder.push_value(&s),
         CoerceResult::Null => builder.push_null(),
-        CoerceResult::OkWithAnomaly { value, actual_value, actual_type } => {
+        CoerceResult::OkWithAnomaly {
+            value,
+            actual_value,
+            actual_type,
+        } => {
             builder.push_value(&value);
             anomalies.record(
                 &schema.name,
@@ -113,7 +119,10 @@ fn push_data_col<A: AnomalyCollect>(
                 actual_type,
             )?;
         }
-        CoerceResult::Anomaly { actual_value, actual_type } => {
+        CoerceResult::Anomaly {
+            actual_value,
+            actual_type,
+        } => {
             anomalies.record(
                 &schema.name,
                 &col.name,
@@ -149,7 +158,15 @@ pub fn insert_object<S: RowSink, A: AnomalyCollect>(
     // Delegate child routing using row_id as routing_id (no second emit_routing_row).
     if let InferredStrategy::SiblingCollapseMulti(groups) = &*schema.effective_strategy() {
         let groups = groups.clone();
-        return route_multi_collapse_children(path_map, ctx.sinks, ctx.anomalies, schema, obj, row_id, &groups);
+        return route_multi_collapse_children(
+            path_map,
+            ctx.sinks,
+            ctx.anomalies,
+            schema,
+            obj,
+            row_id,
+            &groups,
+        );
     }
 
     write_group_rows(path_map, ctx, schema, obj, row_id)?;
@@ -194,8 +211,13 @@ fn write_group_rows<S: RowSink, A: AnomalyCollect>(
     row_id: Uuid,
 ) -> Result<()> {
     for name in &schema.column_groups {
-        let Some(group) = path_map.get(name.as_str()) else { continue };
-        if group.data_columns().any(|col| is_present(column_value(group, col, obj))) {
+        let Some(group) = path_map.get(name.as_str()) else {
+            continue;
+        };
+        if group
+            .data_columns()
+            .any(|col| is_present(column_value(group, col, obj)))
+        {
             write_row_of(ctx, group, obj, row_id, Some(row_id), None)?;
         }
     }
@@ -210,7 +232,10 @@ pub(super) fn push_generated_col_insert(
     order: Option<i64>,
 ) {
     if col.is_parent_fk {
-        match parent_id { Some(pid) => builder.push_uuid(pid), None => builder.push_null() }
+        match parent_id {
+            Some(pid) => builder.push_uuid(pid),
+            None => builder.push_null(),
+        }
     } else {
         match col.name.as_str() {
             "j2s_id" => builder.push_uuid(row_id),
@@ -224,7 +249,10 @@ pub(super) fn push_generated_col_insert(
 }
 
 pub(super) fn push_jsonb_col(builder: &mut RowBuilder, json_val: &Value) {
-    if matches!(json_val, Value::Null) { builder.push_null(); return; }
+    if matches!(json_val, Value::Null) {
+        builder.push_null();
+        return;
+    }
     let json_str = serde_json::to_string(json_val).unwrap_or_default();
     match escape_copy_text(&json_str) {
         Some(escaped) => builder.push_value(&escaped),
@@ -263,7 +291,14 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
             }
             Value::Array(arr) => {
                 if let Some(child_schema) = path_map.get(&child_key) {
-                    insert_array(path_map, ctx.sinks, ctx.anomalies, child_schema, arr, row_id)?;
+                    insert_array(
+                        path_map,
+                        ctx.sinks,
+                        ctx.anomalies,
+                        child_schema,
+                        arr,
+                        row_id,
+                    )?;
                 }
             }
             _ => {}
@@ -290,26 +325,56 @@ fn insert_child_object<S: RowSink, A: AnomalyCollect>(
         InferredStrategy::Jsonb => {
             // Object-kind child: no positional order (only ObjectArray elements carry one,
             // cf. insert_array in traversal.rs).
-            insert_jsonb_object(path_map, ctx.sinks, ctx.anomalies, child_schema, value, parent_id, None)?;
+            insert_jsonb_object(
+                path_map,
+                ctx.sinks,
+                ctx.anomalies,
+                child_schema,
+                value,
+                parent_id,
+                None,
+            )?;
         }
         InferredStrategy::StructuredPivot(suffix_schema) => {
             insert_structured_pivot_object(
-                ctx.sinks, ctx.anomalies, child_schema, nested, parent_id, suffix_schema,
+                ctx.sinks,
+                ctx.anomalies,
+                child_schema,
+                nested,
+                parent_id,
+                suffix_schema,
             )?;
         }
         InferredStrategy::SiblingCollapse(sibling_schema) => {
             insert_sibling_collapse_object(
-                path_map, ctx.sinks, ctx.anomalies, child_schema, nested, parent_id, sibling_schema,
+                path_map,
+                ctx.sinks,
+                ctx.anomalies,
+                child_schema,
+                nested,
+                parent_id,
+                sibling_schema,
             )?;
         }
         InferredStrategy::SiblingCollapseMulti(groups) => {
             insert_sibling_collapse_multi(
-                path_map, ctx.sinks, ctx.anomalies, child_schema, nested, parent_id, groups,
+                path_map,
+                ctx.sinks,
+                ctx.anomalies,
+                child_schema,
+                nested,
+                parent_id,
+                groups,
             )?;
         }
         InferredStrategy::NormalizeDynamicKeys { id_column } => {
             insert_normalize_dynamic_keys(
-                ctx.sinks, ctx.anomalies, child_schema, nested, parent_id, id_column,
+                ctx.sinks,
+                ctx.anomalies,
+                child_schema,
+                nested,
+                parent_id,
+                id_column,
             )?;
         }
         InferredStrategy::Columns
@@ -318,7 +383,15 @@ fn insert_child_object<S: RowSink, A: AnomalyCollect>(
         | InferredStrategy::Flatten { .. }
         | InferredStrategy::JsonbFlatten => {
             let child_id = Uuid::now_v7();
-            insert_object(path_map, ctx, child_schema, nested, child_id, Some(parent_id), None)?;
+            insert_object(
+                path_map,
+                ctx,
+                child_schema,
+                nested,
+                child_id,
+                Some(parent_id),
+                None,
+            )?;
         }
     }
     Ok(())
@@ -338,12 +411,33 @@ fn push_wide_value<A: AnomalyCollect>(
         Some(pg_type) => match coerce(value, pg_type) {
             CoerceResult::Ok(s) => wb.push_value(&s),
             CoerceResult::Null => wb.push_null(),
-            CoerceResult::OkWithAnomaly { value, actual_value, actual_type } => {
+            CoerceResult::OkWithAnomaly {
+                value,
+                actual_value,
+                actual_type,
+            } => {
                 wb.push_value(&value);
-                anomalies.record(wide_table_name, "value", &wide_id.to_string(), &pg_type.as_sql(), &actual_value, actual_type)?;
+                anomalies.record(
+                    wide_table_name,
+                    "value",
+                    &wide_id.to_string(),
+                    &pg_type.as_sql(),
+                    &actual_value,
+                    actual_type,
+                )?;
             }
-            CoerceResult::Anomaly { actual_value, actual_type } => {
-                anomalies.record(wide_table_name, "value", &wide_id.to_string(), &pg_type.as_sql(), &actual_value, actual_type)?;
+            CoerceResult::Anomaly {
+                actual_value,
+                actual_type,
+            } => {
+                anomalies.record(
+                    wide_table_name,
+                    "value",
+                    &wide_id.to_string(),
+                    &pg_type.as_sql(),
+                    &actual_value,
+                    actual_type,
+                )?;
                 wb.push_null();
             }
         },
@@ -360,7 +454,12 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     row_id: Uuid,
 ) -> Result<()> {
     let eff = schema.effective_strategy();
-    let InferredStrategy::AutoSplit { medium_keys, wide_table_name, .. } = &*eff else {
+    let InferredStrategy::AutoSplit {
+        medium_keys,
+        wide_table_name,
+        ..
+    } = &*eff
+    else {
         return Ok(());
     };
     let wide_value_type = path_map
@@ -368,7 +467,9 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
         .and_then(|ws| ws.find_by_original("value"))
         .map(|c| c.pg_type.clone());
     for (field, value) in obj {
-        if !medium_keys.contains(field.as_str()) || matches!(value, Value::Object(_) | Value::Array(_)) {
+        if !medium_keys.contains(field.as_str())
+            || matches!(value, Value::Object(_) | Value::Array(_))
+        {
             continue;
         }
         let wide_id = Uuid::now_v7();
@@ -379,7 +480,14 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
             Some(escaped) => wb.push_value(&escaped),
             None => wb.push_null(),
         }
-        push_wide_value(&mut wb, ctx.anomalies, wide_table_name, value, wide_id, wide_value_type.as_ref())?;
+        push_wide_value(
+            &mut wb,
+            ctx.anomalies,
+            wide_table_name,
+            value,
+            wide_id,
+            wide_value_type.as_ref(),
+        )?;
         ctx.anomalies.inc_total(wide_table_name);
         if let Some(sink) = ctx.sinks.get_mut(wide_table_name.as_str()) {
             sink.write_row(&wb.finish())?;
@@ -407,7 +515,14 @@ fn recurse_children<S: RowSink, A: AnomalyCollect>(
             }
             Value::Array(arr) => {
                 if let Some(child_schema) = path_map.get(&child_key) {
-                    insert_array(path_map, ctx.sinks, ctx.anomalies, child_schema, arr, row_id)?;
+                    insert_array(
+                        path_map,
+                        ctx.sinks,
+                        ctx.anomalies,
+                        child_schema,
+                        arr,
+                        row_id,
+                    )?;
                 }
             }
             _ => {} // scalar — already handled as a column above
@@ -419,17 +534,17 @@ fn recurse_children<S: RowSink, A: AnomalyCollect>(
 #[cfg(test)]
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
-    use std::collections::HashMap;
-    use serde_json::Value;
-    use uuid::Uuid;
-    use crate::anomaly::collector::AnomalyCollector;
-    use crate::pass2::test_utils::CaptureSink;
-    use crate::schema::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
-    use crate::schema::type_tracker::PgType;
     use super::{insert_object, InsertCtx};
     use crate::anomaly::collector::AnomalyCollect;
+    use crate::anomaly::collector::AnomalyCollector;
     use crate::error::Result;
+    use crate::pass2::test_utils::CaptureSink;
     use crate::schema::table_schema::ChildKind;
+    use crate::schema::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
+    use crate::schema::type_tracker::PgType;
+    use serde_json::Value;
+    use std::collections::HashMap;
+    use uuid::Uuid;
 
     // --- column groups (#78, T3b) ---
 
@@ -441,8 +556,17 @@ mod tests {
     }
 
     impl AnomalyCollect for Recorder {
-        fn record(&mut self, table: &str, column: &str, row_id: &str, _: &str, _: &str, _: &str) -> Result<()> {
-            self.anomalies.push((table.to_string(), column.to_string(), row_id.to_string()));
+        fn record(
+            &mut self,
+            table: &str,
+            column: &str,
+            row_id: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<()> {
+            self.anomalies
+                .push((table.to_string(), column.to_string(), row_id.to_string()));
             Ok(())
         }
 
@@ -465,14 +589,18 @@ mod tests {
     /// `t` (`a` TEXT, `y` INTEGER) split in the group `t_g` (`x1` TEXT, `x2` TEXT), in a path map.
     fn split_table() -> HashMap<String, TableSchema> {
         let mut parent = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
-        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        parent
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         parent.columns.push(column("a", "a", PgType::Text));
         parent.columns.push(column("y", "y", PgType::Integer));
         parent.column_groups.push("t_g".to_string());
         let mut group = TableSchema::new("t_g".to_string(), vec!["t_g".to_string()], 1);
         group.parent_table = Some("t".to_string());
         group.child_kind = Some(ChildKind::Object);
-        group.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        group
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         group.columns.push(ColumnSchema::parent_fk("t"));
         group.columns.push(column("x1", "x1", PgType::Text));
         group.columns.push(column("x2", "x2", PgType::Text));
@@ -480,15 +608,44 @@ mod tests {
     }
 
     /// Writes `json` as an object of `t` and returns the rows of each table, as cells.
-    fn write(path_map: &HashMap<String, TableSchema>, json: &str, recorder: &mut Recorder) -> HashMap<String, Vec<Vec<String>>> {
-        let mut sinks: HashMap<String, CaptureSink> = path_map.keys().map(|k| (k.clone(), CaptureSink(Vec::new()))).collect();
+    fn write(
+        path_map: &HashMap<String, TableSchema>,
+        json: &str,
+        recorder: &mut Recorder,
+    ) -> HashMap<String, Vec<Vec<String>>> {
+        let mut sinks: HashMap<String, CaptureSink> = path_map
+            .keys()
+            .map(|k| (k.clone(), CaptureSink(Vec::new())))
+            .collect();
         let obj: serde_json::Map<String, Value> = serde_json::from_str(json).unwrap();
         let schema = &path_map["t"];
-        insert_object(path_map, &mut InsertCtx { sinks: &mut sinks, anomalies: recorder }, schema, &obj, ID, None, None).unwrap();
+        insert_object(
+            path_map,
+            &mut InsertCtx {
+                sinks: &mut sinks,
+                anomalies: recorder,
+            },
+            schema,
+            &obj,
+            ID,
+            None,
+            None,
+        )
+        .unwrap();
         sinks
             .into_iter()
             .map(|(table, sink)| {
-                let rows = sink.0.iter().map(|r| String::from_utf8_lossy(r).trim_end_matches('\n').split('\t').map(str::to_string).collect()).collect();
+                let rows = sink
+                    .0
+                    .iter()
+                    .map(|r| {
+                        String::from_utf8_lossy(r)
+                            .trim_end_matches('\n')
+                            .split('\t')
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .collect();
                 (table, rows)
             })
             .collect()
@@ -499,16 +656,32 @@ mod tests {
     #[test]
     fn a_column_group_gets_one_row_that_shares_the_id_of_the_row_it_was_split_from() {
         let mut recorder = Recorder::default();
-        let rows = write(&split_table(), r#"{"a": "A", "y": 2, "x1": "u", "x2": "v"}"#, &mut recorder);
+        let rows = write(
+            &split_table(),
+            r#"{"a": "A", "y": 2, "x1": "u", "x2": "v"}"#,
+            &mut recorder,
+        );
         let id = ID.to_string();
         assert_eq!(rows["t"], [[id.clone(), "A".to_string(), "2".to_string()]]);
-        assert_eq!(rows["t_g"], [[id.clone(), id, "u".to_string(), "v".to_string()]], "j2s_id and the foreign key are the parent's id");
-        assert_eq!((recorder.totals["t"], recorder.totals["t_g"]), (1, 1), "a group row counts as a row written");
+        assert_eq!(
+            rows["t_g"],
+            [[id.clone(), id, "u".to_string(), "v".to_string()]],
+            "j2s_id and the foreign key are the parent's id"
+        );
+        assert_eq!(
+            (recorder.totals["t"], recorder.totals["t_g"]),
+            (1, 1),
+            "a group row counts as a row written"
+        );
     }
 
     #[test]
     fn a_group_whose_values_are_all_empty_has_no_row() {
-        for empty in [r#"{"a": "A", "y": 2}"#, r#"{"a": "A", "x1": null, "x2": ""}"#, r#"{"a": "A", "x1": [], "x2": {}}"#] {
+        for empty in [
+            r#"{"a": "A", "y": 2}"#,
+            r#"{"a": "A", "x1": null, "x2": ""}"#,
+            r#"{"a": "A", "x1": [], "x2": {}}"#,
+        ] {
             let mut recorder = Recorder::default();
             let rows = write(&split_table(), empty, &mut recorder);
             assert_eq!(rows["t"].len(), 1, "{empty}");
@@ -529,7 +702,9 @@ mod tests {
         let mut path_map = split_table();
         let group = path_map.get_mut("t_g").unwrap();
         group.columns[2] = column("n_q", "q", PgType::Text);
-        group.flatten_sources.insert("n_q".to_string(), "n".to_string());
+        group
+            .flatten_sources
+            .insert("n_q".to_string(), "n".to_string());
         let mut recorder = Recorder::default();
         let rows = write(&path_map, r#"{"n": {"q": "deep"}}"#, &mut recorder);
         assert_eq!(rows["t_g"][0][2], "deep");
@@ -541,7 +716,10 @@ mod tests {
         path_map.get_mut("t_g").unwrap().columns[2] = column("x_1", "X 1", PgType::Text);
         let mut recorder = Recorder::default();
         let rows = write(&path_map, r#"{"X 1": "v"}"#, &mut recorder);
-        assert_eq!(rows["t_g"][0][2], "v", "the column is x_1 in the table and X 1 in the file");
+        assert_eq!(
+            rows["t_g"][0][2], "v",
+            "the column is x_1 in the table and X 1 in the file"
+        );
     }
 
     #[test]
@@ -550,18 +728,32 @@ mod tests {
         path_map.get_mut("t_g").unwrap().columns[2] = column("x1", "x1", PgType::Integer);
         let mut recorder = Recorder::default();
         let rows = write(&path_map, r#"{"x1": "text", "x2": "v"}"#, &mut recorder);
-        assert_eq!(recorder.anomalies, [("t_g".to_string(), "x1".to_string(), ID.to_string())]);
-        assert_eq!(rows["t_g"][0][2], "\\N", "the value that cannot be coerced is null");
+        assert_eq!(
+            recorder.anomalies,
+            [("t_g".to_string(), "x1".to_string(), ID.to_string())]
+        );
+        assert_eq!(
+            rows["t_g"][0][2], "\\N",
+            "the value that cannot be coerced is null"
+        );
     }
 
     #[test]
     fn a_group_table_the_path_map_does_not_have_is_skipped() {
         let mut path_map = split_table();
-        path_map.get_mut("t").unwrap().column_groups.insert(0, "t_gone".to_string());
+        path_map
+            .get_mut("t")
+            .unwrap()
+            .column_groups
+            .insert(0, "t_gone".to_string());
         let mut recorder = Recorder::default();
         let rows = write(&path_map, r#"{"a": "A", "x1": "u"}"#, &mut recorder);
         assert_eq!(rows["t"].len(), 1);
-        assert_eq!(rows["t_g"].len(), 1, "the groups that come after the missing one are still written");
+        assert_eq!(
+            rows["t_g"].len(),
+            1,
+            "the groups that come after the missing one are still written"
+        );
     }
 
     fn make_jsonb_root_schema() -> TableSchema {
@@ -601,13 +793,17 @@ mod tests {
 
         insert_object(
             &path_map,
-            &mut InsertCtx { sinks: &mut sinks, anomalies: &mut anomalies },
+            &mut InsertCtx {
+                sinks: &mut sinks,
+                anomalies: &mut anomalies,
+            },
             &schema,
             &obj,
             Uuid::nil(),
             None,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         let rows = &sinks["t"].0;
         assert_eq!(rows.len(), 1);
@@ -626,12 +822,20 @@ mod tests {
     fn array_cell_with_bad_elements_records_one_anomaly() {
         let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
         schema.columns.push(ColumnSchema {
-            name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
-            pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: false,
+            name: "j2s_id".to_string(),
+            original_name: "j2s_id".to_string(),
+            pg_type: PgType::Uuid,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: false,
         });
         schema.columns.push(ColumnSchema {
-            name: "tags".to_string(), original_name: "tags".to_string(),
-            pg_type: PgType::Array(Box::new(PgType::VarChar(2))), not_null: false, is_generated: false, is_parent_fk: false,
+            name: "tags".to_string(),
+            original_name: "tags".to_string(),
+            pg_type: PgType::Array(Box::new(PgType::VarChar(2))),
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
         });
         let path_map: HashMap<String, TableSchema> = HashMap::new();
         let mut anomalies = AnomalyCollector::new(None);
@@ -642,17 +846,38 @@ mod tests {
 
         insert_object(
             &path_map,
-            &mut InsertCtx { sinks: &mut sinks, anomalies: &mut anomalies },
-            &schema, &obj, Uuid::nil(), None, None,
-        ).unwrap();
+            &mut InsertCtx {
+                sinks: &mut sinks,
+                anomalies: &mut anomalies,
+            },
+            &schema,
+            &obj,
+            Uuid::nil(),
+            None,
+            None,
+        )
+        .unwrap();
 
         let row = std::str::from_utf8(&sinks["t"].0[0]).unwrap();
-        assert!(row.ends_with("\t{\"ab\",NULL,NULL}\n"), "the cell is written with NULL elements, got {row:?}");
+        assert!(
+            row.ends_with("\t{\"ab\",NULL,NULL}\n"),
+            "the cell is written with NULL elements, got {row:?}"
+        );
         let summaries = anomalies.summaries();
-        assert_eq!(summaries.len(), 1, "one (table, column) pair: {summaries:?}");
+        assert_eq!(
+            summaries.len(),
+            1,
+            "one (table, column) pair: {summaries:?}"
+        );
         let s = &summaries[0];
-        assert_eq!((s.column.as_str(), s.expected_type.as_str(), s.anomaly_count), ("tags", "VARCHAR(2)[]", 1));
-        assert_eq!(s.examples[0].actual_value, "\"abc\"", "the first faulty element is the example");
+        assert_eq!(
+            (s.column.as_str(), s.expected_type.as_str(), s.anomaly_count),
+            ("tags", "VARCHAR(2)[]", 1)
+        );
+        assert_eq!(
+            s.examples[0].actual_value, "\"abc\"",
+            "the first faulty element is the example"
+        );
     }
 
     #[test]
@@ -663,25 +888,44 @@ mod tests {
         schema.inferred_strategy = InferredStrategy::Columns;
         schema.set_ui_override(Some(UserOverride::Jsonb));
         schema.columns.push(ColumnSchema {
-            name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
-            pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: false,
+            name: "j2s_id".to_string(),
+            original_name: "j2s_id".to_string(),
+            pg_type: PgType::Uuid,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: false,
         });
         schema.columns.push(ColumnSchema {
-            name: "data".to_string(), original_name: "data".to_string(),
-            pg_type: PgType::Jsonb, not_null: false, is_generated: false, is_parent_fk: false,
+            name: "data".to_string(),
+            original_name: "data".to_string(),
+            pg_type: PgType::Jsonb,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
         });
         let path_map: HashMap<String, TableSchema> = HashMap::new();
         let mut anomalies = AnomalyCollector::new(None);
         let mut sinks: HashMap<String, CaptureSink> = HashMap::new();
         sinks.insert("t".to_string(), CaptureSink(Vec::new()));
-        let obj: serde_json::Map<String, Value> =
-            serde_json::from_str(r#"{"x":1}"#).unwrap();
+        let obj: serde_json::Map<String, Value> = serde_json::from_str(r#"{"x":1}"#).unwrap();
         insert_object(
             &path_map,
-            &mut InsertCtx { sinks: &mut sinks, anomalies: &mut anomalies },
-            &schema, &obj, Uuid::nil(), None, None,
-        ).unwrap();
+            &mut InsertCtx {
+                sinks: &mut sinks,
+                anomalies: &mut anomalies,
+            },
+            &schema,
+            &obj,
+            Uuid::nil(),
+            None,
+            None,
+        )
+        .unwrap();
         // Root Jsonb path writes exactly 1 row with a JSONB blob
-        assert_eq!(sinks["t"].0.len(), 1, "ui_override=Jsonb on root must produce one JSONB row");
+        assert_eq!(
+            sinks["t"].0.len(),
+            1,
+            "ui_override=Jsonb on root must produce one JSONB row"
+        );
     }
 }

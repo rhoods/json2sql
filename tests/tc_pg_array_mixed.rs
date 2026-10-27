@@ -7,7 +7,12 @@ use std::collections::HashSet;
 use json2sql::anomaly::reporter::AnomalyFormat;
 use json2sql::pipeline::{run_pipeline, PipelineConfig};
 
-fn base_config(url: String, schema: String, fixture: &str, wide_column_threshold: usize) -> PipelineConfig {
+fn base_config(
+    url: String,
+    schema: String,
+    fixture: &str,
+    wide_column_threshold: usize,
+) -> PipelineConfig {
     PipelineConfig {
         input: Some(integration::fixture(fixture)),
         root_table: "products".to_string(),
@@ -46,12 +51,29 @@ fn base_config(url: String, schema: String, fixture: &str, wide_column_threshold
 #[tokio::test]
 async fn test_pg_array_mixed_occurrences_e2e() {
     integration::with_pg_container(|client, schema, url| async move {
-        let result = run_pipeline(base_config(url, schema.clone(), "tc_pg_array_mixed.jsonl", 100)).await;
+        let result = run_pipeline(base_config(
+            url,
+            schema.clone(),
+            "tc_pg_array_mixed.jsonl",
+            100,
+        ))
+        .await;
         assert!(result.is_ok(), "pg_array_mixed pipeline failed: {result:?}");
-        assert_eq!(integration::row_count(&client, &schema, "products").await, 3);
+        assert_eq!(
+            integration::row_count(&client, &schema, "products").await,
+            3
+        );
 
-        let sql = format!("SELECT array_to_string(\"tags\", ',') FROM \"{schema}\".\"products\" ORDER BY \"id\"");
-        let tags: Vec<String> = client.query(&sql, &[]).await.unwrap().iter().map(|r| r.get(0)).collect();
+        let sql = format!(
+            "SELECT array_to_string(\"tags\", ',') FROM \"{schema}\".\"products\" ORDER BY \"id\""
+        );
+        let tags: Vec<String> = client
+            .query(&sql, &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
         assert_eq!(tags, vec!["bio", "bio,vegan", "local"]);
     })
     .await;
@@ -121,14 +143,29 @@ async fn test_pg_array_sibling_union_keeps_arrays_e2e() {
 #[tokio::test]
 async fn test_pg_array_object_occurrence_goes_to_child_e2e() {
     integration::with_pg_container(|client, schema, url| async move {
-        let result = run_pipeline(base_config(url, schema.clone(), "tc_pg_array_object.jsonl", 100)).await;
-        assert!(result.is_ok(), "pg_array_object pipeline failed: {result:?}");
+        let result = run_pipeline(base_config(
+            url,
+            schema.clone(),
+            "tc_pg_array_object.jsonl",
+            100,
+        ))
+        .await;
+        assert!(
+            result.is_ok(),
+            "pg_array_object pipeline failed: {result:?}"
+        );
 
         let sql = format!(
             "SELECT p.\"id\", t.\"x\" FROM \"{schema}\".\"products_tags\" t \
              JOIN \"{schema}\".\"products\" p ON t.\"j2s_products_id\" = p.\"j2s_id\""
         );
-        let rows: Vec<(i32, i32)> = client.query(&sql, &[]).await.unwrap().iter().map(|r| (r.get(0), r.get(1))).collect();
+        let rows: Vec<(i32, i32)> = client
+            .query(&sql, &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect();
         assert_eq!(rows, vec![(2, 1)]);
     })
     .await;

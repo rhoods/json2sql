@@ -552,9 +552,16 @@ mod tests {
 
     #[test]
     fn fewer_than_two_columns_give_no_group() {
-        assert_eq!(lexical_groups(&[], &LexicalParams::default()).unwrap().len(), 0);
         assert_eq!(
-            lexical_groups(&stems(&["kiwi_red"]), &LexicalParams::default()).unwrap().len(),
+            lexical_groups(&[], &LexicalParams::default())
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            lexical_groups(&stems(&["kiwi_red"]), &LexicalParams::default())
+                .unwrap()
+                .len(),
             0
         );
     }

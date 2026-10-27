@@ -29,9 +29,11 @@ use super::super::naming::NamingRegistry;
 use super::super::observer::TableEntry;
 use super::super::strategies::StrategyName;
 use super::super::suffix_detector::detect_suffix_schema;
-use super::super::table_schema::{ChildKind, ColumnSchema, TableSchema, InferredStrategy};
+use super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
 use super::super::type_tracker::{widen_pg_types, PgType};
-use super::super::wide_strategies::{apply_structured_pivot_columns, apply_wide_strategy_columns, suggest_wide_strategy};
+use super::super::wide_strategies::{
+    apply_structured_pivot_columns, apply_wide_strategy_columns, suggest_wide_strategy,
+};
 use super::base::is_scalar_column;
 use super::SchemaFinalizer;
 
@@ -45,8 +47,11 @@ pub(super) fn apply_wide_table_strategies(
     tables_with_object_children: &std::collections::HashSet<String>,
 ) {
     let mut extra_schemas: Vec<TableSchema> = Vec::new();
-    let schema_map: std::collections::HashMap<String, usize> =
-        schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+    let schema_map: std::collections::HashMap<String, usize> = schemas
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.name.clone(), i))
+        .collect();
     // Toutes les tables déjà nommées à ce stade — sert à garantir l'unicité des noms de
     // compagnon `_pivot` synthétiques (mis à jour au fil des créations pour couvrir aussi
     // les collisions entre deux compagnons créés dans le même passage).
@@ -65,7 +70,13 @@ pub(super) fn apply_wide_table_strategies(
             if !matches!(schemas[idx].inferred_strategy, InferredStrategy::Columns) {
                 continue;
             }
-            if let Some(extra) = apply_wide_strategy(&mut schemas[idx], entry, config, tables_with_object_children, &existing_names) {
+            if let Some(extra) = apply_wide_strategy(
+                &mut schemas[idx],
+                entry,
+                config,
+                tables_with_object_children,
+                &existing_names,
+            ) {
                 existing_names.insert(extra.name.clone());
                 extra_schemas.push(extra);
             }
@@ -74,14 +85,19 @@ pub(super) fn apply_wide_table_strategies(
     schemas.extend(extra_schemas);
 }
 
-pub(super) fn build_finalizer_config(finalizer: &SchemaFinalizer, text_threshold: u32) -> FinalizerConfig {
+pub(super) fn build_finalizer_config(
+    finalizer: &SchemaFinalizer,
+    text_threshold: u32,
+) -> FinalizerConfig {
     FinalizerConfig {
         wide_column_threshold: finalizer.wide_column_threshold,
         stable_threshold: finalizer.stable_threshold,
         rare_threshold: finalizer.rare_threshold,
         text_threshold,
         disable_pivot: finalizer.disabled_strategies.contains(&StrategyName::Pivot),
-        disable_structured_pivot: finalizer.disabled_strategies.contains(&StrategyName::StructuredPivot),
+        disable_structured_pivot: finalizer
+            .disabled_strategies
+            .contains(&StrategyName::StructuredPivot),
     }
 }
 
@@ -105,7 +121,10 @@ fn apply_wide_strategy(
     tables_with_object_children: &std::collections::HashSet<String>,
     existing_names: &std::collections::HashSet<String>,
 ) -> Option<TableSchema> {
-    let is_wide_eligible = matches!(entry.child_kind, Some(ChildKind::Object | ChildKind::ObjectArray) | None);
+    let is_wide_eligible = matches!(
+        entry.child_kind,
+        Some(ChildKind::Object | ChildKind::ObjectArray) | None
+    );
     // Only scalar columns make a table wide. PG array columns stay on the table whatever the
     // strategy, so they neither raise the width nor dilute the stable ratio (#84).
     let scalar_col_count = schema.data_columns().filter(|c| !is_pg_array(c)).count();
@@ -130,15 +149,31 @@ fn apply_wide_strategy(
         eprintln!(
             "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: Columns \
             (high stable ratio — legitimate schema, not key explosion)",
-            schema.name, scalar_col_count, ratio_stable * 100.0
+            schema.name,
+            scalar_col_count,
+            ratio_stable * 100.0
         );
         return None;
     }
     if is_root && has_object_children {
-        return Some(apply_autosplit_strategy(schema, entry, config, row_count, scalar_col_count, ratio_stable));
+        return Some(apply_autosplit_strategy(
+            schema,
+            entry,
+            config,
+            row_count,
+            scalar_col_count,
+            ratio_stable,
+        ));
     }
 
-    apply_non_autosplit_strategy(schema, entry, config, scalar_col_count, ratio_stable, existing_names)
+    apply_non_autosplit_strategy(
+        schema,
+        entry,
+        config,
+        scalar_col_count,
+        ratio_stable,
+        existing_names,
+    )
 }
 
 /// Chooses `StructuredPivot`, Jsonb, or the identity/companion split (Pivot) for a table that
@@ -166,19 +201,28 @@ fn apply_non_autosplit_strategy(
         return None;
     }
 
-    let strategy = if config.disable_pivot { InferredStrategy::Jsonb } else { suggest_wide_strategy(entry) };
+    let strategy = if config.disable_pivot {
+        InferredStrategy::Jsonb
+    } else {
+        suggest_wide_strategy(entry)
+    };
     if strategy == InferredStrategy::Pivot {
         eprintln!(
             "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: Pivot \
             (split identité/compagnon)",
-            schema.name, scalar_col_count, ratio_stable * 100.0
+            schema.name,
+            scalar_col_count,
+            ratio_stable * 100.0
         );
         return Some(apply_pivot_split(schema, entry, config, existing_names));
     }
 
     eprintln!(
         "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: {:?}",
-        schema.name, scalar_col_count, ratio_stable * 100.0, strategy
+        schema.name,
+        scalar_col_count,
+        ratio_stable * 100.0,
+        strategy
     );
     apply_wide_strategy_columns(schema, strategy);
     None
@@ -199,8 +243,11 @@ fn apply_pivot_split(
     config: &FinalizerConfig,
     existing_names: &std::collections::HashSet<String>,
 ) -> TableSchema {
-    let all_keys: std::collections::HashSet<String> =
-        schema.data_columns().filter(|c| !is_pg_array(c)).map(|c| c.original_name.clone()).collect();
+    let all_keys: std::collections::HashSet<String> = schema
+        .data_columns()
+        .filter(|c| !is_pg_array(c))
+        .map(|c| c.original_name.clone())
+        .collect();
     schema.columns.retain(|c| c.is_generated || is_pg_array(c));
     let wide_name = unique_pivot_name(&schema.name, existing_names);
     let value_type = infer_medium_value_type(entry, &all_keys);
@@ -210,10 +257,17 @@ fn apply_pivot_split(
 /// Companion name for `apply_pivot_split`: `{base}_pivot`, falling back to `{base}_pivot_eav`
 /// on self-collision (schema already named `..._pivot`) and to an incremental `_pivot_2`,
 /// `_pivot_3`, ... on collision with any other already-known table name.
-fn unique_pivot_name(schema_name: &str, existing_names: &std::collections::HashSet<String>) -> String {
+fn unique_pivot_name(
+    schema_name: &str,
+    existing_names: &std::collections::HashSet<String>,
+) -> String {
     let base_name = schema_name.strip_suffix("_pivot").unwrap_or(schema_name);
     let candidate = format!("{base_name}_pivot");
-    let mut candidate = if candidate == schema_name { format!("{base_name}_pivot_eav") } else { candidate };
+    let mut candidate = if candidate == schema_name {
+        format!("{base_name}_pivot_eav")
+    } else {
+        candidate
+    };
     let mut suffix_n = 2;
     while existing_names.contains(&candidate) {
         candidate = format!("{base_name}_pivot_{suffix_n}");
@@ -235,8 +289,12 @@ fn collect_medium_keys(
     rare_threshold: f64,
     stable_threshold: f64,
 ) -> std::collections::HashSet<String> {
-    entry.columns.iter()
-        .filter(|(k, t)| !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k))
+    entry
+        .columns
+        .iter()
+        .filter(|(k, t)| {
+            !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k)
+        })
         .filter(|(_, t)| {
             let freq = t.total_count as f64 / row_count;
             freq >= rare_threshold && freq < stable_threshold
@@ -249,7 +307,8 @@ fn infer_medium_value_type(
     entry: &TableEntry,
     medium_keys: &std::collections::HashSet<String>,
 ) -> PgType {
-    medium_keys.iter()
+    medium_keys
+        .iter()
         .filter_map(|k| entry.columns.get(k))
         .fold(None::<PgType>, |acc, t| {
             Some(acc.map_or_else(|| t.to_pg_type(), |a| widen_pg_types(a, &t.to_pg_type())))
@@ -258,17 +317,38 @@ fn infer_medium_value_type(
 }
 
 /// Rare keys are dropped by `AutoSplit` (data loss): name them on stderr so the drop is never silent.
-fn warn_rare_keys(entry: &TableEntry, row_count: f64, rare_threshold: f64, table: &str, wide_name: &str) {
-    let mut rare_keys: Vec<&str> = entry.columns.iter()
-        .filter(|(k, t)| !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k))
+fn warn_rare_keys(
+    entry: &TableEntry,
+    row_count: f64,
+    rare_threshold: f64,
+    table: &str,
+    wide_name: &str,
+) {
+    let mut rare_keys: Vec<&str> = entry
+        .columns
+        .iter()
+        .filter(|(k, t)| {
+            !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k)
+        })
         .filter(|(_, t)| (t.total_count as f64 / row_count) < rare_threshold)
         .map(|(k, _)| k.as_str())
         .collect();
-    if rare_keys.is_empty() { return; }
+    if rare_keys.is_empty() {
+        return;
+    }
     rare_keys.sort_unstable();
-    let shown = rare_keys.iter().take(10).copied().collect::<Vec<_>>().join(", ");
+    let shown = rare_keys
+        .iter()
+        .take(10)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
     let more = rare_keys.len().saturating_sub(10);
-    let more = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+    let more = if more > 0 {
+        format!(" (+{more} more)")
+    } else {
+        String::new()
+    };
     eprintln!(
         "  WARNING: {} rare key(s) in '{table}' are NOT imported (frequency < --rare-threshold {rare_threshold}): \
         {shown}{more}. Use --rare-threshold 0 to keep them in '{wide_name}'.",
@@ -284,27 +364,53 @@ fn apply_autosplit_strategy(
     scalar_col_count: usize,
     ratio_stable: f64,
 ) -> TableSchema {
-    let medium_keys = collect_medium_keys(entry, row_count, config.rare_threshold, config.stable_threshold);
+    let medium_keys = collect_medium_keys(
+        entry,
+        row_count,
+        config.rare_threshold,
+        config.stable_threshold,
+    );
     // pg-array columns are kept unconditionally: their tracker counts elements, not occurrences,
     // and the scalar EAV companion cannot hold them (issue #48).
     schema.columns.retain(|c| {
-        c.is_generated || is_pg_array(c) || entry.columns.get(&c.original_name)
-            .is_some_and(|t| t.total_count as f64 / row_count >= config.stable_threshold)
+        c.is_generated
+            || is_pg_array(c)
+            || entry
+                .columns
+                .get(&c.original_name)
+                .is_some_and(|t| t.total_count as f64 / row_count >= config.stable_threshold)
     });
     // Scalars only, like `scalar_col_count`: the kept pg-array columns would otherwise hide rare keys.
     let stable_col_count = schema.data_columns().filter(|c| !is_pg_array(c)).count();
-    let rare_count = scalar_col_count.saturating_sub(stable_col_count).saturating_sub(medium_keys.len());
+    let rare_count = scalar_col_count
+        .saturating_sub(stable_col_count)
+        .saturating_sub(medium_keys.len());
     // Strip any existing `_wide` suffix to avoid `foo_wide_wide`; fall back to `_eav` on collision.
     let base_name = schema.name.strip_suffix("_wide").unwrap_or(&schema.name);
     let wide_candidate = format!("{base_name}_wide");
-    let wide_name = if wide_candidate == schema.name { format!("{base_name}_eav") } else { wide_candidate };
+    let wide_name = if wide_candidate == schema.name {
+        format!("{base_name}_eav")
+    } else {
+        wide_candidate
+    };
     eprintln!(
         "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: AutoSplit \
         ({} stable cols, {} medium → {}, {} rare dropped)",
-        schema.name, scalar_col_count, ratio_stable * 100.0,
-        stable_col_count, medium_keys.len(), wide_name, rare_count,
+        schema.name,
+        scalar_col_count,
+        ratio_stable * 100.0,
+        stable_col_count,
+        medium_keys.len(),
+        wide_name,
+        rare_count,
     );
-    warn_rare_keys(entry, row_count, config.rare_threshold, &schema.name, &wide_name);
+    warn_rare_keys(
+        entry,
+        row_count,
+        config.rare_threshold,
+        &schema.name,
+        &wide_name,
+    );
     let value_type = infer_medium_value_type(entry, &medium_keys);
     build_wide_pivot_schema(schema, wide_name, value_type, medium_keys, config)
 }
@@ -316,18 +422,31 @@ fn build_wide_pivot_schema(
     medium_keys: std::collections::HashSet<String>,
     config: &FinalizerConfig,
 ) -> TableSchema {
-    let mut wide_schema = TableSchema::new(wide_name.clone(), vec![wide_name.clone()], schema.depth + 1);
+    let mut wide_schema =
+        TableSchema::new(wide_name.clone(), vec![wide_name.clone()], schema.depth + 1);
     wide_schema.parent_table = Some(schema.name.clone());
     wide_schema.child_kind = Some(ChildKind::Object);
-    wide_schema.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
-    wide_schema.columns.push(ColumnSchema::parent_fk(&schema.name));
+    wide_schema
+        .columns
+        .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+    wide_schema
+        .columns
+        .push(ColumnSchema::parent_fk(&schema.name));
     wide_schema.columns.push(ColumnSchema {
-        name: "key".to_string(), original_name: "key".to_string(),
-        pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false,
+        name: "key".to_string(),
+        original_name: "key".to_string(),
+        pg_type: PgType::Text,
+        not_null: true,
+        is_generated: false,
+        is_parent_fk: false,
     });
     wide_schema.columns.push(ColumnSchema {
-        name: "value".to_string(), original_name: "value".to_string(),
-        pg_type: value_type, not_null: false, is_generated: false, is_parent_fk: false,
+        name: "value".to_string(),
+        original_name: "value".to_string(),
+        pg_type: value_type,
+        not_null: false,
+        is_generated: false,
+        is_parent_fk: false,
     });
     wide_schema.inferred_strategy = InferredStrategy::Pivot;
     schema.inferred_strategy = InferredStrategy::AutoSplit {
@@ -382,9 +501,9 @@ mod tests {
     #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn already_assigned_schema_is_never_reprocessed() {
         let mut observer = SchemaObserver::new(256);
-        let obj: serde_json::Map<String, Value> = serde_json::from_str(
-            r#"{"id": 1, "foo": {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}}"#,
-        ).unwrap();
+        let obj: serde_json::Map<String, Value> =
+            serde_json::from_str(r#"{"id": 1, "foo": {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}}"#)
+                .unwrap();
         observer.observe_root("root", &obj);
 
         let mut naming = NamingRegistry::new();
@@ -394,32 +513,60 @@ mod tests {
 
         // Simule la Phase 2 ayant déjà fusionné "root_foo" en SiblingCollapse — une forme de
         // colonnes différente de ce que le TableEntry brut (5 colonnes scalaires) produirait.
-        let mut fused = TableSchema::new("root_foo".to_string(), vec!["root".to_string(), "foo".to_string()], 1);
+        let mut fused = TableSchema::new(
+            "root_foo".to_string(),
+            vec!["root".to_string(), "foo".to_string()],
+            1,
+        );
         fused.parent_table = Some("root".to_string());
         fused.inferred_strategy = InferredStrategy::SiblingCollapse(SiblingSchema {
-            key_col_name: "key".to_string(), key_shape: KeyShape::Slug, array_children: false,
+            key_col_name: "key".to_string(),
+            key_shape: KeyShape::Slug,
+            array_children: false,
         });
-        fused.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        fused
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         fused.columns.push(ColumnSchema::parent_fk("root"));
         // 3 colonnes data > wide_column_threshold(2) — nécessaire pour que apply_wide_strategy
         // dépasse le premier seuil et atteigne réellement le chemin de retraitement.
         for col_name in ["key", "x1", "imgid"] {
             fused.columns.push(ColumnSchema {
-                name: col_name.to_string(), original_name: col_name.to_string(),
-                pg_type: PgType::Text, not_null: true, is_generated: false, is_parent_fk: false,
+                name: col_name.to_string(),
+                original_name: col_name.to_string(),
+                pg_type: PgType::Text,
+                not_null: true,
+                is_generated: false,
+                is_parent_fk: false,
             });
         }
         let mut schemas = vec![fused];
 
         apply_wide_table_strategies(
-            &mut schemas, &observer.tables, &naming, &make_config(), &std::collections::HashSet::new(),
+            &mut schemas,
+            &observer.tables,
+            &naming,
+            &make_config(),
+            &std::collections::HashSet::new(),
         );
 
-        assert_eq!(schemas.len(), 1, "aucun compagnon ne doit être créé à partir d'une table déjà fusionnée");
-        assert!(
-            matches!(schemas[0].inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-            "le SiblingCollapse de la Phase 2 doit survivre intact — trouvé : {:?}", schemas[0].inferred_strategy
+        assert_eq!(
+            schemas.len(),
+            1,
+            "aucun compagnon ne doit être créé à partir d'une table déjà fusionnée"
         );
-        assert_eq!(schemas[0].data_columns().count(), 3, "colonnes inchangées (key, x1, imgid)");
+        assert!(
+            matches!(
+                schemas[0].inferred_strategy,
+                InferredStrategy::SiblingCollapse(_)
+            ),
+            "le SiblingCollapse de la Phase 2 doit survivre intact — trouvé : {:?}",
+            schemas[0].inferred_strategy
+        );
+        assert_eq!(
+            schemas[0].data_columns().count(),
+            3,
+            "colonnes inchangées (key, x1, imgid)"
+        );
     }
 }
