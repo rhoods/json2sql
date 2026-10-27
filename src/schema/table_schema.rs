@@ -459,25 +459,20 @@ pub enum UserOverride {
     /// Inline child as a JSONB column on the parent — IHM override only.
     JsonbFlatten,
     /// Inline child's scalar fields as prefixed columns on the parent.
-    Flatten {
-        prefix: Arc<str>,
-        max_depth: u8,
-    },
+    Flatten { prefix: Arc<str>, max_depth: u8 },
     /// Normalize dynamic keys: each JSON key becomes a row with the key as a typed ID column.
-    NormalizeDynamicKeys {
-        id_column: Arc<str>,
-    },
+    NormalizeDynamicKeys { id_column: Arc<str> },
 }
 
 impl From<&UserOverride> for InferredStrategy {
     fn from(ov: &UserOverride) -> Self {
         match ov {
-            UserOverride::Columns                           => Self::Columns,
-            UserOverride::Pivot                             => Self::Pivot,
-            UserOverride::Jsonb                             => Self::Jsonb,
-            UserOverride::Skip                              => Self::Ignore,
-            UserOverride::JsonbFlatten                      => Self::JsonbFlatten,
-            UserOverride::Flatten { prefix, max_depth }     => Self::Flatten {
+            UserOverride::Columns => Self::Columns,
+            UserOverride::Pivot => Self::Pivot,
+            UserOverride::Jsonb => Self::Jsonb,
+            UserOverride::Skip => Self::Ignore,
+            UserOverride::JsonbFlatten => Self::JsonbFlatten,
+            UserOverride::Flatten { prefix, max_depth } => Self::Flatten {
                 prefix: prefix.clone(),
                 max_depth: *max_depth,
             },
@@ -528,7 +523,9 @@ impl ColumnSchema {
         debug_assert!(
             parent_name.len() <= PG_TABLE_MAX_IDENT,
             "parent_name '{}' is {} chars — NamingRegistry should have truncated it to ≤{}",
-            parent_name, parent_name.len(), PG_TABLE_MAX_IDENT
+            parent_name,
+            parent_name.len(),
+            PG_TABLE_MAX_IDENT
         );
         let col_name = format!("j2s_{parent_name}_id");
         Self {
@@ -763,8 +760,8 @@ impl std::fmt::Display for KeyShape {
         match self {
             Self::Numeric => write!(f, "NUMERIC"),
             Self::IsoLang => write!(f, "ISO_LANG"),
-            Self::Slug    => write!(f, "SLUG"),
-            Self::Mixed   => write!(f, "MIXED"),
+            Self::Slug => write!(f, "SLUG"),
+            Self::Mixed => write!(f, "MIXED"),
         }
     }
 }
@@ -788,13 +785,21 @@ mod tests {
     #[test]
     fn child_routes_round_trip_json() {
         let mut s = make_schema("root");
-        s.child_routes.insert("k1".to_string(), "root_pivot_k1".to_string());
-        s.child_routes.insert("k2".to_string(), "root_pivot_k2".to_string());
+        s.child_routes
+            .insert("k1".to_string(), "root_pivot_k1".to_string());
+        s.child_routes
+            .insert("k2".to_string(), "root_pivot_k2".to_string());
 
         let json = serde_json::to_string(&s).unwrap();
         let back: TableSchema = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.child_routes.get("k1").map(std::string::String::as_str), Some("root_pivot_k1"));
-        assert_eq!(back.child_routes.get("k2").map(std::string::String::as_str), Some("root_pivot_k2"));
+        assert_eq!(
+            back.child_routes.get("k1").map(std::string::String::as_str),
+            Some("root_pivot_k1")
+        );
+        assert_eq!(
+            back.child_routes.get("k2").map(std::string::String::as_str),
+            Some("root_pivot_k2")
+        );
     }
 
     #[test]
@@ -844,8 +849,13 @@ mod tests {
             UserOverride::Jsonb,
             UserOverride::Skip,
             UserOverride::JsonbFlatten,
-            UserOverride::Flatten { prefix: "p_".into(), max_depth: 1 },
-            UserOverride::NormalizeDynamicKeys { id_column: "key_id".into() },
+            UserOverride::Flatten {
+                prefix: "p_".into(),
+                max_depth: 1,
+            },
+            UserOverride::NormalizeDynamicKeys {
+                id_column: "key_id".into(),
+            },
         ];
         for v in variants {
             let json = serde_json::to_string(&v).unwrap();
@@ -856,39 +866,61 @@ mod tests {
 
     #[test]
     fn from_user_override_pivot() {
-        assert_eq!(InferredStrategy::from(&UserOverride::Pivot), InferredStrategy::Pivot);
+        assert_eq!(
+            InferredStrategy::from(&UserOverride::Pivot),
+            InferredStrategy::Pivot
+        );
     }
 
     #[test]
     fn from_user_override_jsonb() {
-        assert_eq!(InferredStrategy::from(&UserOverride::Jsonb), InferredStrategy::Jsonb);
+        assert_eq!(
+            InferredStrategy::from(&UserOverride::Jsonb),
+            InferredStrategy::Jsonb
+        );
     }
 
     #[test]
     fn from_user_override_skip_becomes_ignore() {
-        assert_eq!(InferredStrategy::from(&UserOverride::Skip), InferredStrategy::Ignore);
+        assert_eq!(
+            InferredStrategy::from(&UserOverride::Skip),
+            InferredStrategy::Ignore
+        );
     }
 
     #[test]
     fn from_user_override_jsonb_flatten() {
-        assert_eq!(InferredStrategy::from(&UserOverride::JsonbFlatten), InferredStrategy::JsonbFlatten);
+        assert_eq!(
+            InferredStrategy::from(&UserOverride::JsonbFlatten),
+            InferredStrategy::JsonbFlatten
+        );
     }
 
     #[test]
     fn from_user_override_flatten() {
-        let ov = UserOverride::Flatten { prefix: "img_".into(), max_depth: 2 };
+        let ov = UserOverride::Flatten {
+            prefix: "img_".into(),
+            max_depth: 2,
+        };
         assert_eq!(
             InferredStrategy::from(&ov),
-            InferredStrategy::Flatten { prefix: "img_".into(), max_depth: 2 }
+            InferredStrategy::Flatten {
+                prefix: "img_".into(),
+                max_depth: 2
+            }
         );
     }
 
     #[test]
     fn from_user_override_normalize_dynamic_keys() {
-        let ov = UserOverride::NormalizeDynamicKeys { id_column: "image_id".into() };
+        let ov = UserOverride::NormalizeDynamicKeys {
+            id_column: "image_id".into(),
+        };
         assert_eq!(
             InferredStrategy::from(&ov),
-            InferredStrategy::NormalizeDynamicKeys { id_column: "image_id".into() }
+            InferredStrategy::NormalizeDynamicKeys {
+                id_column: "image_id".into()
+            }
         );
     }
 
@@ -928,8 +960,14 @@ mod tests {
     fn table_schema_new_override_fields_absent_in_json() {
         let s = make_schema("t");
         let json = serde_json::to_string(&s).unwrap();
-        assert!(!json.contains("toml_override"), "toml_override should be absent when None");
-        assert!(!json.contains("ui_override"), "ui_override should be absent when None");
+        assert!(
+            !json.contains("toml_override"),
+            "toml_override should be absent when None"
+        );
+        assert!(
+            !json.contains("ui_override"),
+            "ui_override should be absent when None"
+        );
     }
 
     #[test]
@@ -981,21 +1019,30 @@ mod tests {
     /// `effective_strategy()` matches the documented priority after *every single* call.
     #[test]
     fn effective_strategy_never_diverges_across_setter_sequences() {
-        let overrides = [None, Some(UserOverride::Pivot), Some(UserOverride::Jsonb), Some(UserOverride::Columns)];
+        let overrides = [
+            None,
+            Some(UserOverride::Pivot),
+            Some(UserOverride::Jsonb),
+            Some(UserOverride::Columns),
+        ];
 
         for ui in &overrides {
             for toml in &overrides {
                 // Two independent schemas to cover both mutation orders (ui-then-toml and
                 // toml-then-ui).
                 let mut ui_then_toml = make_schema("t");
-                ui_then_toml.inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column: "k".into() };
+                ui_then_toml.inferred_strategy = InferredStrategy::NormalizeDynamicKeys {
+                    id_column: "k".into(),
+                };
                 ui_then_toml.set_ui_override(ui.clone());
                 assert_expected_effective_strategy(&ui_then_toml, ui.as_ref(), None);
                 ui_then_toml.set_toml_override(toml.clone());
                 assert_expected_effective_strategy(&ui_then_toml, ui.as_ref(), toml.as_ref());
 
                 let mut toml_then_ui = make_schema("t");
-                toml_then_ui.inferred_strategy = InferredStrategy::NormalizeDynamicKeys { id_column: "k".into() };
+                toml_then_ui.inferred_strategy = InferredStrategy::NormalizeDynamicKeys {
+                    id_column: "k".into(),
+                };
                 toml_then_ui.set_toml_override(toml.clone());
                 assert_expected_effective_strategy(&toml_then_ui, None, toml.as_ref());
                 toml_then_ui.set_ui_override(ui.clone());
@@ -1029,7 +1076,10 @@ mod tests {
     fn effective_strategy_borrows_when_no_override() {
         let mut s = make_schema("t");
         s.inferred_strategy = InferredStrategy::Pivot;
-        assert!(matches!(s.effective_strategy(), std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(
+            s.effective_strategy(),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
@@ -1043,8 +1093,14 @@ mod tests {
     #[test]
     fn table_schema_absorbs_children_via_inferred_strategy() {
         let mut s = make_schema("t");
-        s.inferred_strategy = InferredStrategy::Flatten { prefix: "p_".into(), max_depth: 1 };
-        assert!(s.absorbs_children(), "Flatten (inferred) must absorb children");
+        s.inferred_strategy = InferredStrategy::Flatten {
+            prefix: "p_".into(),
+            max_depth: 1,
+        };
+        assert!(
+            s.absorbs_children(),
+            "Flatten (inferred) must absorb children"
+        );
     }
 
     #[test]
@@ -1052,7 +1108,10 @@ mod tests {
         let mut s = make_schema("t");
         s.inferred_strategy = InferredStrategy::Columns;
         s.ui_override = Some(UserOverride::JsonbFlatten);
-        assert!(s.absorbs_children(), "JsonbFlatten ui_override must absorb children");
+        assert!(
+            s.absorbs_children(),
+            "JsonbFlatten ui_override must absorb children"
+        );
     }
 
     #[test]

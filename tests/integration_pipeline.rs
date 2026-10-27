@@ -62,7 +62,10 @@ async fn test_pipeline_dry_run_no_db() {
         ..base_config("users", "users.json")
     };
     let result = run_pipeline(config).await;
-    assert!(result.is_ok(), "dry_run should succeed without a DB: {result:?}");
+    assert!(
+        result.is_ok(),
+        "dry_run should succeed without a DB: {result:?}"
+    );
 }
 
 /// Full end-to-end import via `PipelineConfig` (no CLI) — proves the API is usable in tests.

@@ -82,15 +82,20 @@ fn next_flush_candidate(
     parent_of: &HashMap<String, String>,
     rank: impl Fn(&str) -> Option<bool>,
 ) -> Option<String> {
-    let parent_done = |table: &str| parent_of.get(table).is_none_or(|p| {
-        !in_flight.contains_key(p) && buffers.get(p).is_none_or(bytes::BytesMut::is_empty)
-    });
-    buffers.iter()
+    let parent_done = |table: &str| {
+        parent_of.get(table).is_none_or(|p| {
+            !in_flight.contains_key(p) && buffers.get(p).is_none_or(bytes::BytesMut::is_empty)
+        })
+    };
+    buffers
+        .iter()
         .filter(|(_, b)| !b.is_empty())
         .filter_map(|(k, b)| rank(k).map(|own| (k, b, own)))
         .filter(|(k, b, _)| match mode {
             FlushMode::Normal => b.len() as u64 >= threshold,
-            FlushMode::Paused => b.len() as u64 >= threshold || idle_bytes >= DEFAULT_LOW_FLUSHER_BYTES,
+            FlushMode::Paused => {
+                b.len() as u64 >= threshold || idle_bytes >= DEFAULT_LOW_FLUSHER_BYTES
+            }
             FlushMode::Drain => parent_done(k),
         })
         .max_by_key(|(_, b, own)| (*own, b.len()))
@@ -100,20 +105,18 @@ fn next_flush_candidate(
 /// RAM usage ratio in [0.0, 1.0]. Returns 0.0 when total memory is zero.
 #[allow(clippy::cast_precision_loss)] // byte counts fit well within f64's 52-bit mantissa for any realistic RAM size
 fn ram_used_ratio(available: u64, total: u64) -> f64 {
-    if total == 0 { return 0.0; }
+    if total == 0 {
+        return 0.0;
+    }
     total.saturating_sub(available) as f64 / total as f64
 }
 
 fn format_flusher_pause_log(total_mb: u64, high_mb: u64) -> String {
-    format!(
-        "[FLUSHER] {total_mb} MB in buffers > {high_mb} MB threshold — workers paused"
-    )
+    format!("[FLUSHER] {total_mb} MB in buffers > {high_mb} MB threshold — workers paused")
 }
 
 fn format_flusher_resume_log(total_mb: u64, low_mb: u64) -> String {
-    format!(
-        "[FLUSHER] {total_mb} MB in buffers < {low_mb} MB threshold — workers resumed"
-    )
+    format!("[FLUSHER] {total_mb} MB in buffers < {low_mb} MB threshold — workers resumed")
 }
 
 fn format_copy_start_log(table_id: &str, buf_len: usize, rows: u64) -> String {
@@ -136,26 +139,37 @@ async fn open_pool(pg_url: &str, size: usize, freeze: bool) -> Result<Vec<(usize
         if freeze {
             // The transaction idles between COPYs: no idle-in-transaction timeout. READ COMMITTED
             // explicitly: a repeatable-read default keeps a snapshot, and COPY FREEZE is refused.
-            conn.batch_execute("SET idle_in_transaction_session_timeout = 0").await
+            conn.batch_execute("SET idle_in_transaction_session_timeout = 0")
+                .await
                 .map_err(|e| pg_err("open load transaction", &e))?;
-            conn.batch_execute("BEGIN ISOLATION LEVEL READ COMMITTED").await
+            conn.batch_execute("BEGIN ISOLATION LEVEL READ COMMITTED")
+                .await
                 .map_err(|e| pg_err("open load transaction", &e))?;
         }
         Ok::<_, J2sError>((id, conn))
-    })).await
+    }))
+    .await
 }
 
 /// First COPY of a table on its owner connection, inside the load transaction: locks the
 /// table, then truncates it if it is empty, which makes `COPY FREEZE` valid in this transaction.
 /// A table that already has rows is never truncated: returns `false`, and it gets a plain COPY.
 async fn claim_for_freeze(client: &Client, table: &str) -> Result<bool> {
-    cancel_on_drop(client, client.batch_execute(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"))).await
-        .map_err(|e| pg_err(&format!("LOCK {table}"), &e))?;
-    let empty: bool = client.query_one(&format!("SELECT NOT EXISTS (SELECT 1 FROM {table})"), &[]).await
+    cancel_on_drop(
+        client,
+        client.batch_execute(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")),
+    )
+    .await
+    .map_err(|e| pg_err(&format!("LOCK {table}"), &e))?;
+    let empty: bool = client
+        .query_one(&format!("SELECT NOT EXISTS (SELECT 1 FROM {table})"), &[])
+        .await
         .map_err(|e| pg_err(&format!("emptiness check {table}"), &e))?
         .get(0);
     if empty {
-        client.batch_execute(&format!("TRUNCATE {table}")).await
+        client
+            .batch_execute(&format!("TRUNCATE {table}"))
+            .await
             .map_err(|e| pg_err(&format!("TRUNCATE {table}"), &e))?;
     }
     Ok(empty)
@@ -164,7 +178,12 @@ async fn claim_for_freeze(client: &Client, table: &str) -> Result<bool> {
 /// One COPY task. `claim` (`FreezeTarget` of a table's first COPY in a FREEZE load) claims
 /// the table first and switches to `COPY FREEZE` when it could be truncated. Returns the claim
 /// outcome, if any.
-async fn copy_task(client: &Client, buf: bytes::Bytes, copy_sql: &str, claim: Option<(String, String)>) -> Result<Option<bool>> {
+async fn copy_task(
+    client: &Client,
+    buf: bytes::Bytes,
+    copy_sql: &str,
+    claim: Option<(String, String)>,
+) -> Result<Option<bool>> {
     let Some((table, freeze_sql)) = claim else {
         flush_mem_sink_to_pg(buf, copy_sql, client).await?;
         return Ok(None);
@@ -236,7 +255,10 @@ pub(super) async fn run_flusher(
     let fail = |table_name: &str, e: J2sError| {
         error_flag.store(true, Ordering::Release);
         if let Some(tx) = progress_tx.as_ref() {
-            let _ = tx.send(ProgressEvent::Pass2Error { table_name: table_name.to_string(), message: e.to_string() });
+            let _ = tx.send(ProgressEvent::Pass2Error {
+                table_name: table_name.to_string(),
+                message: e.to_string(),
+            });
         }
         pause_flag.store(false, Ordering::Release);
         e
@@ -245,9 +267,14 @@ pub(super) async fn run_flusher(
     loop {
         // Resume workers once enough bytes have actually been written to PG.
         if pause_flag.load(Ordering::Acquire) && total_buffered < DEFAULT_LOW_FLUSHER_BYTES {
-            let msg = format_flusher_resume_log(total_buffered / 1024 / 1024, DEFAULT_LOW_FLUSHER_BYTES / 1024 / 1024);
+            let msg = format_flusher_resume_log(
+                total_buffered / 1024 / 1024,
+                DEFAULT_LOW_FLUSHER_BYTES / 1024 / 1024,
+            );
             eprintln!("{msg}");
-            if let Some(tx) = progress_tx.as_ref() { let _ = tx.send(ProgressEvent::Pass2Log(msg)); }
+            if let Some(tx) = progress_tx.as_ref() {
+                let _ = tx.send(ProgressEvent::Pass2Log(msg));
+            }
             pause_flag.store(false, Ordering::Release);
         }
 
@@ -270,15 +297,23 @@ pub(super) async fn run_flusher(
                 _ => Some(false),
             };
             let Some(table_id) = next_flush_candidate(
-                &buffers, &in_flight, mode, mem_flush_threshold_bytes,
-                total_buffered - in_flight_bytes, &parent_of, rank,
+                &buffers,
+                &in_flight,
+                mode,
+                mem_flush_threshold_bytes,
+                total_buffered - in_flight_bytes,
+                &parent_of,
+                rank,
             ) else {
                 no_work.push((conn_id, client));
                 continue;
             };
             let Some(plain_sql) = copy_sql_map.get(&table_id).cloned() else {
                 tasks.abort_all();
-                return Err(fail(&table_id, J2sError::InvalidInput(format!("flusher: no copy_sql for table '{table_id}'"))));
+                return Err(fail(
+                    &table_id,
+                    J2sError::InvalidInput(format!("flusher: no copy_sql for table '{table_id}'")),
+                ));
             };
             let buf = buffers.remove(&table_id).unwrap_or_default();
             let rows = pending_rows.remove(&table_id).unwrap_or(0);
@@ -288,9 +323,18 @@ pub(super) async fn run_flusher(
                 None => (plain_sql, None),
                 Some(t) => {
                     owned_bytes[conn_id] += bytes;
-                    let claim = owner.insert(table_id.clone(), conn_id).is_none()
+                    let claim = owner
+                        .insert(table_id.clone(), conn_id)
+                        .is_none()
                         .then(|| (t.table.clone(), t.copy_sql.clone()));
-                    (if frozen.contains(&table_id) { t.copy_sql.clone() } else { plain_sql }, claim)
+                    (
+                        if frozen.contains(&table_id) {
+                            t.copy_sql.clone()
+                        } else {
+                            plain_sql
+                        },
+                        claim,
+                    )
                 }
             };
             *in_flight.entry(table_id.clone()).or_insert(0) += 1;
@@ -298,14 +342,31 @@ pub(super) async fn run_flusher(
             tasks.spawn(async move {
                 let start = std::time::Instant::now();
                 let result = copy_task(&client, buf.freeze(), &copy_sql, claim).await;
-                CopyOutcome { table_id, conn_id, rows, bytes, elapsed_ms: start.elapsed().as_millis(), client, result }
+                CopyOutcome {
+                    table_id,
+                    conn_id,
+                    rows,
+                    bytes,
+                    elapsed_ms: start.elapsed().as_millis(),
+                    client,
+                    result,
+                }
             });
         }
         idle.extend(no_work);
 
         if !rx_open && tasks.is_empty() {
-            if let Some(left) = buffers.iter().find(|(_, b)| !b.is_empty()).map(|(k, _)| k.clone()) {
-                return Err(fail(&left, J2sError::InvalidInput(format!("flusher: drain left rows unflushed for '{left}'"))));
+            if let Some(left) = buffers
+                .iter()
+                .find(|(_, b)| !b.is_empty())
+                .map(|(k, _)| k.clone())
+            {
+                return Err(fail(
+                    &left,
+                    J2sError::InvalidInput(format!(
+                        "flusher: drain left rows unflushed for '{left}'"
+                    )),
+                ));
             }
             break;
         }
@@ -419,7 +480,10 @@ mod tests {
     use super::{next_flush_candidate, FlushMode};
 
     fn bufs(entries: &[(&str, usize)]) -> HashMap<String, bytes::BytesMut> {
-        entries.iter().map(|(k, n)| (k.to_string(), bytes::BytesMut::from(&vec![0u8; *n][..]))).collect()
+        entries
+            .iter()
+            .map(|(k, n)| (k.to_string(), bytes::BytesMut::from(&vec![0u8; *n][..])))
+            .collect()
     }
 
     fn set(items: &[&str]) -> HashMap<String, usize> {
@@ -428,26 +492,47 @@ mod tests {
 
     /// `rank` of a plain load: every table goes to any connection.
     #[allow(clippy::unnecessary_wraps)] // same signature as the `rank` of a FREEZE load
-    fn any(_: &str) -> Option<bool> { Some(false) }
+    fn any(_: &str) -> Option<bool> {
+        Some(false)
+    }
 
     #[test]
     fn freeze_load_serves_own_tables_first_and_never_another_connections() {
         let none = HashMap::new();
-        let rank = |t: &str| match t { "theirs" => None, "mine" => Some(true), _ => Some(false) };
+        let rank = |t: &str| match t {
+            "theirs" => None,
+            "mine" => Some(true),
+            _ => Some(false),
+        };
         let b = bufs(&[("root", 100), ("mine", 60), ("theirs", 200)]);
-        assert_eq!(next_flush_candidate(&b, &set(&[]), FlushMode::Normal, 50, 360, &none, rank), Some("mine".into()));
+        assert_eq!(
+            next_flush_candidate(&b, &set(&[]), FlushMode::Normal, 50, 360, &none, rank),
+            Some("mine".into())
+        );
         let b = bufs(&[("root", 100), ("theirs", 200)]);
-        assert_eq!(next_flush_candidate(&b, &set(&[]), FlushMode::Normal, 50, 300, &none, rank), Some("root".into()));
+        assert_eq!(
+            next_flush_candidate(&b, &set(&[]), FlushMode::Normal, 50, 300, &none, rank),
+            Some("root".into())
+        );
         let b = bufs(&[("theirs", 200)]);
-        assert_eq!(next_flush_candidate(&b, &set(&[]), FlushMode::Drain, 50, 200, &none, rank), None);
+        assert_eq!(
+            next_flush_candidate(&b, &set(&[]), FlushMode::Drain, 50, 200, &none, rank),
+            None
+        );
     }
 
     #[test]
     fn normal_mode_only_picks_tables_over_threshold() {
         let b = bufs(&[("small", 10), ("big", 100)]);
         let none = HashMap::new();
-        assert_eq!(next_flush_candidate(&b, &set(&[]), FlushMode::Normal, 50, 110, &none, any), Some("big".into()));
-        assert_eq!(next_flush_candidate(&b, &set(&[]), FlushMode::Normal, 500, 110, &none, any), None);
+        assert_eq!(
+            next_flush_candidate(&b, &set(&[]), FlushMode::Normal, 50, 110, &none, any),
+            Some("big".into())
+        );
+        assert_eq!(
+            next_flush_candidate(&b, &set(&[]), FlushMode::Normal, 500, 110, &none, any),
+            None
+        );
     }
 
     #[test]
@@ -455,9 +540,15 @@ mod tests {
         // A dominant table must be able to use several connections at once.
         let b = bufs(&[("a", 100), ("b", 60), ("empty", 0)]);
         let none = HashMap::new();
-        assert_eq!(next_flush_candidate(&b, &set(&["a"]), FlushMode::Normal, 50, 160, &none, any), Some("a".into()));
+        assert_eq!(
+            next_flush_candidate(&b, &set(&["a"]), FlushMode::Normal, 50, 160, &none, any),
+            Some("a".into())
+        );
         let b = bufs(&[("empty", 0)]);
-        assert_eq!(next_flush_candidate(&b, &set(&[]), FlushMode::Drain, 50, 0, &none, any), None);
+        assert_eq!(
+            next_flush_candidate(&b, &set(&[]), FlushMode::Drain, 50, 0, &none, any),
+            None
+        );
     }
 
     #[test]
@@ -465,10 +556,19 @@ mod tests {
         let b = bufs(&[("a", 10), ("b", 20)]);
         let none = HashMap::new();
         let low = super::DEFAULT_LOW_FLUSHER_BYTES;
-        assert_eq!(next_flush_candidate(&b, &set(&[]), FlushMode::Paused, 1000, low, &none, any), Some("b".into()));
-        assert_eq!(next_flush_candidate(&b, &set(&[]), FlushMode::Paused, 1000, low - 1, &none, any), None);
+        assert_eq!(
+            next_flush_candidate(&b, &set(&[]), FlushMode::Paused, 1000, low, &none, any),
+            Some("b".into())
+        );
+        assert_eq!(
+            next_flush_candidate(&b, &set(&[]), FlushMode::Paused, 1000, low - 1, &none, any),
+            None
+        );
         // threshold still applies below LOW
-        assert_eq!(next_flush_candidate(&b, &set(&[]), FlushMode::Paused, 15, low - 1, &none, any), Some("b".into()));
+        assert_eq!(
+            next_flush_candidate(&b, &set(&[]), FlushMode::Paused, 15, low - 1, &none, any),
+            Some("b".into())
+        );
     }
 
     #[test]
@@ -476,12 +576,29 @@ mod tests {
         let parent_of: HashMap<String, String> = [("child".to_string(), "root".to_string())].into();
         // child is bigger, but root still buffered → root first
         let b = bufs(&[("root", 10), ("child", 100)]);
-        assert_eq!(next_flush_candidate(&b, &set(&[]), FlushMode::Drain, 1000, 110, &parent_of, any), Some("root".into()));
+        assert_eq!(
+            next_flush_candidate(&b, &set(&[]), FlushMode::Drain, 1000, 110, &parent_of, any),
+            Some("root".into())
+        );
         // root in flight → child blocked
         let b = bufs(&[("child", 100)]);
-        assert_eq!(next_flush_candidate(&b, &set(&["root"]), FlushMode::Drain, 1000, 100, &parent_of, any), None);
+        assert_eq!(
+            next_flush_candidate(
+                &b,
+                &set(&["root"]),
+                FlushMode::Drain,
+                1000,
+                100,
+                &parent_of,
+                any
+            ),
+            None
+        );
         // root done → child allowed, even under threshold
-        assert_eq!(next_flush_candidate(&b, &set(&[]), FlushMode::Drain, 1000, 100, &parent_of, any), Some("child".into()));
+        assert_eq!(
+            next_flush_candidate(&b, &set(&[]), FlushMode::Drain, 1000, 100, &parent_of, any),
+            Some("child".into())
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -507,66 +624,144 @@ mod tests {
             eprintln!("[SKIP] TEST_DATABASE_URL not set");
             return None;
         };
-        let schema = format!("j2s_flusher_{}", &uuid::Uuid::now_v7().simple().to_string()[20..]);
+        let schema = format!(
+            "j2s_flusher_{}",
+            &uuid::Uuid::now_v7().simple().to_string()[20..]
+        );
         let admin = crate::db::connection::connect(&url).await.expect("connect");
         admin.batch_execute(&format!(
             "CREATE SCHEMA {schema}; CREATE TABLE {schema}.a (n int); CREATE TABLE {schema}.b (n int)"
         )).await.expect("create scratch schema");
         if prefill_b {
-            admin.batch_execute(&format!("INSERT INTO {schema}.b VALUES (42)")).await.expect("prefill b");
+            admin
+                .batch_execute(&format!("INSERT INTO {schema}.b VALUES (42)"))
+                .await
+                .expect("prefill b");
         }
-        let freeze_sql = (!freeze.is_empty()).then(|| freeze.iter().map(|t| (t.to_string(), super::FreezeTarget {
-            table: format!("{schema}.{t}"),
-            copy_sql: format!("COPY {schema}.{t} (n) FROM STDIN (FREEZE)"),
-        })).collect::<HashMap<_, _>>());
+        let freeze_sql = (!freeze.is_empty()).then(|| {
+            freeze
+                .iter()
+                .map(|t| {
+                    (
+                        t.to_string(),
+                        super::FreezeTarget {
+                            table: format!("{schema}.{t}"),
+                            copy_sql: format!("COPY {schema}.{t} (n) FROM STDIN (FREEZE)"),
+                        },
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        });
 
-        let copy_sql_map: HashMap<String, String> = ["a", "b", "bad"].iter()
-            .map(|t| (t.to_string(), format!("COPY {schema}.{} (n) FROM STDIN", if *t == "bad" { "missing" } else { t })))
+        let copy_sql_map: HashMap<String, String> = ["a", "b", "bad"]
+            .iter()
+            .map(|t| {
+                (
+                    t.to_string(),
+                    format!(
+                        "COPY {schema}.{} (n) FROM STDIN",
+                        if *t == "bad" { "missing" } else { t }
+                    ),
+                )
+            })
             .collect();
         let parent_of: HashMap<String, String> = [("b".to_string(), "a".to_string())].into();
         let (tx, rx) = tokio::sync::mpsc::channel(batches.len().max(1));
         for (table, line) in batches {
-            tx.send((table.to_string(), bytes::Bytes::from(line.to_string()), 1)).await.expect("send");
+            tx.send((table.to_string(), bytes::Bytes::from(line.to_string()), 1))
+                .await
+                .expect("send");
         }
         drop(tx);
         let pause_flag = Arc::new(AtomicBool::new(true));
         let error_flag = Arc::new(AtomicBool::new(false));
-        let result = tokio::time::timeout(std::time::Duration::from_secs(20), super::run_flusher(
-            rx, copy_sql_map, freeze_sql, url, None, Arc::clone(&pause_flag), Arc::clone(&error_flag),
-            threshold, 0.7, 0.5, false, parent_of, 3,
-        )).await.expect("run_flusher must not hang");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            super::run_flusher(
+                rx,
+                copy_sql_map,
+                freeze_sql,
+                url,
+                None,
+                Arc::clone(&pause_flag),
+                Arc::clone(&error_flag),
+                threshold,
+                0.7,
+                0.5,
+                false,
+                parent_of,
+                3,
+            ),
+        )
+        .await
+        .expect("run_flusher must not hang");
         let result = match result {
             Ok((counts, clients)) => {
                 for c in clients.iter().filter(|_| !freeze.is_empty()) {
-                    c.batch_execute("COMMIT").await.expect("commit the FREEZE load");
+                    c.batch_execute("COMMIT")
+                        .await
+                        .expect("commit the FREEZE load");
                 }
                 Ok(counts)
             }
             Err(e) => Err(e), // connections dropped: a FREEZE load is rolled back
         };
-        let rows: i64 = admin.query_one(&format!("SELECT (SELECT count(*) FROM {schema}.a) + (SELECT count(*) FROM {schema}.b)"), &[])
-            .await.expect("count").get(0);
-        admin.batch_execute(&format!("DROP SCHEMA {schema} CASCADE")).await.expect("drop scratch schema");
-        Some((result, error_flag.load(Ordering::Acquire), pause_flag.load(Ordering::Acquire), rows))
+        let rows: i64 = admin
+            .query_one(
+                &format!(
+                    "SELECT (SELECT count(*) FROM {schema}.a) + (SELECT count(*) FROM {schema}.b)"
+                ),
+                &[],
+            )
+            .await
+            .expect("count")
+            .get(0);
+        admin
+            .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+            .await
+            .expect("drop scratch schema");
+        Some((
+            result,
+            error_flag.load(Ordering::Acquire),
+            pause_flag.load(Ordering::Acquire),
+            rows,
+        ))
     }
 
     #[tokio::test]
     async fn run_flusher_parallel_drain_copies_every_table() {
-        let Some((result, errored, paused, rows)) =
-            run_flusher_on_scratch_schema(&[("a", "1\n"), ("b", "2\n"), ("a", "3\n")], 1 << 30, &[], false).await else { return };
+        let Some((result, errored, paused, rows)) = run_flusher_on_scratch_schema(
+            &[("a", "1\n"), ("b", "2\n"), ("a", "3\n")],
+            1 << 30,
+            &[],
+            false,
+        )
+        .await
+        else {
+            return;
+        };
         let counts = result.expect("drain must succeed");
         assert_eq!(counts.get("a"), Some(&2));
         assert_eq!(counts.get("b"), Some(&1));
         assert_eq!(rows, 3, "every buffered row must reach PG");
-        assert!(!errored && !paused, "flags must be clear after a clean drain");
+        assert!(
+            !errored && !paused,
+            "flags must be clear after a clean drain"
+        );
     }
 
     #[tokio::test]
     async fn run_flusher_streaming_flushes_keep_counts_exact() {
         // threshold = 1: every batch triggers a Normal-mode COPY while rx is still open, so a
         // table regularly receives data while its own COPY is in flight.
-        let batches: Vec<(&str, &str)> = (0..20).map(|i| (if i % 3 == 0 { "b" } else { "a" }, "1\n")).collect();
-        let Some((result, errored, paused, rows)) = run_flusher_on_scratch_schema(&batches, 1, &[], false).await else { return };
+        let batches: Vec<(&str, &str)> = (0..20)
+            .map(|i| (if i % 3 == 0 { "b" } else { "a" }, "1\n"))
+            .collect();
+        let Some((result, errored, paused, rows)) =
+            run_flusher_on_scratch_schema(&batches, 1, &[], false).await
+        else {
+            return;
+        };
         let counts = result.expect("streaming flushes must succeed");
         assert_eq!(counts.get("a"), Some(&13));
         assert_eq!(counts.get("b"), Some(&7));
@@ -576,41 +771,83 @@ mod tests {
 
     #[tokio::test]
     async fn run_flusher_copy_error_returns_err_and_releases_workers() {
-        let Some((result, errored, paused, _)) =
-            run_flusher_on_scratch_schema(&[("a", "1\n"), ("bad", "2\n"), ("b", "3\n")], 1 << 30, &[], false).await else { return };
+        let Some((result, errored, paused, _)) = run_flusher_on_scratch_schema(
+            &[("a", "1\n"), ("bad", "2\n"), ("b", "3\n")],
+            1 << 30,
+            &[],
+            false,
+        )
+        .await
+        else {
+            return;
+        };
         let err = result.expect_err("COPY into a missing table must fail the flusher");
-        assert!(err.to_string().contains("missing"), "error must carry the PG cause: {err}");
+        assert!(
+            err.to_string().contains("missing"),
+            "error must carry the PG cause: {err}"
+        );
         assert!(errored, "error_flag must be set so workers stop");
-        assert!(!paused, "pause_flag must be cleared so paused workers are released");
+        assert!(
+            !paused,
+            "pause_flag must be cleared so paused workers are released"
+        );
     }
 
     #[tokio::test]
     async fn run_flusher_freeze_load_commits_every_row() {
         // threshold = 1: many COPYs per table. `["b"]`: the root `a` spreads over the connections
         // (replica); `["a", "b"]`: each table stays on the connection that claimed it (minimal).
-        let batches: Vec<(&str, &str)> = (0..20).map(|i| (if i % 3 == 0 { "b" } else { "a" }, "1\n")).collect();
+        let batches: Vec<(&str, &str)> = (0..20)
+            .map(|i| (if i % 3 == 0 { "b" } else { "a" }, "1\n"))
+            .collect();
         for targets in [&["b"][..], &["a", "b"]] {
-            let Some((result, errored, _, rows)) = run_flusher_on_scratch_schema(&batches, 1, targets, false).await else { return };
+            let Some((result, errored, _, rows)) =
+                run_flusher_on_scratch_schema(&batches, 1, targets, false).await
+            else {
+                return;
+            };
             let counts = result.expect("FREEZE load must succeed");
             assert_eq!(counts.get("a"), Some(&13), "{targets:?}");
             assert_eq!(counts.get("b"), Some(&7), "{targets:?}");
-            assert_eq!(rows, 20, "every row must be committed exactly once ({targets:?})");
+            assert_eq!(
+                rows, 20,
+                "every row must be committed exactly once ({targets:?})"
+            );
             assert!(!errored);
         }
     }
 
     #[tokio::test]
     async fn run_flusher_freeze_never_truncates_a_table_with_rows() {
-        let Some((result, _, _, rows)) =
-            run_flusher_on_scratch_schema(&[("a", "1\n"), ("b", "2\n"), ("b", "3\n")], 1 << 30, &["a", "b"], true).await else { return };
+        let Some((result, _, _, rows)) = run_flusher_on_scratch_schema(
+            &[("a", "1\n"), ("b", "2\n"), ("b", "3\n")],
+            1 << 30,
+            &["a", "b"],
+            true,
+        )
+        .await
+        else {
+            return;
+        };
         result.expect("a non-empty child falls back to a plain COPY");
-        assert_eq!(rows, 4, "the row already in `b` must survive next to the 3 loaded ones");
+        assert_eq!(
+            rows, 4,
+            "the row already in `b` must survive next to the 3 loaded ones"
+        );
     }
 
     #[tokio::test]
     async fn run_flusher_freeze_error_rolls_the_whole_load_back() {
-        let Some((result, errored, _, rows)) =
-            run_flusher_on_scratch_schema(&[("a", "1\n"), ("b", "2\n"), ("bad", "3\n")], 1, &["a", "b"], false).await else { return };
+        let Some((result, errored, _, rows)) = run_flusher_on_scratch_schema(
+            &[("a", "1\n"), ("b", "2\n"), ("bad", "3\n")],
+            1,
+            &["a", "b"],
+            false,
+        )
+        .await
+        else {
+            return;
+        };
         result.expect_err("COPY into a missing table must fail the flusher");
         assert!(errored);
         assert_eq!(rows, 0, "a failed FREEZE load must leave nothing behind");
@@ -637,7 +874,10 @@ mod tests {
     #[test]
     fn copy_start_log_contains_table_size_and_rows() {
         let msg = super::format_copy_start_log("ingredients_debug", 67_108_864, 7_664_150);
-        assert!(msg.contains("ingredients_debug"), "must show table name: {msg}");
+        assert!(
+            msg.contains("ingredients_debug"),
+            "must show table name: {msg}"
+        );
         assert!(msg.contains("64"), "must show size in MB: {msg}");
         assert!(msg.contains("7664150"), "must show row count: {msg}");
     }
@@ -645,7 +885,10 @@ mod tests {
     #[test]
     fn copy_done_log_contains_table_and_duration() {
         let msg = super::format_copy_done_log("ingredients_debug", 2_341);
-        assert!(msg.contains("ingredients_debug"), "must show table name: {msg}");
+        assert!(
+            msg.contains("ingredients_debug"),
+            "must show table name: {msg}"
+        );
         assert!(msg.contains("2341"), "must show duration ms: {msg}");
     }
 
@@ -658,12 +901,18 @@ mod tests {
     #[test]
     fn ram_used_ratio_full_usage() {
         let r = super::ram_used_ratio(0, 100);
-        assert!((r - 1.0).abs() < 1e-9, "available=0, total=100 → ratio=1.0, got {r}");
+        assert!(
+            (r - 1.0).abs() < 1e-9,
+            "available=0, total=100 → ratio=1.0, got {r}"
+        );
     }
 
     #[test]
     fn ram_used_ratio_half_usage() {
         let r = super::ram_used_ratio(50, 100);
-        assert!((r - 0.5).abs() < 1e-9, "available=50, total=100 → ratio=0.5, got {r}");
+        assert!(
+            (r - 0.5).abs() < 1e-9,
+            "available=50, total=100 → ratio=0.5, got {r}"
+        );
     }
 }

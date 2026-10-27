@@ -17,8 +17,10 @@ use dioxus::prelude::*;
 
 use json2sql::db::ddl::generate_ddl_preview;
 
-use crate::screens::{build_effective_schemas, build_table_rows, strategy_badge, user_override_badge, TableRowsCtx};
 use crate::screens::table_list::TableListPanel;
+use crate::screens::{
+    build_effective_schemas, build_table_rows, strategy_badge, user_override_badge, TableRowsCtx,
+};
 use crate::state::{AppScreen, AppState};
 
 // ---------------------------------------------------------------------------
@@ -32,10 +34,19 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
 
     let (schemas_orig, strategy_overrides, group_columns) = {
         let s = state.read();
-        (s.schema.schemas.clone(), s.schema.strategy_overrides.clone(), s.schema.group_columns.clone())
+        (
+            s.schema.schemas.clone(),
+            s.schema.strategy_overrides.clone(),
+            s.schema.group_columns.clone(),
+        )
     };
 
-    let schemas = build_effective_schemas(&schemas_orig, &strategy_overrides, &group_columns, &state.read().schema.pass1_samples);
+    let schemas = build_effective_schemas(
+        &schemas_orig,
+        &strategy_overrides,
+        &group_columns,
+        &state.read().schema.pass1_samples,
+    );
 
     if schemas.is_empty() {
         return rsx! {
@@ -45,18 +56,28 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
         };
     }
 
-    let mut left_collapsed:  Signal<bool> = use_signal(|| false);
+    let mut left_collapsed: Signal<bool> = use_signal(|| false);
     let mut right_collapsed: Signal<bool> = use_signal(|| false);
 
     let pg_schema = state.read().project.pg_schema.clone();
-    let idx = state.read().schema.last_selected_idx.min(schemas.len().saturating_sub(1));
+    let idx = state
+        .read()
+        .schema
+        .last_selected_idx
+        .min(schemas.len().saturating_sub(1));
 
     let selected = &schemas[idx];
     let ddl = generate_ddl_preview(selected, &pg_schema);
 
-    let (data_cols, gen_cols) = selected.columns.iter()
+    let (data_cols, gen_cols) = selected
+        .columns
+        .iter()
         .fold((0usize, 0usize), |(d, g), col| {
-            if col.is_generated { (d, g + 1) } else { (d + 1, g) }
+            if col.is_generated {
+                (d, g + 1)
+            } else {
+                (d + 1, g)
+            }
         });
 
     // Strategy diff — tables whose user override differs from the inferred strategy.
@@ -87,8 +108,10 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
     // Real children removed by cascade from a Skip elsewhere — never chosen by the user
     // directly, so they never surface in `diffs` above. Surfaced separately here so the
     // user sees, before importing, everything a Skip took down with it (#47).
-    let (_removed, cascade_warnings) = json2sql::schema::config::compute_skip_cascade(&schemas_orig, &strategy_overrides);
-    let cascade_diffs: Vec<DiffEntry> = cascade_warnings.iter()
+    let (_removed, cascade_warnings) =
+        json2sql::schema::config::compute_skip_cascade(&schemas_orig, &strategy_overrides);
+    let cascade_diffs: Vec<DiffEntry> = cascade_warnings
+        .iter()
         .flat_map(|w| w.cascaded_children.iter())
         .filter_map(|child| {
             let orig = schemas_orig.iter().find(|s| &s.name == child)?;
@@ -104,7 +127,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
 
     let (sel_cls, sel_lbl) = strategy_badge(&selected.inferred_strategy);
     let selected_name = selected.name.clone();
-    let parent_table  = selected.parent_table.clone();
+    let parent_table = selected.parent_table.clone();
 
     rsx! {
         div { style: "display:flex;flex-direction:column;height:100vh;background:var(--bg);overflow:hidden;",
@@ -364,17 +387,47 @@ struct DdlToken {
 #[allow(clippy::too_many_lines)]
 fn tokenize_ddl(line: &str) -> Vec<DdlToken> {
     const KW: &[&str] = &[
-        "CREATE", "TABLE", "IF", "NOT", "EXISTS",
-        "PRIMARY", "KEY", "FOREIGN", "REFERENCES",
-        "ON", "DELETE", "CASCADE", "SET",
-        "NULL", "DEFAULT", "GENERATED", "ALWAYS", "AS", "IDENTITY",
-        "CONSTRAINT", "UNIQUE",
+        "CREATE",
+        "TABLE",
+        "IF",
+        "NOT",
+        "EXISTS",
+        "PRIMARY",
+        "KEY",
+        "FOREIGN",
+        "REFERENCES",
+        "ON",
+        "DELETE",
+        "CASCADE",
+        "SET",
+        "NULL",
+        "DEFAULT",
+        "GENERATED",
+        "ALWAYS",
+        "AS",
+        "IDENTITY",
+        "CONSTRAINT",
+        "UNIQUE",
     ];
     const TY: &[&str] = &[
-        "BIGINT", "INTEGER", "INT", "SMALLINT",
-        "VARCHAR", "TEXT", "NUMERIC", "DECIMAL", "FLOAT",
-        "BOOLEAN", "BOOL", "JSONB", "JSON",
-        "TIMESTAMPTZ", "TIMESTAMP", "DATE", "UUID", "SERIAL",
+        "BIGINT",
+        "INTEGER",
+        "INT",
+        "SMALLINT",
+        "VARCHAR",
+        "TEXT",
+        "NUMERIC",
+        "DECIMAL",
+        "FLOAT",
+        "BOOLEAN",
+        "BOOL",
+        "JSONB",
+        "JSON",
+        "TIMESTAMPTZ",
+        "TIMESTAMP",
+        "DATE",
+        "UUID",
+        "SERIAL",
     ];
 
     let mut tokens = Vec::new();
@@ -382,15 +435,23 @@ fn tokenize_ddl(line: &str) -> Vec<DdlToken> {
 
     while !remaining.is_empty() {
         // Whitespace run
-        let ws = remaining.find(|c: char| !c.is_whitespace()).unwrap_or(remaining.len());
+        let ws = remaining
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(remaining.len());
         if ws > 0 {
-            tokens.push(DdlToken { cls: "", text: remaining[..ws].to_string() });
+            tokens.push(DdlToken {
+                cls: "",
+                text: remaining[..ws].to_string(),
+            });
             remaining = &remaining[ws..];
             continue;
         }
         // Single-char punctuation
         if remaining.starts_with(|c: char| "(),;".contains(c)) {
-            tokens.push(DdlToken { cls: "pn", text: remaining[..1].to_string() });
+            tokens.push(DdlToken {
+                cls: "pn",
+                text: remaining[..1].to_string(),
+            });
             remaining = &remaining[1..];
             continue;
         }
@@ -398,7 +459,7 @@ fn tokenize_ddl(line: &str) -> Vec<DdlToken> {
         let word_end = remaining
             .find(|c: char| c.is_whitespace() || "(),;".contains(c))
             .unwrap_or(remaining.len());
-        let word  = &remaining[..word_end];
+        let word = &remaining[..word_end];
         let upper = word.to_ascii_uppercase();
         let cls = if KW.contains(&upper.as_str()) {
             "kw"
@@ -407,7 +468,10 @@ fn tokenize_ddl(line: &str) -> Vec<DdlToken> {
         } else {
             ""
         };
-        tokens.push(DdlToken { cls, text: word.to_string() });
+        tokens.push(DdlToken {
+            cls,
+            text: word.to_string(),
+        });
         remaining = &remaining[word_end..];
     }
 
@@ -420,7 +484,7 @@ fn tokenize_ddl(line: &str) -> Vec<DdlToken> {
 
 struct DiffEntry {
     table_name: String,
-    from_lbl:   &'static str,
-    to_cls:     &'static str,
-    to_lbl:     &'static str,
+    from_lbl: &'static str,
+    to_cls: &'static str,
+    to_lbl: &'static str,
 }

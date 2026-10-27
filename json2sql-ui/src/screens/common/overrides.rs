@@ -10,13 +10,13 @@
 //! - fn `not_splittable` — raison pour laquelle une table du schéma effectif ne peut pas être découpée, s'il y en a une.
 //! - fn `skip_cascade_names` — noms des vrais enfants retirés par cascade d'un `Skip` (#47),
 //!   pour affichage (badges, récapitulatif) sans muter les schémas.
-use std::collections::{BTreeSet, HashMap, HashSet};
 use json2sql::schema::grouping::auto::{apply_name_groups, name_proposals};
 use json2sql::schema::grouping::proposal::Status;
 use json2sql::schema::grouping::sample::StoredSample;
 use json2sql::schema::grouping::suggest::MIN_TABLE_COLUMNS;
 use json2sql::schema::naming::group_table_name;
 use json2sql::schema::table_schema::{TableSchema, UserOverride};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Apply user strategy overrides (`Pivot | Jsonb | Skip`) to a copy of `schemas`.
 ///
@@ -40,7 +40,8 @@ pub fn build_effective_schemas(
     result.retain(|s| seen.insert(s.name.clone()));
     if !group_columns.is_empty() {
         // the only error is a table of over 2000 columns, which the 1600-column guard already turned into JSONB
-        if let Err(e) = apply_name_groups(&mut result, samples, |t| group_columns.contains(&t.name)) {
+        if let Err(e) = apply_name_groups(&mut result, samples, |t| group_columns.contains(&t.name))
+        {
             eprintln!("column groups not applied: {e}");
         }
     }
@@ -57,7 +58,10 @@ pub fn display_schemas(
     samples: &[StoredSample],
 ) -> Vec<TableSchema> {
     let effective = build_effective_schemas(schemas, strategy_overrides, group_columns, samples);
-    let groups: HashSet<&str> = effective.iter().flat_map(|t| t.column_groups.iter().map(String::as_str)).collect();
+    let groups: HashSet<&str> = effective
+        .iter()
+        .flat_map(|t| t.column_groups.iter().map(String::as_str))
+        .collect();
     let mut shown: Vec<TableSchema> = schemas
         .iter()
         .map(|t| {
@@ -71,7 +75,9 @@ pub fn display_schemas(
     shown.extend(
         effective
             .iter()
-            .filter(|t| groups.contains(t.name.as_str()) && !schemas.iter().any(|s| s.name == t.name))
+            .filter(|t| {
+                groups.contains(t.name.as_str()) && !schemas.iter().any(|s| s.name == t.name)
+            })
             .cloned(),
     );
     shown
@@ -126,7 +132,9 @@ pub fn group_preview(
     if let Some(why) = not_splittable(&effective, table) {
         return GroupPreview::Unavailable(why);
     }
-    let proposals = match name_proposals(&effective, samples, |s| s.name == table || group_columns.contains(&s.name)) {
+    let proposals = match name_proposals(&effective, samples, |s| {
+        s.name == table || group_columns.contains(&s.name)
+    }) {
         Ok(proposals) => proposals,
         Err(e) => return GroupPreview::Unavailable(e.to_string()),
     };
@@ -134,20 +142,38 @@ pub fn group_preview(
         .iter()
         .filter(|p| p.table == table)
         .flat_map(|p| {
-            p.groups.iter().enumerate().filter(|(_, g)| g.status == Status::Confirmed).map(move |(at, g)| PreviewGroup {
-                table: group_table_name(table, &g.name),
-                columns: g.columns.iter().map(|&c| p.columns[c].name.clone()).collect(),
-                candidates: p.attachments.iter().filter(|a| a.group == at).map(|a| p.columns[a.column].name.clone()).collect(),
-                fused: g.families > 1,
-            })
+            p.groups
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| g.status == Status::Confirmed)
+                .map(move |(at, g)| PreviewGroup {
+                    table: group_table_name(table, &g.name),
+                    columns: g
+                        .columns
+                        .iter()
+                        .map(|&c| p.columns[c].name.clone())
+                        .collect(),
+                    candidates: p
+                        .attachments
+                        .iter()
+                        .filter(|a| a.group == at)
+                        .map(|a| p.columns[a.column].name.clone())
+                        .collect(),
+                    fused: g.families > 1,
+                })
         })
         .collect();
     let moved: usize = groups.iter().map(|g| g.columns.len()).sum();
-    let data_columns = effective.iter().find(|s| s.name == table).map_or(0, |t| t.data_columns().count());
+    let data_columns = effective
+        .iter()
+        .find(|s| s.name == table)
+        .map_or(0, |t| t.data_columns().count());
     if groups.is_empty() {
         GroupPreview::Unavailable("the column names give no group".to_string())
     } else if moved == data_columns {
-        GroupPreview::Unavailable("every data column would leave the table: it is not split".to_string())
+        GroupPreview::Unavailable(
+            "every data column would leave the table: it is not split".to_string(),
+        )
     } else {
         GroupPreview::Groups(groups)
     }
@@ -162,13 +188,20 @@ fn not_splittable(effective: &[TableSchema], table: &str) -> Option<String> {
     if !target.takes_column_groups() {
         let strategy = format!("{:?}", *target.effective_strategy());
         let short = strategy.split(['(', ' ', '{']).next().unwrap_or_default();
-        return Some(format!("{short} strategy: only Columns and AutoSplit tables can be split"));
+        return Some(format!(
+            "{short} strategy: only Columns and AutoSplit tables can be split"
+        ));
     }
     let data_columns = target.data_columns().count();
     if data_columns < MIN_TABLE_COLUMNS {
-        return Some(format!("{data_columns} data columns: at least {MIN_TABLE_COLUMNS} data columns are needed"));
+        return Some(format!(
+            "{data_columns} data columns: at least {MIN_TABLE_COLUMNS} data columns are needed"
+        ));
     }
-    let split = !target.column_groups.is_empty() || effective.iter().any(|s| s.column_groups.iter().any(|g| g == table));
+    let split = !target.column_groups.is_empty()
+        || effective
+            .iter()
+            .any(|s| s.column_groups.iter().any(|g| g == table));
     split.then(|| "already split by the column groups of the snapshot".to_string())
 }
 
@@ -181,8 +214,12 @@ pub fn skip_cascade_names(
     schemas: &[TableSchema],
     strategy_overrides: &HashMap<String, UserOverride>,
 ) -> HashSet<String> {
-    let (_removed, warnings) = json2sql::schema::config::compute_skip_cascade(schemas, strategy_overrides);
-    warnings.into_iter().flat_map(|w| w.cascaded_children).collect()
+    let (_removed, warnings) =
+        json2sql::schema::config::compute_skip_cascade(schemas, strategy_overrides);
+    warnings
+        .into_iter()
+        .flat_map(|w| w.cascaded_children)
+        .collect()
 }
 
 #[cfg(test)]
@@ -234,9 +271,21 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("wide".to_string(), UserOverride::Jsonb);
         let result = build_effective_schemas(&schemas, &overrides, &BTreeSet::new(), &[]);
-        assert_eq!(result[0].ui_override(), Some(&UserOverride::Jsonb), "ui_override must be set");
-        assert_eq!(result[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must be preserved");
-        assert_eq!(*result[0].effective_strategy(), InferredStrategy::Jsonb, "effective_strategy must reflect override");
+        assert_eq!(
+            result[0].ui_override(),
+            Some(&UserOverride::Jsonb),
+            "ui_override must be set"
+        );
+        assert_eq!(
+            result[0].inferred_strategy,
+            InferredStrategy::Columns,
+            "inferred_strategy must be preserved"
+        );
+        assert_eq!(
+            *result[0].effective_strategy(),
+            InferredStrategy::Jsonb,
+            "effective_strategy must reflect override"
+        );
     }
 
     #[test]
@@ -246,7 +295,11 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("a".to_string(), UserOverride::Skip);
         let _ = build_effective_schemas(&schemas, &overrides, &BTreeSet::new(), &[]);
-        assert_eq!(schemas.len(), original_len, "original slice must not be mutated");
+        assert_eq!(
+            schemas.len(),
+            original_len,
+            "original slice must not be mutated"
+        );
     }
 
     #[test]
@@ -286,9 +339,12 @@ mod tests {
         let result = build_effective_schemas(&schemas, &overrides, &BTreeSet::new(), &[]);
 
         let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
-        assert!(!names.contains(&"events"),      "main table must be removed");
-        assert!(!names.contains(&"events_wide"), "companion _wide table must be removed");
-        assert!(names.contains(&"users"),        "unrelated table must survive");
+        assert!(!names.contains(&"events"), "main table must be removed");
+        assert!(
+            !names.contains(&"events_wide"),
+            "companion _wide table must be removed"
+        );
+        assert!(names.contains(&"users"), "unrelated table must survive");
     }
 
     /// A root table `name` with six `kiwi_*`, six `zulu_*` and twelve unrelated columns: two groups by the names.
@@ -296,9 +352,15 @@ mod tests {
         use json2sql::schema::table_schema::ColumnSchema;
         use json2sql::schema::type_tracker::PgType;
         let mut t = make_table(name, None);
-        t.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
-        let others = ["quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow", "oyster", "pebble", "saddle", "thimble"];
-        let names = ('a'..='f').flat_map(|c| [format!("kiwi_{c}"), format!("zulu_{c}")]).chain(others.iter().map(|n| (*n).to_string()));
+        t.columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        let others = [
+            "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow",
+            "oyster", "pebble", "saddle", "thimble",
+        ];
+        let names = ('a'..='f')
+            .flat_map(|c| [format!("kiwi_{c}"), format!("zulu_{c}")])
+            .chain(others.iter().map(|n| (*n).to_string()));
         t.columns.extend(names.map(|n| ColumnSchema {
             name: n.clone(),
             original_name: n,
@@ -324,13 +386,20 @@ mod tests {
         let schemas = vec![wide_table("a"), wide_table("b")];
         let result = build_effective_schemas(&schemas, &HashMap::new(), &ticked(&["b"]), &[]);
         assert_eq!(names(&result), ["a", "b", "b_kiwi", "b_zulu"]);
-        assert_eq!(names(&schemas), ["a", "b"], "the schemas of the Strategy screen keep their indices");
+        assert_eq!(
+            names(&schemas),
+            ["a", "b"],
+            "the schemas of the Strategy screen keep their indices"
+        );
     }
 
     #[test]
     fn a_pivot_or_skip_chosen_for_a_ticked_table_wins() {
         let schemas = vec![wide_table("a"), wide_table("b")];
-        let overrides = HashMap::from([("a".to_string(), UserOverride::Pivot), ("b".to_string(), UserOverride::Skip)]);
+        let overrides = HashMap::from([
+            ("a".to_string(), UserOverride::Pivot),
+            ("b".to_string(), UserOverride::Skip),
+        ]);
         let result = build_effective_schemas(&schemas, &overrides, &ticked(&["a", "b"]), &[]);
         assert_eq!(names(&result), ["a"]);
     }
@@ -342,10 +411,25 @@ mod tests {
         let shown = display_schemas(&schemas, &HashMap::new(), &ticked(&["a"]), &[]);
         assert_eq!(names(&shown), ["a", "b", "a_kiwi", "a_zulu"]);
         let kept: Vec<&str> = shown[0].data_columns().map(|c| c.name.as_str()).collect();
-        assert!(!kept.contains(&"kiwi_a") && kept.contains(&"quartz"), "a split table shows the columns it keeps: {kept:?}");
+        assert!(
+            !kept.contains(&"kiwi_a") && kept.contains(&"quartz"),
+            "a split table shows the columns it keeps: {kept:?}"
+        );
         assert_eq!(shown[0].column_groups, ["a_kiwi", "a_zulu"]);
-        assert_eq!(shown[1].columns.len(), schemas[1].columns.len(), "a table that is not split is shown as it is");
-        assert_eq!(names(&display_schemas(&schemas, &HashMap::new(), &ticked(&[]), &[])), ["a", "b"]);
+        assert_eq!(
+            shown[1].columns.len(),
+            schemas[1].columns.len(),
+            "a table that is not split is shown as it is"
+        );
+        assert_eq!(
+            names(&display_schemas(
+                &schemas,
+                &HashMap::new(),
+                &ticked(&[]),
+                &[]
+            )),
+            ["a", "b"]
+        );
     }
 
     #[test]
@@ -364,18 +448,34 @@ mod tests {
                 let tables: Vec<&str> = groups.iter().map(|g| g.table.as_str()).collect();
                 assert_eq!(tables, ["a_kiwi", "a_zulu"]);
                 assert_eq!(groups[0].columns.len(), 6);
-                assert_eq!(groups[0].candidates.len(), 0, "no data signal, no candidate");
+                assert_eq!(
+                    groups[0].candidates.len(),
+                    0,
+                    "no data signal, no candidate"
+                );
                 assert!(!groups[0].fused, "one family of names");
             }
             GroupPreview::Unavailable(why) => panic!("{why}"),
         }
-        let why = |table: &str, overrides: &HashMap<String, UserOverride>| match group_preview(&schemas, overrides, &ticked(&[]), &[], table) {
+        let why = |table: &str, overrides: &HashMap<String, UserOverride>| match group_preview(
+            &schemas,
+            overrides,
+            &ticked(&[]),
+            &[],
+            table,
+        ) {
             GroupPreview::Unavailable(why) => why,
             GroupPreview::Groups(g) => panic!("{g:?}"),
         };
         assert!(why("small", &HashMap::new()).contains("20 data columns"));
-        assert!(why("a", &HashMap::from([("a".to_string(), UserOverride::Jsonb)])).contains("Jsonb"));
-        assert!(why("a", &HashMap::from([("a".to_string(), UserOverride::Skip)])).contains("skipped"));
+        assert!(why(
+            "a",
+            &HashMap::from([("a".to_string(), UserOverride::Jsonb)])
+        )
+        .contains("Jsonb"));
+        assert!(
+            why("a", &HashMap::from([("a".to_string(), UserOverride::Skip)])).contains("skipped")
+        );
     }
 
     #[test]
@@ -388,8 +488,15 @@ mod tests {
 
         let names = skip_cascade_names(&schemas, &overrides);
 
-        assert_eq!(names, std::collections::HashSet::from(["child".to_string()]));
-        assert_eq!(schemas.len(), 2, "schemas must not be mutated by a display-only query");
+        assert_eq!(
+            names,
+            std::collections::HashSet::from(["child".to_string()])
+        );
+        assert_eq!(
+            schemas.len(),
+            2,
+            "schemas must not be mutated by a display-only query"
+        );
     }
 
     #[test]
@@ -400,6 +507,9 @@ mod tests {
 
         let names = skip_cascade_names(&schemas, &overrides);
 
-        assert!(names.is_empty(), "a plain Skip with no real children cascades nothing");
+        assert!(
+            names.is_empty(),
+            "a plain Skip with no real children cascades nothing"
+        );
     }
 }

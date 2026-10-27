@@ -82,7 +82,9 @@ impl WorkerKillHandle {
         let pid = inner.child.lock().ok().and_then(|c| c.id());
         if let Some(pid) = pid {
             // `kill` binary: the crate forbids unsafe code, so no direct libc::kill.
-            let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+            let _ = std::process::Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
         }
         let handle = self.clone();
         std::thread::spawn(move || {
@@ -313,13 +315,19 @@ mod tests {
 
     /// Matches `find_active_socket`'s pattern — only for tests that exercise the probe.
     fn probed_sock(tag: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("json2sql-ui-test-{}-{}.sock", tag, uuid::Uuid::now_v7()))
+        std::env::temp_dir().join(format!(
+            "json2sql-ui-test-{}-{}.sock",
+            tag,
+            uuid::Uuid::now_v7()
+        ))
     }
 
     #[tokio::test]
     async fn connect_with_retry_fails_if_no_socket() {
-        let path = std::env::temp_dir()
-            .join(format!("json2sql-ui-test-missing-{}.sock", uuid::Uuid::now_v7()));
+        let path = std::env::temp_dir().join(format!(
+            "json2sql-ui-test-missing-{}.sock",
+            uuid::Uuid::now_v7()
+        ));
         let result = connect_with_retry(&path, 2, Duration::from_millis(5)).await;
         assert!(result.is_err(), "must fail when socket never appears");
     }
@@ -359,8 +367,10 @@ mod tests {
     ) {
         let listener = UnixListener::bind(path).expect("bind");
         let connect_fut = tokio::net::UnixStream::connect(path);
-        let (server_stream, client_stream) =
-            tokio::join!(async { listener.accept().await.expect("accept").0 }, connect_fut);
+        let (server_stream, client_stream) = tokio::join!(
+            async { listener.accept().await.expect("accept").0 },
+            connect_fut
+        );
         let client_stream = client_stream.expect("connect");
         let (_, server_write) = server_stream.into_split();
         let (client_read, _) = client_stream.into_split();
@@ -377,13 +387,11 @@ mod tests {
         let line = format!("{}\n", serde_json::to_string(&event).unwrap());
         write.write_all(line.as_bytes()).await.expect("write");
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            reader.next_event(),
-        )
-        .await
-        .expect("timeout")
-        .expect("io");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(200), reader.next_event())
+                .await
+                .expect("timeout")
+                .expect("io");
         assert!(
             matches!(result, Some(ProgressEvent::Pass1Log(m)) if m == "hello from socket"),
             "must deserialise the event"
@@ -408,13 +416,11 @@ mod tests {
         }
 
         for expected_bytes in [0u64, 100, 200] {
-            let result = tokio::time::timeout(
-                std::time::Duration::from_millis(200),
-                reader.next_event(),
-            )
-            .await
-            .expect("timeout")
-            .expect("io");
+            let result =
+                tokio::time::timeout(std::time::Duration::from_millis(200), reader.next_event())
+                    .await
+                    .expect("timeout")
+                    .expect("io");
             assert!(
                 matches!(result, Some(ProgressEvent::Pass2Progress { bytes_read, .. }) if bytes_read == expected_bytes)
             );
@@ -431,13 +437,11 @@ mod tests {
         // Drop the write half — causes EOF on the read side
         drop(write);
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            reader.next_event(),
-        )
-        .await
-        .expect("timeout")
-        .expect("io");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(200), reader.next_event())
+                .await
+                .expect("timeout")
+                .expect("io");
         assert!(result.is_none(), "EOF must return Ok(None)");
         let _ = std::fs::remove_file(&path);
     }
@@ -450,12 +454,10 @@ mod tests {
 
         write.write_all(b"not-valid-json\n").await.expect("write");
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            reader.next_event(),
-        )
-        .await
-        .expect("timeout");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(200), reader.next_event())
+                .await
+                .expect("timeout");
         assert!(result.is_err(), "malformed JSON must return Err");
         let _ = std::fs::remove_file(&path);
     }
@@ -471,11 +473,16 @@ mod tests {
         let line = serde_json::to_string(&ProgressEvent::Pass1Log("split".to_string())).unwrap();
         let (head, tail) = line.split_at(line.len() / 2);
         write.write_all(head.as_bytes()).await.expect("write head");
-        let cancelled =
-            tokio::time::timeout(Duration::from_millis(20), reader.next_event()).await;
-        assert!(cancelled.is_err(), "no newline yet: the read must still be pending");
+        let cancelled = tokio::time::timeout(Duration::from_millis(20), reader.next_event()).await;
+        assert!(
+            cancelled.is_err(),
+            "no newline yet: the read must still be pending"
+        );
 
-        write.write_all(format!("{tail}\n").as_bytes()).await.expect("write tail");
+        write
+            .write_all(format!("{tail}\n").as_bytes())
+            .await
+            .expect("write tail");
         let result = tokio::time::timeout(Duration::from_millis(200), reader.next_event())
             .await
             .expect("timeout");
@@ -494,7 +501,10 @@ mod tests {
         let mut reader = SocketEventReader::new(read);
 
         let good = serde_json::to_string(&ProgressEvent::Pass1Log("after".to_string())).unwrap();
-        write.write_all(format!("garbage\n{good}\n").as_bytes()).await.expect("write");
+        write
+            .write_all(format!("garbage\n{good}\n").as_bytes())
+            .await
+            .expect("write");
 
         let first = tokio::time::timeout(Duration::from_millis(200), reader.next_event())
             .await
@@ -522,9 +532,7 @@ mod tests {
         let path = probed_sock("find-active");
         let listener = UnixListener::bind(&path).expect("bind");
         // Accept in a loop: a concurrent probe from another test must not close the listener.
-        let _accept = tokio::spawn(async move {
-            while listener.accept().await.is_ok() {}
-        });
+        let _accept = tokio::spawn(async move { while listener.accept().await.is_ok() {} });
 
         let found = find_active_socket().await;
         // May find other sockets first, but our path must be found eventually.
@@ -543,10 +551,7 @@ mod tests {
         let _ = find_active_socket().await;
 
         // The orphan file should have been deleted.
-        assert!(
-            !path.exists(),
-            "orphan socket file should be cleaned up"
-        );
+        assert!(!path.exists(), "orphan socket file should be cleaned up");
     }
 
     #[test]
@@ -575,7 +580,9 @@ mod tests {
             .expect("cargo must be on PATH to run this test suite");
         let h1 = WorkerKillHandle::new(child);
 
-        let inner = h1.0.as_ref().expect("h1 must be Some right after construction");
+        let inner =
+            h1.0.as_ref()
+                .expect("h1 must be Some right after construction");
         assert_eq!(Arc::strong_count(inner), 1, "no clone yet");
 
         let h2 = h1.clone();
@@ -586,7 +593,11 @@ mod tests {
         );
 
         drop(h2);
-        assert_eq!(Arc::strong_count(inner), 1, "dropping a clone must release its Arc ref");
+        assert_eq!(
+            Arc::strong_count(inner),
+            1,
+            "dropping a clone must release its Arc ref"
+        );
 
         // Re-clone, then prove the sharing is functional, not just structural: kill()
         // on one clone must be observable from the other via the same underlying Child.
@@ -598,7 +609,10 @@ mod tests {
         while tokio::time::Instant::now() < deadline {
             {
                 // Lock scope kept sync and short — never held across an .await point.
-                let mut guard = inner2.child.lock().expect("child mutex must not be poisoned");
+                let mut guard = inner2
+                    .child
+                    .lock()
+                    .expect("child mutex must not be poisoned");
                 if guard.try_wait().expect("try_wait must not error").is_some() {
                     exited = true;
                     break;

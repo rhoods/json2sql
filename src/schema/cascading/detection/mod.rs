@@ -22,10 +22,10 @@
 
 use super::super::table_schema::{ChildKind, ColumnSchema, KeyShape, TableSchema};
 
-mod wave0;
 mod apply;
 mod cascade;
 mod keyed_pivot;
+mod wave0;
 
 struct SubgroupData {
     pivot_table_name: String,
@@ -38,16 +38,16 @@ struct SubgroupData {
     absorbed_path_segments: Vec<String>,
 }
 
-
 enum CollapseKind {
     Single {
         key_col_name: String,
         key_shape: KeyShape,
         union_cols: Vec<ColumnSchema>,
     },
-    Multi { groups: Vec<SubgroupData> },
+    Multi {
+        groups: Vec<SubgroupData>,
+    },
 }
-
 
 struct Collapse {
     parent_idx: usize,
@@ -56,7 +56,6 @@ struct Collapse {
     kind: CollapseKind,
     absorbed_indices: Vec<usize>,
 }
-
 
 struct SiblingDetectCtx {
     parent_name: String,
@@ -73,7 +72,6 @@ struct SiblingDetectCtx {
 // ---------------------------------------------------------------------------
 // Cascading sibling detection
 // ---------------------------------------------------------------------------
-
 
 /// BFS top-down sibling fusion with child-compatibility gate and cascaded merging.
 ///
@@ -108,7 +106,8 @@ pub fn finalize_cascading(schemas: &mut Vec<TableSchema>, threshold: usize, min_
     // parent (e.g. lang-code T tables produced by cascade wave 1 that themselves
     // are numerous and similar).  A second sibling-detection pass fuses them into
     // a synthetic sub-pivot and cascades their own children.
-    let post_co_siblings = keyed_pivot::run_keyed_pivot_children_wave(schemas, threshold, min_jaccard);
+    let post_co_siblings =
+        keyed_pivot::run_keyed_pivot_children_wave(schemas, threshold, min_jaccard);
     drain_cascade_waves(schemas, post_co_siblings);
 }
 
@@ -118,17 +117,25 @@ fn drain_cascade_waves(schemas: &mut Vec<TableSchema>, initial: Vec<CoSiblingGro
     let mut pending = initial;
     while !pending.is_empty() {
         let (obj_map, arr_map) = build_parent_child_maps(schemas);
-        let name_to_idx: std::collections::HashMap<String, usize> =
-            schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+        let name_to_idx: std::collections::HashMap<String, usize> = schemas
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.name.clone(), i))
+            .collect();
         let mut next_pending: Vec<CoSiblingGroup> = Vec::new();
         for group in pending {
-            let produced = cascade::process_co_sibling_group(schemas, &group, &obj_map, &arr_map, &name_to_idx);
+            let produced = cascade::process_co_sibling_group(
+                schemas,
+                &group,
+                &obj_map,
+                &arr_map,
+                &name_to_idx,
+            );
             next_pending.extend(produced);
         }
         pending = next_pending;
     }
 }
-
 
 /// A group of co-sibling tables produced by a cascade wave.
 /// These are children of tables that were merged in the previous wave,
@@ -143,7 +150,6 @@ struct CoSiblingGroup {
     /// True when the co-siblings are `ObjectArray` children.
     array_children: bool,
 }
-
 
 /// Build `parent_name` → [`child_index`] maps for Object and `ObjectArray` children.
 fn build_parent_child_maps(
@@ -172,7 +178,6 @@ fn build_parent_child_maps(
     (obj_map, arr_map)
 }
 
-
 fn run_sibling_wave(
     schemas: &mut Vec<TableSchema>,
     threshold: usize,
@@ -180,22 +185,39 @@ fn run_sibling_wave(
 ) -> Vec<CoSiblingGroup> {
     let (parent_to_object_children, parent_to_array_children) = build_parent_child_maps(schemas);
     let name_to_idx: std::collections::HashMap<String, usize> = schemas
-        .iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
-    let work = wave0::build_work_items(schemas, threshold, &parent_to_object_children, &parent_to_array_children);
-    let collapses = wave0::collect_sibling_collapses(
-        schemas, &work, threshold, min_jaccard,
-        &name_to_idx, &parent_to_object_children, &parent_to_array_children,
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.name.clone(), i))
+        .collect();
+    let work = wave0::build_work_items(
+        schemas,
+        threshold,
+        &parent_to_object_children,
+        &parent_to_array_children,
     );
-    apply::apply_collapses(schemas, &collapses, &name_to_idx, &parent_to_object_children, &parent_to_array_children)
+    let collapses = wave0::collect_sibling_collapses(
+        schemas,
+        &work,
+        threshold,
+        min_jaccard,
+        &name_to_idx,
+        &parent_to_object_children,
+        &parent_to_array_children,
+    );
+    apply::apply_collapses(
+        schemas,
+        &collapses,
+        &name_to_idx,
+        &parent_to_object_children,
+        &parent_to_array_children,
+    )
 }
-
-
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::table_schema::{ColumnSchema, TableSchema};
     use super::super::super::type_tracker::PgType;
+    use super::*;
 
     fn make_parent(name: &str) -> TableSchema {
         TableSchema::new(name.to_string(), vec![name.to_string()], 0)
@@ -205,17 +227,29 @@ mod tests {
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
         t.parent_table = Some(parent.to_string());
         t.columns.push(ColumnSchema {
-            name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
-            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false,
+            name: "j2s_id".to_string(),
+            original_name: "j2s_id".to_string(),
+            pg_type: PgType::BigInt,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: false,
         });
         t.columns.push(ColumnSchema {
-            name: "j2s_parent_id".to_string(), original_name: "j2s_parent_id".to_string(),
-            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: true,
+            name: "j2s_parent_id".to_string(),
+            original_name: "j2s_parent_id".to_string(),
+            pg_type: PgType::BigInt,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: true,
         });
         for &k in data_keys {
             t.columns.push(ColumnSchema {
-                name: k.to_string(), original_name: k.to_string(),
-                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+                name: k.to_string(),
+                original_name: k.to_string(),
+                pg_type: PgType::Text,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
             });
         }
         t
@@ -226,8 +260,6 @@ mod tests {
         t.path = vec![parent.to_string(), key.to_string()];
         t
     }
-
-
 
     #[test]
     fn test_apply_multi_collapse_pivot_schemas_have_distinct_paths() {
@@ -249,13 +281,19 @@ mod tests {
             parent_idx: 0,
             array_children: false,
             log_msg: String::new(),
-            kind: CollapseKind::Multi { groups: vec![g0, g1] },
+            kind: CollapseKind::Multi {
+                groups: vec![g0, g1],
+            },
             absorbed_indices: vec![1, 2, 3, 4, 5, 6],
         };
-        let name_to_idx: std::collections::HashMap<String, usize> =
-            schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+        let name_to_idx: std::collections::HashMap<String, usize> = schemas
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.name.clone(), i))
+            .collect();
         let empty = std::collections::HashMap::new();
-        let (pivot_schemas, _) = apply::apply_multi_collapse(&mut schemas, &collapse, &name_to_idx, &empty, &empty);
+        let (pivot_schemas, _) =
+            apply::apply_multi_collapse(&mut schemas, &collapse, &name_to_idx, &empty, &empty);
         assert_eq!(pivot_schemas.len(), 2, "expected 2 pivot schemas");
         let last_segs: Vec<Option<&String>> = pivot_schemas.iter().map(|s| s.path.last()).collect();
         assert_ne!(

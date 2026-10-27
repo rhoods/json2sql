@@ -41,7 +41,10 @@ use super::placement::placements;
 use super::proposal::TableProposal;
 use super::proposal::{avoid_taken_names, propose, ColumnName, DataSignals};
 use super::render::{to_markdown, to_toml};
-use super::sample::{empty_sample, observe_row, sample_tables, SampleSource, SampleTarget, StoredSample, TableSample, DEFAULT_BUDGET};
+use super::sample::{
+    empty_sample, observe_row, sample_tables, SampleSource, SampleTarget, StoredSample,
+    TableSample, DEFAULT_BUDGET,
+};
 use super::values::RANK_SAMPLE;
 use crate::error::{J2sError, Result};
 use crate::schema::table_schema::{ChildKind, ColumnSchema, TableSchema};
@@ -173,20 +176,46 @@ impl<'s> SamplePlan<'s> {
             .filter_map(|table| {
                 let path = object_path(schemas, table)?;
                 let root = root_of(schemas, table)?.path[0].as_str();
-                let keys: Vec<Vec<String>> = data_columns_by_name(table).iter().map(|c| key_path(table, c)).collect();
-                let sample = Some(empty_sample(&SampleTarget { path: &path, columns: &keys }, row_count / RANK_SAMPLE));
-                Some(Self { table, root, path, keys, sample })
+                let keys: Vec<Vec<String>> = data_columns_by_name(table)
+                    .iter()
+                    .map(|c| key_path(table, c))
+                    .collect();
+                let sample = Some(empty_sample(
+                    &SampleTarget {
+                        path: &path,
+                        columns: &keys,
+                    },
+                    row_count / RANK_SAMPLE,
+                ));
+                Some(Self {
+                    table,
+                    root,
+                    path,
+                    keys,
+                    sample,
+                })
             })
             .collect()
     }
 
     /// Adds a row read under `key`; a row that does not fit the path drops the sample.
     fn observe(&mut self, key: Option<&str>, row: &serde_json::Value) {
-        let Some(sample) = self.sample.as_mut() else { return };
+        let Some(sample) = self.sample.as_mut() else {
+            return;
+        };
         if key.is_some_and(|key| key != self.root) {
             return;
         }
-        if observe_row(sample, row, &SampleTarget { path: &self.path, columns: &self.keys }).is_err() {
+        if observe_row(
+            sample,
+            row,
+            &SampleTarget {
+                path: &self.path,
+                columns: &self.keys,
+            },
+        )
+        .is_err()
+        {
             self.sample = None;
         }
     }
@@ -214,7 +243,10 @@ pub fn samples_of_rows(
             sample.values.drop_unranked();
             Some(StoredSample {
                 table: plan.table.name.clone(),
-                columns: data_columns_by_name(plan.table).iter().map(|c| c.name.clone()).collect(),
+                columns: data_columns_by_name(plan.table)
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect(),
                 sample,
             })
         })
@@ -228,7 +260,9 @@ fn root_of<'s>(schemas: &'s [TableSchema], table: &'s TableSchema) -> Option<&'s
         if current.is_root() {
             return Some(current);
         }
-        current = schemas.iter().find(|s| Some(&s.name) == current.parent_table.as_ref())?;
+        current = schemas
+            .iter()
+            .find(|s| Some(&s.name) == current.parent_table.as_ref())?;
     }
     None
 }
@@ -237,7 +271,11 @@ fn root_of<'s>(schemas: &'s [TableSchema], table: &'s TableSchema) -> Option<&'s
 /// sample and for the proposal.
 pub(super) fn data_columns_by_name(table: &TableSchema) -> Vec<&ColumnSchema> {
     let mut columns: Vec<&ColumnSchema> = table.data_columns().collect();
-    columns.sort_by(|a, b| a.original_name.cmp(&b.original_name).then_with(|| a.name.cmp(&b.name)));
+    columns.sort_by(|a, b| {
+        a.original_name
+            .cmp(&b.original_name)
+            .then_with(|| a.name.cmp(&b.name))
+    });
     columns
 }
 
@@ -330,7 +368,10 @@ fn read_plans(schemas: &[TableSchema], tables: &[&TableSchema]) -> Vec<ReadPlan>
         .iter()
         .map(|table| ReadPlan {
             path: object_path(schemas, table),
-            columns: data_columns_by_name(table).into_iter().map(|c| key_path(table, c)).collect(),
+            columns: data_columns_by_name(table)
+                .into_iter()
+                .map(|c| key_path(table, c))
+                .collect(),
         })
         .collect()
 }
@@ -594,12 +635,22 @@ mod tests {
     /// Two prefix families whose columns `i` and `i + 4` hold the same six values, then twelve fillers with values of
     /// their own: the names make one fusion of `nutrition` and `nutriscore`, the shared values confirm it.
     const FUSED: [&str; 8] = [
-        "nutrition_fat", "nutrition_sugar", "nutrition_salt", "nutrition_fiber",
-        "nutriscore_fat", "nutriscore_sugar", "nutriscore_salt", "nutriscore_fiber",
+        "nutrition_fat",
+        "nutrition_sugar",
+        "nutrition_salt",
+        "nutrition_fiber",
+        "nutriscore_fat",
+        "nutriscore_sugar",
+        "nutriscore_salt",
+        "nutriscore_fiber",
     ];
 
     fn fused_names() -> Vec<String> {
-        FUSED.iter().chain(&OTHER).map(|n| (*n).to_string()).collect()
+        FUSED
+            .iter()
+            .chain(&OTHER)
+            .map(|n| (*n).to_string())
+            .collect()
     }
 
     /// `rows` lines with the fused table under `props`.
@@ -609,8 +660,21 @@ mod tests {
             let props: serde_json::Map<String, Value> = FUSED
                 .iter()
                 .enumerate()
-                .map(|(c, n)| ((*n).to_string(), json!(format!("{}{}", char::from(b'a' + u8::try_from(c % 4).unwrap()), i % 6))))
-                .chain(OTHER.iter().map(|n| ((*n).to_string(), json!(format!("{n}{}", i % 6)))))
+                .map(|(c, n)| {
+                    (
+                        (*n).to_string(),
+                        json!(format!(
+                            "{}{}",
+                            char::from(b'a' + u8::try_from(c % 4).unwrap()),
+                            i % 6
+                        )),
+                    )
+                })
+                .chain(
+                    OTHER
+                        .iter()
+                        .map(|n| ((*n).to_string(), json!(format!("{n}{}", i % 6)))),
+                )
                 .collect();
             writeln!(f, "{}", json!({"id": i, "props": props})).unwrap();
         }
@@ -621,7 +685,13 @@ mod tests {
     fn fused_run(columns: &[String], input: &Path) -> Suggestion {
         let schemas = vec![
             table("items", &["items"], None, &["id".to_string()], 60),
-            table("items_props", &["items", "props"], Some(ChildKind::Object), columns, 60),
+            table(
+                "items_props",
+                &["items", "props"],
+                Some(ChildKind::Object),
+                columns,
+                60,
+            ),
         ];
         run(&schemas, input, None).unwrap()
     }
@@ -638,10 +708,17 @@ mod tests {
         // #90: with several Pass 1 workers the columns of a table come in another order at each run
         let missing = Path::new("/nonexistent/dir/input.json");
         let names = fused_names();
-        let (a, b) = (fused_run(&names, missing), fused_run(&shuffled(&names), missing));
+        let (a, b) = (
+            fused_run(&names, missing),
+            fused_run(&shuffled(&names), missing),
+        );
         assert_eq!(a.toml, b.toml);
         assert_eq!(a.report, b.report);
-        assert!(a.toml.contains("nutrition = [") && a.toml.contains("nutriscore = ["), "{}", a.toml);
+        assert!(
+            a.toml.contains("nutrition = [") && a.toml.contains("nutriscore = ["),
+            "{}",
+            a.toml
+        );
     }
 
     #[test]
@@ -649,8 +726,15 @@ mod tests {
         // the sample and the proposal must list the columns in the same order, or the signals land on other columns
         let f = fused_jsonl(60);
         let names = fused_names();
-        let (a, b) = (fused_run(&names, f.path()), fused_run(&shuffled(&names), f.path()));
-        assert!(a.toml.contains("\nnutriscore_nutrition = ["), "the shared values confirm the fusion: {}", a.toml);
+        let (a, b) = (
+            fused_run(&names, f.path()),
+            fused_run(&shuffled(&names), f.path()),
+        );
+        assert!(
+            a.toml.contains("\nnutriscore_nutrition = ["),
+            "the shared values confirm the fusion: {}",
+            a.toml
+        );
         assert_eq!(a.toml, b.toml);
         assert_eq!(a.report, b.report);
     }
@@ -686,7 +770,12 @@ mod tests {
         let mut rows = rows_of(&jsonl(60));
         rows[5].1["props"] = json!([1, 2]);
         let samples = samples_of_rows(&schemas, rows, 60);
-        assert_eq!(samples.len(), 0, "{:?}", samples.iter().map(|s| &s.table).collect::<Vec<_>>());
+        assert_eq!(
+            samples.len(),
+            0,
+            "{:?}",
+            samples.iter().map(|s| &s.table).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -697,7 +786,13 @@ mod tests {
             .enumerate()
             .map(|(i, (_, v))| (Some(if i < 20 { "items" } else { "other" }.to_string()), v))
             .collect();
-        assert_eq!(samples_of_rows(&schemas, rows, 60)[0].sample.presence.rows(), 20);
+        assert_eq!(
+            samples_of_rows(&schemas, rows, 60)[0]
+                .sample
+                .presence
+                .rows(),
+            20
+        );
     }
 
     #[test]

@@ -18,9 +18,13 @@ where
         async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                if is_done() { break; }
+                if is_done() {
+                    break;
+                }
                 let e = *elapsed_secs.read();
-                if e < u32::MAX { *elapsed_secs.write() = e + 1; }
+                if e < u32::MAX {
+                    *elapsed_secs.write() = e + 1;
+                }
             }
         }
     });

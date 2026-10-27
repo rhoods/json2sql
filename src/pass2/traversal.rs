@@ -57,8 +57,11 @@ use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::error::Result;
 use crate::pass2::coercer::{coerce, CoerceResult};
 use crate::pass2::sink::RowSink;
+use crate::schema::table_schema::{
+    ChildKind, ColumnSchema, InferredStrategy, SiblingGroup, SiblingSchema, SuffixSchema,
+    TableSchema,
+};
 use crate::schema::PATH_SEP;
-use crate::schema::table_schema::{ChildKind, ColumnSchema, SiblingGroup, SiblingSchema, SuffixSchema, TableSchema, InferredStrategy};
 
 use super::insert::{insert_object, push_generated_col_insert, push_jsonb_col, InsertCtx};
 
@@ -73,12 +76,33 @@ fn push_coerced<A: AnomalyCollect>(
     match coerce(val, &col.pg_type) {
         CoerceResult::Ok(s) => builder.push_value(&s),
         CoerceResult::Null => builder.push_null(),
-        CoerceResult::OkWithAnomaly { value, actual_value, actual_type } => {
+        CoerceResult::OkWithAnomaly {
+            value,
+            actual_value,
+            actual_type,
+        } => {
             builder.push_value(&value);
-            anomalies.record(table_name, &col.name, row_id, &col.pg_type.as_sql(), &actual_value, actual_type)?;
+            anomalies.record(
+                table_name,
+                &col.name,
+                row_id,
+                &col.pg_type.as_sql(),
+                &actual_value,
+                actual_type,
+            )?;
         }
-        CoerceResult::Anomaly { actual_value, actual_type } => {
-            anomalies.record(table_name, &col.name, row_id, &col.pg_type.as_sql(), &actual_value, actual_type)?;
+        CoerceResult::Anomaly {
+            actual_value,
+            actual_type,
+        } => {
+            anomalies.record(
+                table_name,
+                &col.name,
+                row_id,
+                &col.pg_type.as_sql(),
+                &actual_value,
+                actual_type,
+            )?;
             builder.push_null();
         }
     }
@@ -105,7 +129,14 @@ pub(super) fn insert_pivot_object<S: RowSink>(
             None => builder.push_null(),
         }
         if let Some(col) = value_col {
-            push_coerced(&mut builder, anomalies, &schema.name, col, &child_id.to_string(), val)?;
+            push_coerced(
+                &mut builder,
+                anomalies,
+                &schema.name,
+                col,
+                &child_id.to_string(),
+                val,
+            )?;
         } else {
             builder.push_null();
         }
@@ -161,28 +192,78 @@ fn dispatch_child_object<S: RowSink>(
     child_value: &Value,
     child_id: Uuid,
 ) -> Result<()> {
-    let Value::Object(nested) = child_value else { return Ok(()); };
+    let Value::Object(nested) = child_value else {
+        return Ok(());
+    };
     let eff = child_schema.effective_strategy();
     match &*eff {
-        InferredStrategy::Pivot => insert_pivot_object(sinks, anomalies, child_schema, nested, child_id)?,
-        InferredStrategy::Jsonb => insert_jsonb_object(path_map, sinks, anomalies, child_schema, child_value, child_id, None)?,
+        InferredStrategy::Pivot => {
+            insert_pivot_object(sinks, anomalies, child_schema, nested, child_id)?
+        }
+        InferredStrategy::Jsonb => insert_jsonb_object(
+            path_map,
+            sinks,
+            anomalies,
+            child_schema,
+            child_value,
+            child_id,
+            None,
+        )?,
         InferredStrategy::StructuredPivot(suffix_schema) => {
-            insert_structured_pivot_object(sinks, anomalies, child_schema, nested, child_id, suffix_schema)?;
+            insert_structured_pivot_object(
+                sinks,
+                anomalies,
+                child_schema,
+                nested,
+                child_id,
+                suffix_schema,
+            )?;
         }
         InferredStrategy::SiblingCollapse(sibling_schema) => {
-            insert_sibling_collapse_object(path_map, sinks, anomalies, child_schema, nested, child_id, sibling_schema)?;
+            insert_sibling_collapse_object(
+                path_map,
+                sinks,
+                anomalies,
+                child_schema,
+                nested,
+                child_id,
+                sibling_schema,
+            )?;
         }
         InferredStrategy::SiblingCollapseMulti(groups) => {
-            insert_sibling_collapse_multi(path_map, sinks, anomalies, child_schema, nested, child_id, groups)?;
+            insert_sibling_collapse_multi(
+                path_map,
+                sinks,
+                anomalies,
+                child_schema,
+                nested,
+                child_id,
+                groups,
+            )?;
         }
         InferredStrategy::NormalizeDynamicKeys { id_column } => {
-            insert_normalize_dynamic_keys(sinks, anomalies, child_schema, nested, child_id, id_column)?;
+            insert_normalize_dynamic_keys(
+                sinks,
+                anomalies,
+                child_schema,
+                nested,
+                child_id,
+                id_column,
+            )?;
         }
-        InferredStrategy::Columns | InferredStrategy::AutoSplit { .. } | InferredStrategy::Ignore
-        | InferredStrategy::Flatten { .. } | InferredStrategy::JsonbFlatten => {
+        InferredStrategy::Columns
+        | InferredStrategy::AutoSplit { .. }
+        | InferredStrategy::Ignore
+        | InferredStrategy::Flatten { .. }
+        | InferredStrategy::JsonbFlatten => {
             insert_object(
-                path_map, &mut InsertCtx { sinks, anomalies },
-                child_schema, nested, Uuid::now_v7(), Some(child_id), None,
+                path_map,
+                &mut InsertCtx { sinks, anomalies },
+                child_schema,
+                nested,
+                Uuid::now_v7(),
+                Some(child_id),
+                None,
             )?;
         }
     }
@@ -203,7 +284,14 @@ fn dispatch_jsonb_children<S: RowSink>(
         match child_value {
             Value::Object(_) => {
                 if let Some(child_schema) = path_map.get(&child_key) {
-                    dispatch_child_object(path_map, sinks, anomalies, child_schema, child_value, child_id)?;
+                    dispatch_child_object(
+                        path_map,
+                        sinks,
+                        anomalies,
+                        child_schema,
+                        child_value,
+                        child_id,
+                    )?;
                 }
             }
             Value::Array(arr) => {
@@ -233,10 +321,16 @@ fn group_keys_by_base<'a>(
         match matched_suffix {
             Some(suffix) => {
                 let base = &key[..key.len() - suffix.len()];
-                groups.entry(base.to_string()).or_default().insert(suffix.to_string(), val);
+                groups
+                    .entry(base.to_string())
+                    .or_default()
+                    .insert(suffix.to_string(), val);
             }
             None => {
-                groups.entry(key.clone()).or_default().insert(String::new(), val);
+                groups
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(String::new(), val);
             }
         }
     }
@@ -256,26 +350,41 @@ fn write_structured_pivot_row<S: RowSink>(
     let row_id_str = child_id.to_string();
     for col in &schema.columns {
         if col.is_generated {
-            if col.is_parent_fk { builder.push_uuid(parent_id); }
-            else { match col.name.as_str() { "j2s_id" => builder.push_uuid(child_id), _ => builder.push_null() } }
+            if col.is_parent_fk {
+                builder.push_uuid(parent_id);
+            } else {
+                match col.name.as_str() {
+                    "j2s_id" => builder.push_uuid(child_id),
+                    _ => builder.push_null(),
+                }
+            }
             continue;
         }
         if col.original_name == "name" {
-            match escape_copy_text(base) { Some(e) => builder.push_value(&e), None => builder.push_null() }
+            match escape_copy_text(base) {
+                Some(e) => builder.push_value(&e),
+                None => builder.push_null(),
+            }
             continue;
         }
         if col.original_name == "value" {
             if let Some(&val) = suffix_vals.get("") {
                 push_coerced(&mut builder, anomalies, &schema.name, col, &row_id_str, val)?;
-            } else { builder.push_null(); }
+            } else {
+                builder.push_null();
+            }
             continue;
         }
         if let Some(&val) = suffix_vals.get(&col.original_name) {
             push_coerced(&mut builder, anomalies, &schema.name, col, &row_id_str, val)?;
-        } else { builder.push_null(); }
+        } else {
+            builder.push_null();
+        }
     }
     anomalies.inc_total(&schema.name);
-    if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&builder.finish())?; }
+    if let Some(sink) = sinks.get_mut(&schema.name) {
+        sink.write_row(&builder.finish())?;
+    }
     Ok(())
 }
 
@@ -313,27 +422,57 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
         return Ok(());
     }
     for (sub_key, child_table_name) in &schema.child_routes {
-        let Some(sub_value) = child_obj.get(sub_key) else { continue };
-        let Some(child_schema) = path_map.values().find(|s| s.name == *child_table_name) else { continue };
+        let Some(sub_value) = child_obj.get(sub_key) else {
+            continue;
+        };
+        let Some(child_schema) = path_map.values().find(|s| s.name == *child_table_name) else {
+            continue;
+        };
         match sub_value {
             Value::Object(nested) => {
                 let eff = child_schema.effective_strategy();
                 match &*eff {
                     InferredStrategy::SiblingCollapse(ss) => {
                         let ss = ss.clone();
-                        insert_sibling_collapse_object(path_map, sinks, anomalies, child_schema, nested, row_id, &ss)?;
+                        insert_sibling_collapse_object(
+                            path_map,
+                            sinks,
+                            anomalies,
+                            child_schema,
+                            nested,
+                            row_id,
+                            &ss,
+                        )?;
                     }
                     InferredStrategy::SiblingCollapseMulti(groups) => {
                         let groups = groups.clone();
-                        insert_sibling_collapse_multi(path_map, sinks, anomalies, child_schema, nested, row_id, &groups)?;
+                        insert_sibling_collapse_multi(
+                            path_map,
+                            sinks,
+                            anomalies,
+                            child_schema,
+                            nested,
+                            row_id,
+                            &groups,
+                        )?;
                     }
                     _ => {
                         let child_id = Uuid::now_v7();
-                        insert_object(path_map, &mut InsertCtx { sinks, anomalies }, child_schema, nested, child_id, Some(row_id), None)?;
+                        insert_object(
+                            path_map,
+                            &mut InsertCtx { sinks, anomalies },
+                            child_schema,
+                            nested,
+                            child_id,
+                            Some(row_id),
+                            None,
+                        )?;
                     }
                 }
             }
-            Value::Array(arr) => insert_array(path_map, sinks, anomalies, child_schema, arr, row_id)?,
+            Value::Array(arr) => {
+                insert_array(path_map, sinks, anomalies, child_schema, arr, row_id)?
+            }
             _ => {}
         }
     }
@@ -360,8 +499,9 @@ fn write_keyed_pivot_columns<A: AnomalyCollect>(
     let row_id_str = ctx.row_id.to_string();
     for col in &schema.columns {
         if col.is_generated {
-            if col.is_parent_fk { builder.push_uuid(ctx.parent_id); }
-            else {
+            if col.is_parent_fk {
+                builder.push_uuid(ctx.parent_id);
+            } else {
                 match col.name.as_str() {
                     "j2s_id" => builder.push_uuid(ctx.row_id),
                     "j2s_order" => match ctx.order {
@@ -374,10 +514,16 @@ fn write_keyed_pivot_columns<A: AnomalyCollect>(
             continue;
         }
         if col.original_name == ctx.sibling_schema.key_col_name {
-            match escape_copy_text(ctx.key) { Some(e) => builder.push_value(&e), None => builder.push_null() }
+            match escape_copy_text(ctx.key) {
+                Some(e) => builder.push_value(&e),
+                None => builder.push_null(),
+            }
             continue;
         }
-        let json_val = ctx.child_obj.get(&col.original_name).unwrap_or(&Value::Null);
+        let json_val = ctx
+            .child_obj
+            .get(&col.original_name)
+            .unwrap_or(&Value::Null);
         if matches!(json_val, Value::Object(_))
             || (matches!(json_val, Value::Array(_))
                 && !matches!(col.pg_type, crate::schema::type_tracker::PgType::Array(_)))
@@ -405,16 +551,35 @@ pub(super) fn insert_sibling_collapse_object<S: RowSink>(
     sibling_schema: &SiblingSchema,
 ) -> Result<()> {
     if sibling_schema.array_children {
-        return insert_sibling_collapse_array_of_objects(path_map, sinks, anomalies, schema, obj, parent_id, sibling_schema);
+        return insert_sibling_collapse_array_of_objects(
+            path_map,
+            sinks,
+            anomalies,
+            schema,
+            obj,
+            parent_id,
+            sibling_schema,
+        );
     }
     for (key, value) in obj {
-        let Value::Object(child_obj) = value else { continue };
+        let Value::Object(child_obj) = value else {
+            continue;
+        };
         let row_id = Uuid::now_v7();
         let mut builder = RowBuilder::new();
-        let ctx = SiblingCollapseRowInput { key, child_obj, parent_id, row_id, order: None, sibling_schema };
+        let ctx = SiblingCollapseRowInput {
+            key,
+            child_obj,
+            parent_id,
+            row_id,
+            order: None,
+            sibling_schema,
+        };
         write_keyed_pivot_columns(&mut builder, anomalies, schema, &ctx)?;
         anomalies.inc_total(&schema.name);
-        if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&builder.finish())?; }
+        if let Some(sink) = sinks.get_mut(&schema.name) {
+            sink.write_row(&builder.finish())?;
+        }
         dispatch_child_routes(path_map, sinks, anomalies, schema, child_obj, row_id)?;
     }
     Ok(())
@@ -434,13 +599,24 @@ pub(super) fn insert_sibling_collapse_array_of_objects<S: RowSink>(
     for (key, value) in obj {
         let Value::Array(arr) = value else { continue };
         for (order, item) in arr.iter().enumerate() {
-            let Value::Object(item_obj) = item else { continue };
+            let Value::Object(item_obj) = item else {
+                continue;
+            };
             let row_id = Uuid::now_v7();
             let mut builder = RowBuilder::new();
-            let ctx = SiblingCollapseRowInput { key, child_obj: item_obj, parent_id, row_id, order: Some(order), sibling_schema };
+            let ctx = SiblingCollapseRowInput {
+                key,
+                child_obj: item_obj,
+                parent_id,
+                row_id,
+                order: Some(order),
+                sibling_schema,
+            };
             write_keyed_pivot_columns(&mut builder, anomalies, schema, &ctx)?;
             anomalies.inc_total(&schema.name);
-            if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&builder.finish())?; }
+            if let Some(sink) = sinks.get_mut(&schema.name) {
+                sink.write_row(&builder.finish())?;
+            }
             dispatch_child_routes(path_map, sinks, anomalies, schema, item_obj, row_id)?;
         }
     }
@@ -458,18 +634,29 @@ pub(super) fn insert_normalize_dynamic_keys<S: RowSink>(
     id_column: &str,
 ) -> Result<()> {
     for (key, value) in obj {
-        let Value::Object(child_obj) = value else { continue };
+        let Value::Object(child_obj) = value else {
+            continue;
+        };
         let row_id = Uuid::now_v7();
         let mut builder = RowBuilder::new();
         let row_id_str = row_id.to_string();
         for col in &schema.columns {
             if col.is_generated {
-                if col.is_parent_fk { builder.push_uuid(parent_id); }
-                else { match col.name.as_str() { "j2s_id" => builder.push_uuid(row_id), _ => builder.push_null() } }
+                if col.is_parent_fk {
+                    builder.push_uuid(parent_id);
+                } else {
+                    match col.name.as_str() {
+                        "j2s_id" => builder.push_uuid(row_id),
+                        _ => builder.push_null(),
+                    }
+                }
                 continue;
             }
             if col.original_name == id_column {
-                match escape_copy_text(key) { Some(e) => builder.push_value(&e), None => builder.push_null() }
+                match escape_copy_text(key) {
+                    Some(e) => builder.push_value(&e),
+                    None => builder.push_null(),
+                }
                 continue;
             }
             let json_val = child_obj.get(&col.original_name).unwrap_or(&Value::Null);
@@ -480,10 +667,19 @@ pub(super) fn insert_normalize_dynamic_keys<S: RowSink>(
                 builder.push_null();
                 continue;
             }
-            push_coerced(&mut builder, anomalies, &schema.name, col, &row_id_str, json_val)?;
+            push_coerced(
+                &mut builder,
+                anomalies,
+                &schema.name,
+                col,
+                &row_id_str,
+                json_val,
+            )?;
         }
         anomalies.inc_total(&schema.name);
-        if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&builder.finish())?; }
+        if let Some(sink) = sinks.get_mut(&schema.name) {
+            sink.write_row(&builder.finish())?;
+        }
     }
     Ok(())
 }
@@ -497,12 +693,18 @@ fn emit_routing_row<S: RowSink>(
     let routing_id = Uuid::now_v7();
     let mut rb = RowBuilder::new();
     for col in &schema.columns {
-        if col.name == "j2s_id" { rb.push_uuid(routing_id); }
-        else if col.is_parent_fk { rb.push_uuid(parent_id); }
-        else { rb.push_null(); }
+        if col.name == "j2s_id" {
+            rb.push_uuid(routing_id);
+        } else if col.is_parent_fk {
+            rb.push_uuid(parent_id);
+        } else {
+            rb.push_null();
+        }
     }
     anomalies.inc_total(&schema.name);
-    if let Some(sink) = sinks.get_mut(&schema.name) { sink.write_row(&rb.finish())?; }
+    if let Some(sink) = sinks.get_mut(&schema.name) {
+        sink.write_row(&rb.finish())?;
+    }
     Ok(routing_id)
 }
 
@@ -517,16 +719,44 @@ fn route_independent_child<S: RowSink>(
     child_path_key: &str,
     routing_id: Uuid,
 ) -> Result<bool> {
-    let Some(child_schema) = path_map.get(child_path_key) else { return Ok(false) };
-    if child_schema.parent_table.as_deref() != Some(schema_name) { return Ok(false); }
+    let Some(child_schema) = path_map.get(child_path_key) else {
+        return Ok(false);
+    };
+    if child_schema.parent_table.as_deref() != Some(schema_name) {
+        return Ok(false);
+    }
     if let Value::Object(nested) = value {
         let eff = child_schema.effective_strategy();
         match &*eff {
-            InferredStrategy::SiblingCollapse(ss) => insert_sibling_collapse_object(path_map, sinks, anomalies, child_schema, nested, routing_id, ss)?,
-            InferredStrategy::SiblingCollapseMulti(cg) => insert_sibling_collapse_multi(path_map, sinks, anomalies, child_schema, nested, routing_id, cg)?,
+            InferredStrategy::SiblingCollapse(ss) => insert_sibling_collapse_object(
+                path_map,
+                sinks,
+                anomalies,
+                child_schema,
+                nested,
+                routing_id,
+                ss,
+            )?,
+            InferredStrategy::SiblingCollapseMulti(cg) => insert_sibling_collapse_multi(
+                path_map,
+                sinks,
+                anomalies,
+                child_schema,
+                nested,
+                routing_id,
+                cg,
+            )?,
             _ => {
                 let child_id = Uuid::now_v7();
-                insert_object(path_map, &mut InsertCtx { sinks, anomalies }, child_schema, nested, child_id, Some(routing_id), None)?;
+                insert_object(
+                    path_map,
+                    &mut InsertCtx { sinks, anomalies },
+                    child_schema,
+                    nested,
+                    child_id,
+                    Some(routing_id),
+                    None,
+                )?;
             }
         }
         Ok(true)
@@ -556,10 +786,19 @@ pub(super) fn route_multi_collapse_children<S: RowSink>(
     groups: &[SiblingGroup],
 ) -> Result<()> {
     let routing_path = schema.path.join(&PATH_SEP.to_string());
-    let mut group_submaps: Vec<serde_json::Map<String, Value>> = vec![serde_json::Map::new(); groups.len()];
+    let mut group_submaps: Vec<serde_json::Map<String, Value>> =
+        vec![serde_json::Map::new(); groups.len()];
     for (key, value) in obj {
         let child_path_key = format!("{routing_path}{PATH_SEP}{key}");
-        if route_independent_child(path_map, sinks, anomalies, &schema.name, value, &child_path_key, routing_id)? {
+        if route_independent_child(
+            path_map,
+            sinks,
+            anomalies,
+            &schema.name,
+            value,
+            &child_path_key,
+            routing_id,
+        )? {
             continue;
         }
         if let Some(idx) = find_group_for_key(groups, key) {
@@ -567,15 +806,29 @@ pub(super) fn route_multi_collapse_children<S: RowSink>(
         }
     }
     for (group, submap) in groups.iter().zip(group_submaps.iter()) {
-        if submap.is_empty() { continue; }
+        if submap.is_empty() {
+            continue;
+        }
         let path_seg = if group.path_segment.is_empty() {
-            if group.key_is_numeric { "num" } else { "key" }
+            if group.key_is_numeric {
+                "num"
+            } else {
+                "key"
+            }
         } else {
             &group.path_segment
         };
         let pivot_path_key = format!("{routing_path}{PATH_SEP}{path_seg}");
         if let Some(pivot_schema) = path_map.get(&pivot_path_key) {
-            insert_sibling_collapse_object(path_map, sinks, anomalies, pivot_schema, submap, routing_id, &group.sibling_schema)?;
+            insert_sibling_collapse_object(
+                path_map,
+                sinks,
+                anomalies,
+                pivot_schema,
+                submap,
+                routing_id,
+                &group.sibling_schema,
+            )?;
         }
     }
     Ok(())
@@ -600,11 +853,16 @@ pub(super) fn insert_sibling_collapse_multi<S: RowSink>(
 /// schemas produced since the fix). Falls back to the `key_is_numeric` heuristic so
 /// that old snapshots (empty `absorbed_path_segments`) continue to work correctly.
 fn find_group_for_key(groups: &[SiblingGroup], key: &str) -> Option<usize> {
-    if let Some(idx) = groups.iter().position(|g| g.absorbed_path_segments.iter().any(|s| s == key)) {
+    if let Some(idx) = groups
+        .iter()
+        .position(|g| g.absorbed_path_segments.iter().any(|s| s == key))
+    {
         return Some(idx);
     }
     let key_is_numeric = key.chars().all(|c| c.is_ascii_digit());
-    groups.iter().position(|g| g.key_is_numeric == key_is_numeric)
+    groups
+        .iter()
+        .position(|g| g.key_is_numeric == key_is_numeric)
 }
 
 #[allow(clippy::cast_possible_wrap)] // array index never reaches i64::MAX
@@ -620,16 +878,31 @@ pub(super) fn insert_array<S: RowSink>(
         let child_id = Uuid::now_v7();
         let order = i as i64;
         match (&schema.child_kind, item) {
-            (Some(ChildKind::ObjectArray), Value::Object(_)) if matches!(*schema.effective_strategy(), InferredStrategy::Jsonb) => {
+            (Some(ChildKind::ObjectArray), Value::Object(_))
+                if matches!(*schema.effective_strategy(), InferredStrategy::Jsonb) =>
+            {
                 // Jsonb needs the whole element as a blob, not just its object fields — insert_object's
                 // generic per-column loop would look up a literal "data" JSON key that never exists and
                 // silently write NULL (issue #45, tâche 10).
-                insert_jsonb_object(path_map, sinks, anomalies, schema, item, parent_id, Some(order))?;
+                insert_jsonb_object(
+                    path_map,
+                    sinks,
+                    anomalies,
+                    schema,
+                    item,
+                    parent_id,
+                    Some(order),
+                )?;
             }
             (Some(ChildKind::ObjectArray), Value::Object(obj)) => {
                 insert_object(
-                    path_map, &mut InsertCtx { sinks, anomalies },
-                    schema, obj, child_id, Some(parent_id), Some(order),
+                    path_map,
+                    &mut InsertCtx { sinks, anomalies },
+                    schema,
+                    obj,
+                    child_id,
+                    Some(parent_id),
+                    Some(order),
                 )?;
             }
             _ => {}
@@ -688,26 +961,59 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     fn col(name: &str, pg_type: PgType) -> ColumnSchema {
-        ColumnSchema { name: name.to_string(), original_name: name.to_string(), pg_type, not_null: false, is_generated: false, is_parent_fk: false }
+        ColumnSchema {
+            name: name.to_string(),
+            original_name: name.to_string(),
+            pg_type,
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
+        }
     }
 
     fn generated_id() -> ColumnSchema {
-        ColumnSchema { name: "j2s_id".to_string(), original_name: "j2s_id".to_string(), pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: false }
+        ColumnSchema {
+            name: "j2s_id".to_string(),
+            original_name: "j2s_id".to_string(),
+            pg_type: PgType::Uuid,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: false,
+        }
     }
 
     fn parent_fk(parent: &str) -> ColumnSchema {
-        ColumnSchema { name: format!("j2s_{parent}_id"), original_name: format!("j2s_{parent}_id"), pg_type: PgType::Uuid, not_null: true, is_generated: true, is_parent_fk: true }
+        ColumnSchema {
+            name: format!("j2s_{parent}_id"),
+            original_name: format!("j2s_{parent}_id"),
+            pg_type: PgType::Uuid,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: true,
+        }
     }
 
     fn generated_order() -> ColumnSchema {
-        ColumnSchema { name: "j2s_order".to_string(), original_name: "j2s_order".to_string(), pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false }
+        ColumnSchema {
+            name: "j2s_order".to_string(),
+            original_name: "j2s_order".to_string(),
+            pg_type: PgType::BigInt,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: false,
+        }
     }
 
     /// Pivot schema: `j2s_id`, j2s_{parent}_id, key TEXT, value TEXT
     fn make_pivot_schema(name: &str, parent: &str) -> TableSchema {
         let mut s = TableSchema::new(name.to_string(), vec![name.to_string()], 1);
         s.inferred_strategy = InferredStrategy::Pivot;
-        s.columns = vec![generated_id(), parent_fk(parent), col("key", PgType::Text), col("value", PgType::Text)];
+        s.columns = vec![
+            generated_id(),
+            parent_fk(parent),
+            col("key", PgType::Text),
+            col("value", PgType::Text),
+        ];
         s
     }
 
@@ -728,10 +1034,15 @@ mod tests {
     }
 
     fn make_sinks(names: &[&str]) -> HashMap<String, CaptureSink> {
-        names.iter().map(|n| ((*n).to_string(), CaptureSink(vec![]))).collect()
+        names
+            .iter()
+            .map(|n| ((*n).to_string(), CaptureSink(vec![])))
+            .collect()
     }
 
-    fn dummy_parent_id() -> Uuid { Uuid::nil() }
+    fn dummy_parent_id() -> Uuid {
+        Uuid::nil()
+    }
 
     // ---------------------------------------------------------------------------
     // Row parsing helper
@@ -739,7 +1050,9 @@ mod tests {
 
     fn parse_fields(row: &[u8]) -> Vec<&str> {
         let row = row.strip_suffix(b"\n").unwrap_or(row);
-        row.split(|&b| b == b'\t').map(|f| std::str::from_utf8(f).unwrap()).collect()
+        row.split(|&b| b == b'\t')
+            .map(|f| std::str::from_utf8(f).unwrap())
+            .collect()
     }
 
     // ---------------------------------------------------------------------------
@@ -768,7 +1081,8 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"a": "hello", "b": "world"}"#).unwrap();
 
-        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id())
+            .unwrap();
 
         let rows = &sinks["attrs"].0;
         assert_eq!(rows.len(), 2, "two key-value pairs → two rows");
@@ -790,7 +1104,8 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"k": null}"#).unwrap();
 
-        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id())
+            .unwrap();
 
         let rows = &sinks["attrs"].0;
         assert_eq!(rows.len(), 1);
@@ -808,7 +1123,8 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"k": true}"#).unwrap();
 
-        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id())
+            .unwrap();
 
         let rows = &sinks["attrs"].0;
         assert_eq!(rows.len(), 1);
@@ -824,15 +1140,22 @@ mod tests {
         let mut sinks = make_sinks(&["attrs"]);
         let mut anomalies = CountingAnomaly::default();
         let mut obj = serde_json::Map::new();
-        obj.insert("ke\0y".to_string(), serde_json::Value::String("val".to_string()));
+        obj.insert(
+            "ke\0y".to_string(),
+            serde_json::Value::String("val".to_string()),
+        );
 
-        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id())
+            .unwrap();
 
         let rows = &sinks["attrs"].0;
         assert_eq!(rows.len(), 1);
         let fields = parse_fields(&rows[0]);
         assert_eq!(fields[2], r"\N", "null byte in key → \\N for key field");
-        assert!(anomalies.records.is_empty(), "null byte in key is not a type anomaly");
+        assert!(
+            anomalies.records.is_empty(),
+            "null byte in key is not a type anomaly"
+        );
     }
 
     #[test]
@@ -843,10 +1166,15 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"k": "v"}"#).unwrap();
 
-        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id()).unwrap();
+        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id())
+            .unwrap();
 
         assert_eq!(sinks.len(), 0);
-        assert_eq!(anomalies.totals.get("attrs").copied().unwrap_or(0), 1, "inc_total called even without sink");
+        assert_eq!(
+            anomalies.totals.get("attrs").copied().unwrap_or(0),
+            1,
+            "inc_total called even without sink"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -865,7 +1193,16 @@ mod tests {
         let path_map = HashMap::new();
         let value = serde_json::json!({"x": 1, "y": "hello"});
 
-        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id(), None).unwrap();
+        super::insert_jsonb_object(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &value,
+            dummy_parent_id(),
+            None,
+        )
+        .unwrap();
 
         let rows = &sinks["evts"].0;
         assert_eq!(rows.len(), 1, "one JSONB row emitted");
@@ -895,10 +1232,23 @@ mod tests {
         let mut anomalies = CountingAnomaly::default();
         let value = serde_json::json!({"tags": {"a": "v1", "b": "v2"}});
 
-        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id(), None).unwrap();
+        super::insert_jsonb_object(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &value,
+            dummy_parent_id(),
+            None,
+        )
+        .unwrap();
 
         assert_eq!(sinks["evts"].0.len(), 1, "one JSONB row for parent");
-        assert_eq!(sinks["evts_tags"].0.len(), 2, "two pivot rows for child tags");
+        assert_eq!(
+            sinks["evts_tags"].0.len(),
+            2,
+            "two pivot rows for child tags"
+        );
     }
 
     #[test]
@@ -910,9 +1260,22 @@ mod tests {
         let path_map: HashMap<String, crate::schema::table_schema::TableSchema> = HashMap::new();
         let value = serde_json::json!({"nested": {"x": 1}});
 
-        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id(), None).unwrap();
+        super::insert_jsonb_object(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &value,
+            dummy_parent_id(),
+            None,
+        )
+        .unwrap();
 
-        assert_eq!(sinks["evts"].0.len(), 1, "one row — no child dispatch without path_map");
+        assert_eq!(
+            sinks["evts"].0.len(),
+            1,
+            "one row — no child dispatch without path_map"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -932,13 +1295,29 @@ mod tests {
         let path_map = HashMap::new();
         let value = serde_json::json!({"score": 5});
 
-        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id(), Some(2)).unwrap();
+        super::insert_jsonb_object(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &value,
+            dummy_parent_id(),
+            Some(2),
+        )
+        .unwrap();
 
         let rows = &sinks["reviews"].0;
         assert_eq!(rows.len(), 1);
         let fields = parse_fields(&rows[0]);
-        assert_eq!(fields.len(), 4, "uuid, parent_uuid, order, json_data — une ligne par colonne déclarée");
-        assert_eq!(fields[2], "2", "j2s_order doit porter la position passée en paramètre");
+        assert_eq!(
+            fields.len(),
+            4,
+            "uuid, parent_uuid, order, json_data — une ligne par colonne déclarée"
+        );
+        assert_eq!(
+            fields[2], "2",
+            "j2s_order doit porter la position passée en paramètre"
+        );
         let parsed: serde_json::Value = serde_json::from_str(fields[3]).unwrap();
         assert_eq!(parsed["score"], 5);
     }
@@ -951,7 +1330,16 @@ mod tests {
         let path_map = HashMap::new();
         let value = serde_json::json!({"score": 5});
 
-        super::insert_jsonb_object(&path_map, &mut sinks, &mut anomalies, &schema, &value, dummy_parent_id(), None).unwrap();
+        super::insert_jsonb_object(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &value,
+            dummy_parent_id(),
+            None,
+        )
+        .unwrap();
 
         let fields = parse_fields(&sinks["reviews"].0[0]);
         assert_eq!(fields[2], r"\N", "pas d'ordre fourni → j2s_order NULL");
@@ -963,9 +1351,17 @@ mod tests {
 
     use crate::schema::table_schema::{SuffixColumn, SuffixSchema};
 
-    fn make_structured_pivot_schema(name: &str, parent: &str, suffix_schema: &SuffixSchema) -> crate::schema::table_schema::TableSchema {
+    fn make_structured_pivot_schema(
+        name: &str,
+        parent: &str,
+        suffix_schema: &SuffixSchema,
+    ) -> crate::schema::table_schema::TableSchema {
         use crate::schema::table_schema::InferredStrategy;
-        let mut s = crate::schema::table_schema::TableSchema::new(name.to_string(), vec![name.to_string()], 1);
+        let mut s = crate::schema::table_schema::TableSchema::new(
+            name.to_string(),
+            vec![name.to_string()],
+            1,
+        );
         s.inferred_strategy = InferredStrategy::StructuredPivot(suffix_schema.clone());
         let mut cols = vec![
             generated_id(),
@@ -989,11 +1385,14 @@ mod tests {
 
     fn make_suffix_schema(suffixes: &[&str]) -> SuffixSchema {
         SuffixSchema {
-            suffix_cols: suffixes.iter().map(|s| SuffixColumn {
-                suffix: s.to_string(),
-                col_name: format!("c{}", s.replace('_', "")),
-                pg_type: PgType::Text,
-            }).collect(),
+            suffix_cols: suffixes
+                .iter()
+                .map(|s| SuffixColumn {
+                    suffix: s.to_string(),
+                    col_name: format!("c{}", s.replace('_', "")),
+                    pg_type: PgType::Text,
+                })
+                .collect(),
             value_type: PgType::Text,
         }
     }
@@ -1007,7 +1406,15 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"price_eur": "1.5", "price_usd": "2.0"}"#).unwrap();
 
-        super::insert_structured_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+        super::insert_structured_pivot_object(
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            dummy_parent_id(),
+            &ss,
+        )
+        .unwrap();
 
         let rows = &sinks["prices"].0;
         assert_eq!(rows.len(), 1, "two keys with same base → one row");
@@ -1026,13 +1433,27 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"standalone": "val"}"#).unwrap();
 
-        super::insert_structured_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+        super::insert_structured_pivot_object(
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            dummy_parent_id(),
+            &ss,
+        )
+        .unwrap();
 
         let rows = &sinks["prices"].0;
         assert_eq!(rows.len(), 1);
         let fields = parse_fields(&rows[0]);
-        assert_eq!(fields[2], "standalone", "key with no suffix → 'name' column");
-        assert_eq!(fields[3], "val", "value goes to 'value' column (suffix \"\")");
+        assert_eq!(
+            fields[2], "standalone",
+            "key with no suffix → 'name' column"
+        );
+        assert_eq!(
+            fields[3], "val",
+            "value goes to 'value' column (suffix \"\")"
+        );
         assert_eq!(fields[4], r"\N", "suffix column absent → \\N");
     }
 
@@ -1045,7 +1466,15 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"cost_eur": "1", "price_eur": "2"}"#).unwrap();
 
-        super::insert_structured_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+        super::insert_structured_pivot_object(
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            dummy_parent_id(),
+            &ss,
+        )
+        .unwrap();
 
         assert_eq!(sinks["prices"].0.len(), 2, "two distinct bases → two rows");
     }
@@ -1056,13 +1485,32 @@ mod tests {
 
     use crate::schema::table_schema::{KeyShape, SiblingSchema};
 
-    fn make_sibling_collapse_schema(name: &str, parent: &str, key_col: &str, data_cols: &[&str]) -> (crate::schema::table_schema::TableSchema, SiblingSchema) {
+    fn make_sibling_collapse_schema(
+        name: &str,
+        parent: &str,
+        key_col: &str,
+        data_cols: &[&str],
+    ) -> (crate::schema::table_schema::TableSchema, SiblingSchema) {
         use crate::schema::table_schema::InferredStrategy;
-        let ss = SiblingSchema { key_col_name: key_col.to_string(), key_shape: KeyShape::Mixed, array_children: false };
-        let mut s = crate::schema::table_schema::TableSchema::new(name.to_string(), vec![name.to_string()], 1);
+        let ss = SiblingSchema {
+            key_col_name: key_col.to_string(),
+            key_shape: KeyShape::Mixed,
+            array_children: false,
+        };
+        let mut s = crate::schema::table_schema::TableSchema::new(
+            name.to_string(),
+            vec![name.to_string()],
+            1,
+        );
         s.inferred_strategy = InferredStrategy::SiblingCollapse(ss.clone());
-        let mut cols = vec![generated_id(), parent_fk(parent), col(key_col, PgType::Text)];
-        for dc in data_cols { cols.push(col(dc, PgType::Text)); }
+        let mut cols = vec![
+            generated_id(),
+            parent_fk(parent),
+            col(key_col, PgType::Text),
+        ];
+        for dc in data_cols {
+            cols.push(col(dc, PgType::Text));
+        }
         s.columns = cols;
         (s, ss)
     }
@@ -1076,9 +1524,22 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"k": "scalar_not_object"}"#).unwrap();
 
-        super::insert_sibling_collapse_object(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+        super::insert_sibling_collapse_object(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            dummy_parent_id(),
+            &ss,
+        )
+        .unwrap();
 
-        assert_eq!(sinks["items"].0.len(), 0, "scalar value → silently skipped, zero rows");
+        assert_eq!(
+            sinks["items"].0.len(),
+            0,
+            "scalar value → silently skipped, zero rows"
+        );
         assert_eq!(anomalies.totals.get("items").copied().unwrap_or(0), 0);
     }
 
@@ -1091,7 +1552,16 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"mykey": {"a": "v1", "b": "v2"}}"#).unwrap();
 
-        super::insert_sibling_collapse_object(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+        super::insert_sibling_collapse_object(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            dummy_parent_id(),
+            &ss,
+        )
+        .unwrap();
 
         let rows = &sinks["items"].0;
         assert_eq!(rows.len(), 1);
@@ -1112,7 +1582,16 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"k1": {"val": "a"}, "k2": {"val": "b"}}"#).unwrap();
 
-        super::insert_sibling_collapse_object(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &ss).unwrap();
+        super::insert_sibling_collapse_object(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            dummy_parent_id(),
+            &ss,
+        )
+        .unwrap();
 
         assert_eq!(sinks["items"].0.len(), 2, "two sibling keys → two rows");
     }
@@ -1123,22 +1602,40 @@ mod tests {
 
     use crate::schema::table_schema::SiblingGroup;
 
-    fn make_routing_schema(name: &str, parent: &str, path: &[&str]) -> crate::schema::table_schema::TableSchema {
+    fn make_routing_schema(
+        name: &str,
+        parent: &str,
+        path: &[&str],
+    ) -> crate::schema::table_schema::TableSchema {
         let mut s = crate::schema::table_schema::TableSchema::new(
-            name.to_string(), path.iter().map(std::string::ToString::to_string).collect(), 1
+            name.to_string(),
+            path.iter().map(std::string::ToString::to_string).collect(),
+            1,
         );
         s.columns = vec![generated_id(), parent_fk(parent)];
         s
     }
 
-    fn make_group(path_segment: &str, key_is_numeric: bool, absorbed: &[&str], key_col: &str) -> SiblingGroup {
+    fn make_group(
+        path_segment: &str,
+        key_is_numeric: bool,
+        absorbed: &[&str],
+        key_col: &str,
+    ) -> SiblingGroup {
         SiblingGroup {
             pivot_table: format!("pivot_{path_segment}"),
             key_is_numeric,
-            sibling_schema: SiblingSchema { key_col_name: key_col.to_string(), key_shape: KeyShape::Mixed, array_children: false },
+            sibling_schema: SiblingSchema {
+                key_col_name: key_col.to_string(),
+                key_shape: KeyShape::Mixed,
+                array_children: false,
+            },
             absorbed_names: vec![],
             path_segment: path_segment.to_string(),
-            absorbed_path_segments: absorbed.iter().map(std::string::ToString::to_string).collect(),
+            absorbed_path_segments: absorbed
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
         }
     }
 
@@ -1151,9 +1648,22 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"k": {"a": 1}}"#).unwrap();
 
-        super::insert_sibling_collapse_multi(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &[]).unwrap();
+        super::insert_sibling_collapse_multi(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            dummy_parent_id(),
+            &[],
+        )
+        .unwrap();
 
-        assert_eq!(sinks["multi"].0.len(), 1, "one routing row emitted even with no groups");
+        assert_eq!(
+            sinks["multi"].0.len(),
+            1,
+            "one routing row emitted even with no groups"
+        );
     }
 
     #[test]
@@ -1164,8 +1674,10 @@ mod tests {
             make_group("num", true, &[], "k"),
         ];
 
-        let (pivot_key_schema, pivot_key_ss) = make_sibling_collapse_schema("pivot_key", "multi", "k", &["val"]);
-        let (pivot_num_schema, pivot_num_ss) = make_sibling_collapse_schema("pivot_num", "multi", "k", &["val"]);
+        let (pivot_key_schema, pivot_key_ss) =
+            make_sibling_collapse_schema("pivot_key", "multi", "k", &["val"]);
+        let (pivot_num_schema, pivot_num_ss) =
+            make_sibling_collapse_schema("pivot_num", "multi", "k", &["val"]);
         // Override sibling_schema from groups (not used directly — pivot schemas get their own)
         let _ = (pivot_key_ss, pivot_num_ss);
 
@@ -1178,11 +1690,28 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"foo": {"val": "x"}, "42": {"val": "y"}}"#).unwrap();
 
-        super::insert_sibling_collapse_multi(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &groups).unwrap();
+        super::insert_sibling_collapse_multi(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            dummy_parent_id(),
+            &groups,
+        )
+        .unwrap();
 
         assert_eq!(sinks["multi"].0.len(), 1, "routing row");
-        assert_eq!(sinks["pivot_key"].0.len(), 1, "non-numeric key 'foo' → pivot_key");
-        assert_eq!(sinks["pivot_num"].0.len(), 1, "numeric key '42' → pivot_num");
+        assert_eq!(
+            sinks["pivot_key"].0.len(),
+            1,
+            "non-numeric key 'foo' → pivot_key"
+        );
+        assert_eq!(
+            sinks["pivot_num"].0.len(),
+            1,
+            "numeric key '42' → pivot_num"
+        );
     }
 
     #[test]
@@ -1194,8 +1723,10 @@ mod tests {
             make_group("grp1", false, &["bar"], "k"),
         ];
 
-        let (pivot_grp0_schema, _) = make_sibling_collapse_schema("pivot_grp0", "multi", "k", &["val"]);
-        let (pivot_grp1_schema, _) = make_sibling_collapse_schema("pivot_grp1", "multi", "k", &["val"]);
+        let (pivot_grp0_schema, _) =
+            make_sibling_collapse_schema("pivot_grp0", "multi", "k", &["val"]);
+        let (pivot_grp1_schema, _) =
+            make_sibling_collapse_schema("pivot_grp1", "multi", "k", &["val"]);
 
         let mut path_map = HashMap::new();
         path_map.insert("multi\x00grp0".to_string(), pivot_grp0_schema);
@@ -1206,10 +1737,27 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"foo": {"val": "f"}, "bar": {"val": "b"}}"#).unwrap();
 
-        super::insert_sibling_collapse_multi(&path_map, &mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id(), &groups).unwrap();
+        super::insert_sibling_collapse_multi(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            dummy_parent_id(),
+            &groups,
+        )
+        .unwrap();
 
-        assert_eq!(sinks["pivot_grp0"].0.len(), 1, "'foo' → grp0 via absorbed_path_segments");
-        assert_eq!(sinks["pivot_grp1"].0.len(), 1, "'bar' → grp1 via absorbed_path_segments");
+        assert_eq!(
+            sinks["pivot_grp0"].0.len(),
+            1,
+            "'foo' → grp0 via absorbed_path_segments"
+        );
+        assert_eq!(
+            sinks["pivot_grp1"].0.len(),
+            1,
+            "'bar' → grp1 via absorbed_path_segments"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1217,7 +1765,12 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     fn group(key_is_numeric: bool, absorbed: &[&str]) -> SiblingGroup {
-        make_group(if key_is_numeric { "num" } else { "key" }, key_is_numeric, absorbed, "k")
+        make_group(
+            if key_is_numeric { "num" } else { "key" },
+            key_is_numeric,
+            absorbed,
+            "k",
+        )
     }
 
     #[test]
@@ -1231,19 +1784,31 @@ mod tests {
     #[test]
     fn find_group_fallback_numeric_key() {
         let groups = vec![group(false, &[]), group(true, &[])];
-        assert_eq!(super::find_group_for_key(&groups, "123"), Some(1), "all-digit key → numeric group");
+        assert_eq!(
+            super::find_group_for_key(&groups, "123"),
+            Some(1),
+            "all-digit key → numeric group"
+        );
     }
 
     #[test]
     fn find_group_fallback_non_numeric_key() {
         let groups = vec![group(false, &[]), group(true, &[])];
-        assert_eq!(super::find_group_for_key(&groups, "abc"), Some(0), "non-digit key → non-numeric group");
+        assert_eq!(
+            super::find_group_for_key(&groups, "abc"),
+            Some(0),
+            "non-digit key → non-numeric group"
+        );
     }
 
     #[test]
     fn find_group_key_absent_returns_none() {
         let groups = vec![group(true, &["42"])]; // only numeric group
-        assert_eq!(super::find_group_for_key(&groups, "foo"), None, "no matching group → None");
+        assert_eq!(
+            super::find_group_for_key(&groups, "foo"),
+            None,
+            "no matching group → None"
+        );
     }
 
     #[test]
@@ -1252,14 +1817,22 @@ mod tests {
             make_group("grp0", false, &[], "k"),
             make_group("grp1", false, &[], "k"),
         ];
-        assert_eq!(super::find_group_for_key(&groups, "foo"), Some(0), "tie-break → first group wins");
+        assert_eq!(
+            super::find_group_for_key(&groups, "foo"),
+            Some(0),
+            "tie-break → first group wins"
+        );
     }
 
     #[test]
     fn find_group_absorbed_segments_take_priority_over_key_is_numeric() {
         // Key "123" is all-digits, but group 0 has it in absorbed_path_segments → should win over group 1 (numeric)
         let groups = vec![group(false, &["123"]), group(true, &[])];
-        assert_eq!(super::find_group_for_key(&groups, "123"), Some(0), "exact match wins over key_is_numeric heuristic");
+        assert_eq!(
+            super::find_group_for_key(&groups, "123"),
+            Some(0),
+            "exact match wins over key_is_numeric heuristic"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1277,8 +1850,10 @@ mod tests {
             make_group("b_key", false, &["b1", "b2"], "key"),
         ];
 
-        let (pivot_a_schema, _) = make_sibling_collapse_schema("pivot_a_key", "root", "key", &["color"]);
-        let (pivot_b_schema, _) = make_sibling_collapse_schema("pivot_b_key", "root", "key", &["size"]);
+        let (pivot_a_schema, _) =
+            make_sibling_collapse_schema("pivot_a_key", "root", "key", &["color"]);
+        let (pivot_b_schema, _) =
+            make_sibling_collapse_schema("pivot_b_key", "root", "key", &["size"]);
 
         let sep = crate::schema::PATH_SEP.to_string();
         let mut path_map = HashMap::new();
@@ -1294,7 +1869,16 @@ mod tests {
             r#"{"a1": {"color": "red"}, "a2": {"color": "blue"}, "b1": {"size": "10"}, "b2": {"size": "20"}}"#
         ).unwrap();
 
-        super::route_multi_collapse_children(&path_map, &mut sinks, &mut anomalies, &schema, &obj, routing_id, &groups).unwrap();
+        super::route_multi_collapse_children(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            routing_id,
+            &groups,
+        )
+        .unwrap();
 
         assert_eq!(sinks["pivot_a_key"].0.len(), 2, "a1 + a2 → pivot_a_key");
         assert_eq!(sinks["pivot_b_key"].0.len(), 2, "b1 + b2 → pivot_b_key");
@@ -1319,17 +1903,37 @@ mod tests {
             serde_json::json!({"score": 2}),
         ];
 
-        super::insert_array(&path_map, &mut sinks, &mut anomalies, &schema, &arr, dummy_parent_id()).unwrap();
+        super::insert_array(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &arr,
+            dummy_parent_id(),
+        )
+        .unwrap();
 
         let rows = &sinks["reviews"].0;
-        assert_eq!(rows.len(), 2, "un élément d'array → une ligne JSONB, pas un no-op silencieux");
+        assert_eq!(
+            rows.len(),
+            2,
+            "un élément d'array → une ligne JSONB, pas un no-op silencieux"
+        );
         for (i, row) in rows.iter().enumerate() {
             let fields = parse_fields(row);
             assert_eq!(fields.len(), 4, "uuid, parent_uuid, order, data");
-            assert_ne!(fields[3], r"\N", "le blob JSON ne doit pas être NULL (bug pré-#45)");
-            assert_eq!(fields[2], i.to_string(), "j2s_order doit suivre la position dans l'array");
+            assert_ne!(
+                fields[3], r"\N",
+                "le blob JSON ne doit pas être NULL (bug pré-#45)"
+            );
+            assert_eq!(
+                fields[2],
+                i.to_string(),
+                "j2s_order doit suivre la position dans l'array"
+            );
         }
-        let first: serde_json::Value = serde_json::from_str(parse_fields(&rows[0]).remove(3)).unwrap();
+        let first: serde_json::Value =
+            serde_json::from_str(parse_fields(&rows[0]).remove(3)).unwrap();
         assert_eq!(first["score"], 5);
         assert_eq!(first["note"], "top");
     }
@@ -1341,17 +1945,33 @@ mod tests {
         // détourné par le nouveau branchement Jsonb quand effective_strategy() != Jsonb.
         let mut schema = TableSchema::new("items".to_string(), vec!["items".to_string()], 1);
         schema.child_kind = Some(ChildKind::ObjectArray);
-        schema.columns = vec![generated_id(), parent_fk("root"), generated_order(), col("a", PgType::Text)];
+        schema.columns = vec![
+            generated_id(),
+            parent_fk("root"),
+            generated_order(),
+            col("a", PgType::Text),
+        ];
         let mut sinks = make_sinks(&["items"]);
         let mut anomalies = CountingAnomaly::default();
         let path_map = HashMap::new();
         let arr = vec![serde_json::json!({"a": "x"})];
 
-        super::insert_array(&path_map, &mut sinks, &mut anomalies, &schema, &arr, dummy_parent_id()).unwrap();
+        super::insert_array(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &arr,
+            dummy_parent_id(),
+        )
+        .unwrap();
 
         let fields = parse_fields(&sinks["items"].0[0]);
         assert_eq!(fields.len(), 4);
-        assert_eq!(fields[3], "x", "colonne 'a' peuplée depuis la clé JSON réelle — chemin Columns inchangé");
+        assert_eq!(
+            fields[3], "x",
+            "colonne 'a' peuplée depuis la clé JSON réelle — chemin Columns inchangé"
+        );
     }
 
     // Smoke tests for fakes

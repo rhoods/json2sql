@@ -21,7 +21,10 @@ fn to_hex(words: impl Iterator<Item = u64>, width: usize) -> String {
 /// The words of `width` digits of `text`.
 fn from_hex<E: serde::de::Error>(text: &str, width: usize) -> Result<Vec<u64>, E> {
     if !text.len().is_multiple_of(width) || !text.is_ascii() {
-        return Err(E::custom(format!("packed table: {} characters is not a multiple of {width}", text.len())));
+        return Err(E::custom(format!(
+            "packed table: {} characters is not a multiple of {width}",
+            text.len()
+        )));
     }
     (0..text.len())
         .step_by(width)
@@ -34,11 +37,20 @@ pub mod word_lists {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(lists: &[Vec<u64>], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(lists.iter().map(|list| super::to_hex(list.iter().copied(), 16)))
+        serializer.collect_seq(
+            lists
+                .iter()
+                .map(|list| super::to_hex(list.iter().copied(), 16)),
+        )
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Vec<u64>>, D::Error> {
-        Vec::<String>::deserialize(deserializer)?.iter().map(|text| super::from_hex(text, 16)).collect()
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Vec<u64>>, D::Error> {
+        Vec::<String>::deserialize(deserializer)?
+            .iter()
+            .map(|text| super::from_hex(text, 16))
+            .collect()
     }
 }
 
@@ -52,8 +64,14 @@ pub mod word_set {
         serializer.serialize_str(&super::to_hex(set.iter().copied(), 16))
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BTreeSet<u64>, D::Error> {
-        Ok(super::from_hex::<D::Error>(&String::deserialize(deserializer)?, 16)?.into_iter().collect())
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeSet<u64>, D::Error> {
+        Ok(
+            super::from_hex::<D::Error>(&String::deserialize(deserializer)?, 16)?
+                .into_iter()
+                .collect(),
+        )
     }
 }
 
@@ -82,7 +100,12 @@ pub mod floats {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<f64>, D::Error> {
-        Ok(super::from_hex::<D::Error>(&String::deserialize(deserializer)?, 16)?.into_iter().map(f64::from_bits).collect())
+        Ok(
+            super::from_hex::<D::Error>(&String::deserialize(deserializer)?, 16)?
+                .into_iter()
+                .map(f64::from_bits)
+                .collect(),
+        )
     }
 }
 
@@ -112,17 +135,31 @@ mod tests {
             floats: vec![1.5, f64::NAN, -0.0, f64::INFINITY],
         };
         let json = serde_json::to_string_pretty(&t).unwrap();
-        assert_eq!(json.lines().count(), 10, "one line per table (and per list): {json}");
+        assert_eq!(
+            json.lines().count(),
+            10,
+            "one line per table (and per list): {json}"
+        );
         let back: Tables = serde_json::from_str(&json).unwrap();
-        assert_eq!((back.lists, back.set, back.halves), (t.lists, t.set, t.halves));
+        assert_eq!(
+            (back.lists, back.set, back.halves),
+            (t.lists, t.set, t.halves)
+        );
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-        assert_eq!(bits(&back.floats), bits(&t.floats), "exact bits, NaN included");
+        assert_eq!(
+            bits(&back.floats),
+            bits(&t.floats),
+            "exact bits, NaN included"
+        );
     }
 
     #[test]
     fn a_damaged_table_is_an_error_not_a_panic() {
         for bad in [r#""abc""#, r#""zzzzzzzzzzzzzzzz""#, r#""éééééééé""#] {
-            assert!(serde_json::from_str::<SetOnly>(&format!(r#"{{"set": {bad}}}"#)).is_err(), "{bad}");
+            assert!(
+                serde_json::from_str::<SetOnly>(&format!(r#"{{"set": {bad}}}"#)).is_err(),
+                "{bad}"
+            );
         }
     }
 

@@ -436,7 +436,8 @@ mod tests {
 
     #[test]
     fn undocumented_real_function_is_reported_as_code_missing() {
-        let content = "//! Fonctions :\n//! - fn `foo` — fait un truc.\n\nfn foo() {}\nfn bar() {}\n";
+        let content =
+            "//! Fonctions :\n//! - fn `foo` — fait un truc.\n\nfn foo() {}\nfn bar() {}\n";
         let inc = check_file(Path::new("undocumented.rs"), content).unwrap();
         assert!(inc.doc_missing.is_empty());
         assert_eq!(inc.code_missing, vec![item(Kind::Fn, "bar")]);

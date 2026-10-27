@@ -30,21 +30,23 @@ use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
 
 use crate::anomaly::collector::AnomalyCollector;
-use crate::schema::PATH_SEP;
-use crate::db::ddl::{add_constraints, set_tables_autovacuum, vacuum_analyze_tables, ConstraintWarning};
+use crate::db::ddl::{
+    add_constraints, set_tables_autovacuum, vacuum_analyze_tables, ConstraintWarning,
+};
 use crate::error::{J2sError, Result};
 use crate::io::progress::ProgressTracker;
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
 use crate::io::reader::{file_size, JsonReader};
 use crate::schema::table_schema::TableSchema;
+use crate::schema::PATH_SEP;
 
 mod config;
 pub use config::Pass2Config;
 use config::{DEFAULT_RAM_HIGH_WATERMARK, DEFAULT_RAM_LOW_WATERMARK};
 
+mod dispatch;
 mod flusher;
 mod worker;
-mod dispatch;
 
 /// Wall-clock breakdown of Pass 2: load (stream + concurrent COPY) and post-load phases.
 #[allow(dead_code)]
@@ -85,14 +87,21 @@ fn find_root_schema(schemas: &[TableSchema], root_table: &str, sep: &str) -> Res
 
 /// Child table → parent table, used by the flusher to drain parents before children.
 fn schema_parent_map(schemas: &[TableSchema]) -> HashMap<String, String> {
-    schemas.iter()
-        .filter_map(|s| s.parent_table.as_ref().filter(|p| **p != s.name).map(|p| (s.name.clone(), p.clone())))
+    schemas
+        .iter()
+        .filter_map(|s| {
+            s.parent_table
+                .as_ref()
+                .filter(|p| **p != s.name)
+                .map(|p| (s.name.clone(), p.clone()))
+        })
         .collect()
 }
 
 /// Build the per-table COPY SQL map used by `run_flusher` to open COPY FROM STDIN sessions.
 fn build_copy_sql_map(schemas: &[TableSchema], pg_schema: &str) -> HashMap<String, String> {
-    schemas.iter()
+    schemas
+        .iter()
         .map(|s| {
             let sink = crate::db::copy_sink::MemSink::new(s, pg_schema);
             (s.name.clone(), sink.copy_sql)
@@ -106,14 +115,24 @@ fn build_copy_sql_map(schemas: &[TableSchema], pg_schema: &str) -> HashMap<Strin
 /// multi-connection plain load (OFF 70 GB, replica: load +10 min).
 /// shortcut: a non-empty root (append into a schema without FK) is pinned to one connection with a
 /// plain COPY; leave non-empty roots out of the targets if appending big files matters.
-fn build_freeze_targets(schemas: &[TableSchema], pg_schema: &str, with_root: bool) -> HashMap<String, flusher::FreezeTarget> {
+fn build_freeze_targets(
+    schemas: &[TableSchema],
+    pg_schema: &str,
+    with_root: bool,
+) -> HashMap<String, flusher::FreezeTarget> {
     use crate::db::ddl::quote_ident;
-    schemas.iter()
+    schemas
+        .iter()
         .filter(|s| with_root || !s.is_root())
-        .map(|s| (s.name.clone(), flusher::FreezeTarget {
-            table: format!("{}.{}", quote_ident(pg_schema), quote_ident(&s.name)),
-            copy_sql: crate::db::copy_sink::copy_sql(s, pg_schema, true),
-        }))
+        .map(|s| {
+            (
+                s.name.clone(),
+                flusher::FreezeTarget {
+                    table: format!("{}.{}", quote_ident(pg_schema), quote_ident(&s.name)),
+                    copy_sql: crate::db::copy_sink::copy_sql(s, pg_schema, true),
+                },
+            )
+        })
         .collect()
 }
 
@@ -134,7 +153,16 @@ pub async fn run(
     config: &Pass2Config,
     progress_tx: Option<ProgressTx>,
 ) -> Result<Pass2Result> {
-    run_interruptible(path, schemas, client, pg_url, config, progress_tx, std::future::pending()).await
+    run_interruptible(
+        path,
+        schemas,
+        client,
+        pg_url,
+        config,
+        progress_tx,
+        std::future::pending(),
+    )
+    .await
 }
 
 /// `run`, stopped early when `interrupt` resolves (worker cancel, SIGTERM, Ctrl-C): the load is
@@ -163,18 +191,29 @@ pub async fn run_interruptible(
     };
 
     // Recorded before switching autovacuum off: a killed import is undone by the next one.
-    let autovacuum_restore = crate::db::pg_tuning::record_autovacuum_restore(pg_url, schemas, &config.pg_schema, ptx);
+    let autovacuum_restore =
+        crate::db::pg_tuning::record_autovacuum_restore(pg_url, schemas, &config.pg_schema, ptx);
     // Held by `load_and_constrain` during the load COMMITs: an interrupt lets them all finish, as
     // committing some connections and rolling back the others would leave a partial load.
     let commits = tokio::sync::Mutex::new(());
-    let result = match set_tables_autovacuum(pg_url, schemas, &config.pg_schema, false, parallel).await {
+    let result = match set_tables_autovacuum(pg_url, schemas, &config.pg_schema, false, parallel)
+        .await
+    {
         Ok(()) => tokio::select! {
             r = load_and_constrain(path, schemas, client, pg_url, config, progress_tx.clone(), &commits) => r,
             () = async { interrupt.await; drop(commits.lock().await); } => Err(J2sError::InvalidInput("Pass 2 interrupted".to_string())),
         },
         Err(e) => Err(e),
     };
-    put_back_autovacuum(pg_url, schemas, &config.pg_schema, parallel, autovacuum_restore, ptx).await;
+    put_back_autovacuum(
+        pg_url,
+        schemas,
+        &config.pg_schema,
+        parallel,
+        autovacuum_restore,
+        ptx,
+    )
+    .await;
     if let Some(restore) = wal_restore {
         crate::db::pg_tuning::restore_max_wal_size(client, &restore, ptx).await;
     }
@@ -219,17 +258,24 @@ async fn load_and_constrain(
     const WORKER_CHANNEL_CAP: usize = 256;
 
     let mem_flush_threshold = config.mem_flush_threshold_bytes.unwrap_or(64 * 1024 * 1024);
-    let ram_high = config.ram_high_watermark.unwrap_or(DEFAULT_RAM_HIGH_WATERMARK);
-    let ram_low = config.ram_low_watermark.unwrap_or(DEFAULT_RAM_LOW_WATERMARK);
+    let ram_high = config
+        .ram_high_watermark
+        .unwrap_or(DEFAULT_RAM_HIGH_WATERMARK);
+    let ram_low = config
+        .ram_low_watermark
+        .unwrap_or(DEFAULT_RAM_LOW_WATERMARK);
     let verbose = config.verbose;
     config::validate_watermarks(ram_high, ram_low, mem_flush_threshold)?;
 
     let parallel = config.parallel.max(1);
     let total_bytes = file_size(path)?;
-    let progress = progress_tx.is_none().then(|| ProgressTracker::new(total_bytes, "Pass 2"));
+    let progress = progress_tx
+        .is_none()
+        .then(|| ProgressTracker::new(total_bytes, "Pass 2"));
 
     let sep = PATH_SEP.to_string();
-    let path_map: HashMap<String, TableSchema> = schemas.iter()
+    let path_map: HashMap<String, TableSchema> = schemas
+        .iter()
         .map(|s| (s.path.join(&sep), s.clone()))
         .collect();
 
@@ -238,14 +284,19 @@ async fn load_and_constrain(
         (reader, known)
     } else {
         if let Some(ref tx) = progress_tx {
-            let _ = tx.send(ProgressEvent::Pass2Log("Detecting JSON format…".to_string()));
+            let _ = tx.send(ProgressEvent::Pass2Log(
+                "Detecting JSON format…".to_string(),
+            ));
         }
         JsonReader::open(path)?
     };
     // For wrapper format, root table names come from wrapper keys (raw, as stored in s.path),
     // not from config.root_table (the filename-derived fallback).
-    let effective_root_table = if let crate::io::reader::JsonFormat::RootWrapper(ref keys) = format {
-        keys.first().cloned().unwrap_or_else(|| config.root_table.clone())
+    let effective_root_table = if let crate::io::reader::JsonFormat::RootWrapper(ref keys) = format
+    {
+        keys.first()
+            .cloned()
+            .unwrap_or_else(|| config.root_table.clone())
     } else {
         config.root_table.clone()
     };
@@ -254,16 +305,26 @@ async fn load_and_constrain(
     if let Some(ref dir) = config.anomaly_dir {
         std::fs::create_dir_all(dir).map_err(J2sError::Io)?;
     }
-    let (anomaly_tx, anomaly_writer_handle) = dispatch::spawn_anomaly_writer(config.anomaly_dir.clone());
-    dispatch::preflight_warn_nonempty(schemas, client, &config.pg_schema, progress_tx.as_ref()).await;
+    let (anomaly_tx, anomaly_writer_handle) =
+        dispatch::spawn_anomaly_writer(config.anomaly_dir.clone());
+    dispatch::preflight_warn_nonempty(schemas, client, &config.pg_schema, progress_tx.as_ref())
+        .await;
     // Child tables loaded with COPY FREEZE when no FK can trip over the load transactions (#68), the
     // root too under wal_level = minimal (#77).
     let freeze = dispatch::freeze_load_allowed(schemas, client, &config.pg_schema).await;
     let freeze_sql = if freeze {
         let minimal = crate::db::pg_tuning::warn_wal_level(client, progress_tx.as_ref()).await;
-        crate::db::pg_tuning::log(progress_tx.as_ref(), format!(
-            "{} loaded with COPY FREEZE: rows are committed at the end of the load.",
-            if minimal { "Tables, root included," } else { "Child tables" }));
+        crate::db::pg_tuning::log(
+            progress_tx.as_ref(),
+            format!(
+                "{} loaded with COPY FREEZE: rows are committed at the end of the load.",
+                if minimal {
+                    "Tables, root included,"
+                } else {
+                    "Child tables"
+                }
+            ),
+        );
         Some(build_freeze_targets(schemas, &config.pg_schema, minimal))
     } else {
         None
@@ -279,21 +340,22 @@ async fn load_and_constrain(
     let error_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Aborted when the load is dropped (interrupt): detached, it kept COPYing and holding its FREEZE
     // locks, which the settings restore waits behind (#80).
-    let flusher_handle = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(flusher::run_flusher(
-        flush_rx,
-        copy_sql_map,
-        freeze_sql,
-        pg_url.to_string(),
-        progress_tx.clone(),
-        Arc::clone(&pause_flag),
-        Arc::clone(&error_flag),
-        mem_flush_threshold,
-        ram_high,
-        ram_low,
-        verbose,
-        parent_of,
-        parallel,
-    )));
+    let flusher_handle =
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(flusher::run_flusher(
+            flush_rx,
+            copy_sql_map,
+            freeze_sql,
+            pg_url.to_string(),
+            progress_tx.clone(),
+            Arc::clone(&pause_flag),
+            Arc::clone(&error_flag),
+            mem_flush_threshold,
+            ram_high,
+            ram_low,
+            verbose,
+            parent_of,
+            parallel,
+        )));
 
     let path_map_arc: Arc<HashMap<String, TableSchema>> = Arc::new(path_map);
     let root_schema_arc: Arc<TableSchema> = Arc::new(root_schema);
@@ -303,8 +365,14 @@ async fn load_and_constrain(
     for _ in 0..parallel {
         let (tx, rx) = tokio::sync::mpsc::channel::<(Option<String>, Vec<u8>)>(WORKER_CHANNEL_CAP);
         senders.push(tx);
-        let worker_sinks: HashMap<String, crate::db::copy_sink::MemSink> = schemas.iter()
-            .map(|s| (s.name.clone(), crate::db::copy_sink::MemSink::new(s, &config.pg_schema)))
+        let worker_sinks: HashMap<String, crate::db::copy_sink::MemSink> = schemas
+            .iter()
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    crate::db::copy_sink::MemSink::new(s, &config.pg_schema),
+                )
+            })
             .collect();
         worker_handles.push(tokio::task::spawn(worker::run_worker_diskless(
             rx,
@@ -317,36 +385,62 @@ async fn load_and_constrain(
                 flush_tx: flush_tx.clone(),
                 pause_flag: Arc::clone(&pause_flag),
                 error_flag: Arc::clone(&error_flag),
-                mem_flush_threshold: config::effective_worker_threshold(mem_flush_threshold, parallel),
+                mem_flush_threshold: config::effective_worker_threshold(
+                    mem_flush_threshold,
+                    parallel,
+                ),
             },
         )));
     }
-    drop(flush_tx);  // workers now hold all flush_tx clones
+    drop(flush_tx); // workers now hold all flush_tx clones
     drop(anomaly_tx); // workers now hold all anomaly_tx clones
 
     let stream_start = Instant::now();
     let (rows_processed, worker_died) = dispatch::dispatch_loop(
-        &mut reader, &senders, progress_tx.as_ref(), progress.as_ref(), config.limit, total_bytes, verbose,
-    ).await?;
+        &mut reader,
+        &senders,
+        progress_tx.as_ref(),
+        progress.as_ref(),
+        config.limit,
+        total_bytes,
+        verbose,
+    )
+    .await?;
     drop(senders); // workers break their recv loops → drain local sinks → drop flush_tx + anomaly_tx
 
-    dispatch::finalize_dispatch(progress_tx.as_ref(), progress.as_ref(), rows_processed, reader.bytes_read(), total_bytes);
+    dispatch::finalize_dispatch(
+        progress_tx.as_ref(),
+        progress.as_ref(),
+        rows_processed,
+        reader.bytes_read(),
+        total_bytes,
+    );
     let drain_start = Instant::now();
-    eprintln!("Pass 2 streaming done ({parallel} workers). Flushing remaining rows to PostgreSQL...");
+    eprintln!(
+        "Pass 2 streaming done ({parallel} workers). Flushing remaining rows to PostgreSQL..."
+    );
 
     // Join all workers — accumulate first error; always drain all handles so channels are closed.
     let mut first_error: Option<J2sError> = None;
     for handle in worker_handles {
         match handle.await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => { if first_error.is_none() { first_error = Some(e); } }
-            Err(e) => { if first_error.is_none() {
-                first_error = Some(J2sError::InvalidInput(format!("worker panic: {e}")));
-            }}
+            Ok(Err(e)) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(J2sError::InvalidInput(format!("worker panic: {e}")));
+                }
+            }
         }
     }
     if worker_died && first_error.is_none() {
-        first_error = Some(J2sError::InvalidInput("worker channel closed unexpectedly".into()));
+        first_error = Some(J2sError::InvalidInput(
+            "worker channel closed unexpectedly".into(),
+        ));
     }
 
     // All workers done → anomaly channel closed → writer finishes.
@@ -360,7 +454,9 @@ async fn load_and_constrain(
         Err(e) => {
             flusher_handle.abort();
             let _ = flusher_handle.await;
-            return Err(J2sError::InvalidInput(format!("anomaly writer task panicked: {e}")));
+            return Err(J2sError::InvalidInput(format!(
+                "anomaly writer task panicked: {e}"
+            )));
         }
     };
 
@@ -372,18 +468,27 @@ async fn load_and_constrain(
     let (rows_per_table, flusher_clients) = match flusher_result {
         Ok(Ok(done)) => done,
         Ok(Err(e)) => return Err(e),
-        Err(e) => return Err(J2sError::InvalidInput(format!("flusher task panicked: {e}"))),
+        Err(e) => {
+            return Err(J2sError::InvalidInput(format!(
+                "flusher task panicked: {e}"
+            )))
+        }
     };
 
-    if let Some(err) = first_error { return Err(err); }
+    if let Some(err) = first_error {
+        return Err(err);
+    }
     if freeze {
         // Only now is it known that no worker failed: commit the load transactions. Any earlier
         // return drops the connections, which rolls the whole load back (#68). From here on, an
         // interrupt waits for the COMMITs, all sent at once: PostgreSQL finishes them even if the
         // worker is killed meanwhile (e.g. by the UI's fallback SIGKILL).
         let _commits = commits.lock().await;
-        futures_util::future::try_join_all(flusher_clients.iter().map(|c| c.batch_execute("COMMIT"))).await
-            .map_err(|e| crate::db::error::pg_err("COMMIT of the load", &e))?;
+        futures_util::future::try_join_all(
+            flusher_clients.iter().map(|c| c.batch_execute("COMMIT")),
+        )
+        .await
+        .map_err(|e| crate::db::error::pg_err("COMMIT of the load", &e))?;
     }
     drop(flusher_clients);
     #[allow(clippy::cast_possible_truncation)]
@@ -395,20 +500,47 @@ async fn load_and_constrain(
     // Before constraints and outside the skip_constraints branch: stats are needed either way, and
     // the import only reports done once nothing is left for autovacuum (#68).
     let vacuum_start = Instant::now();
-    crate::db::pg_tuning::log(progress_tx.as_ref(), format!("Pass 2 flusher complete. VACUUM (ANALYZE) of {} tables...", schemas.len()));
+    crate::db::pg_tuning::log(
+        progress_tx.as_ref(),
+        format!(
+            "Pass 2 flusher complete. VACUUM (ANALYZE) of {} tables...",
+            schemas.len()
+        ),
+    );
     vacuum_analyze_tables(pg_url, schemas, &config.pg_schema, parallel).await?;
-    crate::db::pg_tuning::log(progress_tx.as_ref(), format!("VACUUM (ANALYZE) done in {} s.", vacuum_start.elapsed().as_secs()));
+    crate::db::pg_tuning::log(
+        progress_tx.as_ref(),
+        format!(
+            "VACUUM (ANALYZE) done in {} s.",
+            vacuum_start.elapsed().as_secs()
+        ),
+    );
     eprintln!("Pass 2 flusher complete. Applying constraints...");
     let constraint_warnings = if config.skip_constraints {
         eprintln!("Constraints skipped (skip_constraints = true).");
         vec![]
     } else {
-        let warnings = add_constraints(pg_url, schemas, &config.pg_schema, parallel, progress_tx.as_ref()).await?;
+        let warnings = add_constraints(
+            pg_url,
+            schemas,
+            &config.pg_schema,
+            parallel,
+            progress_tx.as_ref(),
+        )
+        .await?;
         dispatch::log_constraint_warnings(&warnings, progress_tx.as_ref());
         warnings
     };
 
-    build_pass2_result(merged_anomalies, rows_per_table, constraint_warnings, progress_tx.as_ref(), copy_start, streaming_ms, drain_ms)
+    build_pass2_result(
+        merged_anomalies,
+        rows_per_table,
+        constraint_warnings,
+        progress_tx.as_ref(),
+        copy_start,
+        streaming_ms,
+        drain_ms,
+    )
 }
 
 fn build_pass2_result(
@@ -421,7 +553,12 @@ fn build_pass2_result(
     drain_ms: u64,
 ) -> Result<Pass2Result> {
     if let Some(tx) = progress_tx {
-        dispatch::emit_completion_events(tx, &merged_anomalies, &rows_per_table, &constraint_warnings);
+        dispatch::emit_completion_events(
+            tx,
+            &merged_anomalies,
+            &rows_per_table,
+            &constraint_warnings,
+        );
     }
     merged_anomalies.finish()?;
     #[allow(clippy::cast_possible_truncation)]
@@ -435,7 +572,10 @@ fn build_pass2_result(
         rows_per_table,
         anomaly_collector: merged_anomalies,
         constraint_warnings,
-        timing: Pass2Timing { streaming_ms, copy_ms },
+        timing: Pass2Timing {
+            streaming_ms,
+            copy_ms,
+        },
     })
 }
 
@@ -445,9 +585,9 @@ mod test_support;
 #[cfg(test)]
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
-    use std::collections::HashMap;
-    use super::Pass2Timing;
     use super::test_support::make_schema_with_rows;
+    use super::Pass2Timing;
+    use std::collections::HashMap;
 
     // -------------------------------------------------------------------------
     // Error priority tests — flusher error must surface before generic worker error
@@ -459,11 +599,15 @@ mod tests {
 
         // Simulate: flusher has real PG error, workers have generic "flusher died" message.
         // The FIXED code checks flusher_result first, so the PG error is returned.
-        let flusher_err = J2sError::InvalidInput("COPY failed: table 'orders', unique violation".to_string());
-        let worker_err = J2sError::InvalidInput("flusher reported a fatal PG error — aborting worker".to_string());
+        let flusher_err =
+            J2sError::InvalidInput("COPY failed: table 'orders', unique violation".to_string());
+        let worker_err = J2sError::InvalidInput(
+            "flusher reported a fatal PG error — aborting worker".to_string(),
+        );
 
         // Reproduce the fixed ordering: flusher checked first, then first_error.
-        let flusher_result: Result<std::collections::HashMap<String, u64>, J2sError> = Err(flusher_err);
+        let flusher_result: Result<std::collections::HashMap<String, u64>, J2sError> =
+            Err(flusher_err);
         let first_error: Option<J2sError> = Some(worker_err);
 
         let result: crate::error::Result<()> = match flusher_result {
@@ -472,8 +616,14 @@ mod tests {
         };
 
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("COPY failed"), "must surface PG error, not generic: {msg}");
-        assert!(!msg.contains("aborting worker"), "must not surface generic worker error: {msg}");
+        assert!(
+            msg.contains("COPY failed"),
+            "must surface PG error, not generic: {msg}"
+        );
+        assert!(
+            !msg.contains("aborting worker"),
+            "must not surface generic worker error: {msg}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -491,9 +641,15 @@ mod tests {
         });
         let event = rx.try_recv().expect("event must be in the channel");
         match event {
-            ProgressEvent::Pass2Error { table_name, message } => {
+            ProgressEvent::Pass2Error {
+                table_name,
+                message,
+            } => {
                 assert_eq!(table_name, "orders");
-                assert!(message.contains("duplicate key"), "message must contain error text");
+                assert!(
+                    message.contains("duplicate key"),
+                    "message must contain error text"
+                );
             }
             other => panic!("unexpected event variant: {other:?}"),
         }
@@ -506,11 +662,16 @@ mod tests {
     #[tokio::test]
     async fn flusher_abort_await_cancels_running_task() {
         let handle: tokio::task::JoinHandle<crate::error::Result<HashMap<String, u64>>> =
-            tokio::spawn(async { futures_util::future::pending::<crate::error::Result<HashMap<String, u64>>>().await });
+            tokio::spawn(async {
+                futures_util::future::pending::<crate::error::Result<HashMap<String, u64>>>().await
+            });
         handle.abort();
         let result = handle.await;
         assert!(result.is_err(), "aborted task must return JoinError");
-        assert!(result.unwrap_err().is_cancelled(), "must be JoinError::Cancelled");
+        assert!(
+            result.unwrap_err().is_cancelled(),
+            "must be JoinError::Cancelled"
+        );
     }
 
     #[tokio::test]
@@ -530,8 +691,8 @@ mod tests {
 
     #[tokio::test]
     async fn pause_spin_exits_when_error_flag_set() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
 
         let pause_flag = Arc::new(AtomicBool::new(true));
         let error_flag = Arc::new(AtomicBool::new(false));
@@ -553,13 +714,19 @@ mod tests {
 
     #[test]
     fn pass2_timing_total_ms_is_sum() {
-        let t = Pass2Timing { streaming_ms: 3000, copy_ms: 500 };
+        let t = Pass2Timing {
+            streaming_ms: 3000,
+            copy_ms: 500,
+        };
         assert_eq!(t.total_ms(), 3500);
     }
 
     #[test]
     fn pass2_timing_zero() {
-        let t = Pass2Timing { streaming_ms: 0, copy_ms: 0 };
+        let t = Pass2Timing {
+            streaming_ms: 0,
+            copy_ms: 0,
+        };
         assert_eq!(t.total_ms(), 0);
     }
 
@@ -569,7 +736,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // single test case with verbose setup
     async fn anomaly_writer_task_creates_ndjson_files() {
-        use crate::anomaly::collector::{AnomalyCollect, AnomalyCollector, AnomalyEvent, AnomalyProxy};
+        use crate::anomaly::collector::{
+            AnomalyCollect, AnomalyCollector, AnomalyEvent, AnomalyProxy,
+        };
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
@@ -582,10 +751,20 @@ mod tests {
                 while let Some(event) = anomaly_rx.blocking_recv() {
                     match event {
                         AnomalyEvent::Record {
-                            table, column, row_id, expected_type, actual_value, actual_type,
+                            table,
+                            column,
+                            row_id,
+                            expected_type,
+                            actual_value,
+                            actual_type,
                         } => {
                             collector.record(
-                                &table, &column, &row_id, &expected_type, &actual_value, &actual_type,
+                                &table,
+                                &column,
+                                &row_id,
+                                &expected_type,
+                                &actual_value,
+                                &actual_type,
                             )?;
                         }
                         AnomalyEvent::IncTotal { table } => {
@@ -602,10 +781,28 @@ mod tests {
 
         proxy1.inc_total("products");
         proxy1.inc_total("products");
-        proxy1.record("products", "price", "r1", "double precision", "gratuit", "string").unwrap();
+        proxy1
+            .record(
+                "products",
+                "price",
+                "r1",
+                "double precision",
+                "gratuit",
+                "string",
+            )
+            .unwrap();
 
         proxy2.inc_total("products");
-        proxy2.record("products", "price", "r2", "double precision", "N/A", "string").unwrap();
+        proxy2
+            .record(
+                "products",
+                "price",
+                "r2",
+                "double precision",
+                "N/A",
+                "string",
+            )
+            .unwrap();
 
         // Drop proxies + main sender to close the channel
         drop(proxy1);
@@ -619,7 +816,10 @@ mod tests {
         assert!((collector.overall_anomaly_rate() - 2.0 / 3.0).abs() < 1e-9);
 
         let paths = collector.written_paths();
-        assert!(paths.contains_key("products"), "NDJSON file must exist for products");
+        assert!(
+            paths.contains_key("products"),
+            "NDJSON file must exist for products"
+        );
         let content = std::fs::read_to_string(&paths["products"]).unwrap();
         let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
         assert_eq!(lines.len(), 2, "both anomaly rows must be in the file");
@@ -652,11 +852,17 @@ mod tests {
         child.parent_table = Some("orders".to_string());
         let schemas = vec![make_schema_with_rows("orders", 0), child];
         let names = |with_root| {
-            let mut n: Vec<String> = super::build_freeze_targets(&schemas, "public", with_root).into_keys().collect();
+            let mut n: Vec<String> = super::build_freeze_targets(&schemas, "public", with_root)
+                .into_keys()
+                .collect();
             n.sort();
             n
         };
-        assert_eq!(names(false), ["orders_items"], "root left to several connections outside wal_level = minimal");
+        assert_eq!(
+            names(false),
+            ["orders_items"],
+            "root left to several connections outside wal_level = minimal"
+        );
         assert_eq!(names(true), ["orders", "orders_items"]);
     }
 
@@ -665,8 +871,14 @@ mod tests {
         let schemas = vec![make_schema_with_rows("products", 0)];
         let map = super::build_copy_sql_map(&schemas, "myschema");
         let sql = map.get("products").expect("products must be present");
-        assert!(sql.contains("myschema"), "COPY SQL must reference the pg_schema");
-        assert!(sql.contains("products"), "COPY SQL must reference the table name");
+        assert!(
+            sql.contains("myschema"),
+            "COPY SQL must reference the pg_schema"
+        );
+        assert!(
+            sql.contains("products"),
+            "COPY SQL must reference the table name"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -678,8 +890,12 @@ mod tests {
         use crate::io::progress_event::{ProgressEvent, ProgressTx};
 
         let (tx, mut rx): (ProgressTx, _) = tokio::sync::mpsc::unbounded_channel();
-        let _ = tx.send(ProgressEvent::Pass2Log("Detecting JSON format…".to_string()));
-        let event = rx.try_recv().expect("Pass2Log event must be in the channel");
+        let _ = tx.send(ProgressEvent::Pass2Log(
+            "Detecting JSON format…".to_string(),
+        ));
+        let event = rx
+            .try_recv()
+            .expect("Pass2Log event must be in the channel");
         match event {
             ProgressEvent::Pass2Log(msg) => {
                 assert!(msg.contains("Detecting"), "message must mention detection");
@@ -687,5 +903,4 @@ mod tests {
             other => panic!("unexpected event variant: {other:?}"),
         }
     }
-
 }

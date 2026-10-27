@@ -16,9 +16,12 @@ use dioxus::prelude::*;
 use dioxus::prelude::Modifiers;
 use json2sql::schema::table_schema::{InferredStrategy, TableSchema, UserOverride};
 
-use crate::screens::{build_table_rows, display_schemas, group_preview, pick_save_file, strategy_badge, strategy_label, user_override_badge, GroupPreview, PickResult, PreviewGroup, TableRowsCtx};
-use crate::state::select_children_visible;
 use crate::screens::table_list::TableListPanel;
+use crate::screens::{
+    build_table_rows, display_schemas, group_preview, pick_save_file, strategy_badge,
+    strategy_label, user_override_badge, GroupPreview, PickResult, PreviewGroup, TableRowsCtx,
+};
+use crate::state::select_children_visible;
 use crate::state::{AppScreen, AppState};
 
 // ---------------------------------------------------------------------------
@@ -42,29 +45,47 @@ pub fn compute_jaccard_display(schemas: &[TableSchema], indices: &[usize]) -> Ja
     use std::collections::HashSet as HS;
 
     // a selection can still hold the index of a group table that is no longer listed (#91)
-    let indices: Vec<usize> = indices.iter().copied().filter(|&i| i < schemas.len()).collect();
+    let indices: Vec<usize> = indices
+        .iter()
+        .copied()
+        .filter(|&i| i < schemas.len())
+        .collect();
     let indices = indices.as_slice();
 
     if indices.len() < 2 {
-        return JaccardDisplay { score: 1.0, common: 0, union_count: 0 };
+        return JaccardDisplay {
+            score: 1.0,
+            common: 0,
+            union_count: 0,
+        };
     }
 
     let tables: Vec<&TableSchema> = indices.iter().filter_map(|&i| schemas.get(i)).collect();
 
     // Column name sets (data columns only).
-    let col_sets: Vec<HS<&str>> = tables.iter()
+    let col_sets: Vec<HS<&str>> = tables
+        .iter()
         .map(|t| t.data_columns().map(|c| c.original_name.as_str()).collect())
         .collect();
 
     let union_cols: HS<&str> = col_sets.iter().flatten().copied().collect();
     let union_count = union_cols.len();
-    let common = if col_sets.is_empty() { 0 } else {
-        union_cols.iter().filter(|&&c| col_sets.iter().all(|s| s.contains(c))).count()
+    let common = if col_sets.is_empty() {
+        0
+    } else {
+        union_cols
+            .iter()
+            .filter(|&&c| col_sets.iter().all(|s| s.contains(c)))
+            .count()
     };
 
     let score = pairwise_jaccard_min(schemas, indices);
 
-    JaccardDisplay { score, common, union_count }
+    JaccardDisplay {
+        score,
+        common,
+        union_count,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -74,37 +95,50 @@ pub fn compute_jaccard_display(schemas: &[TableSchema], indices: &[usize]) -> Ja
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[component]
 pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
-    let mut left_collapsed:  Signal<bool>            = use_signal(|| false);
-    let mut right_collapsed: Signal<bool>            = use_signal(|| false);
-    let mut filter_text:     Signal<String>          = use_signal(String::new);
-    let mut warn_only:       Signal<bool>            = use_signal(|| false);
-    let mut modified_only:   Signal<bool>            = use_signal(|| false);
-    let mut save_feedback:   Signal<Option<Result<String, String>>> = use_signal(|| None);
-    let mut picking_save:    Signal<bool>            = use_signal(|| false);
-    let mut banner_dismissed:         Signal<bool> = use_signal(|| false);
-    let mut cfg_banner_dismissed:     Signal<bool> = use_signal(|| false);
-    let mut anchor_idx:      Signal<usize>           = use_signal(|| 0);
+    let mut left_collapsed: Signal<bool> = use_signal(|| false);
+    let mut right_collapsed: Signal<bool> = use_signal(|| false);
+    let mut filter_text: Signal<String> = use_signal(String::new);
+    let mut warn_only: Signal<bool> = use_signal(|| false);
+    let mut modified_only: Signal<bool> = use_signal(|| false);
+    let mut save_feedback: Signal<Option<Result<String, String>>> = use_signal(|| None);
+    let mut picking_save: Signal<bool> = use_signal(|| false);
+    let mut banner_dismissed: Signal<bool> = use_signal(|| false);
+    let mut cfg_banner_dismissed: Signal<bool> = use_signal(|| false);
+    let mut anchor_idx: Signal<usize> = use_signal(|| 0);
 
     // ── Derived snapshot ──────────────────────────────────────────────────
     // The original tables (the indices of the state point into them), then the group tables of the ticked tables,
     // shown read-only under their parent (#91).
-    let originals         = state.read().schema.schemas.clone();
-    let overrides_snap    = state.read().schema.strategy_overrides.clone();
-    let schemas           = display_schemas(&originals, &overrides_snap, &state.read().schema.group_columns, &state.read().schema.pass1_samples);
-    let overflow_warnings  = state.read().schema.overflow_warnings.clone();
-    let config_warnings    = state.read().schema.config_warnings.clone();
+    let originals = state.read().schema.schemas.clone();
+    let overrides_snap = state.read().schema.strategy_overrides.clone();
+    let schemas = display_schemas(
+        &originals,
+        &overrides_snap,
+        &state.read().schema.group_columns,
+        &state.read().schema.pass1_samples,
+    );
+    let overflow_warnings = state.read().schema.overflow_warnings.clone();
+    let config_warnings = state.read().schema.config_warnings.clone();
     // the indices of group tables that are no longer listed (column groups unticked) are dropped (#91)
-    let selected_indices: std::collections::HashSet<usize> = state.read().schema.selected_table_indices
-        .iter().copied().filter(|&i| i < schemas.len()).collect();
-    let absorbed_names    = state.read().schema.absorbed_names.clone();
+    let selected_indices: std::collections::HashSet<usize> = state
+        .read()
+        .schema
+        .selected_table_indices
+        .iter()
+        .copied()
+        .filter(|&i| i < schemas.len())
+        .collect();
+    let absorbed_names = state.read().schema.absorbed_names.clone();
 
-    let overflow_names: std::collections::HashSet<String> =
-        overflow_warnings.iter().map(|w| w.table_name.clone()).collect();
+    let overflow_names: std::collections::HashSet<String> = overflow_warnings
+        .iter()
+        .map(|w| w.table_name.clone())
+        .collect();
     // Real children that a Skip elsewhere in strategy_overrides will remove by cascade —
     // never chosen by the user directly (#47). Computed on the full, un-reduced list.
     let cascaded_names = crate::screens::skip_cascade_names(&originals, &overrides_snap);
 
-    let tables_count  = schemas.len();
+    let tables_count = schemas.len();
     let columns_count: usize = schemas.iter().map(|s| s.columns.len()).sum();
     let overflow_count = overflow_warnings.len();
 
@@ -116,7 +150,11 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
         };
     }
 
-    let idx = state.read().schema.last_selected_idx.min(schemas.len().saturating_sub(1));
+    let idx = state
+        .read()
+        .schema
+        .last_selected_idx
+        .min(schemas.len().saturating_sub(1));
     let selected_table = &schemas[idx];
     let eff_strategy = selected_table.effective_strategy();
     let inferred_strategy = &*eff_strategy;
@@ -128,12 +166,19 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     // Column groups of the selected table (#91): what the switch would split, or why it cannot.
     let group_columns_snap = state.read().schema.group_columns.clone();
     let groups_on = group_columns_snap.contains(&selected_table.name);
-    let (preview_groups, preview_note): (Vec<PreviewGroup>, String) =
-        match group_preview(&originals, &overrides_snap, &group_columns_snap, &state.read().schema.pass1_samples, &selected_table.name) {
-            GroupPreview::Groups(groups) => (groups, String::new()),
-            GroupPreview::Unavailable(why) if groups_on => (Vec::new(), format!("No group will be made: {why}.")),
-            GroupPreview::Unavailable(why) => (Vec::new(), format!("Not available: {why}.")),
-        };
+    let (preview_groups, preview_note): (Vec<PreviewGroup>, String) = match group_preview(
+        &originals,
+        &overrides_snap,
+        &group_columns_snap,
+        &state.read().schema.pass1_samples,
+        &selected_table.name,
+    ) {
+        GroupPreview::Groups(groups) => (groups, String::new()),
+        GroupPreview::Unavailable(why) if groups_on => {
+            (Vec::new(), format!("No group will be made: {why}."))
+        }
+        GroupPreview::Unavailable(why) => (Vec::new(), format!("Not available: {why}.")),
+    };
     let groups_available = !preview_groups.is_empty();
     let is_group_row = idx >= originals.len();
     let group_parent = selected_table.parent_table.clone().unwrap_or_default();
@@ -143,10 +188,14 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
         let idx_vec: Vec<usize> = selected_indices.iter().copied().collect();
         compute_jaccard_display(&schemas, &idx_vec)
     } else {
-        JaccardDisplay { score: 1.0, common: 0, union_count: 0 }
+        JaccardDisplay {
+            score: 1.0,
+            common: 0,
+            union_count: 0,
+        }
     };
-    let jaccard_score_pct   = format!("{:.0}%", jaccard.score * 100.0);
-    let jaccard_ratio_txt   = if jaccard.union_count == 0 {
+    let jaccard_score_pct = format!("{:.0}%", jaccard.score * 100.0);
+    let jaccard_ratio_txt = if jaccard.union_count == 0 {
         "no data cols".to_string()
     } else {
         format!("{} / {} cols", jaccard.common, jaccard.union_count)
@@ -160,24 +209,38 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     };
 
     // Table list — filtered
-    let filter   = filter_text.read().to_lowercase();
+    let filter = filter_text.read().to_lowercase();
     let show_warn = *warn_only.read();
     let show_modified = *modified_only.read();
 
     // Pre-compute rows and visible index list so the Shift+click handler can capture it.
-    let anomaly_counts = state.read().import.pass2_progress.anomaly_counts_per_table.clone();
-    let table_rows = build_table_rows(&schemas, &TableRowsCtx {
-        overrides: &overrides_snap, overflow_names: &overflow_names,
-        selected_indices: &selected_indices, absorbed_names: &absorbed_names,
-        cascaded_names: &cascaded_names,
-        filter: &filter, show_warn_only: show_warn, anomaly_counts: &anomaly_counts,
-        grouped: &state.read().schema.group_columns, show_modified_only: show_modified,
-    });
-    let visible_indices: Vec<usize> = table_rows.iter()
+    let anomaly_counts = state
+        .read()
+        .import
+        .pass2_progress
+        .anomaly_counts_per_table
+        .clone();
+    let table_rows = build_table_rows(
+        &schemas,
+        &TableRowsCtx {
+            overrides: &overrides_snap,
+            overflow_names: &overflow_names,
+            selected_indices: &selected_indices,
+            absorbed_names: &absorbed_names,
+            cascaded_names: &cascaded_names,
+            filter: &filter,
+            show_warn_only: show_warn,
+            anomaly_counts: &anomaly_counts,
+            grouped: &state.read().schema.group_columns,
+            show_modified_only: show_modified,
+        },
+    );
+    let visible_indices: Vec<usize> = table_rows
+        .iter()
         .filter(|r| r.visible)
         .map(|r| r.index)
         .collect();
-    let vi_all      = visible_indices.clone();
+    let vi_all = visible_indices.clone();
     let vi_children = visible_indices.clone();
 
     // ── Render ────────────────────────────────────────────────────────────
@@ -971,7 +1034,9 @@ mod tests {
 
     fn make_schema(name: &str, parent: Option<&str>) -> TableSchema {
         let mut s = TableSchema::new(
-            name.to_string(), vec![name.to_string()], usize::from(parent.is_some()),
+            name.to_string(),
+            vec![name.to_string()],
+            usize::from(parent.is_some()),
         );
         s.parent_table = parent.map(str::to_string);
         s
@@ -981,9 +1046,23 @@ mod tests {
         use json2sql::schema::table_schema::ColumnSchema;
         use json2sql::schema::type_tracker::PgType;
         let mut s = make_schema(name, parent);
-        s.columns.push(ColumnSchema { name: "j2s_id".to_string(), original_name: "j2s_id".to_string(), pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false });
+        s.columns.push(ColumnSchema {
+            name: "j2s_id".to_string(),
+            original_name: "j2s_id".to_string(),
+            pg_type: PgType::BigInt,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: false,
+        });
         for &k in data_keys {
-            s.columns.push(ColumnSchema { name: k.to_string(), original_name: k.to_string(), pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false });
+            s.columns.push(ColumnSchema {
+                name: k.to_string(),
+                original_name: k.to_string(),
+                pg_type: PgType::Text,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
+            });
         }
         s
     }
@@ -993,7 +1072,7 @@ mod tests {
         // #91: unticking column groups removes the group rows a selection may still point to
         let schemas = vec![
             make_schema_with_cols("img_front", Some("img"), &["url", "width"]),
-            make_schema_with_cols("img_back",  Some("img"), &["url", "width"]),
+            make_schema_with_cols("img_back", Some("img"), &["url", "width"]),
         ];
         let d = compute_jaccard_display(&schemas, &[0, 1, 141]);
         assert!((d.score - 1.0).abs() < 1e-9);
@@ -1004,7 +1083,7 @@ mod tests {
     fn jaccard_display_identical_siblings_score_one() {
         let schemas = vec![
             make_schema_with_cols("img_front", Some("img"), &["url", "width"]),
-            make_schema_with_cols("img_back",  Some("img"), &["url", "width"]),
+            make_schema_with_cols("img_back", Some("img"), &["url", "width"]),
         ];
         let d = compute_jaccard_display(&schemas, &[0, 1]);
         assert!((d.score - 1.0).abs() < 1e-9);
@@ -1020,11 +1099,11 @@ mod tests {
         ];
         let d = compute_jaccard_display(&schemas, &[0, 1]);
         // union_count and common are computed before noise-filtering.
-        assert_eq!(d.common, 2);      // {x,y} present in both
+        assert_eq!(d.common, 2); // {x,y} present in both
         assert_eq!(d.union_count, 4); // {x,y,z,w}
-        // pairwise_jaccard_min applies noise-filtering: with n=2 schemas,
-        // min_presence = max(2, 2/20) = 2, so z and w are filtered out.
-        // Filtered sets: p_a={x,y}, p_b={x,y} → Jaccard = 1.0.
+                                      // pairwise_jaccard_min applies noise-filtering: with n=2 schemas,
+                                      // min_presence = max(2, 2/20) = 2, so z and w are filtered out.
+                                      // Filtered sets: p_a={x,y}, p_b={x,y} → Jaccard = 1.0.
         assert!((d.score - 1.0).abs() < 1e-9);
     }
 }

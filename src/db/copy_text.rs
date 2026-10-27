@@ -98,10 +98,22 @@ mod tests {
 
     #[test]
     fn test_escape_copy_text() {
-        assert_eq!(escape_copy_text("hello\tworld").unwrap().as_str(), "hello\\tworld");
-        assert_eq!(escape_copy_text("line1\nline2").unwrap().as_str(), "line1\\nline2");
-        assert_eq!(escape_copy_text("back\\slash").unwrap().as_str(), "back\\\\slash");
-        assert_eq!(escape_copy_text("plain text").unwrap().as_str(), "plain text");
+        assert_eq!(
+            escape_copy_text("hello\tworld").unwrap().as_str(),
+            "hello\\tworld"
+        );
+        assert_eq!(
+            escape_copy_text("line1\nline2").unwrap().as_str(),
+            "line1\\nline2"
+        );
+        assert_eq!(
+            escape_copy_text("back\\slash").unwrap().as_str(),
+            "back\\\\slash"
+        );
+        assert_eq!(
+            escape_copy_text("plain text").unwrap().as_str(),
+            "plain text"
+        );
         // Fast-path null byte (first char)
         assert_eq!(escape_copy_text("\x00abc"), None);
         // Slow-path null byte (after a special char that triggers allocation)

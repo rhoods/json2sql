@@ -49,7 +49,10 @@ async fn test_flat_table_e2e() {
         assert!(result.is_ok(), "flat_table pipeline failed: {result:?}");
 
         let count = integration::row_count(&client, &schema, "products").await;
-        assert_eq!(count, 5, "tc_flat_table.jsonl must produce 5 rows in products");
+        assert_eq!(
+            count, 5,
+            "tc_flat_table.jsonl must produce 5 rows in products"
+        );
     })
     .await;
 }

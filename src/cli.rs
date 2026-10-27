@@ -254,7 +254,8 @@ mod tests {
 
     #[test]
     fn test_inspect_limit_custom() {
-        let cli = Cli::try_parse_from(["json2sql", "inspect", "data.json", "--limit", "200"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["json2sql", "inspect", "data.json", "--limit", "200"]).unwrap();
         if let Some(Commands::Inspect { limit, .. }) = cli.command {
             assert_eq!(limit, 200);
         } else {
@@ -265,7 +266,8 @@ mod tests {
     #[test]
     fn test_array_as_pg_array_flag_is_gone() {
         // Scalar arrays are always PG array columns (#84): the old flag is an unknown argument, no alias.
-        let err = Cli::try_parse_from(["json2sql", "--input", "x.json", "--array-as-pg-array"]).unwrap_err();
+        let err = Cli::try_parse_from(["json2sql", "--input", "x.json", "--array-as-pg-array"])
+            .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
@@ -277,17 +279,29 @@ mod tests {
 
     #[test]
     fn test_disable_strategy_single_parses() {
-        let cli = Cli::try_parse_from(["json2sql", "--input", "x.json", "--disable-strategy", "sibling"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "json2sql",
+            "--input",
+            "x.json",
+            "--disable-strategy",
+            "sibling",
+        ])
+        .unwrap();
         assert_eq!(cli.disable_strategy, vec!["sibling"]);
     }
 
     #[test]
     fn test_disable_strategy_repeatable() {
         let cli = Cli::try_parse_from([
-            "json2sql", "--input", "x.json",
-            "--disable-strategy", "sibling",
-            "--disable-strategy", "pivot",
-        ]).unwrap();
+            "json2sql",
+            "--input",
+            "x.json",
+            "--disable-strategy",
+            "sibling",
+            "--disable-strategy",
+            "pivot",
+        ])
+        .unwrap();
         assert_eq!(cli.disable_strategy, vec!["sibling", "pivot"]);
     }
 
@@ -305,39 +319,77 @@ mod tests {
 
     #[test]
     fn test_suggest_groups_parses_a_file() {
-        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--suggest-groups", "groups.toml"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "json2sql",
+            "--input",
+            "data.json",
+            "--suggest-groups",
+            "groups.toml",
+        ])
+        .unwrap();
         assert_eq!(cli.suggest_groups, Some(PathBuf::from("groups.toml")));
     }
 
     #[test]
     fn test_embedding_model_goes_with_suggest_groups() {
         let with = Cli::try_parse_from([
-            "json2sql", "--input", "data.json", "--suggest-groups", "groups.toml", "--embedding-model", "models/potion",
+            "json2sql",
+            "--input",
+            "data.json",
+            "--suggest-groups",
+            "groups.toml",
+            "--embedding-model",
+            "models/potion",
         ])
         .unwrap();
         assert_eq!(with.embedding_model, Some(PathBuf::from("models/potion")));
-        assert!(Cli::try_parse_from(["json2sql", "--input", "data.json", "--embedding-model", "models/potion"]).is_err());
+        assert!(Cli::try_parse_from([
+            "json2sql",
+            "--input",
+            "data.json",
+            "--embedding-model",
+            "models/potion"
+        ])
+        .is_err());
     }
 
     #[test]
     fn test_suggest_groups_excludes_dry_run() {
         assert!(Cli::try_parse_from([
-            "json2sql", "--input", "data.json", "--suggest-groups", "groups.toml", "--dry-run",
+            "json2sql",
+            "--input",
+            "data.json",
+            "--suggest-groups",
+            "groups.toml",
+            "--dry-run",
         ])
         .is_err());
     }
 
     #[test]
     fn test_group_columns_is_off_by_default_and_parses() {
-        assert!(!Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap().group_columns);
-        assert!(Cli::try_parse_from(["json2sql", "--input", "data.json", "--group-columns"]).unwrap().group_columns);
+        assert!(
+            !Cli::try_parse_from(["json2sql", "--input", "data.json"])
+                .unwrap()
+                .group_columns
+        );
+        assert!(
+            Cli::try_parse_from(["json2sql", "--input", "data.json", "--group-columns"])
+                .unwrap()
+                .group_columns
+        );
     }
 
     #[test]
     fn test_group_columns_excludes_suggest_groups() {
         // the proposal would run on tables the strategy already split
         assert!(Cli::try_parse_from([
-            "json2sql", "--input", "data.json", "--group-columns", "--suggest-groups", "groups.toml",
+            "json2sql",
+            "--input",
+            "data.json",
+            "--group-columns",
+            "--suggest-groups",
+            "groups.toml",
         ])
         .is_err());
     }
@@ -350,23 +402,30 @@ mod tests {
 
     #[test]
     fn test_limit_parses_value() {
-        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--limit", "500"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["json2sql", "--input", "data.json", "--limit", "500"]).unwrap();
         assert_eq!(cli.limit, Some(500));
     }
 
     #[test]
     fn test_limit_zero_parses() {
-        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--limit", "0"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["json2sql", "--input", "data.json", "--limit", "0"]).unwrap();
         assert_eq!(cli.limit, Some(0));
     }
 
     #[test]
     fn test_limit_composable_with_disable_strategy() {
         let cli = Cli::try_parse_from([
-            "json2sql", "--input", "data.json",
-            "--disable-strategy", "sibling",
-            "--limit", "100",
-        ]).unwrap();
+            "json2sql",
+            "--input",
+            "data.json",
+            "--disable-strategy",
+            "sibling",
+            "--limit",
+            "100",
+        ])
+        .unwrap();
         assert_eq!(cli.disable_strategy, vec!["sibling"]);
         assert_eq!(cli.limit, Some(100));
     }
@@ -374,26 +433,44 @@ mod tests {
     #[test]
     fn test_no_constraints_default_false() {
         let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
-        assert!(!cli.no_constraints, "--no-constraints must default to false");
+        assert!(
+            !cli.no_constraints,
+            "--no-constraints must default to false"
+        );
     }
 
     #[test]
     fn test_no_constraints_flag_parses() {
-        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--no-constraints"]).unwrap();
-        assert!(cli.no_constraints, "--no-constraints flag must set field to true");
+        let cli =
+            Cli::try_parse_from(["json2sql", "--input", "data.json", "--no-constraints"]).unwrap();
+        assert!(
+            cli.no_constraints,
+            "--no-constraints flag must set field to true"
+        );
     }
 
     #[test]
     fn test_no_constraints_composable_with_dry_run() {
         // --dry-run exits before pass2, so --no-constraints is a silent no-op — but it must parse
-        let cli = Cli::try_parse_from(["json2sql", "--input", "data.json", "--dry-run", "--no-constraints"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "json2sql",
+            "--input",
+            "data.json",
+            "--dry-run",
+            "--no-constraints",
+        ])
+        .unwrap();
         assert!(cli.dry_run);
         assert!(cli.no_constraints);
     }
 
     #[test]
     fn test_tune_wal_flag_parses() {
-        assert!(!Cli::try_parse_from(["json2sql", "--input", "d.json"]).unwrap().tune_wal);
+        assert!(
+            !Cli::try_parse_from(["json2sql", "--input", "d.json"])
+                .unwrap()
+                .tune_wal
+        );
         let cli = Cli::try_parse_from(["json2sql", "--input", "d.json", "--tune-wal"]).unwrap();
         assert!(cli.tune_wal);
     }

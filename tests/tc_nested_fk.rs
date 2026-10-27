@@ -5,8 +5,8 @@ mod integration;
 use std::collections::HashSet;
 
 use json2sql::anomaly::reporter::AnomalyFormat;
-use json2sql::pipeline::{run_pipeline, PipelineConfig};
 use json2sql::db::ddl::add_constraints;
+use json2sql::pipeline::{run_pipeline, PipelineConfig};
 use json2sql::schema::table_schema::TableSchema;
 
 fn base_config(url: String, schema: String) -> PipelineConfig {

@@ -4,17 +4,17 @@
 //! - fn `SchemaFinalizer::new` — construit le finaliseur avec ses seuils.
 //! - fn `SchemaFinalizer::run` — orchestre les 4 phases (base → cascade → wide strategies → guard).
 
-use std::collections::HashSet;
 use indexmap::IndexMap;
+use std::collections::HashSet;
 
+use super::super::cascading::finalize_cascading;
 use super::super::naming::{ColumnCollision, NamingRegistry};
 use super::super::observer::TableEntry;
 use super::super::strategies::StrategyName;
 use super::super::table_schema::{ChildKind, TableSchema};
-use super::super::cascading::finalize_cascading;
 use super::base::build_base_schemas;
 use super::wide_strategy::{apply_wide_table_strategies, build_finalizer_config};
-use super::{OverflowWarning, apply_column_limit_guard, exclude_absorbed_children};
+use super::{apply_column_limit_guard, exclude_absorbed_children, OverflowWarning};
 
 /// Transforms raw observations (from `SchemaObserver`) into finalized `TableSchema` objects.
 ///
@@ -43,7 +43,15 @@ impl SchemaFinalizer {
         disabled_strategies: HashSet<StrategyName>,
         apply_pg_guard: bool,
     ) -> Self {
-        Self { wide_column_threshold, sibling_threshold, sibling_jaccard, stable_threshold, rare_threshold, disabled_strategies, apply_pg_guard }
+        Self {
+            wide_column_threshold,
+            sibling_threshold,
+            sibling_jaccard,
+            stable_threshold,
+            rare_threshold,
+            disabled_strategies,
+            apply_pg_guard,
+        }
     }
 
     /// Convert all accumulated observations into finalized `TableSchema` objects,
@@ -79,7 +87,12 @@ impl SchemaFinalizer {
         // Pre-compute set of path_keys that have at least one Object/ObjectArray child.
         let tables_with_object_children: std::collections::HashSet<String> = tables
             .values()
-            .filter(|e| matches!(e.child_kind, Some(ChildKind::Object | ChildKind::ObjectArray)))
+            .filter(|e| {
+                matches!(
+                    e.child_kind,
+                    Some(ChildKind::Object | ChildKind::ObjectArray)
+                )
+            })
             .map(|e| e.parent_key.clone())
             .collect();
 
@@ -111,7 +124,13 @@ impl SchemaFinalizer {
 
         // Phase 3 — per-table: apply wide-table strategies (Pivot, Jsonb, StructuredPivot, AutoSplit)
         // to remaining tables after fusion is complete.
-        apply_wide_table_strategies(&mut schemas, tables, naming, &config, &tables_with_object_children);
+        apply_wide_table_strategies(
+            &mut schemas,
+            tables,
+            naming,
+            &config,
+            &tables_with_object_children,
+        );
 
         // Phase 4 — cleanup: column limit guard and absorbed child exclusion.
         let overflow_warnings = if self.apply_pg_guard {

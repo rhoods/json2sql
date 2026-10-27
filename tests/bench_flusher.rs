@@ -25,7 +25,11 @@ const SCHEMA: &str = "j2s_bench";
 fn env_list(name: &str, default: &[usize]) -> Vec<usize> {
     std::env::var(name).map_or_else(
         |_| default.to_vec(),
-        |v| v.split(',').map(|s| s.trim().parse().expect("bad bench env value")).collect(),
+        |v| {
+            v.split(',')
+                .map(|s| s.trim().parse().expect("bad bench env value"))
+                .collect()
+        },
     )
 }
 
@@ -33,23 +37,35 @@ fn env_list(name: &str, default: &[usize]) -> Vec<usize> {
 fn build_buffer(rows: usize) -> Bytes {
     let mut buf = String::with_capacity(rows * 80);
     for i in 0..rows {
-        buf.push_str(&format!("{}\t{i}\tvalue number {i} with some padding text\n", uuid::Uuid::now_v7()));
+        buf.push_str(&format!(
+            "{}\t{i}\tvalue number {i} with some padding text\n",
+            uuid::Uuid::now_v7()
+        ));
     }
     Bytes::from(buf)
 }
 
 async fn bench_client(url: &str) -> Client {
     let c = connect(url).await.expect("connect");
-    c.execute("SET synchronous_commit = off", &[]).await.unwrap();
+    c.execute("SET synchronous_commit = off", &[])
+        .await
+        .unwrap();
     c
 }
 
 async fn reset_schema(client: &Client, tables: usize, unlogged: bool) {
-    client.batch_execute(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; CREATE SCHEMA {SCHEMA}")).await.unwrap();
+    client
+        .batch_execute(&format!(
+            "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; CREATE SCHEMA {SCHEMA}"
+        ))
+        .await
+        .unwrap();
     let kind = if unlogged { "UNLOGGED " } else { "" };
     for t in 0..tables {
         client
-            .batch_execute(&format!("CREATE {kind}TABLE {SCHEMA}.t{t} (id uuid, n bigint, s text)"))
+            .batch_execute(&format!(
+                "CREATE {kind}TABLE {SCHEMA}.t{t} (id uuid, n bigint, s text)"
+            ))
             .await
             .unwrap();
     }
@@ -82,7 +98,8 @@ async fn bench_flusher_drain() {
                     reset_schema(&admin, tables, unlogged).await;
                     // Connections opened outside the timer: we measure the drain, not the handshake.
                     let clients: Vec<Client> = if parallel {
-                        futures_util::future::join_all((0..tables).map(|_| bench_client(&url))).await
+                        futures_util::future::join_all((0..tables).map(|_| bench_client(&url)))
+                            .await
                     } else {
                         vec![bench_client(&url).await]
                     };
@@ -92,21 +109,29 @@ async fn bench_flusher_drain() {
                         let mut set = tokio::task::JoinSet::new();
                         for (t, client) in clients.into_iter().enumerate() {
                             let buf = buf.clone();
-                            set.spawn(async move { flush_mem_sink_to_pg(buf, &copy_sql(t), &client).await });
+                            set.spawn(async move {
+                                flush_mem_sink_to_pg(buf, &copy_sql(t), &client).await
+                            });
                         }
                         while let Some(r) = set.join_next().await {
                             r.unwrap().expect("parallel COPY failed");
                         }
                     } else {
                         for t in 0..tables {
-                            flush_mem_sink_to_pg(buf.clone(), &copy_sql(t), &clients[0]).await.expect("COPY failed");
+                            flush_mem_sink_to_pg(buf.clone(), &copy_sql(t), &clients[0])
+                                .await
+                                .expect("COPY failed");
                         }
                     }
                     let elapsed = start.elapsed();
 
                     let mut total: i64 = 0;
                     for t in 0..tables {
-                        total += admin.query_one(&format!("SELECT count(*) FROM {SCHEMA}.t{t}"), &[]).await.unwrap().get::<_, i64>(0);
+                        total += admin
+                            .query_one(&format!("SELECT count(*) FROM {SCHEMA}.t{t}"), &[])
+                            .await
+                            .unwrap()
+                            .get::<_, i64>(0);
                     }
                     assert_eq!(total, (tables * rows) as i64, "row count mismatch");
 
@@ -114,7 +139,11 @@ async fn bench_flusher_drain() {
                     let secs = elapsed.as_secs_f64();
                     eprintln!(
                         "| {tables} | {rows} | {} | {} | {mb:.0} | {} | {:.1} | {:.2} |",
-                        if parallel { format!("par-{tables}conn") } else { "seq-1conn".to_string() },
+                        if parallel {
+                            format!("par-{tables}conn")
+                        } else {
+                            "seq-1conn".to_string()
+                        },
                         if unlogged { "UNLOGGED" } else { "LOGGED" },
                         elapsed.as_millis(),
                         mb / secs,

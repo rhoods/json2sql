@@ -48,14 +48,18 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::error::{J2sError, Result};
-use crate::schema::column_groups::{apply_column_groups, dissolve_column_groups, prune_missing_groups};
+use crate::schema::column_groups::{
+    apply_column_groups, dissolve_column_groups, prune_missing_groups,
+};
+use crate::schema::suffix_detector::build_suffix_schema_from_list;
+use crate::schema::table_schema::{
+    ColumnSchema, InferredStrategy, KeyShape, SiblingSchema, TableSchema, UserOverride,
+};
+use crate::schema::type_tracker::PgType;
 use crate::schema::wide_strategies::{
     apply_flatten, apply_normalize_dynamic_keys, apply_structured_pivot_columns,
     apply_wide_strategy_columns, build_union_columns,
 };
-use crate::schema::suffix_detector::build_suffix_schema_from_list;
-use crate::schema::table_schema::{ColumnSchema, KeyShape, SiblingSchema, TableSchema, InferredStrategy, UserOverride};
-use crate::schema::type_tracker::PgType;
 
 /// TOML config file for manual type overrides.
 ///
@@ -109,39 +113,99 @@ impl SchemaConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigWarning {
     UnknownTable(String),
-    UnknownColumn { table: String, column: String },
-    UnknownType    { table: String, column: String, type_str: String },
-    UnknownStrategy { table: String, strategy: String },
-    UnknownGroupStrategy { group: String, strategy: String },
-    GroupMergeFailed { group: String, found: usize, expected: usize },
+    UnknownColumn {
+        table: String,
+        column: String,
+    },
+    UnknownType {
+        table: String,
+        column: String,
+        type_str: String,
+    },
+    UnknownStrategy {
+        table: String,
+        strategy: String,
+    },
+    UnknownGroupStrategy {
+        group: String,
+        strategy: String,
+    },
+    GroupMergeFailed {
+        group: String,
+        found: usize,
+        expected: usize,
+    },
     /// Override to `to_strategy` is incompatible with the table's current column layout
     /// (inferred as `from_strategy`). Column names were lost during finalization and cannot
     /// be reconstructed.
-    InvalidOverride { table: String, from_strategy: String, to_strategy: String },
+    InvalidOverride {
+        table: String,
+        from_strategy: String,
+        to_strategy: String,
+    },
     /// Both `strategy` and `suffix_columns` were set for the same table. `suffix_columns`
     /// takes precedence — `strategy` is ignored entirely (see #31).
-    ConflictingOverride { table: String, ignored_strategy: String },
+    ConflictingOverride {
+        table: String,
+        ignored_strategy: String,
+    },
     /// A type override targets a PG array column. `parse_pg_type` only builds scalar types, so applying
     /// it would turn the column into a scalar one that Pass 2 fills with NULL: it is ignored (#84).
-    ArrayColumnOverride { table: String, column: String, type_str: String },
+    ArrayColumnOverride {
+        table: String,
+        column: String,
+        type_str: String,
+    },
     /// `column_groups` of a table is not a table of lists of column names (#78).
-    ColumnGroupsMalformed { table: String },
+    ColumnGroupsMalformed {
+        table: String,
+    },
     /// One group of `column_groups` is not a list of column names (#78).
-    ColumnGroupMalformed { table: String, group: String },
+    ColumnGroupMalformed {
+        table: String,
+        group: String,
+    },
     /// A group lists a column the table does not have (#78): the group is ignored.
-    ColumnGroupUnknownColumn { table: String, group: String, column: String },
+    ColumnGroupUnknownColumn {
+        table: String,
+        group: String,
+        column: String,
+    },
     /// A column is listed twice, or is already in `other`, an earlier group (#78): the group is ignored.
-    ColumnGroupColumnRepeated { table: String, group: String, column: String, other: String },
+    ColumnGroupColumnRepeated {
+        table: String,
+        group: String,
+        column: String,
+        other: String,
+    },
     /// A group lists a column that json2sql generates (`j2s_*`) (#78): the group is ignored.
-    ColumnGroupGeneratedColumn { table: String, group: String, column: String },
+    ColumnGroupGeneratedColumn {
+        table: String,
+        group: String,
+        column: String,
+    },
     /// A group has fewer columns than `minimum` (#78): the group is ignored.
-    ColumnGroupTooSmall { table: String, group: String, found: usize, minimum: usize },
+    ColumnGroupTooSmall {
+        table: String,
+        group: String,
+        found: usize,
+        minimum: usize,
+    },
     /// The table the group would become already exists, or another group of the config gets the same name (#78).
-    ColumnGroupNameTaken { table: String, group: String, name: String },
+    ColumnGroupNameTaken {
+        table: String,
+        group: String,
+        name: String,
+    },
     /// The table's effective strategy is not `Columns` or `AutoSplit` (#78): its groups are ignored.
-    ColumnGroupParentStrategy { table: String, strategy: String },
+    ColumnGroupParentStrategy {
+        table: String,
+        strategy: String,
+    },
     /// The groups of the table would take all its data columns (#78): they are ignored.
-    ColumnGroupEmptiesParent { table: String },
+    ColumnGroupEmptiesParent {
+        table: String,
+    },
 }
 
 impl ConfigWarning {
@@ -188,18 +252,28 @@ impl ConfigWarning {
     }
 }
 
-struct DeferredNormalize { table_name: String, id_column: String }
-struct DeferredFlatten  { table_name: String, prefix: String, max_depth: u8 }
+struct DeferredNormalize {
+    table_name: String,
+    id_column: String,
+}
+struct DeferredFlatten {
+    table_name: String,
+    prefix: String,
+    max_depth: u8,
+}
 
 /// Apply type overrides from `config` to the finalized schemas.
 /// Matches by table name and column name (both sanitized `PostgreSQL` identifiers).
 /// Unknown tables, columns, types, or strategies are returned as `ConfigWarning` values
 /// rather than written to stderr — the caller decides how to display them.
 #[allow(clippy::too_many_lines)] // exhaustive dispatch over override kinds; see apply_strategy_override below for same pattern
-pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) -> crate::error::Result<Vec<ConfigWarning>> {
+pub fn apply_overrides(
+    schemas: &mut Vec<TableSchema>,
+    config: &SchemaConfig,
+) -> crate::error::Result<Vec<ConfigWarning>> {
     let mut warnings: Vec<ConfigWarning> = Vec::new();
     let mut deferred_normalize: Vec<DeferredNormalize> = Vec::new();
-    let mut deferred_flatten:   Vec<DeferredFlatten>   = Vec::new();
+    let mut deferred_flatten: Vec<DeferredFlatten> = Vec::new();
 
     for (table_name, col_overrides) in &config.tables {
         if rebuilds_columns(col_overrides) {
@@ -219,20 +293,41 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) ->
                         table: table_name.clone(),
                         ignored_strategy,
                     }),
-                    None => warnings.extend(apply_strategy_override(schema, table_name, col_overrides, &mut deferred_normalize, &mut deferred_flatten)),
+                    None => warnings.extend(apply_strategy_override(
+                        schema,
+                        table_name,
+                        col_overrides,
+                        &mut deferred_normalize,
+                        &mut deferred_flatten,
+                    )),
                 }
-                warnings.extend(apply_suffix_columns_override(schema, table_name, col_overrides));
-                warnings.extend(apply_column_type_overrides(schema, table_name, col_overrides));
+                warnings.extend(apply_suffix_columns_override(
+                    schema,
+                    table_name,
+                    col_overrides,
+                ));
+                warnings.extend(apply_column_type_overrides(
+                    schema,
+                    table_name,
+                    col_overrides,
+                ));
             }
         }
     }
 
     for op in deferred_normalize {
-        let original = schemas.iter().find(|s| s.name == op.table_name).map(|s| s.inferred_strategy.clone());
+        let original = schemas
+            .iter()
+            .find(|s| s.name == op.table_name)
+            .map(|s| s.inferred_strategy.clone());
         apply_normalize_dynamic_keys(schemas, &op.table_name, op.id_column.clone())?;
         if let Some(s) = schemas.iter_mut().find(|s| s.name == op.table_name) {
-            if let Some(orig) = original { s.inferred_strategy = orig; }
-            s.set_toml_override(Some(UserOverride::NormalizeDynamicKeys { id_column: op.id_column.into() }));
+            if let Some(orig) = original {
+                s.inferred_strategy = orig;
+            }
+            s.set_toml_override(Some(UserOverride::NormalizeDynamicKeys {
+                id_column: op.id_column.into(),
+            }));
         }
     }
     for op in deferred_flatten {
@@ -247,12 +342,21 @@ pub fn apply_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) ->
 fn rebuilds_columns(col_overrides: &HashMap<String, toml::Value>) -> bool {
     has_nonempty_suffix_columns(col_overrides)
         || toml_str(col_overrides, "strategy").is_some_and(|s| {
-            matches!(s.to_lowercase().as_str(), "pivot" | "jsonb" | "normalize_dynamic_keys" | "flatten")
+            matches!(
+                s.to_lowercase().as_str(),
+                "pivot" | "jsonb" | "normalize_dynamic_keys" | "flatten"
+            )
         })
 }
 
 fn toml_str(map: &HashMap<String, toml::Value>, key: &str) -> Option<String> {
-    map.get(key).and_then(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
+    map.get(key).and_then(|v| {
+        if let toml::Value::String(s) = v {
+            Some(s.clone())
+        } else {
+            None
+        }
+    })
 }
 
 fn has_nonempty_suffix_columns(col_overrides: &HashMap<String, toml::Value>) -> bool {
@@ -285,7 +389,9 @@ fn apply_strategy_override(
     deferred_normalize: &mut Vec<DeferredNormalize>,
     deferred_flatten: &mut Vec<DeferredFlatten>,
 ) -> Vec<ConfigWarning> {
-    let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") else { return vec![] };
+    let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") else {
+        return vec![];
+    };
     match strategy_str.to_lowercase().as_str() {
         "pivot" => {
             let original = schema.inferred_strategy.clone();
@@ -306,7 +412,10 @@ fn apply_strategy_override(
                 return vec![ConfigWarning::InvalidOverride {
                     table: table_name.to_string(),
                     from_strategy: format!("{:?}", schema.inferred_strategy)
-                        .split('(').next().unwrap_or("Unknown").to_string(),
+                        .split('(')
+                        .next()
+                        .unwrap_or("Unknown")
+                        .to_string(),
                     to_strategy: "columns".to_string(),
                 }];
             }
@@ -320,20 +429,38 @@ fn apply_strategy_override(
         // still resolves correctly by falling through to inferred_strategy. Verified in #28.
         "structured_pivot" => {}
         "normalize_dynamic_keys" => {
-            let id_col = toml_str(col_overrides, "id_column").unwrap_or_else(|| "key_id".to_string());
-            deferred_normalize.push(DeferredNormalize { table_name: table_name.to_string(), id_column: id_col });
+            let id_col =
+                toml_str(col_overrides, "id_column").unwrap_or_else(|| "key_id".to_string());
+            deferred_normalize.push(DeferredNormalize {
+                table_name: table_name.to_string(),
+                id_column: id_col,
+            });
         }
         "flatten" => {
-            let prefix = toml_str(col_overrides, "prefix").unwrap_or_else(|| format!("{table_name}_"));
-            let max_depth = col_overrides.get("max_depth")
-                .and_then(|v| if let toml::Value::Integer(n) = v { u8::try_from(*n).ok() } else { None })
+            let prefix =
+                toml_str(col_overrides, "prefix").unwrap_or_else(|| format!("{table_name}_"));
+            let max_depth = col_overrides
+                .get("max_depth")
+                .and_then(|v| {
+                    if let toml::Value::Integer(n) = v {
+                        u8::try_from(*n).ok()
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or(1);
-            deferred_flatten.push(DeferredFlatten { table_name: table_name.to_string(), prefix, max_depth });
+            deferred_flatten.push(DeferredFlatten {
+                table_name: table_name.to_string(),
+                prefix,
+                max_depth,
+            });
         }
-        other => return vec![ConfigWarning::UnknownStrategy {
-            table: table_name.to_string(),
-            strategy: other.to_string(),
-        }],
+        other => {
+            return vec![ConfigWarning::UnknownStrategy {
+                table: table_name.to_string(),
+                strategy: other.to_string(),
+            }]
+        }
     }
     vec![]
 }
@@ -343,12 +470,22 @@ fn apply_suffix_columns_override(
     table_name: &str,
     col_overrides: &HashMap<String, toml::Value>,
 ) -> Vec<ConfigWarning> {
-    let Some(toml::Value::Array(arr)) = col_overrides.get("suffix_columns") else { return vec![] };
+    let Some(toml::Value::Array(arr)) = col_overrides.get("suffix_columns") else {
+        return vec![];
+    };
     let suffix_list: Vec<String> = arr
         .iter()
-        .filter_map(|v| if let toml::Value::String(s) = v { Some(s.clone()) } else { None })
+        .filter_map(|v| {
+            if let toml::Value::String(s) = v {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
         .collect();
-    if suffix_list.is_empty() { return vec![]; }
+    if suffix_list.is_empty() {
+        return vec![];
+    }
 
     // Same compatibility guard as the "columns" branch of apply_strategy_override: once a
     // table is no longer Columns (SiblingCollapse/AutoSplit/Pivot via cascade/wide-table
@@ -358,7 +495,10 @@ fn apply_suffix_columns_override(
         return vec![ConfigWarning::InvalidOverride {
             table: table_name.to_string(),
             from_strategy: format!("{:?}", schema.inferred_strategy)
-                .split('(').next().unwrap_or("Unknown").to_string(),
+                .split('(')
+                .next()
+                .unwrap_or("Unknown")
+                .to_string(),
             to_strategy: "structured_pivot".to_string(),
         }];
     }
@@ -386,21 +526,28 @@ fn apply_column_type_overrides(
 ) -> Vec<ConfigWarning> {
     let mut warnings = Vec::new();
     for (col_name, value) in col_overrides {
-        if matches!(col_name.as_str(), "strategy" | "suffix_columns" | "id_column" | "prefix" | "max_depth" | "column_groups") {
+        if matches!(
+            col_name.as_str(),
+            "strategy" | "suffix_columns" | "id_column" | "prefix" | "max_depth" | "column_groups"
+        ) {
             continue;
         }
-        let toml::Value::String(type_str) = value else { continue };
+        let toml::Value::String(type_str) = value else {
+            continue;
+        };
         match schema.columns.iter_mut().find(|c| &c.name == col_name) {
             None => warnings.push(ConfigWarning::UnknownColumn {
                 table: table_name.to_string(),
                 column: col_name.clone(),
             }),
             // checked first: any type override would turn the array into a scalar column (#84)
-            Some(col) if matches!(col.pg_type, PgType::Array(_)) => warnings.push(ConfigWarning::ArrayColumnOverride {
-                table: table_name.to_string(),
-                column: col_name.clone(),
-                type_str: type_str.clone(),
-            }),
+            Some(col) if matches!(col.pg_type, PgType::Array(_)) => {
+                warnings.push(ConfigWarning::ArrayColumnOverride {
+                    table: table_name.to_string(),
+                    column: col_name.clone(),
+                    type_str: type_str.clone(),
+                })
+            }
             Some(col) => match parse_pg_type(type_str) {
                 None => warnings.push(ConfigWarning::UnknownType {
                     table: table_name.to_string(),
@@ -408,7 +555,13 @@ fn apply_column_type_overrides(
                     type_str: type_str.clone(),
                 }),
                 Some(pg_type) => {
-                    eprintln!("  Override: {}.{} {} → {}", table_name, col_name, col.pg_type.as_sql(), pg_type.as_sql());
+                    eprintln!(
+                        "  Override: {}.{} {} → {}",
+                        table_name,
+                        col_name,
+                        col.pg_type.as_sql(),
+                        pg_type.as_sql()
+                    );
                     col.pg_type = pg_type;
                 }
             },
@@ -419,7 +572,10 @@ fn apply_column_type_overrides(
 
 /// Appliquer les groupes de fusion définis dans la config.
 /// Doit être appelé APRÈS `apply_overrides` et AVANT la sauvegarde du snapshot.
-pub fn apply_group_overrides(schemas: &mut Vec<TableSchema>, config: &SchemaConfig) -> Vec<ConfigWarning> {
+pub fn apply_group_overrides(
+    schemas: &mut Vec<TableSchema>,
+    config: &SchemaConfig,
+) -> Vec<ConfigWarning> {
     let mut warnings = Vec::new();
     for (group_name, group_cfg) in &config.group {
         match group_cfg.strategy.to_lowercase().as_str() {
@@ -457,16 +613,23 @@ pub fn apply_overrides_complete(
 fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> TableSchema {
     let refs: Vec<&TableSchema> = cloned.iter().collect();
     let first = &cloned[0];
-    let mut merged =
-        TableSchema::new(group_name.to_string(), vec![group_name.to_string()], first.depth);
+    let mut merged = TableSchema::new(
+        group_name.to_string(),
+        vec![group_name.to_string()],
+        first.depth,
+    );
     merged.parent_table.clone_from(&first.parent_table);
     merged.child_kind.clone_from(&first.child_kind);
-    merged.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+    merged
+        .columns
+        .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
     if let Some(ref parent) = first.parent_table {
         merged.columns.push(ColumnSchema::parent_fk(parent));
     }
     if first.has_order_column() {
-        merged.columns.push(ColumnSchema::generated("j2s_order", PgType::BigInt));
+        merged
+            .columns
+            .push(ColumnSchema::generated("j2s_order", PgType::BigInt));
     }
     merged.columns.push(ColumnSchema {
         name: "key_id".to_string(),
@@ -487,7 +650,11 @@ fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> 
     merged
 }
 
-fn apply_keyed_pivot_merge(schemas: &mut Vec<TableSchema>, group_name: &str, members: &[String]) -> Option<ConfigWarning> {
+fn apply_keyed_pivot_merge(
+    schemas: &mut Vec<TableSchema>,
+    group_name: &str,
+    members: &[String],
+) -> Option<ConfigWarning> {
     let mut indices: Vec<usize> = members
         .iter()
         .filter_map(|name| schemas.iter().position(|s| &s.name == name))
@@ -573,7 +740,8 @@ fn apply_single_user_override(s: &mut TableSchema, ov: &UserOverride) {
             }
         }
         UserOverride::Columns => {
-            if matches!(s.inferred_strategy, InferredStrategy::Columns) && s.ui_override().is_none() {
+            if matches!(s.inferred_strategy, InferredStrategy::Columns) && s.ui_override().is_none()
+            {
                 s.set_ui_override(Some(UserOverride::Columns));
             }
         }
@@ -591,11 +759,17 @@ fn wide_companions_of_skipped(
     schemas: &[TableSchema],
     overrides: &HashMap<String, UserOverride>,
 ) -> HashMap<String, String> {
-    overrides.iter()
+    overrides
+        .iter()
         .filter_map(|(name, ov)| {
-            if !matches!(ov, UserOverride::Skip) { return None; }
+            if !matches!(ov, UserOverride::Skip) {
+                return None;
+            }
             schemas.iter().find(|s| &s.name == name).and_then(|s| {
-                if let InferredStrategy::AutoSplit { wide_table_name, .. } = &s.inferred_strategy {
+                if let InferredStrategy::AutoSplit {
+                    wide_table_name, ..
+                } = &s.inferred_strategy
+                {
                     Some((name.clone(), wide_table_name.clone()))
                 } else {
                     None
@@ -634,8 +808,11 @@ pub fn compute_skip_cascade(
     overrides: &HashMap<String, UserOverride>,
 ) -> (HashSet<String>, Vec<SkipCascadeWarning>) {
     let wide_companion = wide_companions_of_skipped(schemas, overrides);
-    let direct_skip_roots: HashSet<String> = overrides.iter()
-        .filter(|(name, ov)| matches!(ov, UserOverride::Skip) && schemas.iter().any(|s| &s.name == *name))
+    let direct_skip_roots: HashSet<String> = overrides
+        .iter()
+        .filter(|(name, ov)| {
+            matches!(ov, UserOverride::Skip) && schemas.iter().any(|s| &s.name == *name)
+        })
         .map(|(name, _)| name.clone())
         .collect();
 
@@ -643,7 +820,8 @@ pub fn compute_skip_cascade(
     seed.extend(wide_companion.values().cloned());
     let removed = close_over_real_children(schemas, seed);
 
-    let mut warnings: Vec<SkipCascadeWarning> = direct_skip_roots.iter()
+    let mut warnings: Vec<SkipCascadeWarning> = direct_skip_roots
+        .iter()
         .filter_map(|root| {
             let mut own_seed = HashSet::from([root.clone()]);
             if let Some(wide_name) = wide_companion.get(root) {
@@ -657,7 +835,10 @@ pub fn compute_skip_cascade(
                 return None;
             }
             cascaded.sort();
-            Some(SkipCascadeWarning { removed_table: root.clone(), cascaded_children: cascaded })
+            Some(SkipCascadeWarning {
+                removed_table: root.clone(),
+                cascaded_children: cascaded,
+            })
         })
         .collect();
     warnings.sort_by(|a, b| a.removed_table.cmp(&b.removed_table));
@@ -705,7 +886,10 @@ fn parse_pg_type(s: &str) -> Option<PgType> {
         "TEXT" => Some(PgType::Text),
         other => {
             // VARCHAR(N)
-            if let Some(inner) = other.strip_prefix("VARCHAR(").and_then(|s| s.strip_suffix(')')) {
+            if let Some(inner) = other
+                .strip_prefix("VARCHAR(")
+                .and_then(|s| s.strip_suffix(')'))
+            {
                 if let Ok(n) = inner.trim().parse::<u32>() {
                     return Some(PgType::VarChar(n));
                 }
@@ -738,7 +922,10 @@ mod tests {
         assert_eq!(parse_pg_type("INTEGER"), Some(PgType::Integer));
         assert_eq!(parse_pg_type("int"), Some(PgType::Integer));
         assert_eq!(parse_pg_type("BIGINT"), Some(PgType::BigInt));
-        assert_eq!(parse_pg_type("double precision"), Some(PgType::DoublePrecision));
+        assert_eq!(
+            parse_pg_type("double precision"),
+            Some(PgType::DoublePrecision)
+        );
         assert_eq!(parse_pg_type("float"), Some(PgType::DoublePrecision));
         assert_eq!(parse_pg_type("BOOLEAN"), Some(PgType::Boolean));
         assert_eq!(parse_pg_type("bool"), Some(PgType::Boolean));
@@ -747,7 +934,10 @@ mod tests {
         assert_eq!(parse_pg_type("TIMESTAMP"), Some(PgType::Timestamp));
         assert_eq!(parse_pg_type("TEXT"), Some(PgType::Text));
         assert_eq!(parse_pg_type("VARCHAR(128)"), Some(PgType::VarChar(128)));
-        assert_eq!(parse_pg_type("CHARACTER VARYING(64)"), Some(PgType::VarChar(64)));
+        assert_eq!(
+            parse_pg_type("CHARACTER VARYING(64)"),
+            Some(PgType::VarChar(64))
+        );
         assert_eq!(parse_pg_type("NONSENSE"), None);
     }
 
@@ -762,7 +952,10 @@ mod tests {
 
     #[test]
     fn config_warning_to_message_unknown_column() {
-        let w = ConfigWarning::UnknownColumn { table: "users".to_string(), column: "age".to_string() };
+        let w = ConfigWarning::UnknownColumn {
+            table: "users".to_string(),
+            column: "age".to_string(),
+        };
         let msg = w.to_message();
         assert!(msg.contains("users"));
         assert!(msg.contains("age"));
@@ -783,7 +976,10 @@ mod tests {
 
     #[test]
     fn config_warning_to_message_unknown_strategy() {
-        let w = ConfigWarning::UnknownStrategy { table: "tags".to_string(), strategy: "magic".to_string() };
+        let w = ConfigWarning::UnknownStrategy {
+            table: "tags".to_string(),
+            strategy: "magic".to_string(),
+        };
         let msg = w.to_message();
         assert!(msg.contains("magic"));
         assert!(msg.contains("tags"));
@@ -791,7 +987,11 @@ mod tests {
 
     #[test]
     fn config_warning_to_message_group_merge_failed() {
-        let w = ConfigWarning::GroupMergeFailed { group: "merged".to_string(), found: 1, expected: 3 };
+        let w = ConfigWarning::GroupMergeFailed {
+            group: "merged".to_string(),
+            found: 1,
+            expected: 3,
+        };
         let msg = w.to_message();
         assert!(msg.contains("merged"));
         assert!(msg.contains('1'));
@@ -812,9 +1012,15 @@ mod tests {
         let mut schemas = vec![simple_table("users")];
         let mut tables = HashMap::new();
         tables.insert("ghost".to_string(), HashMap::new());
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
-        assert_eq!(warnings, vec![ConfigWarning::UnknownTable("ghost".to_string())]);
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::UnknownTable("ghost".to_string())]
+        );
     }
 
     #[test]
@@ -823,20 +1029,34 @@ mod tests {
         let mut schemas = vec![{
             let mut s = TableSchema::new("users".to_string(), vec!["users".to_string()], 0);
             s.columns.push(ColumnSchema {
-                name: "name".to_string(), original_name: "name".to_string(),
-                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+                name: "name".to_string(),
+                original_name: "name".to_string(),
+                pg_type: PgType::Text,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
             });
             s
         }];
         let mut tables = HashMap::new();
         let mut cols = HashMap::new();
-        cols.insert("ghost_col".to_string(), toml::Value::String("TEXT".to_string()));
+        cols.insert(
+            "ghost_col".to_string(),
+            toml::Value::String("TEXT".to_string()),
+        );
         tables.insert("users".to_string(), cols);
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
-        assert_eq!(warnings, vec![ConfigWarning::UnknownColumn {
-            table: "users".to_string(), column: "ghost_col".to_string(),
-        }]);
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::UnknownColumn {
+                table: "users".to_string(),
+                column: "ghost_col".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -845,20 +1065,35 @@ mod tests {
         let mut schemas = vec![{
             let mut s = TableSchema::new("users".to_string(), vec!["users".to_string()], 0);
             s.columns.push(ColumnSchema {
-                name: "age".to_string(), original_name: "age".to_string(),
-                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+                name: "age".to_string(),
+                original_name: "age".to_string(),
+                pg_type: PgType::Text,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
             });
             s
         }];
         let mut tables = HashMap::new();
         let mut cols = HashMap::new();
-        cols.insert("age".to_string(), toml::Value::String("NONSENSE".to_string()));
+        cols.insert(
+            "age".to_string(),
+            toml::Value::String("NONSENSE".to_string()),
+        );
         tables.insert("users".to_string(), cols);
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
-        assert_eq!(warnings, vec![ConfigWarning::UnknownType {
-            table: "users".to_string(), column: "age".to_string(), type_str: "NONSENSE".to_string(),
-        }]);
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::UnknownType {
+                table: "users".to_string(),
+                column: "age".to_string(),
+                type_str: "NONSENSE".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -870,8 +1105,12 @@ mod tests {
         let mut schemas = vec![{
             let mut s = TableSchema::new("users".to_string(), vec!["users".to_string()], 0);
             s.columns.push(ColumnSchema {
-                name: "tags".to_string(), original_name: "tags".to_string(),
-                pg_type: array_type.clone(), not_null: false, is_generated: false, is_parent_fk: false,
+                name: "tags".to_string(),
+                original_name: "tags".to_string(),
+                pg_type: array_type.clone(),
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
             });
             s
         }];
@@ -879,21 +1118,37 @@ mod tests {
         let mut cols = HashMap::new();
         cols.insert("tags".to_string(), toml::Value::String("text".to_string()));
         tables.insert("users".to_string(), cols);
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
-        assert_eq!(warnings, vec![ConfigWarning::ArrayColumnOverride {
-            table: "users".to_string(), column: "tags".to_string(), type_str: "text".to_string(),
-        }]);
-        assert_eq!(schemas[0].columns[0].pg_type, array_type, "the column must stay an array");
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::ArrayColumnOverride {
+                table: "users".to_string(),
+                column: "tags".to_string(),
+                type_str: "text".to_string(),
+            }]
+        );
+        assert_eq!(
+            schemas[0].columns[0].pg_type, array_type,
+            "the column must stay an array"
+        );
     }
 
     #[test]
     fn config_warning_to_message_array_column_override() {
         let w = ConfigWarning::ArrayColumnOverride {
-            table: "users".to_string(), column: "tags".to_string(), type_str: "text".to_string(),
+            table: "users".to_string(),
+            column: "tags".to_string(),
+            type_str: "text".to_string(),
         };
         let msg = w.to_message();
-        assert!(msg.contains("users.tags") && msg.contains("array") && msg.contains("text"), "got {msg}");
+        assert!(
+            msg.contains("users.tags") && msg.contains("array") && msg.contains("text"),
+            "got {msg}"
+        );
     }
 
     #[test]
@@ -901,13 +1156,23 @@ mod tests {
         let mut schemas = vec![simple_table("tags")];
         let mut tables = HashMap::new();
         let mut cols = HashMap::new();
-        cols.insert("strategy".to_string(), toml::Value::String("magic".to_string()));
+        cols.insert(
+            "strategy".to_string(),
+            toml::Value::String("magic".to_string()),
+        );
         tables.insert("tags".to_string(), cols);
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
-        assert_eq!(warnings, vec![ConfigWarning::UnknownStrategy {
-            table: "tags".to_string(), strategy: "magic".to_string(),
-        }]);
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::UnknownStrategy {
+                table: "tags".to_string(),
+                strategy: "magic".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -916,16 +1181,26 @@ mod tests {
         let mut schemas = vec![{
             let mut s = TableSchema::new("users".to_string(), vec!["users".to_string()], 0);
             s.columns.push(ColumnSchema {
-                name: "age".to_string(), original_name: "age".to_string(),
-                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+                name: "age".to_string(),
+                original_name: "age".to_string(),
+                pg_type: PgType::Text,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
             });
             s
         }];
         let mut tables = HashMap::new();
         let mut cols = HashMap::new();
-        cols.insert("age".to_string(), toml::Value::String("INTEGER".to_string()));
+        cols.insert(
+            "age".to_string(),
+            toml::Value::String("INTEGER".to_string()),
+        );
         tables.insert("users".to_string(), cols);
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
         assert_eq!(warnings, []);
     }
@@ -949,12 +1224,21 @@ mod tests {
 
         let mut tables = HashMap::new();
         let mut cols = HashMap::new();
-        cols.insert("age".to_string(), toml::Value::String("INTEGER".to_string()));
+        cols.insert(
+            "age".to_string(),
+            toml::Value::String("INTEGER".to_string()),
+        );
         tables.insert("users".to_string(), cols);
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
 
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
-        assert!(warnings.is_empty(), "valid override must produce no warnings");
+        assert!(
+            warnings.is_empty(),
+            "valid override must produce no warnings"
+        );
 
         let col = schemas[0].columns.iter().find(|c| c.name == "age").unwrap();
         assert_eq!(col.pg_type, PgType::Integer);
@@ -962,7 +1246,10 @@ mod tests {
 
     fn toml_strategy(strategy: &str) -> HashMap<String, toml::Value> {
         let mut m = HashMap::new();
-        m.insert("strategy".to_string(), toml::Value::String(strategy.to_string()));
+        m.insert(
+            "strategy".to_string(),
+            toml::Value::String(strategy.to_string()),
+        );
         m
     }
 
@@ -972,9 +1259,15 @@ mod tests {
         // inferred as Columns (default for simple_table)
         let mut tables = HashMap::new();
         tables.insert("flat".to_string(), toml_strategy("columns"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
-        assert!(warnings.is_empty(), "no warning when inferred is already Columns");
+        assert!(
+            warnings.is_empty(),
+            "no warning when inferred is already Columns"
+        );
         assert_eq!(schemas[0].toml_override(), Some(&UserOverride::Columns));
         assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns);
     }
@@ -987,12 +1280,25 @@ mod tests {
         schemas[0].inferred_strategy = InferredStrategy::Pivot;
         let mut tables = HashMap::new();
         tables.insert("metrics".to_string(), toml_strategy("columns"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
         assert_eq!(warnings.len(), 1);
-        assert!(matches!(&warnings[0], ConfigWarning::InvalidOverride { table, .. } if table == "metrics"));
-        assert_eq!(schemas[0].toml_override(), None, "toml_override must not be set on invalid override");
-        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Pivot, "inferred_strategy must be unchanged");
+        assert!(
+            matches!(&warnings[0], ConfigWarning::InvalidOverride { table, .. } if table == "metrics")
+        );
+        assert_eq!(
+            schemas[0].toml_override(),
+            None,
+            "toml_override must not be set on invalid override"
+        );
+        assert_eq!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::Pivot,
+            "inferred_strategy must be unchanged"
+        );
     }
 
     #[test]
@@ -1003,10 +1309,15 @@ mod tests {
         schemas[0].inferred_strategy = InferredStrategy::Jsonb;
         let mut tables = HashMap::new();
         tables.insert("events".to_string(), toml_strategy("columns"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
         assert_eq!(warnings.len(), 1);
-        assert!(matches!(&warnings[0], ConfigWarning::InvalidOverride { table, .. } if table == "events"));
+        assert!(
+            matches!(&warnings[0], ConfigWarning::InvalidOverride { table, .. } if table == "events")
+        );
     }
 
     #[test]
@@ -1015,9 +1326,16 @@ mod tests {
         schemas[0].inferred_strategy = InferredStrategy::Columns;
         let mut tables = HashMap::new();
         tables.insert("tags".to_string(), toml_strategy("pivot"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         apply_overrides(&mut schemas, &config).unwrap();
-        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must not be mutated");
+        assert_eq!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::Columns,
+            "inferred_strategy must not be mutated"
+        );
         assert_eq!(schemas[0].toml_override(), Some(&UserOverride::Pivot));
         assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Pivot);
     }
@@ -1028,9 +1346,16 @@ mod tests {
         schemas[0].inferred_strategy = InferredStrategy::Columns;
         let mut tables = HashMap::new();
         tables.insert("blob".to_string(), toml_strategy("jsonb"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         apply_overrides(&mut schemas, &config).unwrap();
-        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must not be mutated");
+        assert_eq!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::Columns,
+            "inferred_strategy must not be mutated"
+        );
         assert_eq!(schemas[0].toml_override(), Some(&UserOverride::Jsonb));
         assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Jsonb);
     }
@@ -1040,28 +1365,51 @@ mod tests {
         use crate::schema::table_schema::{ChildKind, ColumnSchema};
         let mut parent = simple_table("images");
         parent.inferred_strategy = InferredStrategy::Columns;
-        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::BigInt));
+        parent
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::BigInt));
         // NormalizeDynamicKeys requires at least one Object child
-        let mut child = TableSchema::new("images_12584".to_string(), vec!["images".to_string(), "12584".to_string()], 1);
+        let mut child = TableSchema::new(
+            "images_12584".to_string(),
+            vec!["images".to_string(), "12584".to_string()],
+            1,
+        );
         child.parent_table = Some("images".to_string());
         child.child_kind = Some(ChildKind::Object);
         let mut schemas = vec![parent, child];
         let mut cols = HashMap::new();
-        cols.insert("strategy".to_string(), toml::Value::String("normalize_dynamic_keys".to_string()));
-        cols.insert("id_column".to_string(), toml::Value::String("image_id".to_string()));
+        cols.insert(
+            "strategy".to_string(),
+            toml::Value::String("normalize_dynamic_keys".to_string()),
+        );
+        cols.insert(
+            "id_column".to_string(),
+            toml::Value::String("image_id".to_string()),
+        );
         let mut tables = HashMap::new();
         tables.insert("images".to_string(), cols);
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         apply_overrides(&mut schemas, &config).unwrap();
         let images = schemas.iter().find(|s| s.name == "images").unwrap();
-        assert_eq!(images.inferred_strategy, InferredStrategy::Columns, "inferred_strategy must not be mutated");
+        assert_eq!(
+            images.inferred_strategy,
+            InferredStrategy::Columns,
+            "inferred_strategy must not be mutated"
+        );
         assert_eq!(
             images.toml_override(),
-            Some(&UserOverride::NormalizeDynamicKeys { id_column: "image_id".into() })
+            Some(&UserOverride::NormalizeDynamicKeys {
+                id_column: "image_id".into()
+            })
         );
         assert_eq!(
             *images.effective_strategy(),
-            InferredStrategy::NormalizeDynamicKeys { id_column: "image_id".into() }
+            InferredStrategy::NormalizeDynamicKeys {
+                id_column: "image_id".into()
+            }
         );
     }
 
@@ -1069,7 +1417,10 @@ mod tests {
 
     fn cols_with_strategy_and_suffix(strategy: &str) -> HashMap<String, toml::Value> {
         let mut cols = HashMap::new();
-        cols.insert("strategy".to_string(), toml::Value::String(strategy.to_string()));
+        cols.insert(
+            "strategy".to_string(),
+            toml::Value::String(strategy.to_string()),
+        );
         cols.insert(
             "suffix_columns".to_string(),
             toml::Value::Array(vec![toml::Value::String("_100g".to_string())]),
@@ -1081,18 +1432,34 @@ mod tests {
     fn toml_conflicting_strategy_and_suffix_columns_ignores_strategy() {
         let mut schemas = vec![simple_table("nutrients")];
         let mut tables = HashMap::new();
-        tables.insert("nutrients".to_string(), cols_with_strategy_and_suffix("pivot"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        tables.insert(
+            "nutrients".to_string(),
+            cols_with_strategy_and_suffix("pivot"),
+        );
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
 
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
 
-        assert_eq!(warnings, vec![ConfigWarning::ConflictingOverride {
-            table: "nutrients".to_string(),
-            ignored_strategy: "pivot".to_string(),
-        }]);
-        assert_eq!(schemas[0].toml_override(), None, "strategy must be ignored, not applied");
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::ConflictingOverride {
+                table: "nutrients".to_string(),
+                ignored_strategy: "pivot".to_string(),
+            }]
+        );
+        assert_eq!(
+            schemas[0].toml_override(),
+            None,
+            "strategy must be ignored, not applied"
+        );
         assert!(
-            matches!(schemas[0].inferred_strategy, InferredStrategy::StructuredPivot(_)),
+            matches!(
+                schemas[0].inferred_strategy,
+                InferredStrategy::StructuredPivot(_)
+            ),
             "suffix_columns must still apply normally"
         );
     }
@@ -1102,30 +1469,55 @@ mod tests {
         let mut schemas = vec![simple_table("nutrients")];
         let mut tables = HashMap::new();
         // Mixed case must match the .to_lowercase() comparison used by apply_strategy_override.
-        tables.insert("nutrients".to_string(), cols_with_strategy_and_suffix("Structured_Pivot"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        tables.insert(
+            "nutrients".to_string(),
+            cols_with_strategy_and_suffix("Structured_Pivot"),
+        );
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
 
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
 
-        assert!(warnings.is_empty(), "structured_pivot + suffix_columns is the documented normal combo");
-        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::StructuredPivot(_)));
+        assert!(
+            warnings.is_empty(),
+            "structured_pivot + suffix_columns is the documented normal combo"
+        );
+        assert!(matches!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::StructuredPivot(_)
+        ));
     }
 
     #[test]
     fn toml_unknown_strategy_with_suffix_columns_still_emits_unknown_strategy() {
         let mut schemas = vec![simple_table("nutrients")];
         let mut tables = HashMap::new();
-        tables.insert("nutrients".to_string(), cols_with_strategy_and_suffix("pvot"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        tables.insert(
+            "nutrients".to_string(),
+            cols_with_strategy_and_suffix("pvot"),
+        );
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
 
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
 
-        assert_eq!(warnings, vec![ConfigWarning::UnknownStrategy {
-            table: "nutrients".to_string(),
-            strategy: "pvot".to_string(),
-        }], "a genuine typo must not be masked by the conflict guard");
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::UnknownStrategy {
+                table: "nutrients".to_string(),
+                strategy: "pvot".to_string(),
+            }],
+            "a genuine typo must not be masked by the conflict guard"
+        );
         assert!(
-            matches!(schemas[0].inferred_strategy, InferredStrategy::StructuredPivot(_)),
+            matches!(
+                schemas[0].inferred_strategy,
+                InferredStrategy::StructuredPivot(_)
+            ),
             "suffix_columns must still apply even though strategy was invalid"
         );
     }
@@ -1141,38 +1533,69 @@ mod tests {
         );
         let mut tables = HashMap::new();
         tables.insert("nutrients".to_string(), cols);
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
 
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
 
-        assert!(warnings.is_empty(), "a non-string strategy value is a no-op, not a real conflict");
-        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::StructuredPivot(_)));
+        assert!(
+            warnings.is_empty(),
+            "a non-string strategy value is a no-op, not a real conflict"
+        );
+        assert!(matches!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::StructuredPivot(_)
+        ));
     }
 
     #[test]
     fn toml_normalize_dynamic_keys_with_suffix_columns_ignores_strategy() {
         use crate::schema::table_schema::{ChildKind, ColumnSchema};
         let mut parent = simple_table("images");
-        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::BigInt));
-        let mut child = TableSchema::new("images_12584".to_string(), vec!["images".to_string(), "12584".to_string()], 1);
+        parent
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::BigInt));
+        let mut child = TableSchema::new(
+            "images_12584".to_string(),
+            vec!["images".to_string(), "12584".to_string()],
+            1,
+        );
         child.parent_table = Some("images".to_string());
         child.child_kind = Some(ChildKind::Object);
         let mut schemas = vec![parent, child];
         let mut cols = cols_with_strategy_and_suffix("normalize_dynamic_keys");
-        cols.insert("id_column".to_string(), toml::Value::String("image_id".to_string()));
+        cols.insert(
+            "id_column".to_string(),
+            toml::Value::String("image_id".to_string()),
+        );
         let mut tables = HashMap::new();
         tables.insert("images".to_string(), cols);
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
 
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
 
-        assert_eq!(warnings, vec![ConfigWarning::ConflictingOverride {
-            table: "images".to_string(),
-            ignored_strategy: "normalize_dynamic_keys".to_string(),
-        }]);
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::ConflictingOverride {
+                table: "images".to_string(),
+                ignored_strategy: "normalize_dynamic_keys".to_string(),
+            }]
+        );
         let images = schemas.iter().find(|s| s.name == "images").unwrap();
-        assert_eq!(images.toml_override(), None, "the deferred normalize_dynamic_keys must not be scheduled");
-        assert!(matches!(images.inferred_strategy, InferredStrategy::StructuredPivot(_)));
+        assert_eq!(
+            images.toml_override(),
+            None,
+            "the deferred normalize_dynamic_keys must not be scheduled"
+        );
+        assert!(matches!(
+            images.inferred_strategy,
+            InferredStrategy::StructuredPivot(_)
+        ));
         // Only two schemas: parent + its original child. No derived "_by_key" table was created.
         assert_eq!(schemas.len(), 2);
     }
@@ -1210,10 +1633,14 @@ mod tests {
         let mut schemas = vec![simple_table("metrics")];
         apply_wide_strategy_columns(&mut schemas[0], InferredStrategy::Pivot);
         schemas[0].inferred_strategy = InferredStrategy::Pivot;
-        let column_names_before: Vec<String> = schemas[0].columns.iter().map(|c| c.name.clone()).collect();
+        let column_names_before: Vec<String> =
+            schemas[0].columns.iter().map(|c| c.name.clone()).collect();
         let mut tables = HashMap::new();
         tables.insert("metrics".to_string(), suffix_columns_only("_100g"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
 
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
 
@@ -1222,9 +1649,17 @@ mod tests {
             ConfigWarning::InvalidOverride { table, from_strategy, to_strategy }
             if table == "metrics" && from_strategy == "Pivot" && to_strategy == "structured_pivot"
         ));
-        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Pivot, "strategy must be unchanged");
-        let column_names_after: Vec<String> = schemas[0].columns.iter().map(|c| c.name.clone()).collect();
-        assert_eq!(column_names_after, column_names_before, "columns must be unchanged");
+        assert_eq!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::Pivot,
+            "strategy must be unchanged"
+        );
+        let column_names_after: Vec<String> =
+            schemas[0].columns.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(
+            column_names_after, column_names_before,
+            "columns must be unchanged"
+        );
     }
 
     #[test]
@@ -1234,12 +1669,18 @@ mod tests {
         let mut schemas = vec![simple_table("nutrients")];
         let mut tables = HashMap::new();
         tables.insert("nutrients".to_string(), suffix_columns_only("_100g"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
 
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
 
         assert_eq!(warnings, []);
-        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::StructuredPivot(_)));
+        assert!(matches!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::StructuredPivot(_)
+        ));
     }
 
     #[test]
@@ -1252,24 +1693,45 @@ mod tests {
         let mut schemas = vec![simple_table("metrics")];
         apply_wide_strategy_columns(&mut schemas[0], InferredStrategy::Pivot);
         schemas[0].inferred_strategy = InferredStrategy::Pivot;
-        let column_names_before: Vec<String> = schemas[0].columns.iter().map(|c| c.name.clone()).collect();
+        let column_names_before: Vec<String> =
+            schemas[0].columns.iter().map(|c| c.name.clone()).collect();
         let mut tables = HashMap::new();
-        tables.insert("metrics".to_string(), cols_with_strategy_and_suffix("pivot"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        tables.insert(
+            "metrics".to_string(),
+            cols_with_strategy_and_suffix("pivot"),
+        );
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
 
         let warnings = apply_overrides(&mut schemas, &config).unwrap();
 
-        assert_eq!(warnings, vec![
-            ConfigWarning::ConflictingOverride { table: "metrics".to_string(), ignored_strategy: "pivot".to_string() },
-            ConfigWarning::InvalidOverride {
-                table: "metrics".to_string(),
-                from_strategy: "Pivot".to_string(),
-                to_strategy: "structured_pivot".to_string(),
-            },
-        ]);
-        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Pivot, "table keeps its original layout");
-        let column_names_after: Vec<String> = schemas[0].columns.iter().map(|c| c.name.clone()).collect();
-        assert_eq!(column_names_after, column_names_before, "columns must be unchanged");
+        assert_eq!(
+            warnings,
+            vec![
+                ConfigWarning::ConflictingOverride {
+                    table: "metrics".to_string(),
+                    ignored_strategy: "pivot".to_string()
+                },
+                ConfigWarning::InvalidOverride {
+                    table: "metrics".to_string(),
+                    from_strategy: "Pivot".to_string(),
+                    to_strategy: "structured_pivot".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::Pivot,
+            "table keeps its original layout"
+        );
+        let column_names_after: Vec<String> =
+            schemas[0].columns.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(
+            column_names_after, column_names_before,
+            "columns must be unchanged"
+        );
     }
 
     #[test]
@@ -1282,14 +1744,27 @@ mod tests {
         );
         let mut tables = HashMap::new();
         tables.insert("nutrients".to_string(), cols);
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
 
         apply_overrides_complete(&mut schemas, &config).unwrap();
 
         let nutrients = &schemas[0];
-        assert!(matches!(nutrients.inferred_strategy, InferredStrategy::StructuredPivot(_)));
-        assert_eq!(nutrients.toml_override(), None, "suffix_columns has no UserOverride variant to set");
-        assert!(matches!(*nutrients.effective_strategy(), InferredStrategy::StructuredPivot(_)));
+        assert!(matches!(
+            nutrients.inferred_strategy,
+            InferredStrategy::StructuredPivot(_)
+        ));
+        assert_eq!(
+            nutrients.toml_override(),
+            None,
+            "suffix_columns has no UserOverride variant to set"
+        );
+        assert!(matches!(
+            *nutrients.effective_strategy(),
+            InferredStrategy::StructuredPivot(_)
+        ));
     }
 
     // --- apply_group_overrides (return Vec<ConfigWarning>) ---
@@ -1298,44 +1773,68 @@ mod tests {
     fn apply_group_overrides_merge_failure_returns_warning() {
         let mut schemas = vec![simple_table("a")];
         let mut group = HashMap::new();
-        group.insert("merged".to_string(), GroupConfig {
-            strategy: "keyed_pivot".to_string(),
-            members: vec!["a".to_string(), "b".to_string()],
-        });
-        let config = SchemaConfig { tables: HashMap::new(), group };
+        group.insert(
+            "merged".to_string(),
+            GroupConfig {
+                strategy: "keyed_pivot".to_string(),
+                members: vec!["a".to_string(), "b".to_string()],
+            },
+        );
+        let config = SchemaConfig {
+            tables: HashMap::new(),
+            group,
+        };
         let warnings = apply_group_overrides(&mut schemas, &config);
-        assert_eq!(warnings, vec![ConfigWarning::GroupMergeFailed {
-            group: "merged".to_string(),
-            found: 1,
-            expected: 2,
-        }]);
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::GroupMergeFailed {
+                group: "merged".to_string(),
+                found: 1,
+                expected: 2,
+            }]
+        );
     }
 
     #[test]
     fn apply_group_overrides_unknown_strategy_returns_warning() {
         let mut schemas = vec![simple_table("a"), simple_table("b")];
         let mut group = HashMap::new();
-        group.insert("merged".to_string(), GroupConfig {
-            strategy: "magic".to_string(),
-            members: vec!["a".to_string(), "b".to_string()],
-        });
-        let config = SchemaConfig { tables: HashMap::new(), group };
+        group.insert(
+            "merged".to_string(),
+            GroupConfig {
+                strategy: "magic".to_string(),
+                members: vec!["a".to_string(), "b".to_string()],
+            },
+        );
+        let config = SchemaConfig {
+            tables: HashMap::new(),
+            group,
+        };
         let warnings = apply_group_overrides(&mut schemas, &config);
-        assert_eq!(warnings, vec![ConfigWarning::UnknownGroupStrategy {
-            group: "merged".to_string(),
-            strategy: "magic".to_string(),
-        }]);
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::UnknownGroupStrategy {
+                group: "merged".to_string(),
+                strategy: "magic".to_string(),
+            }]
+        );
     }
 
     #[test]
     fn apply_group_overrides_valid_merge_no_warnings() {
         let mut schemas = vec![simple_table("a"), simple_table("b")];
         let mut group = HashMap::new();
-        group.insert("merged".to_string(), GroupConfig {
-            strategy: "keyed_pivot".to_string(),
-            members: vec!["a".to_string(), "b".to_string()],
-        });
-        let config = SchemaConfig { tables: HashMap::new(), group };
+        group.insert(
+            "merged".to_string(),
+            GroupConfig {
+                strategy: "keyed_pivot".to_string(),
+                members: vec!["a".to_string(), "b".to_string()],
+            },
+        );
+        let config = SchemaConfig {
+            tables: HashMap::new(),
+            group,
+        };
         let warnings = apply_group_overrides(&mut schemas, &config);
         assert_eq!(warnings, []);
         assert_eq!(schemas.len(), 1);
@@ -1390,20 +1889,30 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("ghost".to_string(), HashMap::new());
         let mut group = HashMap::new();
-        group.insert("g".to_string(), GroupConfig {
-            strategy: "keyed_pivot".to_string(),
-            members: vec!["a".to_string(), "b".to_string()],
-        });
+        group.insert(
+            "g".to_string(),
+            GroupConfig {
+                strategy: "keyed_pivot".to_string(),
+                members: vec!["a".to_string(), "b".to_string()],
+            },
+        );
         let config = SchemaConfig { group, tables };
         let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
-        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::UnknownTable(_))));
-        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::GroupMergeFailed { .. })));
+        assert!(warnings
+            .iter()
+            .any(|w| matches!(w, ConfigWarning::UnknownTable(_))));
+        assert!(warnings
+            .iter()
+            .any(|w| matches!(w, ConfigWarning::GroupMergeFailed { .. })));
     }
 
     #[test]
     fn apply_overrides_complete_no_warnings_clean_config() {
         let mut schemas = vec![simple_table("users")];
-        let config = SchemaConfig { tables: HashMap::new(), group: HashMap::new() };
+        let config = SchemaConfig {
+            tables: HashMap::new(),
+            group: HashMap::new(),
+        };
         let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
         assert_eq!(warnings, []);
     }
@@ -1421,7 +1930,10 @@ mod tests {
 
         let mut tables = HashMap::new();
         tables.insert("users".to_string(), toml_strategy("jsonb"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
         apply_overrides_complete(&mut schemas, &config).unwrap();
 
         let users = schemas.iter().find(|s| s.name == "users").unwrap();
@@ -1445,7 +1957,10 @@ mod tests {
 
         let mut tables = HashMap::new();
         tables.insert("images".to_string(), toml_strategy("jsonb"));
-        let config = SchemaConfig { tables, group: HashMap::new() };
+        let config = SchemaConfig {
+            tables,
+            group: HashMap::new(),
+        };
 
         apply_overrides_complete(&mut schemas, &config).unwrap();
 
@@ -1460,7 +1975,8 @@ mod tests {
     /// `name`: `j2s_id`, three columns for each of two groups (`x*`, `y*`) and one that stays.
     fn splittable(name: &str) -> TableSchema {
         let mut t = simple_table(name);
-        t.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        t.columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         for c in ["x1", "x2", "x3", "y1", "y2", "y3", "z1"] {
             t.columns.push(ColumnSchema {
                 name: c.to_string(),
@@ -1486,12 +2002,17 @@ mod tests {
     #[test]
     fn column_groups_apply_after_the_type_overrides() {
         let mut schemas = vec![splittable("items")];
-        let text = "[items]\nx1 = \"INTEGER\"\n[items.column_groups]\nalpha = [\"x1\", \"x2\", \"x3\"]\n";
+        let text =
+            "[items]\nx1 = \"INTEGER\"\n[items.column_groups]\nalpha = [\"x1\", \"x2\", \"x3\"]\n";
         let config: SchemaConfig = toml::from_str(text).unwrap();
         assert_eq!(apply_overrides_complete(&mut schemas, &config).unwrap(), []);
         assert_eq!(schemas.len(), 2);
         let moved = schemas[1].columns.iter().find(|c| c.name == "x1").unwrap();
-        assert_eq!(moved.pg_type, PgType::Integer, "the override reached the column before it moved");
+        assert_eq!(
+            moved.pg_type,
+            PgType::Integer,
+            "the override reached the column before it moved"
+        );
     }
 
     #[test]
@@ -1502,7 +2023,10 @@ mod tests {
         let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
         assert_eq!(
             warnings,
-            [ConfigWarning::ColumnGroupParentStrategy { table: "items".to_string(), strategy: "Pivot".to_string() }]
+            [ConfigWarning::ColumnGroupParentStrategy {
+                table: "items".to_string(),
+                strategy: "Pivot".to_string()
+            }]
         );
         assert!(schemas.iter().all(|s| s.column_groups.is_empty()));
     }
@@ -1513,15 +2037,25 @@ mod tests {
         assert_eq!(schemas.len(), 3);
         let config: SchemaConfig = toml::from_str("[items]\nstrategy = \"jsonb\"\n").unwrap();
         apply_overrides_complete(&mut schemas, &config).unwrap();
-        assert_eq!(schemas.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["items"]);
-        assert!(schemas[0].column_groups.is_empty(), "no name of a table that is gone");
+        assert_eq!(
+            schemas.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["items"]
+        );
+        assert!(
+            schemas[0].column_groups.is_empty(),
+            "no name of a table that is gone"
+        );
     }
 
     /// `items` split in two groups, all its columns `INTEGER` but `x1`, which is `TEXT` and leaves with `alpha`.
     fn split_items_with_a_text_column_in_a_group() -> Vec<TableSchema> {
         let mut parent = splittable("items");
         for c in parent.columns.iter_mut().filter(|c| !c.is_generated) {
-            c.pg_type = if c.name == "x1" { PgType::Text } else { PgType::Integer };
+            c.pg_type = if c.name == "x1" {
+                PgType::Text
+            } else {
+                PgType::Integer
+            };
         }
         let mut schemas = vec![parent];
         let config: SchemaConfig = toml::from_str(TWO_GROUPS).unwrap();
@@ -1530,7 +2064,13 @@ mod tests {
     }
 
     fn type_of(table: &TableSchema, column: &str) -> PgType {
-        table.columns.iter().find(|c| c.name == column).unwrap().pg_type.clone()
+        table
+            .columns
+            .iter()
+            .find(|c| c.name == column)
+            .unwrap()
+            .pg_type
+            .clone()
     }
 
     #[test]
@@ -1542,32 +2082,52 @@ mod tests {
             let mut schemas = split_items_with_a_text_column_in_a_group();
             let config: SchemaConfig = toml::from_str(override_text).unwrap();
             apply_overrides_complete(&mut schemas, &config).unwrap();
-            assert_eq!(schemas.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["items"], "{override_text}");
+            assert_eq!(
+                schemas.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+                ["items"],
+                "{override_text}"
+            );
             assert!(schemas[0].column_groups.is_empty(), "{override_text}");
-            assert_eq!(type_of(&schemas[0], column), PgType::Text, "{override_text}: widened over the moved text column");
+            assert_eq!(
+                type_of(&schemas[0], column),
+                PgType::Text,
+                "{override_text}: widened over the moved text column"
+            );
         }
         let mut schemas = split_items_with_a_text_column_in_a_group();
         let pivot = HashMap::from([("items".to_string(), UserOverride::Pivot)]);
         apply_user_overrides(&mut schemas, &pivot);
-        assert_eq!(type_of(&schemas[0], "value"), PgType::Text, "the same through the user overrides");
+        assert_eq!(
+            type_of(&schemas[0], "value"),
+            PgType::Text,
+            "the same through the user overrides"
+        );
     }
 
     #[test]
     fn flattening_or_normalizing_a_split_table_keeps_the_columns_that_were_moved() {
         let mut parent = simple_table("root");
-        parent.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        parent
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         let mut child = splittable("root_child");
         child.parent_table = Some("root".to_string());
         child.child_kind = Some(crate::schema::table_schema::ChildKind::Object);
         child.path = vec!["root".to_string(), "child".to_string()];
         let mut schemas = vec![parent, child];
-        let groups: SchemaConfig = toml::from_str("[root_child.column_groups]\nalpha = [\"x1\", \"x2\", \"x3\"]\n").unwrap();
+        let groups: SchemaConfig =
+            toml::from_str("[root_child.column_groups]\nalpha = [\"x1\", \"x2\", \"x3\"]\n")
+                .unwrap();
         apply_overrides_complete(&mut schemas, &groups).unwrap();
         assert_eq!(schemas.len(), 3);
-        let flatten: SchemaConfig = toml::from_str("[root_child]\nstrategy = \"flatten\"\n").unwrap();
+        let flatten: SchemaConfig =
+            toml::from_str("[root_child]\nstrategy = \"flatten\"\n").unwrap();
         apply_overrides_complete(&mut schemas, &flatten).unwrap();
         assert_eq!(schemas.len(), 1, "the child and its group table are gone");
-        assert!(type_of_exists(&schemas[0], "root_child_x1"), "a moved column is inlined too");
+        assert!(
+            type_of_exists(&schemas[0], "root_child_x1"),
+            "a moved column is inlined too"
+        );
     }
 
     fn type_of_exists(table: &TableSchema, column: &str) -> bool {
@@ -1580,7 +2140,9 @@ mod tests {
         real_child.parent_table = Some("items".to_string());
         real_child.child_kind = Some(crate::schema::table_schema::ChildKind::Object);
         real_child.path = vec!["items".to_string(), "a".to_string()];
-        real_child.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        real_child
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         real_child.columns.push(ColumnSchema {
             name: "q1".to_string(),
             original_name: "q1".to_string(),
@@ -1592,10 +2154,15 @@ mod tests {
         let mut schemas = vec![splittable("items"), real_child];
         apply_overrides_complete(&mut schemas, &toml::from_str(TWO_GROUPS).unwrap()).unwrap();
         assert_eq!(schemas.len(), 4);
-        let normalize: SchemaConfig = toml::from_str("[items]\nstrategy = \"normalize_dynamic_keys\"\n").unwrap();
+        let normalize: SchemaConfig =
+            toml::from_str("[items]\nstrategy = \"normalize_dynamic_keys\"\n").unwrap();
         apply_overrides_complete(&mut schemas, &normalize).unwrap();
         let names: Vec<&str> = schemas[0].columns.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["j2s_id", "key_id", "q1"], "only the real child gives columns");
+        assert_eq!(
+            names,
+            ["j2s_id", "key_id", "q1"],
+            "only the real child gives columns"
+        );
         assert_eq!(schemas[0].column_groups.len(), 0);
     }
 
@@ -1604,7 +2171,11 @@ mod tests {
         let mut schemas = split_items();
         let skip = HashMap::from([("items_beta".to_string(), UserOverride::Skip)]);
         apply_user_overrides(&mut schemas, &skip);
-        assert_eq!(schemas[0].column_groups, ["items_alpha"], "a skipped group leaves the list");
+        assert_eq!(
+            schemas[0].column_groups,
+            ["items_alpha"],
+            "a skipped group leaves the list"
+        );
         let pivot = HashMap::from([("items".to_string(), UserOverride::Pivot)]);
         apply_user_overrides(&mut schemas, &pivot);
         assert_eq!(schemas.len(), 1, "a Pivot parent has no group tables");
@@ -1634,9 +2205,18 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("products".to_string(), UserOverride::Skip);
         apply_user_overrides(&mut schemas, &overrides);
-        assert!(!schemas.iter().any(|s| s.name == "products"),       "main table removed");
-        assert!(!schemas.iter().any(|s| s.name == "products_wide"),  "companion _wide removed");
-        assert!(schemas.iter().any(|s| s.name == "orders"),          "unrelated table kept");
+        assert!(
+            !schemas.iter().any(|s| s.name == "products"),
+            "main table removed"
+        );
+        assert!(
+            !schemas.iter().any(|s| s.name == "products_wide"),
+            "companion _wide removed"
+        );
+        assert!(
+            schemas.iter().any(|s| s.name == "orders"),
+            "unrelated table kept"
+        );
     }
 
     #[test]
@@ -1650,11 +2230,17 @@ mod tests {
 
         let warnings = apply_user_overrides(&mut schemas, &overrides);
 
-        assert!(schemas.is_empty(), "parent and its real child must both be removed");
-        assert_eq!(warnings, vec![SkipCascadeWarning {
-            removed_table: "commandes".to_string(),
-            cascaded_children: vec!["commandes_lignes".to_string()],
-        }]);
+        assert!(
+            schemas.is_empty(),
+            "parent and its real child must both be removed"
+        );
+        assert_eq!(
+            warnings,
+            vec![SkipCascadeWarning {
+                removed_table: "commandes".to_string(),
+                cascaded_children: vec!["commandes_lignes".to_string()],
+            }]
+        );
     }
 
     #[test]
@@ -1671,10 +2257,13 @@ mod tests {
         let warnings = apply_user_overrides(&mut schemas, &overrides);
 
         assert!(schemas.is_empty(), "all three levels must cascade");
-        assert_eq!(warnings, vec![SkipCascadeWarning {
-            removed_table: "a".to_string(),
-            cascaded_children: vec!["b".to_string(), "c".to_string()],
-        }]);
+        assert_eq!(
+            warnings,
+            vec![SkipCascadeWarning {
+                removed_table: "a".to_string(),
+                cascaded_children: vec!["b".to_string(), "c".to_string()],
+            }]
+        );
     }
 
     #[test]
@@ -1688,7 +2277,12 @@ mod tests {
         };
         let mut wide_child = simple_table("products_wide_tags");
         wide_child.parent_table = Some("products_wide".to_string());
-        let mut schemas = vec![t, simple_table("products_wide"), wide_child, simple_table("orders")];
+        let mut schemas = vec![
+            t,
+            simple_table("products_wide"),
+            wide_child,
+            simple_table("orders"),
+        ];
         let mut overrides = HashMap::new();
         overrides.insert("products".to_string(), UserOverride::Skip);
 
@@ -1696,10 +2290,16 @@ mod tests {
 
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, "orders");
-        assert_eq!(warnings, vec![SkipCascadeWarning {
-            removed_table: "products".to_string(),
-            cascaded_children: vec!["products_wide".to_string(), "products_wide_tags".to_string()],
-        }]);
+        assert_eq!(
+            warnings,
+            vec![SkipCascadeWarning {
+                removed_table: "products".to_string(),
+                cascaded_children: vec![
+                    "products_wide".to_string(),
+                    "products_wide_tags".to_string()
+                ],
+            }]
+        );
     }
 
     #[test]
@@ -1711,7 +2311,10 @@ mod tests {
         let warnings = apply_user_overrides(&mut schemas, &overrides);
 
         assert!(schemas.is_empty());
-        assert!(warnings.is_empty(), "a Skip with no real children must not produce a cascade warning");
+        assert!(
+            warnings.is_empty(),
+            "a Skip with no real children must not produce a cascade warning"
+        );
     }
 
     #[test]
@@ -1727,11 +2330,17 @@ mod tests {
 
         let warnings = apply_user_overrides(&mut schemas, &overrides);
 
-        assert!(schemas.is_empty(), "skipping the root table is not blocked, even though it empties the schema");
-        assert_eq!(warnings, vec![SkipCascadeWarning {
-            removed_table: "root".to_string(),
-            cascaded_children: vec!["d".to_string(), "e".to_string()],
-        }]);
+        assert!(
+            schemas.is_empty(),
+            "skipping the root table is not blocked, even though it empties the schema"
+        );
+        assert_eq!(
+            warnings,
+            vec![SkipCascadeWarning {
+                removed_table: "root".to_string(),
+                cascaded_children: vec!["d".to_string(), "e".to_string()],
+            }]
+        );
     }
 
     #[test]
@@ -1786,12 +2395,26 @@ mod tests {
         overrides.insert("tags".to_string(), UserOverride::Pivot);
         apply_user_overrides(&mut schemas, &overrides);
         assert_eq!(schemas.len(), 1);
-        assert_eq!(schemas[0].ui_override(), Some(&UserOverride::Pivot), "ui_override must be set");
-        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must not be mutated");
+        assert_eq!(
+            schemas[0].ui_override(),
+            Some(&UserOverride::Pivot),
+            "ui_override must be set"
+        );
+        assert_eq!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::Columns,
+            "inferred_strategy must not be mutated"
+        );
         assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Pivot);
         // Column layout must have been restructured (EAV: key + value)
-        assert!(schemas[0].columns.iter().any(|c| c.name == "key"), "Pivot layout: key column expected");
-        assert!(schemas[0].columns.iter().any(|c| c.name == "value"), "Pivot layout: value column expected");
+        assert!(
+            schemas[0].columns.iter().any(|c| c.name == "key"),
+            "Pivot layout: key column expected"
+        );
+        assert!(
+            schemas[0].columns.iter().any(|c| c.name == "value"),
+            "Pivot layout: value column expected"
+        );
     }
 
     #[test]
@@ -1800,10 +2423,21 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("blob".to_string(), UserOverride::Jsonb);
         apply_user_overrides(&mut schemas, &overrides);
-        assert_eq!(schemas[0].ui_override(), Some(&UserOverride::Jsonb), "ui_override must be set");
-        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns, "inferred_strategy must not be mutated");
+        assert_eq!(
+            schemas[0].ui_override(),
+            Some(&UserOverride::Jsonb),
+            "ui_override must be set"
+        );
+        assert_eq!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::Columns,
+            "inferred_strategy must not be mutated"
+        );
         assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Jsonb);
-        assert!(schemas[0].columns.iter().any(|c| c.name == "data"), "Jsonb layout: data column expected");
+        assert!(
+            schemas[0].columns.iter().any(|c| c.name == "data"),
+            "Jsonb layout: data column expected"
+        );
     }
 
     #[test]
@@ -1814,7 +2448,11 @@ mod tests {
         overrides.insert("tags".to_string(), UserOverride::Pivot); // strategy_overrides says Pivot
         apply_user_overrides(&mut schemas, &overrides);
         // Guard: ui_override.is_none() — existing Jsonb override must be preserved
-        assert_eq!(schemas[0].ui_override(), Some(&UserOverride::Jsonb), "existing ui_override must not be overwritten");
+        assert_eq!(
+            schemas[0].ui_override(),
+            Some(&UserOverride::Jsonb),
+            "existing ui_override must not be overwritten"
+        );
     }
 
     #[test]
@@ -1838,8 +2476,16 @@ mod tests {
         overrides.insert("metrics".to_string(), UserOverride::Columns);
         apply_user_overrides(&mut schemas, &overrides);
         // No ui_override should be set — incompatible layout
-        assert_eq!(schemas[0].ui_override(), None, "Columns override on Pivot must not set ui_override");
-        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Pivot, "inferred_strategy unchanged");
+        assert_eq!(
+            schemas[0].ui_override(),
+            None,
+            "Columns override on Pivot must not set ui_override"
+        );
+        assert_eq!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::Pivot,
+            "inferred_strategy unchanged"
+        );
     }
 
     #[test]
@@ -1849,7 +2495,11 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("flat".to_string(), UserOverride::Columns);
         apply_user_overrides(&mut schemas, &overrides);
-        assert_eq!(schemas[0].ui_override(), Some(&UserOverride::Jsonb), "existing ui_override preserved");
+        assert_eq!(
+            schemas[0].ui_override(),
+            Some(&UserOverride::Jsonb),
+            "existing ui_override preserved"
+        );
     }
 
     #[test]
@@ -1858,7 +2508,10 @@ mod tests {
         let overrides: HashMap<String, UserOverride> = HashMap::new();
         apply_user_overrides(&mut schemas, &overrides);
         assert_eq!(schemas.len(), 1);
-        assert!(matches!(schemas[0].inferred_strategy, InferredStrategy::Columns));
+        assert!(matches!(
+            schemas[0].inferred_strategy,
+            InferredStrategy::Columns
+        ));
     }
 
     /// TUI (`json2sql-ui`) manual strategy selection must be reflected in `effective_strategy()`.

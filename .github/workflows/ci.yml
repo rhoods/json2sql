@@ -47,6 +47,23 @@ jobs:
       - name: Unit tests
         run: cargo test --lib --bins
 
+  # ── Format — rustfmt only, nothing to compile ───────────────────────────────
+  fmt:
+    name: Format
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cargo fmt --check
+        run: cargo fmt --all --check
+
   # ── Clippy — Linux only (json2sql + json2sql-ui deny pedantic/nursery at crate root) ─
   clippy:
     name: Clippy

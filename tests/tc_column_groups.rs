@@ -32,9 +32,15 @@ dg = ["d1", "d2", "d3"]
 [items_reviews.column_groups]
 rg = ["r1", "r2", "r3"]
 "#;
-const PLAIN: &str = "[items]\nzulu_a = \"INTEGER\"\n\n[items_meta]\nstrategy = \"flatten\"\nprefix = \"m_\"\n";
+const PLAIN: &str =
+    "[items]\nzulu_a = \"INTEGER\"\n\n[items_meta]\nstrategy = \"flatten\"\nprefix = \"m_\"\n";
 
-fn config(url: &str, schema: &str, toml: &str, anomaly_dir: Option<&Path>) -> (PipelineConfig, tempfile::NamedTempFile) {
+fn config(
+    url: &str,
+    schema: &str,
+    toml: &str,
+    anomaly_dir: Option<&Path>,
+) -> (PipelineConfig, tempfile::NamedTempFile) {
     let file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(file.path(), toml).unwrap();
     let cfg = PipelineConfig {
@@ -74,7 +80,9 @@ fn config(url: &str, schema: &str, toml: &str, anomaly_dir: Option<&Path>) -> (P
 /// The rows of the fixture.
 fn fixture_rows() -> Vec<Value> {
     let text = std::fs::read_to_string(integration::fixture("tc_column_groups.jsonl")).unwrap();
-    text.lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    text.lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
 }
 
 fn present(v: &Value) -> bool {
@@ -115,17 +123,39 @@ async fn count(client: &tokio_postgres::Client, sql: &str) -> i64 {
 }
 
 /// How many of `columns` the table still has.
-async fn columns_left(client: &tokio_postgres::Client, schema: &str, table: &str, columns: &[&str]) -> i64 {
-    let list = columns.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(", ");
+async fn columns_left(
+    client: &tokio_postgres::Client,
+    schema: &str,
+    table: &str,
+    columns: &[&str],
+) -> i64 {
+    let list = columns
+        .iter()
+        .map(|c| format!("'{c}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
     count(client, &format!("SELECT count(*) FROM information_schema.columns WHERE table_schema = '{schema}' AND table_name = '{table}' AND column_name IN ({list})")).await
 }
 
 /// Number of rows in which `columns` of `table` differ between the grouped import and the plain one.
-async fn rest_differences(client: &tokio_postgres::Client, (grouped, plain): (&str, &str), table: &str, columns: &[&str]) -> i64 {
-    let cells = columns.iter().map(|c| format!("\"{c}\"::text")).collect::<Vec<_>>().join(", ");
+async fn rest_differences(
+    client: &tokio_postgres::Client,
+    (grouped, plain): (&str, &str),
+    table: &str,
+    columns: &[&str],
+) -> i64 {
+    let cells = columns
+        .iter()
+        .map(|c| format!("\"{c}\"::text"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let select = |s: &str| format!("SELECT {cells} FROM \"{s}\".\"{table}\"");
     let (a, b) = (select(grouped), select(plain));
-    count(client, &format!("SELECT count(*) FROM (({a} EXCEPT {b}) UNION ALL ({b} EXCEPT {a})) d")).await
+    count(
+        client,
+        &format!("SELECT count(*) FROM (({a} EXCEPT {b}) UNION ALL ({b} EXCEPT {a})) d"),
+    )
+    .await
 }
 
 /// Number of rows in which the grouped import, joined back, differs from the plain one (empty and NULL are equal:
@@ -136,7 +166,13 @@ async fn differences(
     (parent, group, key): (&str, &str, &str),
     columns: &[&str],
 ) -> i64 {
-    let cells = |alias: &str| columns.iter().map(|c| format!("NULLIF({alias}.\"{c}\"::text, '')")).collect::<Vec<_>>().join(", ");
+    let cells = |alias: &str| {
+        columns
+            .iter()
+            .map(|c| format!("NULLIF({alias}.\"{c}\"::text, '')"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let (joined, flat) = (
         format!("SELECT p.\"{key}\", {} FROM \"{grouped}\".\"{parent}\" p LEFT JOIN \"{grouped}\".\"{group}\" g ON g.j2s_id = p.j2s_id", cells("g")),
         format!("SELECT p.\"{key}\", {} FROM \"{plain}\".\"{parent}\" p", cells("p")),
@@ -234,23 +270,50 @@ async fn test_column_groups_are_written_from_the_object_of_their_table() {
 async fn test_group_columns_writes_the_groups_its_names_find() {
     integration::with_pg_container(|client, schema, url| async move {
         let plain = format!("{schema}_plain");
-        client.execute(&format!("CREATE SCHEMA \"{plain}\""), &[]).await.unwrap();
+        client
+            .execute(&format!("CREATE SCHEMA \"{plain}\""), &[])
+            .await
+            .unwrap();
         let (grouped_cfg, _keep) = config(&url, &schema, PLAIN, None);
-        run_pipeline(PipelineConfig { group_columns: true, ..grouped_cfg }).await.expect("import with --group-columns");
+        run_pipeline(PipelineConfig {
+            group_columns: true,
+            ..grouped_cfg
+        })
+        .await
+        .expect("import with --group-columns");
         let (plain_cfg, _keep2) = config(&url, &plain, PLAIN, None);
-        run_pipeline(plain_cfg).await.expect("import without groups");
+        run_pipeline(plain_cfg)
+            .await
+            .expect("import without groups");
 
         let rows = fixture_rows();
         let kiwi = ["kiwi_a", "kiwi_b", "kiwi_c", "kiwi_d", "kiwi_e", "kiwi_f"];
         let zulu = ["zulu_a", "zulu_b", "zulu_c", "zulu_d", "zulu_e", "zulu_f"];
-        assert_eq!(integration::row_count(&client, &schema, "items_kiwi").await, with_a_value(&rows, None, &kiwi));
-        assert_eq!(integration::row_count(&client, &schema, "items_zulu").await, with_a_value(&rows, None, &zulu));
+        assert_eq!(
+            integration::row_count(&client, &schema, "items_kiwi").await,
+            with_a_value(&rows, None, &kiwi)
+        );
+        assert_eq!(
+            integration::row_count(&client, &schema, "items_zulu").await,
+            with_a_value(&rows, None, &zulu)
+        );
         assert_eq!(columns_left(&client, &schema, "items", &kiwi).await, 0);
         let pair = (schema.as_str(), plain.as_str());
-        assert_eq!(differences(&client, pair, ("items", "items_kiwi", "id"), &kiwi).await, 0);
-        assert_eq!(differences(&client, pair, ("items", "items_zulu", "id"), &zulu).await, 0);
-        assert_eq!(all_rows(&client, &plain).await + with_a_value(&rows, None, &kiwi) + with_a_value(&rows, None, &zulu),
-            all_rows(&client, &schema).await, "only the group rows are added");
+        assert_eq!(
+            differences(&client, pair, ("items", "items_kiwi", "id"), &kiwi).await,
+            0
+        );
+        assert_eq!(
+            differences(&client, pair, ("items", "items_zulu", "id"), &zulu).await,
+            0
+        );
+        assert_eq!(
+            all_rows(&client, &plain).await
+                + with_a_value(&rows, None, &kiwi)
+                + with_a_value(&rows, None, &zulu),
+            all_rows(&client, &schema).await,
+            "only the group rows are added"
+        );
     })
     .await;
 }
@@ -258,7 +321,10 @@ async fn test_group_columns_writes_the_groups_its_names_find() {
 /// Rows of all the tables of `schema`.
 async fn all_rows(client: &tokio_postgres::Client, schema: &str) -> i64 {
     let tables = client
-        .query("SELECT table_name FROM information_schema.tables WHERE table_schema = $1", &[&schema])
+        .query(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = $1",
+            &[&schema],
+        )
         .await
         .unwrap();
     let mut total = 0;
@@ -276,24 +342,36 @@ async fn test_group_rows_count_in_the_anomaly_rate() {
         let [plain, grouped, plain_capped, grouped_capped] =
             ["plain", "grouped", "plain_capped", "grouped_capped"].map(|s| format!("{schema}_{s}"));
         for name in [&plain, &grouped, &plain_capped, &grouped_capped] {
-            client.execute(&format!("CREATE SCHEMA \"{name}\""), &[]).await.unwrap();
+            client
+                .execute(&format!("CREATE SCHEMA \"{name}\""), &[])
+                .await
+                .unwrap();
         }
         let (cfg, _keep) = config(&url, &plain, PLAIN, None);
-        run_pipeline(cfg).await.expect("import without column groups");
+        run_pipeline(cfg)
+            .await
+            .expect("import without column groups");
         let (cfg, _keep2) = config(&url, &grouped, GROUPS, None);
         run_pipeline(cfg).await.expect("import with column groups");
-        let (without, with) = (all_rows(&client, &plain).await, all_rows(&client, &grouped).await);
+        let (without, with) = (
+            all_rows(&client, &plain).await,
+            all_rows(&client, &grouped).await,
+        );
         assert!(with > without);
 
         // 3 / ((without + with) / 2): above the rate with the group rows, below the rate without them
         let cap = 6.0 / f64::from(i32::try_from(without + with).unwrap());
         let (mut cfg, _keep3) = config(&url, &plain_capped, PLAIN, None);
         cfg.max_anomaly_rate = Some(cap);
-        let err = run_pipeline(cfg).await.expect_err("3 anomalies are over the cap without the group rows");
+        let err = run_pipeline(cfg)
+            .await
+            .expect_err("3 anomalies are over the cap without the group rows");
         assert!(err.to_string().contains("exceeds threshold"), "{err}");
         let (mut cfg, _keep4) = config(&url, &grouped_capped, GROUPS, None);
         cfg.max_anomaly_rate = Some(cap);
-        run_pipeline(cfg).await.expect("the same 3 anomalies are under the cap once the group rows are counted");
+        run_pipeline(cfg)
+            .await
+            .expect("the same 3 anomalies are under the cap once the group rows are counted");
     })
     .await;
 }

@@ -17,8 +17,14 @@ use json2sql::{db, pass1, pass2};
 async fn max_wal_size(client: &tokio_postgres::Client, expected: &str) -> String {
     let mut value = String::new();
     for _ in 0..50 {
-        value = client.query_one("SHOW max_wal_size", &[]).await.unwrap().get(0);
-        if value == expected { break; }
+        value = client
+            .query_one("SHOW max_wal_size", &[])
+            .await
+            .unwrap()
+            .get(0);
+        if value == expected {
+            break;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     value
@@ -27,9 +33,18 @@ async fn max_wal_size(client: &tokio_postgres::Client, expected: &str) -> String
 /// Resolves once a backend running a statement that matches `pattern` (`LIKE`) waits on a lock.
 /// Panics after 20 s.
 async fn waits_on_lock(client: &tokio_postgres::Client, pattern: &str) {
-    let sql = "SELECT count(*) FROM pg_stat_activity WHERE query LIKE $1 AND wait_event_type = 'Lock'";
+    let sql =
+        "SELECT count(*) FROM pg_stat_activity WHERE query LIKE $1 AND wait_event_type = 'Lock'";
     for _ in 0..400 {
-        if client.query_one(sql, &[&pattern]).await.unwrap().get::<_, i64>(0) > 0 { return; }
+        if client
+            .query_one(sql, &[&pattern])
+            .await
+            .unwrap()
+            .get::<_, i64>(0)
+            > 0
+        {
+            return;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     panic!("no statement matching {pattern} waited on a lock within 20 s");
@@ -39,26 +54,59 @@ async fn waits_on_lock(client: &tokio_postgres::Client, pattern: &str) {
 async fn still_running(client: &tokio_postgres::Client, pattern: &str) -> bool {
     let sql = "SELECT count(*) FROM pg_stat_activity WHERE query LIKE $1 AND state = 'active'";
     for _ in 0..100 {
-        if client.query_one(sql, &[&pattern]).await.unwrap().get::<_, i64>(0) == 0 { return false; }
+        if client
+            .query_one(sql, &[&pattern])
+            .await
+            .unwrap()
+            .get::<_, i64>(0)
+            == 0
+        {
+            return false;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     true
 }
 
 /// Pass 2 returned within its time budget, stopped by the interrupt and not by an error.
-fn assert_interrupted(result: Result<json2sql::error::Result<pass2::runner::Pass2Result>, tokio::time::error::Elapsed>, step: &str) {
-    let Ok(Err(e)) = result else { panic!("{step}: the interrupt must stop Pass 2 within 30 s") };
-    assert!(e.to_string().contains("interrupted"), "{step}: stopped by an error, not by the interrupt: {e}");
+fn assert_interrupted(
+    result: Result<
+        json2sql::error::Result<pass2::runner::Pass2Result>,
+        tokio::time::error::Elapsed,
+    >,
+    step: &str,
+) {
+    let Ok(Err(e)) = result else {
+        panic!("{step}: the interrupt must stop Pass 2 within 30 s")
+    };
+    assert!(
+        e.to_string().contains("interrupted"),
+        "{step}: stopped by an error, not by the interrupt: {e}"
+    );
 }
 
 /// `max_wal_size` back to `before`, autovacuum back on every table of `schema`, nothing pending.
-async fn assert_restored(client: &tokio_postgres::Client, schema: &str, before: &str, marker: &std::path::Path, step: &str) {
-    assert_eq!(max_wal_size(client, before).await, before, "{step}: max_wal_size not restored");
-    let autovacuum_off: i64 = client.query_one(
-        "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+async fn assert_restored(
+    client: &tokio_postgres::Client,
+    schema: &str,
+    before: &str,
+    marker: &std::path::Path,
+    step: &str,
+) {
+    assert_eq!(
+        max_wal_size(client, before).await,
+        before,
+        "{step}: max_wal_size not restored"
+    );
+    let autovacuum_off: i64 = client
+        .query_one(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND 'autovacuum_enabled=false' = ANY(c.reloptions)",
-        &[&schema],
-    ).await.unwrap().get(0);
+            &[&schema],
+        )
+        .await
+        .unwrap()
+        .get(0);
     assert_eq!(autovacuum_off, 0, "{step}: autovacuum not re-enabled");
     assert!(!marker.exists(), "{step}: restore left pending");
 }

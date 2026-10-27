@@ -108,7 +108,8 @@ impl ColumnNameRegistry {
         for (sanitized, originals) in &self.candidates {
             if originals.len() == 1 {
                 // No collision — use sanitized name as-is
-                self.resolved.insert(originals[0].clone(), sanitized.clone());
+                self.resolved
+                    .insert(originals[0].clone(), sanitized.clone());
             } else {
                 // Collision: every colliding field gets a hash suffix derived from its original name
                 let max_base = PG_MAX_IDENT - HASH_SUFFIX_LEN;
@@ -200,11 +201,14 @@ impl NamingRegistry {
     #[must_use]
     pub fn table_name_lookup(&self, path: &[String]) -> String {
         let key = path.join(&PATH_SEP.to_string());
-        debug_assert!(self.cache.contains_key(&key),
-            "table_name_lookup called for unregistered path — pre-registration phase incomplete");
-        self.cache.get(&key).cloned().unwrap_or_else(|| {
-            sanitize_identifier(&path.join("_"))
-        })
+        debug_assert!(
+            self.cache.contains_key(&key),
+            "table_name_lookup called for unregistered path — pre-registration phase incomplete"
+        );
+        self.cache
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| sanitize_identifier(&path.join("_")))
     }
 
     /// Read-only lookup from a pre-computed PATH_SEP-joined key.
@@ -213,9 +217,10 @@ impl NamingRegistry {
     pub fn table_name_lookup_from_dot_key(&self, dot_key: &str) -> String {
         debug_assert!(self.cache.contains_key(dot_key),
             "table_name_lookup_from_dot_key called for unregistered key — pre-registration phase incomplete");
-        self.cache.get(dot_key).cloned().unwrap_or_else(|| {
-            sanitize_identifier(&dot_key.replace(PATH_SEP, "_"))
-        })
+        self.cache
+            .get(dot_key)
+            .cloned()
+            .unwrap_or_else(|| sanitize_identifier(&dot_key.replace(PATH_SEP, "_")))
     }
 
     /// Convert a JSON field name to a safe `PostgreSQL` column name.
@@ -251,7 +256,11 @@ impl NamingRegistry {
             let existing_key = existing.clone();
 
             // Promote the existing key to its hash suffix if it still holds the plain name.
-            if self.cache.get(&existing_key).is_some_and(|n| n == &truncated) {
+            if self
+                .cache
+                .get(&existing_key)
+                .is_some_and(|n| n == &truncated)
+            {
                 let promoted = self.hash_suffixed_name(&truncated, &existing_key);
                 self.cache.insert(existing_key.clone(), promoted.clone());
                 self.reverse.insert(promoted, existing_key);
@@ -259,10 +268,12 @@ impl NamingRegistry {
             }
 
             let candidate = self.hash_suffixed_name(&truncated, original_key);
-            self.reverse.insert(candidate.clone(), original_key.to_string());
+            self.reverse
+                .insert(candidate.clone(), original_key.to_string());
             return candidate;
         }
-        self.reverse.insert(truncated.clone(), original_key.to_string());
+        self.reverse
+            .insert(truncated.clone(), original_key.to_string());
         truncated
     }
 
@@ -354,12 +365,18 @@ fn sanitize_unicode(s: &str) -> String {
 /// - Prefix with `c_` if starts with a digit
 #[must_use]
 pub fn sanitize_identifier(s: &str) -> String {
-    if s.is_ascii() { sanitize_ascii(s) } else { sanitize_unicode(s) }
+    if s.is_ascii() {
+        sanitize_ascii(s)
+    } else {
+        sanitize_unicode(s)
+    }
 }
 
 fn finalize_sanitized(result: &str) -> String {
     let result = result.trim_end_matches('_').to_string();
-    if result.is_empty() { return "col".to_string(); }
+    if result.is_empty() {
+        return "col".to_string();
+    }
     if result.as_bytes().first().is_some_and(u8::is_ascii_digit) {
         return format!("c_{result}");
     }
@@ -445,7 +462,11 @@ fn truncate_table_name(sanitized: &str, original_key: &str, max_len: usize) -> S
 #[must_use]
 pub fn group_table_name(parent: &str, group: &str) -> String {
     let sanitized = sanitize_identifier(&format!("{parent}_{group}"));
-    truncate_to_limit(&sanitized, &format!("{parent}{PATH_SEP}{group}"), PG_TABLE_MAX_IDENT)
+    truncate_to_limit(
+        &sanitized,
+        &format!("{parent}{PATH_SEP}{group}"),
+        PG_TABLE_MAX_IDENT,
+    )
 }
 
 /// Compute a 7-char hex hash of a string using FNV-1a 64-bit.
@@ -472,7 +493,9 @@ mod tests {
 
     // --- truncate_table_name ---
 
-    fn key(segs: &[&str]) -> String { segs.join(&PATH_SEP.to_string()) }
+    fn key(segs: &[&str]) -> String {
+        segs.join(&PATH_SEP.to_string())
+    }
 
     #[test]
     fn truncate_table_no_truncation_needed() {
@@ -484,7 +507,10 @@ mod tests {
     fn truncate_table_phase1_removes_one_segment() {
         // "openfoodfacts_products_images_selected_nutrition_new_lc_sizes" = 61 chars > 53
         // segments[1..] = ["selected_nutrition_new_lc_sizes"] = 31 chars ≤ 53
-        let k = key(&["openfoodfacts_products_images", "selected_nutrition_new_lc_sizes"]);
+        let k = key(&[
+            "openfoodfacts_products_images",
+            "selected_nutrition_new_lc_sizes",
+        ]);
         let sanitized = "openfoodfacts_products_images_selected_nutrition_new_lc_sizes";
         let result = truncate_table_name(sanitized, &k, 53);
         assert_eq!(result, "selected_nutrition_new_lc_sizes");
@@ -507,12 +533,23 @@ mod tests {
         let k = key(&["root", "parent_long", "leaf_is_too_long_yes"]);
         let sanitized = "root_parent_long_leaf_is_too_long_yes";
         let result = truncate_table_name(sanitized, &k, 15);
-        assert!(result.len() <= 15, "result '{}' is {} chars", result, result.len());
+        assert!(
+            result.len() <= 15,
+            "result '{}' is {} chars",
+            result,
+            result.len()
+        );
         // Must end with the hash of the original key
         let h = short_hash(&k);
-        assert!(result.ends_with(&format!("_{h}")), "result '{result}' must end with _{h}");
+        assert!(
+            result.ends_with(&format!("_{h}")),
+            "result '{result}' must end with _{h}"
+        );
         // Must contain parent prefix "paren" (5 chars from "parent_long")
-        assert!(result.starts_with("paren"), "result '{result}' must start with parent prefix");
+        assert!(
+            result.starts_with("paren"),
+            "result '{result}' must start with parent prefix"
+        );
     }
 
     #[test]
@@ -520,7 +557,12 @@ mod tests {
         // No PATH_SEP — single segment longer than max_len → leaf-only fallback
         let k = "this_is_a_single_and_very_long_segment";
         let result = truncate_table_name(k, k, 15);
-        assert!(result.len() <= 15, "result '{}' is {} chars", result, result.len());
+        assert!(
+            result.len() <= 15,
+            "result '{}' is {} chars",
+            result,
+            result.len()
+        );
         let h = short_hash(k);
         assert!(result.ends_with(&format!("_{h}")), "must end with hash");
         // Format: {leaf_truncated}_{hash} — no double-parent
@@ -534,14 +576,24 @@ mod tests {
         let k = format!("root{PATH_SEP}{leaf}");
         let sanitized = format!("root_{}", "a".repeat(55));
         let result = truncate_table_name(&sanitized, &k, PG_TABLE_MAX_IDENT);
-        assert!(result.len() <= PG_TABLE_MAX_IDENT,
-            "result '{}' is {} chars (> {})", result, result.len(), PG_TABLE_MAX_IDENT);
+        assert!(
+            result.len() <= PG_TABLE_MAX_IDENT,
+            "result '{}' is {} chars (> {})",
+            result,
+            result.len(),
+            PG_TABLE_MAX_IDENT
+        );
     }
 
     #[test]
     fn truncate_table_real_world_openfoodfacts() {
         // Real-world: 4-level deep path, first trim finds fit at level 2
-        let k = key(&["openfoodfacts_org", "products", "nutriments", "energy_kcal_100g_details"]);
+        let k = key(&[
+            "openfoodfacts_org",
+            "products",
+            "nutriments",
+            "energy_kcal_100g_details",
+        ]);
         // "openfoodfacts_org_products_nutriments_energy_kcal_100g_details" = 62 > 53
         // start=1: "products_nutriments_energy_kcal_100g_details" = 44 ≤ 53 ✓
         let sanitized = "openfoodfacts_org_products_nutriments_energy_kcal_100g_details";
@@ -557,16 +609,24 @@ mod tests {
         let s = "prefix_x_parent_long_leaf_is_too_long_yes";
         let r1 = truncate_table_name(s, &k1, 15);
         let r2 = truncate_table_name(s, &k2, 15);
-        assert_ne!(r1, r2, "different original paths must produce different fallback names");
+        assert_ne!(
+            r1, r2,
+            "different original paths must produce different fallback names"
+        );
     }
 
     #[test]
     fn truncate_table_utf8_segment_no_panic() {
         // Japanese chars in the parent segment — sanitize_identifier strips non-ASCII,
         // so floor_char_boundary always receives ASCII output (no UTF-8 boundary panic).
-        let k = key(&["root", "ja:カルシウム", "details_very_very_long_name_yes_indeed"]);
+        let k = key(&[
+            "root",
+            "ja:カルシウム",
+            "details_very_very_long_name_yes_indeed",
+        ]);
         // "root_ja_details_very_very_long_name_yes_indeed" after full sanitization
-        let sanitized = sanitize_identifier("root_ja:カルシウム_details_very_very_long_name_yes_indeed");
+        let sanitized =
+            sanitize_identifier("root_ja:カルシウム_details_very_very_long_name_yes_indeed");
         let result = truncate_table_name(&sanitized, &k, 15);
         assert!(result.len() <= 15, "result '{result}' exceeds 15 chars");
         // Must be valid ASCII (no panics during construction)
@@ -590,12 +650,27 @@ mod tests {
         // Read via lookup to get the final (post-promotion) names — mirrors finalizer pattern.
         let name_a = reg.table_name_lookup_from_dot_key(&key_a);
         let name_b = reg.table_name_lookup_from_dot_key(&key_b);
-        assert_ne!(name_a, name_b, "colliding trimmed names must be deduplicated");
-        assert!(name_a.len() <= PG_TABLE_MAX_IDENT, "name_a '{name_a}' too long");
-        assert!(name_b.len() <= PG_TABLE_MAX_IDENT, "name_b '{name_b}' too long");
+        assert_ne!(
+            name_a, name_b,
+            "colliding trimmed names must be deduplicated"
+        );
+        assert!(
+            name_a.len() <= PG_TABLE_MAX_IDENT,
+            "name_a '{name_a}' too long"
+        );
+        assert!(
+            name_b.len() <= PG_TABLE_MAX_IDENT,
+            "name_b '{name_b}' too long"
+        );
         // Both must start with the trimmed base — not the long pre-truncation sanitized form.
-        assert!(name_a.starts_with("shared_suffix"), "name_a '{name_a}' must start with shared_suffix");
-        assert!(name_b.starts_with("shared_suffix"), "name_b '{name_b}' must start with shared_suffix");
+        assert!(
+            name_a.starts_with("shared_suffix"),
+            "name_a '{name_a}' must start with shared_suffix"
+        );
+        assert!(
+            name_b.starts_with("shared_suffix"),
+            "name_b '{name_b}' must start with shared_suffix"
+        );
     }
 
     #[test]
@@ -627,11 +702,23 @@ mod tests {
         let name_a2 = reg2.table_name_lookup_from_dot_key(&key_a);
         let name_b2 = reg2.table_name_lookup_from_dot_key(&key_b);
 
-        assert_eq!(name_a1, name_a2, "path A must get same name regardless of insertion order");
-        assert_eq!(name_b1, name_b2, "path B must get same name regardless of insertion order");
+        assert_eq!(
+            name_a1, name_a2,
+            "path A must get same name regardless of insertion order"
+        );
+        assert_eq!(
+            name_b1, name_b2,
+            "path B must get same name regardless of insertion order"
+        );
         assert_ne!(name_a1, name_b1, "paths must produce distinct names");
-        assert!(name_a1.len() <= PG_TABLE_MAX_IDENT, "name_a '{name_a1}' too long");
-        assert!(name_b1.len() <= PG_TABLE_MAX_IDENT, "name_b '{name_b1}' too long");
+        assert!(
+            name_a1.len() <= PG_TABLE_MAX_IDENT,
+            "name_a '{name_a1}' too long"
+        );
+        assert!(
+            name_b1.len() <= PG_TABLE_MAX_IDENT,
+            "name_b '{name_b1}' too long"
+        );
     }
 
     #[test]
@@ -659,11 +746,26 @@ mod tests {
         let name_a2 = reg2.table_name_lookup_from_dot_key(&key_a);
         let name_b2 = reg2.table_name_lookup_from_dot_key(&key_b);
 
-        assert_ne!(name_a1, name_b1, "colliding sanitized names must be distinct");
-        assert_eq!(name_a1, name_a2, "path A must get same name regardless of order");
-        assert_eq!(name_b1, name_b2, "path B must get same name regardless of order");
-        assert!(name_a1.starts_with("foo_bar"), "name_a '{name_a1}' must start with foo_bar");
-        assert!(name_b1.starts_with("foo_bar"), "name_b '{name_b1}' must start with foo_bar");
+        assert_ne!(
+            name_a1, name_b1,
+            "colliding sanitized names must be distinct"
+        );
+        assert_eq!(
+            name_a1, name_a2,
+            "path A must get same name regardless of order"
+        );
+        assert_eq!(
+            name_b1, name_b2,
+            "path B must get same name regardless of order"
+        );
+        assert!(
+            name_a1.starts_with("foo_bar"),
+            "name_a '{name_a1}' must start with foo_bar"
+        );
+        assert!(
+            name_b1.starts_with("foo_bar"),
+            "name_b '{name_b1}' must start with foo_bar"
+        );
         assert!(name_a1.len() <= PG_TABLE_MAX_IDENT);
         assert!(name_b1.len() <= PG_TABLE_MAX_IDENT);
     }
@@ -709,7 +811,10 @@ mod tests {
         assert!(s.len() > PG_MAX_IDENT, "precondition: must exceed limit");
         let result = truncate_to_pg_limit(&s, &s);
         assert!(result.len() <= PG_MAX_IDENT);
-        assert!(std::str::from_utf8(result.as_bytes()).is_ok(), "result must be valid UTF-8");
+        assert!(
+            std::str::from_utf8(result.as_bytes()).is_ok(),
+            "result must be valid UTF-8"
+        );
     }
 
     #[test]
@@ -719,7 +824,8 @@ mod tests {
         // max_base = PG_MAX_IDENT - HASH_SUFFIX_LEN = 55. Key straddles that boundary.
         let multi = format!("{}{}", "a".repeat(54), "é"); // len=56 > max_base=55
         let mut reg = ColumnNameRegistry::new();
-        reg.candidates.insert(multi, vec!["field_a".to_string(), "field_b".to_string()]);
+        reg.candidates
+            .insert(multi, vec!["field_a".to_string(), "field_b".to_string()]);
         reg.build("test_table"); // must not panic
     }
 
@@ -760,7 +866,7 @@ mod tests {
         // Two fields that both sanitize to "ja" (non-ASCII content stripped)
         let mut reg = ColumnNameRegistry::new();
         reg.register("ja:カルシウム"); // → "ja"
-        reg.register("ja:脂質");       // → "ja"
+        reg.register("ja:脂質"); // → "ja"
         reg.build("nutriments");
 
         let collisions = reg.collisions();
@@ -789,14 +895,22 @@ mod tests {
         let name = reg.table_name(&path);
         // Must fit PG_TABLE_MAX_IDENT (53), not just PG_MAX_IDENT (63):
         // derived identifiers like fk_{name}_parent need the 10-char budget.
-        assert!(name.len() <= PG_TABLE_MAX_IDENT, "name too long: {} chars", name.len());
+        assert!(
+            name.len() <= PG_TABLE_MAX_IDENT,
+            "name too long: {} chars",
+            name.len()
+        );
     }
 
     // --- dot-key fast path must produce identical output to the path-slice version ---
 
     #[test]
     fn test_table_name_from_dot_key_matches_path_version() {
-        let path = vec!["users".to_string(), "orders".to_string(), "items".to_string()];
+        let path = vec![
+            "users".to_string(),
+            "orders".to_string(),
+            "items".to_string(),
+        ];
         let key = path.join(&PATH_SEP.to_string());
 
         let mut reg_path = NamingRegistry::new();
@@ -866,7 +980,9 @@ mod tests {
         let name = reg.table_name(&path);
         assert!(
             format!("pk_{name}").len() <= 63,
-            "pk_{} is {} chars (> 63)", name, format!("pk_{name}").len()
+            "pk_{} is {} chars (> 63)",
+            name,
+            format!("pk_{name}").len()
         );
     }
 
@@ -881,7 +997,9 @@ mod tests {
         let name = reg.table_name(&path);
         assert!(
             format!("fk_{name}_parent").len() <= 63,
-            "fk_{}_parent is {} chars (> 63)", name, format!("fk_{name}_parent").len()
+            "fk_{}_parent is {} chars (> 63)",
+            name,
+            format!("fk_{name}_parent").len()
         );
     }
 
@@ -896,7 +1014,9 @@ mod tests {
         let name = reg.table_name(&path);
         assert!(
             format!("j2s_{name}_id").len() <= 63,
-            "j2s_{}_id is {} chars (> 63)", name, format!("j2s_{name}_id").len()
+            "j2s_{}_id is {} chars (> 63)",
+            name,
+            format!("j2s_{name}_id").len()
         );
     }
 
@@ -911,7 +1031,10 @@ mod tests {
         let name = reg.table_name(&path);
         assert!(
             name.len() <= PG_TABLE_MAX_IDENT,
-            "table name '{}' is {} chars (> {})", name, name.len(), PG_TABLE_MAX_IDENT
+            "table name '{}' is {} chars (> {})",
+            name,
+            name.len(),
+            PG_TABLE_MAX_IDENT
         );
     }
 

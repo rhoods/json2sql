@@ -10,8 +10,8 @@
 //! - fn `build_table_rows` — construit le view-model de toutes les lignes (ordre, filtre, visibilité)
 //! - fn `tree_display_order` — ordre d'affichage DFS (racines triées, enfants groupés, orphelins en fin)
 //! - fn `compute_last_child` — pour chaque position, vrai si dernier enfant de son parent (connecteur └─/├─)
+use json2sql::schema::table_schema::{InferredStrategy, TableSchema, UserOverride};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use json2sql::schema::table_schema::{TableSchema, InferredStrategy, UserOverride};
 
 use super::{strategy_badge, user_override_badge};
 
@@ -24,25 +24,25 @@ use super::{strategy_badge, user_override_badge};
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TableRowViewModel {
-    pub index:       usize,
-    pub name:        String,
+    pub index: usize,
+    pub name: String,
     // badge
-    pub badge_cls:   &'static str,
-    pub badge_lbl:   &'static str,
+    pub badge_cls: &'static str,
+    pub badge_lbl: &'static str,
     // columns
-    pub col_count:   usize,
-    pub is_wide:     bool,           // col_count > PASS1_WIDE_COLUMN_THRESHOLD
+    pub col_count: usize,
+    pub is_wide: bool, // col_count > PASS1_WIDE_COLUMN_THRESHOLD
     // tree
-    pub depth:       usize,
-    pub connector:   &'static str,   // "" | "├─ " | "└─ "
-    pub indent_px:   usize,          // depth * 12
+    pub depth: usize,
+    pub connector: &'static str, // "" | "├─ " | "└─ "
+    pub indent_px: usize,        // depth * 12
     // state
     pub is_selected: bool,
-    pub is_routing:  bool,
-    pub has_warn:    bool,
-    pub row_cls:     &'static str,   // "sel" | "muted" | ""
+    pub is_routing: bool,
+    pub has_warn: bool,
+    pub row_cls: &'static str, // "sel" | "muted" | ""
     // visibility
-    pub visible:     bool,
+    pub visible: bool,
     pub has_children: bool,
     /// Anomaly count from Pass 2 (0 if Pass 2 hasn't run yet).
     pub anomaly_count: u64,
@@ -53,30 +53,30 @@ pub struct TableRowViewModel {
 /// Input context for [`build_table_rows`]. Groups the per-call parameters so the
 /// function signature stays within the `too_many_arguments` threshold.
 pub struct TableRowsCtx<'a> {
-    pub overrides:        &'a HashMap<String, UserOverride>,
-    pub overflow_names:   &'a HashSet<String>,
+    pub overrides: &'a HashMap<String, UserOverride>,
+    pub overflow_names: &'a HashSet<String>,
     pub selected_indices: &'a HashSet<usize>,
-    pub absorbed_names:   &'a HashSet<String>,
+    pub absorbed_names: &'a HashSet<String>,
     /// Real children that will be removed by cascade from a `Skip` override on an ancestor —
     /// never set by the user directly (see `apply_user_overrides` cascade, #47).
-    pub cascaded_names:   &'a HashSet<String>,
-    pub filter:           &'a str,
-    pub show_warn_only:   bool,
-    pub anomaly_counts:   &'a HashMap<String, u64>,
+    pub cascaded_names: &'a HashSet<String>,
+    pub filter: &'a str,
+    pub show_warn_only: bool,
+    pub anomaly_counts: &'a HashMap<String, u64>,
     /// Tables ticked for column groups (#91).
-    pub grouped:          &'a BTreeSet<String>,
+    pub grouped: &'a BTreeSet<String>,
     /// Show only the tables the user changed: an override, ticked column groups, or a group table of those.
     pub show_modified_only: bool,
 }
 
 #[allow(clippy::struct_excessive_bools)] // each flag is an independent, orthogonal row category
 struct RowFlags {
-    is_routing:       bool,
-    is_absorbed:      bool,
+    is_routing: bool,
+    is_absorbed: bool,
     is_cascaded_skip: bool,
-    has_warn:         bool,
-    badge_cls:        &'static str,
-    badge_lbl:        &'static str,
+    has_warn: bool,
+    badge_cls: &'static str,
+    badge_lbl: &'static str,
 }
 
 impl RowFlags {
@@ -92,13 +92,27 @@ impl RowFlags {
             && matches!(*effective, InferredStrategy::SiblingCollapseMulti(_))
             && table.columns.iter().all(|c| c.is_generated);
         let has_warn = is_overflow || is_routing;
-        let (badge_cls, badge_lbl) = if is_absorbed { ("muted", "merged") }
-            else if is_cascaded_skip { ("skip", "skip ↳") }
-            else if is_routing { ("muted", "ROUTE") }
-            else if is_overflow { ("warn", "JSONB ⚠") }
-            else if let Some(ov) = ctx.overrides.get(&table.name) { user_override_badge(ov) }
-            else { strategy_badge(&effective) };
-        Self { is_routing, is_absorbed, is_cascaded_skip, has_warn, badge_cls, badge_lbl }
+        let (badge_cls, badge_lbl) = if is_absorbed {
+            ("muted", "merged")
+        } else if is_cascaded_skip {
+            ("skip", "skip ↳")
+        } else if is_routing {
+            ("muted", "ROUTE")
+        } else if is_overflow {
+            ("warn", "JSONB ⚠")
+        } else if let Some(ov) = ctx.overrides.get(&table.name) {
+            user_override_badge(ov)
+        } else {
+            strategy_badge(&effective)
+        };
+        Self {
+            is_routing,
+            is_absorbed,
+            is_cascaded_skip,
+            has_warn,
+            badge_cls,
+            badge_lbl,
+        }
     }
 }
 
@@ -115,24 +129,48 @@ fn build_row(
     let flags = RowFlags::compute(table, ctx);
     let col_count = table.columns.len();
     let is_wide = col_count > crate::state::PASS1_WIDE_COLUMN_THRESHOLD;
-    let connector: &'static str = if table.depth == 0 { "" }
-        else if is_last[pos] { "└─ " } else { "├─ " };
+    let connector: &'static str = if table.depth == 0 {
+        ""
+    } else if is_last[pos] {
+        "└─ "
+    } else {
+        "├─ "
+    };
     let is_selected = ctx.selected_indices.contains(&i);
-    let row_cls: &'static str = if is_selected { "sel" }
-        else if flags.is_routing || flags.is_absorbed || flags.is_cascaded_skip { "muted" } else { "" };
+    let row_cls: &'static str = if is_selected {
+        "sel"
+    } else if flags.is_routing || flags.is_absorbed || flags.is_cascaded_skip {
+        "muted"
+    } else {
+        ""
+    };
     let has_groups = ctx.grouped.contains(&table.name);
-    let is_group_table = table.parent_table.as_ref().is_some_and(|p| ctx.grouped.contains(p))
-        && schemas.iter().any(|s| s.column_groups.contains(&table.name));
+    let is_group_table = table
+        .parent_table
+        .as_ref()
+        .is_some_and(|p| ctx.grouped.contains(p))
+        && schemas
+            .iter()
+            .any(|s| s.column_groups.contains(&table.name));
     let modified = ctx.overrides.contains_key(&table.name) || has_groups || is_group_table;
     let visible = (!ctx.show_warn_only || flags.has_warn)
         && (!ctx.show_modified_only || modified)
         && (filter_lc.is_empty() || table.name.to_lowercase().contains(filter_lc));
     TableRowViewModel {
-        index: i, name: table.name.clone(),
-        badge_cls: flags.badge_cls, badge_lbl: flags.badge_lbl,
-        col_count, is_wide, depth: table.depth, connector,
-        indent_px: table.depth * 12, is_selected,
-        is_routing: flags.is_routing, has_warn: flags.has_warn, row_cls, visible,
+        index: i,
+        name: table.name.clone(),
+        badge_cls: flags.badge_cls,
+        badge_lbl: flags.badge_lbl,
+        col_count,
+        is_wide,
+        depth: table.depth,
+        connector,
+        indent_px: table.depth * 12,
+        is_selected,
+        is_routing: flags.is_routing,
+        has_warn: flags.has_warn,
+        row_cls,
+        visible,
         has_children: parent_names.contains(table.name.as_str()),
         anomaly_count: ctx.anomaly_counts.get(&table.name).copied().unwrap_or(0),
         has_groups,
@@ -150,10 +188,13 @@ pub fn build_table_rows(schemas: &[TableSchema], ctx: &TableRowsCtx<'_>) -> Vec<
     let order = tree_display_order(schemas);
     let is_last = compute_last_child(&order, schemas);
     let filter_lc = ctx.filter.to_lowercase();
-    let parent_names: HashSet<&str> = schemas.iter()
+    let parent_names: HashSet<&str> = schemas
+        .iter()
         .filter_map(|t| t.parent_table.as_deref())
         .collect();
-    order.iter().enumerate()
+    order
+        .iter()
+        .enumerate()
         .map(|(pos, &i)| build_row(pos, i, schemas, &is_last, &parent_names, &filter_lc, ctx))
         .collect()
 }
@@ -170,24 +211,28 @@ pub fn tree_display_order(schemas: &[TableSchema]) -> Vec<usize> {
         order: &mut Vec<usize>,
         visited: &mut Vec<bool>,
     ) {
-        if visited[i] { return; }
+        if visited[i] {
+            return;
+        }
         visited[i] = true;
         order.push(i);
         if let Some(children) = children_of.get(schemas[i].name.as_str()) {
-            for &c in children { dfs(c, schemas, children_of, order, visited); }
+            for &c in children {
+                dfs(c, schemas, children_of, order, visited);
+            }
         }
     }
 
     let name_set: HashSet<&str> = schemas.iter().map(|t| t.name.as_str()).collect();
     let mut children_of: HashMap<&str, Vec<usize>> = HashMap::new();
-    let mut true_roots:   Vec<usize> = Vec::new();
+    let mut true_roots: Vec<usize> = Vec::new();
     let mut orphan_roots: Vec<usize> = Vec::new();
 
     for (i, t) in schemas.iter().enumerate() {
         match t.parent_table.as_deref() {
-            None                              => true_roots.push(i),
-            Some(p) if name_set.contains(p)  => children_of.entry(p).or_default().push(i),
-            Some(_)                           => orphan_roots.push(i),
+            None => true_roots.push(i),
+            Some(p) if name_set.contains(p) => children_of.entry(p).or_default().push(i),
+            Some(_) => orphan_roots.push(i),
         }
     }
 
@@ -197,11 +242,15 @@ pub fn tree_display_order(schemas: &[TableSchema]) -> Vec<usize> {
         v.sort_by(|&a, &b| schemas[a].name.cmp(&schemas[b].name));
     }
 
-    let mut order   = Vec::with_capacity(schemas.len());
+    let mut order = Vec::with_capacity(schemas.len());
     let mut visited = vec![false; schemas.len()];
 
-    for &r in &true_roots  { dfs(r, schemas, &children_of, &mut order, &mut visited); }
-    for &r in &orphan_roots { dfs(r, schemas, &children_of, &mut order, &mut visited); }
+    for &r in &true_roots {
+        dfs(r, schemas, &children_of, &mut order, &mut visited);
+    }
+    for &r in &orphan_roots {
+        dfs(r, schemas, &children_of, &mut order, &mut visited);
+    }
 
     order
 }
@@ -236,18 +285,29 @@ mod tests {
         t
     }
 
-    fn identity_order(n: usize) -> Vec<usize> { (0..n).collect() }
+    fn identity_order(n: usize) -> Vec<usize> {
+        (0..n).collect()
+    }
 
     #[test]
     fn no_children_all_true() {
         let schemas = vec![make_table("a", None), make_table("b", None)];
-        assert_eq!(compute_last_child(&identity_order(2), &schemas), vec![true, true]);
+        assert_eq!(
+            compute_last_child(&identity_order(2), &schemas),
+            vec![true, true]
+        );
     }
 
     #[test]
     fn single_child_is_last() {
-        let schemas = vec![make_table("parent", None), make_table("child", Some("parent"))];
-        assert_eq!(compute_last_child(&identity_order(2), &schemas), vec![true, true]);
+        let schemas = vec![
+            make_table("parent", None),
+            make_table("child", Some("parent")),
+        ];
+        assert_eq!(
+            compute_last_child(&identity_order(2), &schemas),
+            vec![true, true]
+        );
     }
 
     #[test]
@@ -257,7 +317,10 @@ mod tests {
             make_table("child1", Some("parent")),
             make_table("child2", Some("parent")),
         ];
-        assert_eq!(compute_last_child(&identity_order(3), &schemas), vec![true, false, true]);
+        assert_eq!(
+            compute_last_child(&identity_order(3), &schemas),
+            vec![true, false, true]
+        );
     }
 
     #[test]
@@ -268,20 +331,30 @@ mod tests {
             make_table("c2", Some("root")),
             make_table("c3", Some("root")),
         ];
-        assert_eq!(compute_last_child(&identity_order(4), &schemas), vec![true, false, false, true]);
+        assert_eq!(
+            compute_last_child(&identity_order(4), &schemas),
+            vec![true, false, false, true]
+        );
     }
 
     #[test]
     fn empty_slice_returns_empty() {
         let schemas: Vec<TableSchema> = vec![];
-        assert_eq!(compute_last_child(&identity_order(0), &schemas), Vec::<bool>::new());
+        assert_eq!(
+            compute_last_child(&identity_order(0), &schemas),
+            Vec::<bool>::new()
+        );
     }
 
     // --- tree_display_order ---
 
     #[test]
     fn tree_order_flat_schemas_sorted_alphabetically() {
-        let schemas = vec![make_table("zebra", None), make_table("alpha", None), make_table("mango", None)];
+        let schemas = vec![
+            make_table("zebra", None),
+            make_table("alpha", None),
+            make_table("mango", None),
+        ];
         let order = tree_display_order(&schemas);
         let names: Vec<&str> = order.iter().map(|&i| schemas[i].name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "mango", "zebra"]);
@@ -293,7 +366,7 @@ mod tests {
         let schemas = vec![
             make_table_depth("child_b", Some("parent"), 1),
             make_table_depth("child_a", Some("parent"), 1),
-            make_table_depth("parent",  None,           0),
+            make_table_depth("parent", None, 0),
         ];
         let order = tree_display_order(&schemas);
         let names: Vec<&str> = order.iter().map(|&i| schemas[i].name.as_str()).collect();
@@ -308,8 +381,8 @@ mod tests {
     fn tree_order_three_levels() {
         let schemas = vec![
             make_table_depth("grandchild", Some("child"), 2),
-            make_table_depth("child",      Some("root"),  1),
-            make_table_depth("root",       None,          0),
+            make_table_depth("child", Some("root"), 1),
+            make_table_depth("root", None, 0),
         ];
         let order = tree_display_order(&schemas);
         let names: Vec<&str> = order.iter().map(|&i| schemas[i].name.as_str()).collect();
@@ -319,7 +392,7 @@ mod tests {
     #[test]
     fn tree_order_orphan_parent_at_end() {
         let schemas = vec![
-            make_table_depth("alpha",  None,      0),
+            make_table_depth("alpha", None, 0),
             make_table_depth("orphan", Some("missing"), 1),
         ];
         let order = tree_display_order(&schemas);
@@ -331,9 +404,9 @@ mod tests {
     fn connectors_correct_after_reorder() {
         // c2 avant c1 dans le slice, mais c1 < c2 alphabétiquement
         let schemas = vec![
-            make_table_depth("parent", None,            0),
-            make_table_depth("c2",     Some("parent"),  1),
-            make_table_depth("c1",     Some("parent"),  1),
+            make_table_depth("parent", None, 0),
+            make_table_depth("c2", Some("parent"), 1),
+            make_table_depth("c1", Some("parent"), 1),
         ];
         let rows = empty_rows(&schemas);
         assert_eq!(rows[0].name, "parent");
@@ -368,8 +441,12 @@ mod tests {
             absorbed_path_segments: vec![],
         }]);
         t.columns.push(ColumnSchema {
-            name: "j2s_id".to_string(), original_name: "j2s_id".to_string(),
-            pg_type: PgType::BigInt, not_null: true, is_generated: true, is_parent_fk: false,
+            name: "j2s_id".to_string(),
+            original_name: "j2s_id".to_string(),
+            pg_type: PgType::BigInt,
+            not_null: true,
+            is_generated: true,
+            is_parent_fk: false,
         });
         t
     }
@@ -386,20 +463,41 @@ mod tests {
         let mut t = TableSchema::new(name.to_string(), vec![name.to_string()], 0);
         for i in 0..col_count {
             t.columns.push(ColumnSchema {
-                name: format!("col_{i}"), original_name: format!("col_{i}"),
-                pg_type: PgType::Text, not_null: false, is_generated: false, is_parent_fk: false,
+                name: format!("col_{i}"),
+                original_name: format!("col_{i}"),
+                pg_type: PgType::Text,
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
             });
         }
         t
     }
 
     fn empty_rows(schemas: &[TableSchema]) -> Vec<TableRowViewModel> {
-        let (ov, ov_n, sel, abs, casc, an): (HashMap<String, UserOverride>, _, _, _, _, _) =
-            (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
-        build_table_rows(schemas, &TableRowsCtx {
-            overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
-        })
+        let (ov, ov_n, sel, abs, casc, an): (HashMap<String, UserOverride>, _, _, _, _, _) = (
+            HashMap::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+        );
+        build_table_rows(
+            schemas,
+            &TableRowsCtx {
+                overrides: &ov,
+                overflow_names: &ov_n,
+                selected_indices: &sel,
+                absorbed_names: &abs,
+                cascaded_names: &casc,
+                filter: "",
+                show_warn_only: false,
+                anomaly_counts: &an,
+                grouped: &BTreeSet::new(),
+                show_modified_only: false,
+            },
+        )
     }
 
     // --- build_table_rows tests ---
@@ -408,34 +506,65 @@ mod tests {
     fn modified_schemas() -> Vec<TableSchema> {
         let mut a = make_table("a", None);
         a.column_groups.push("a_kiwi".to_string());
-        vec![a, make_table("a_kiwi", Some("a")), make_table("b", None), make_table("c", None)]
+        vec![
+            a,
+            make_table("a_kiwi", Some("a")),
+            make_table("b", None),
+            make_table("c", None),
+        ]
     }
 
     fn rows_with(schemas: &[TableSchema], show_modified_only: bool) -> Vec<TableRowViewModel> {
         let overrides = HashMap::from([("b".to_string(), UserOverride::Pivot)]);
         let grouped = BTreeSet::from(["a".to_string()]);
-        let (ov_n, sel, abs, casc, an) = (HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
-        build_table_rows(schemas, &TableRowsCtx {
-            overrides: &overrides, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an,
-            grouped: &grouped, show_modified_only,
-        })
+        let (ov_n, sel, abs, casc, an) = (
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+        );
+        build_table_rows(
+            schemas,
+            &TableRowsCtx {
+                overrides: &overrides,
+                overflow_names: &ov_n,
+                selected_indices: &sel,
+                absorbed_names: &abs,
+                cascaded_names: &casc,
+                filter: "",
+                show_warn_only: false,
+                anomaly_counts: &an,
+                grouped: &grouped,
+                show_modified_only,
+            },
+        )
     }
 
     #[test]
     fn a_table_ticked_for_column_groups_shows_the_groups_badge() {
         // #91: the left panel tells which tables are split
         let rows = rows_with(&modified_schemas(), false);
-        let grouped: Vec<&str> = rows.iter().filter(|r| r.has_groups).map(|r| r.name.as_str()).collect();
+        let grouped: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.has_groups)
+            .map(|r| r.name.as_str())
+            .collect();
         assert_eq!(grouped, ["a"]);
     }
 
     #[test]
     fn the_modified_filter_keeps_the_overridden_and_ticked_tables_and_their_group_tables() {
         let visible = |rows: Vec<TableRowViewModel>| -> Vec<String> {
-            rows.into_iter().filter(|r| r.visible).map(|r| r.name).collect()
+            rows.into_iter()
+                .filter(|r| r.visible)
+                .map(|r| r.name)
+                .collect()
         };
-        assert_eq!(visible(rows_with(&modified_schemas(), true)), ["a", "a_kiwi", "b"]);
+        assert_eq!(
+            visible(rows_with(&modified_schemas(), true)),
+            ["a", "a_kiwi", "b"]
+        );
         assert_eq!(visible(rows_with(&modified_schemas(), false)).len(), 4);
     }
 
@@ -454,11 +583,28 @@ mod tests {
     fn overflow_without_override_sets_warn_badge() {
         let schemas = vec![make_overflow_table("big")];
         let overflow = HashSet::from(["big".to_string()]);
-        let (ov, sel, abs, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
-        let rows = build_table_rows(&schemas, &TableRowsCtx {
-            overrides: &ov, overflow_names: &overflow, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
-        });
+        let (ov, sel, abs, casc, an) = (
+            HashMap::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+        );
+        let rows = build_table_rows(
+            &schemas,
+            &TableRowsCtx {
+                overrides: &ov,
+                overflow_names: &overflow,
+                selected_indices: &sel,
+                absorbed_names: &abs,
+                cascaded_names: &casc,
+                filter: "",
+                show_warn_only: false,
+                anomaly_counts: &an,
+                grouped: &BTreeSet::new(),
+                show_modified_only: false,
+            },
+        );
         assert!(rows[0].has_warn);
         assert_eq!(rows[0].badge_cls, "warn");
         assert_eq!(rows[0].badge_lbl, "JSONB ⚠");
@@ -470,12 +616,31 @@ mod tests {
         let overflow = HashSet::from(["big".to_string()]);
         let mut overrides = HashMap::new();
         overrides.insert("big".to_string(), UserOverride::Jsonb);
-        let (sel, abs, casc, an) = (HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
-        let rows = build_table_rows(&schemas, &TableRowsCtx {
-            overrides: &overrides, overflow_names: &overflow, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
-        });
-        assert!(!rows[0].has_warn, "user override must suppress overflow flag");
+        let (sel, abs, casc, an) = (
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+        );
+        let rows = build_table_rows(
+            &schemas,
+            &TableRowsCtx {
+                overrides: &overrides,
+                overflow_names: &overflow,
+                selected_indices: &sel,
+                absorbed_names: &abs,
+                cascaded_names: &casc,
+                filter: "",
+                show_warn_only: false,
+                anomaly_counts: &an,
+                grouped: &BTreeSet::new(),
+                show_modified_only: false,
+            },
+        );
+        assert!(
+            !rows[0].has_warn,
+            "user override must suppress overflow flag"
+        );
         assert_ne!(rows[0].badge_cls, "warn");
     }
 
@@ -492,11 +657,29 @@ mod tests {
     #[test]
     fn filter_text_hides_non_matching() {
         let schemas = vec![make_table("orders", None), make_table("users", None)];
-        let (ov, ov_n, sel, abs, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
-        let rows = build_table_rows(&schemas, &TableRowsCtx {
-            overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "user", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
-        });
+        let (ov, ov_n, sel, abs, casc, an) = (
+            HashMap::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+        );
+        let rows = build_table_rows(
+            &schemas,
+            &TableRowsCtx {
+                overrides: &ov,
+                overflow_names: &ov_n,
+                selected_indices: &sel,
+                absorbed_names: &abs,
+                cascaded_names: &casc,
+                filter: "user",
+                show_warn_only: false,
+                anomaly_counts: &an,
+                grouped: &BTreeSet::new(),
+                show_modified_only: false,
+            },
+        );
         assert!(!rows[0].visible, "orders should be hidden");
         assert!(rows[1].visible, "users should match");
     }
@@ -512,27 +695,61 @@ mod tests {
     fn show_warn_only_hides_clean_rows() {
         let schemas = vec![make_table("clean", None), make_overflow_table("big")];
         let overflow = HashSet::from(["big".to_string()]);
-        let (ov, sel, abs, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
-        let rows = build_table_rows(&schemas, &TableRowsCtx {
-            overrides: &ov, overflow_names: &overflow, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: true, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
-        });
+        let (ov, sel, abs, casc, an) = (
+            HashMap::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+        );
+        let rows = build_table_rows(
+            &schemas,
+            &TableRowsCtx {
+                overrides: &ov,
+                overflow_names: &overflow,
+                selected_indices: &sel,
+                absorbed_names: &abs,
+                cascaded_names: &casc,
+                filter: "",
+                show_warn_only: true,
+                anomaly_counts: &an,
+                grouped: &BTreeSet::new(),
+                show_modified_only: false,
+            },
+        );
         // tree_display_order sorts alphabetically: "big" appears before "clean".
         let clean = rows.iter().find(|r| r.name == "clean").unwrap();
-        let big   = rows.iter().find(|r| r.name == "big").unwrap();
+        let big = rows.iter().find(|r| r.name == "big").unwrap();
         assert!(!clean.visible, "clean table must be hidden");
-        assert!(big.visible,    "warn table must be visible");
+        assert!(big.visible, "warn table must be visible");
     }
 
     #[test]
     fn selected_row_has_sel_class() {
         let schemas = vec![make_table("a", None), make_table("b", None)];
         let selected = HashSet::from([1usize]);
-        let (ov, ov_n, abs, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
-        let rows = build_table_rows(&schemas, &TableRowsCtx {
-            overrides: &ov, overflow_names: &ov_n, selected_indices: &selected,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
-        });
+        let (ov, ov_n, abs, casc, an) = (
+            HashMap::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+        );
+        let rows = build_table_rows(
+            &schemas,
+            &TableRowsCtx {
+                overrides: &ov,
+                overflow_names: &ov_n,
+                selected_indices: &selected,
+                absorbed_names: &abs,
+                cascaded_names: &casc,
+                filter: "",
+                show_warn_only: false,
+                anomaly_counts: &an,
+                grouped: &BTreeSet::new(),
+                show_modified_only: false,
+            },
+        );
         assert_eq!(rows[0].row_cls, "");
         assert_eq!(rows[1].row_cls, "sel");
         assert!(rows[1].is_selected);
@@ -585,7 +802,11 @@ mod tests {
 
     #[test]
     fn index_matches_position() {
-        let schemas = vec![make_table("a", None), make_table("b", None), make_table("c", None)];
+        let schemas = vec![
+            make_table("a", None),
+            make_table("b", None),
+            make_table("c", None),
+        ];
         let rows = empty_rows(&schemas);
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(row.index, i);
@@ -600,42 +821,108 @@ mod tests {
             make_table("child_b", Some("parent")),
         ];
         let absorbed = HashSet::from(["child_a".to_string(), "child_b".to_string()]);
-        let (ov, ov_n, sel, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
-        let rows = build_table_rows(&schemas, &TableRowsCtx {
-            overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &absorbed, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
-        });
-        assert!(rows[0].visible,                    "parent must be visible");
-        assert!(rows[1].visible,                    "absorbed child_a must remain visible");
-        assert_eq!(rows[1].badge_lbl, "merged",     "absorbed must show merged badge");
-        assert_eq!(rows[1].row_cls,   "muted",      "absorbed must be muted");
+        let (ov, ov_n, sel, casc, an) = (
+            HashMap::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+        );
+        let rows = build_table_rows(
+            &schemas,
+            &TableRowsCtx {
+                overrides: &ov,
+                overflow_names: &ov_n,
+                selected_indices: &sel,
+                absorbed_names: &absorbed,
+                cascaded_names: &casc,
+                filter: "",
+                show_warn_only: false,
+                anomaly_counts: &an,
+                grouped: &BTreeSet::new(),
+                show_modified_only: false,
+            },
+        );
+        assert!(rows[0].visible, "parent must be visible");
+        assert!(rows[1].visible, "absorbed child_a must remain visible");
+        assert_eq!(
+            rows[1].badge_lbl, "merged",
+            "absorbed must show merged badge"
+        );
+        assert_eq!(rows[1].row_cls, "muted", "absorbed must be muted");
         assert_eq!(rows[2].badge_lbl, "merged");
     }
 
     #[test]
     fn cascaded_child_shows_dedicated_skip_badge_and_is_muted() {
-        let schemas = vec![make_table("parent", None), make_table("child", Some("parent"))];
+        let schemas = vec![
+            make_table("parent", None),
+            make_table("child", Some("parent")),
+        ];
         let cascaded = HashSet::from(["child".to_string()]);
-        let (ov, ov_n, sel, abs, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
-        let rows = build_table_rows(&schemas, &TableRowsCtx {
-            overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &cascaded, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
-        });
+        let (ov, ov_n, sel, abs, an) = (
+            HashMap::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+        );
+        let rows = build_table_rows(
+            &schemas,
+            &TableRowsCtx {
+                overrides: &ov,
+                overflow_names: &ov_n,
+                selected_indices: &sel,
+                absorbed_names: &abs,
+                cascaded_names: &cascaded,
+                filter: "",
+                show_warn_only: false,
+                anomaly_counts: &an,
+                grouped: &BTreeSet::new(),
+                show_modified_only: false,
+            },
+        );
         let child = rows.iter().find(|r| r.name == "child").unwrap();
-        assert_eq!(child.badge_cls, "skip", "cascaded child must show a skip-styled badge");
-        assert_eq!(child.badge_lbl, "skip ↳", "badge must be visually distinct from a direct user Skip");
-        assert_eq!(child.row_cls, "muted", "cascaded child row must be muted like an absorbed row");
+        assert_eq!(
+            child.badge_cls, "skip",
+            "cascaded child must show a skip-styled badge"
+        );
+        assert_eq!(
+            child.badge_lbl, "skip ↳",
+            "badge must be visually distinct from a direct user Skip"
+        );
+        assert_eq!(
+            child.row_cls, "muted",
+            "cascaded child row must be muted like an absorbed row"
+        );
     }
 
     #[test]
     fn non_absorbed_table_has_normal_badge() {
         let schemas = vec![make_table("standalone", None)];
         let absorbed: HashSet<String> = HashSet::new();
-        let (ov, ov_n, sel, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
-        let rows = build_table_rows(&schemas, &TableRowsCtx {
-            overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &absorbed, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
-        });
+        let (ov, ov_n, sel, casc, an) = (
+            HashMap::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+        );
+        let rows = build_table_rows(
+            &schemas,
+            &TableRowsCtx {
+                overrides: &ov,
+                overflow_names: &ov_n,
+                selected_indices: &sel,
+                absorbed_names: &absorbed,
+                cascaded_names: &casc,
+                filter: "",
+                show_warn_only: false,
+                anomaly_counts: &an,
+                grouped: &BTreeSet::new(),
+                show_modified_only: false,
+            },
+        );
         assert!(rows[0].visible);
         assert_ne!(rows[0].badge_lbl, "merged");
     }
@@ -645,12 +932,28 @@ mod tests {
         let schemas = vec![make_table("orders", None), make_table("users", None)];
         let mut anomalies = HashMap::new();
         anomalies.insert("orders".to_string(), 7u64);
-        let (ov, ov_n, sel, abs, casc) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new());
-        let rows = build_table_rows(&schemas, &TableRowsCtx {
-            overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &anomalies,
-            grouped: &BTreeSet::new(), show_modified_only: false,
-        });
+        let (ov, ov_n, sel, abs, casc) = (
+            HashMap::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+        );
+        let rows = build_table_rows(
+            &schemas,
+            &TableRowsCtx {
+                overrides: &ov,
+                overflow_names: &ov_n,
+                selected_indices: &sel,
+                absorbed_names: &abs,
+                cascaded_names: &casc,
+                filter: "",
+                show_warn_only: false,
+                anomaly_counts: &anomalies,
+                grouped: &BTreeSet::new(),
+                show_modified_only: false,
+            },
+        );
         assert_eq!(rows[0].anomaly_count, 7, "orders must carry anomaly count");
         assert_eq!(rows[1].anomaly_count, 0, "users has no anomaly");
     }

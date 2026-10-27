@@ -19,7 +19,8 @@ impl SchemaState {
     pub fn apply_shift_click(&mut self, i: usize, anchor: usize, visible_indices: &[usize]) {
         let lo = anchor.min(i);
         let hi = anchor.max(i);
-        let range: HashSet<usize> = visible_indices.iter()
+        let range: HashSet<usize> = visible_indices
+            .iter()
             .copied()
             .filter(|&idx| idx >= lo && idx <= hi)
             .collect();
@@ -57,11 +58,15 @@ pub fn select_children_visible(
     parent_idx: usize,
     visible_indices: &[usize],
 ) -> HashSet<usize> {
-    let Some(parent) = schemas.get(parent_idx) else { return HashSet::new() };
-    visible_indices.iter()
+    let Some(parent) = schemas.get(parent_idx) else {
+        return HashSet::new();
+    };
+    visible_indices
+        .iter()
         .copied()
         .filter(|&i| {
-            schemas.get(i)
+            schemas
+                .get(i)
                 .and_then(|t| t.parent_table.as_ref())
                 .is_some_and(|p| p == &parent.name)
         })
@@ -74,8 +79,14 @@ mod tests {
 
     // --- apply_click ---
 
-    fn schema_with_selection(selected: impl IntoIterator<Item = usize>, last: usize) -> SchemaState {
-        let mut s = SchemaState { selected_table_indices: selected.into_iter().collect(), ..Default::default() };
+    fn schema_with_selection(
+        selected: impl IntoIterator<Item = usize>,
+        last: usize,
+    ) -> SchemaState {
+        let mut s = SchemaState {
+            selected_table_indices: selected.into_iter().collect(),
+            ..Default::default()
+        };
         s.last_selected_idx = last;
         s
     }
@@ -108,7 +119,11 @@ mod tests {
     fn ctrl_click_cannot_deselect_last_item() {
         let mut s = schema_with_selection([0], 0);
         s.apply_click(0, true);
-        assert_eq!(s.selected_table_indices, HashSet::from([0]), "last item must stay selected");
+        assert_eq!(
+            s.selected_table_indices,
+            HashSet::from([0]),
+            "last item must stay selected"
+        );
     }
 
     // --- apply_shift_click ---
@@ -155,7 +170,9 @@ mod tests {
 
     fn make_schema(name: &str, parent: Option<&str>) -> TableSchema {
         let mut s = TableSchema::new(
-            name.to_string(), vec![name.to_string()], usize::from(parent.is_some()),
+            name.to_string(),
+            vec![name.to_string()],
+            usize::from(parent.is_some()),
         );
         s.parent_table = parent.map(str::to_string);
         s
@@ -164,10 +181,10 @@ mod tests {
     #[test]
     fn select_children_returns_direct_children() {
         let schemas = vec![
-            make_schema("product", None),          // 0
-            make_schema("product_image", Some("product")),  // 1
-            make_schema("product_tag", Some("product")),    // 2
-            make_schema("order", None),             // 3
+            make_schema("product", None),                  // 0
+            make_schema("product_image", Some("product")), // 1
+            make_schema("product_tag", Some("product")),   // 2
+            make_schema("order", None),                    // 3
         ];
         let visible = vec![0, 1, 2, 3];
         let result = select_children_visible(&schemas, 0, &visible);
@@ -178,8 +195,8 @@ mod tests {
     fn select_children_skips_invisible() {
         let schemas = vec![
             make_schema("product", None),
-            make_schema("product_image", Some("product")),  // 1
-            make_schema("product_tag", Some("product")),    // 2 — filtered out
+            make_schema("product_image", Some("product")), // 1
+            make_schema("product_tag", Some("product")),   // 2 — filtered out
         ];
         let visible = vec![0, 1]; // 2 not visible
         let result = select_children_visible(&schemas, 0, &visible);

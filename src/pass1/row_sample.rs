@@ -55,7 +55,14 @@ impl RowSampler {
     pub fn with_budgets(total_bytes: u64, row_budget: usize, byte_budget: usize) -> Self {
         let row_budget = row_budget.max(1);
         let stride = (total_bytes / u64::try_from(row_budget).unwrap_or(u64::MAX)).max(1);
-        Self { stride, next: stride, rows: Vec::new(), bytes: 0, row_budget, byte_budget }
+        Self {
+            stride,
+            next: stride,
+            rows: Vec::new(),
+            bytes: 0,
+            row_budget,
+            byte_budget,
+        }
     }
 
     /// True when the row ending at `end` (bytes read so far) is to be kept.
@@ -69,7 +76,9 @@ impl RowSampler {
         self.bytes += bytes.len();
         self.rows.push(SampledRow { key, bytes });
         self.next = (end / self.stride + 1) * self.stride;
-        while self.rows.len() > self.row_budget || (self.bytes > self.byte_budget && self.rows.len() > 1) {
+        while self.rows.len() > self.row_budget
+            || (self.bytes > self.byte_budget && self.rows.len() > 1)
+        {
             self.halve();
         }
     }
@@ -123,7 +132,11 @@ mod tests {
         let kept = feed(&mut s, 1_000, 100);
         assert_eq!(kept.len(), 100);
         assert!(kept.windows(2).all(|w| w[1] - w[0] == 10), "{kept:?}");
-        assert_eq!((kept[0], *kept.last().unwrap()), (9, 999), "one row per tenth of the file, to its end");
+        assert_eq!(
+            (kept[0], *kept.last().unwrap()),
+            (9, 999),
+            "one row per tenth of the file, to its end"
+        );
     }
 
     #[test]
@@ -132,7 +145,10 @@ mod tests {
         let mut s = RowSampler::with_budgets(1_000, 100, 1 << 20);
         let kept = feed(&mut s, 10_000, 100);
         assert!(kept.len() <= 100 && kept.len() >= 50, "{}", kept.len());
-        assert!(*kept.last().unwrap() > 9_000, "the end of the file is sampled: {kept:?}");
+        assert!(
+            *kept.last().unwrap() > 9_000,
+            "the end of the file is sampled: {kept:?}"
+        );
     }
 
     #[test]
@@ -149,7 +165,10 @@ mod tests {
 
     #[test]
     fn the_same_reading_gives_the_same_sample() {
-        let (mut a, mut b) = (RowSampler::with_budgets(5_000, 37, 1 << 20), RowSampler::with_budgets(5_000, 37, 1 << 20));
+        let (mut a, mut b) = (
+            RowSampler::with_budgets(5_000, 37, 1 << 20),
+            RowSampler::with_budgets(5_000, 37, 1 << 20),
+        );
         assert_eq!(feed(&mut a, 3_000, 70), feed(&mut b, 3_000, 70));
     }
 }

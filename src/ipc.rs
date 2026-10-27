@@ -155,7 +155,9 @@ mod tests {
 
     #[test]
     fn worker_command_serde_round_trip() {
-        let cmd = WorkerCommand { cmd: "cancel".to_string() };
+        let cmd = WorkerCommand {
+            cmd: "cancel".to_string(),
+        };
         let json = serde_json::to_string(&cmd).expect("serialize");
         let back: WorkerCommand = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.cmd, "cancel");

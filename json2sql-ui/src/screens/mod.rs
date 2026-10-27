@@ -11,20 +11,18 @@
 //! - Stratégies : voir `common/strategy_badges.rs`
 //! - Progress : voir `common/progress.rs`
 //! - Overrides : voir `common/overrides.rs`
-pub mod setup;
 pub mod analysis;
-pub mod strategy;
-pub mod preview;
 pub mod import;
+pub mod preview;
 pub mod resume;
+pub mod setup;
+pub mod strategy;
 pub mod table_list;
 
 mod common;
 pub use common::{
-    use_elapsed_timer,
-    PickResult, pick_file, pick_folder, pick_save_file,
-    strategy_label, strategy_badge, user_override_badge,
-    progress_pct, ProgressBar,
-    build_effective_schemas, display_schemas, group_preview, skip_cascade_names, splittable_tables, GroupPreview, PreviewGroup,
-    TableRowViewModel, TableRowsCtx, build_table_rows,
+    build_effective_schemas, build_table_rows, display_schemas, group_preview, pick_file,
+    pick_folder, pick_save_file, progress_pct, skip_cascade_names, splittable_tables,
+    strategy_badge, strategy_label, use_elapsed_timer, user_override_badge, GroupPreview,
+    PickResult, PreviewGroup, ProgressBar, TableRowViewModel, TableRowsCtx,
 };

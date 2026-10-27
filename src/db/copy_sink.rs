@@ -128,7 +128,11 @@ pub fn copy_sql(schema: &TableSchema, pg_schema: &str, freeze: bool) -> String {
 
 impl MemSink {
     pub fn new(schema: &TableSchema, pg_schema: &str) -> Self {
-        Self { buf: BytesMut::new(), row_count: 0, copy_sql: copy_sql(schema, pg_schema, false) }
+        Self {
+            buf: BytesMut::new(),
+            row_count: 0,
+            copy_sql: copy_sql(schema, pg_schema, false),
+        }
     }
 
     pub fn write_row(&mut self, row: &[u8]) {
@@ -142,24 +146,35 @@ const COPY_CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB per COPY feed call
 /// Flush `buf` to `PostgreSQL` via `COPY FROM STDIN`, streaming in 4 MiB chunks.
 /// No-op when `buf` is empty — avoids opening a COPY session for zero data.
 /// Row count tracking is the caller's responsibility.
-pub async fn flush_mem_sink_to_pg(buf: Bytes, copy_sql: &str, client: &Client) -> crate::error::Result<()> {
+pub async fn flush_mem_sink_to_pg(
+    buf: Bytes,
+    copy_sql: &str,
+    client: &Client,
+) -> crate::error::Result<()> {
     if buf.is_empty() {
         return Ok(());
     }
     // Opening the COPY can wait on a table lock; once data flows, a dropped sink sends CopyFail.
-    let sink = cancel_on_drop(client, client.copy_in::<_, Bytes>(copy_sql)).await
+    let sink = cancel_on_drop(client, client.copy_in::<_, Bytes>(copy_sql))
+        .await
         .map_err(|e| pg_err("COPY FROM STDIN (MemSink)", &e))?;
     let mut pinned = Box::pin(sink);
     let mut offset = 0;
     while offset < buf.len() {
         let end = (offset + COPY_CHUNK_SIZE).min(buf.len());
-        pinned.feed(buf.slice(offset..end)).await
+        pinned
+            .feed(buf.slice(offset..end))
+            .await
             .map_err(|e| pg_err("COPY feed chunk (MemSink)", &e))?;
         offset = end;
     }
-    pinned.flush().await
+    pinned
+        .flush()
+        .await
         .map_err(|e| pg_err("COPY flush (MemSink)", &e))?;
-    pinned.close().await
+    pinned
+        .close()
+        .await
         .map_err(|e| pg_err("COPY close (MemSink)", &e))?;
     Ok(())
 }
@@ -198,7 +213,9 @@ mod tests {
     #[test]
     fn copy_sql_freeze_adds_the_option() {
         let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
-        schema.columns.push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        schema
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         assert_eq!(
             copy_sql(&schema, "public", true),
             r#"COPY "public"."t" ("j2s_id") FROM STDIN WITH (FORMAT text, DELIMITER E'\t', NULL '\N', FREEZE)"#
@@ -270,7 +287,9 @@ mod tests {
         let buf = Bytes::from(vec![0u8; chunk_size * 3]);
         let chunks = collect_chunks(&buf, chunk_size);
         assert_eq!(chunks.len(), 3);
-        for c in &chunks { assert_eq!(c.len(), chunk_size); }
+        for c in &chunks {
+            assert_eq!(c.len(), chunk_size);
+        }
     }
 
     #[test]

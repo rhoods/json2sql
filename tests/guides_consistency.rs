@@ -7,13 +7,13 @@
 //!   partagée dans `tests/common/code_items.rs`. Filet : un mot cité entre backticks dans le texte
 //!   qui est le nom exact d'une définition doit figurer dans `symbols:`.
 //! - Niveau 2 : ce qui s'énumère dans le code est mentionné dans la fiche. Pilote : variantes
-//!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`),
-//!   variantes d'`InferredType` (fiche `pass1.md`), variantes de `KeyShape` et `ChildKind`
-//!   (fiche `finalisation.md`), variantes de `ProgressEvent`
-//!   (fiche `worker-ipc.md`), options de la CLI et leurs valeurs
-//!   dans `usage.md` (fiche `cli-pipeline.md`), variantes de `PgType` (fiche `db.md`), variantes de `Signal`
-//!   (fiche `groupes-colonnes.md`), variantes d'`AppScreen` (fiche `ihm.md`), variantes de `ConfigWarning` et
-//!   `UserOverride` (fiche `config-toml.md`).
+//!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL`
+//!   (fiche `ajouter-une-strategie.md`), variantes d'`InferredType` (fiche `pass1.md`), variantes
+//!   de `KeyShape` et `ChildKind` (fiche `finalisation.md`), variantes de `ProgressEvent`
+//!   (fiche `worker-ipc.md`), options de la CLI et leurs valeurs dans `usage.md`
+//!   (fiche `cli-pipeline.md`), variantes de `PgType` (fiche `db.md`), variantes de `Signal`
+//!   (fiche `groupes-colonnes.md`), variantes d'`AppScreen` (fiche `ihm.md`), variantes de
+//!   `ConfigWarning` et `UserOverride` (fiche `config-toml.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
@@ -117,10 +117,16 @@ fn guide_references_exist() {
     let names = defined_names(&root);
     let mut errors = Vec::new();
     for path in guide_paths(&root) {
-        let display = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+        let display = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
         let content = fs::read_to_string(&path).unwrap();
         let Some(fm) = front_matter(&content) else {
-            errors.push(format!("  {display}: pas d'en-tête YAML entre deux lignes `---`"));
+            errors.push(format!(
+                "  {display}: pas d'en-tête YAML entre deux lignes `---`"
+            ));
             continue;
         };
         if fm.verified_at.is_none() {
@@ -133,7 +139,9 @@ fn guide_references_exist() {
         }
         for symbol in &fm.symbols {
             if !names.contains(symbol) {
-                errors.push(format!("  {display}: symbols: `{symbol}` n'est défini nulle part"));
+                errors.push(format!(
+                    "  {display}: symbols: `{symbol}` n'est défini nulle part"
+                ));
             }
         }
     }
@@ -147,7 +155,9 @@ fn guide_references_exist() {
 /// Mots entre backticks simples du corps de la fiche (après l'en-tête), hors blocs ```.
 fn cited_spans(content: &str) -> Vec<String> {
     // Le `---` d'ouverture n'a pas de `\n` devant : le premier `\n---\n` est la fermeture.
-    let body = content.split_once("\n---\n").map_or(content, |(_, body)| body);
+    let body = content
+        .split_once("\n---\n")
+        .map_or(content, |(_, body)| body);
     let mut in_fence = false;
     let mut spans = Vec::new();
     for line in body.lines() {
@@ -174,7 +184,11 @@ fn cited_symbols_are_listed() {
     let names = defined_names(&root);
     let mut errors = Vec::new();
     for path in guide_paths(&root) {
-        let display = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+        let display = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
         let content = fs::read_to_string(&path).unwrap();
         let Some(fm) = front_matter(&content) else {
             continue; // signalé par `guide_references_exist`
@@ -187,7 +201,9 @@ fn cited_symbols_are_listed() {
         missing.sort();
         missing.dedup();
         for s in missing {
-            errors.push(format!("  {display}: `{s}` cité dans le texte mais absent de symbols:"));
+            errors.push(format!(
+                "  {display}: `{s}` cité dans le texte mais absent de symbols:"
+            ));
         }
     }
     assert!(
@@ -234,7 +250,10 @@ fn strategy_guide_lists_every_inferred_strategy() {
     let root = workspace_root();
     let guide = fs::read_to_string(root.join(STRATEGY_GUIDE)).unwrap();
     let variants = enum_variants(&root, "src/schema/table_schema.rs", "InferredStrategy");
-    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    assert!(
+        variants.len() > 1,
+        "extraction des variantes cassée : {variants:?}"
+    );
     let missing = variants_missing_from_table(&guide, &variants);
     assert!(
         missing.is_empty(),
@@ -250,7 +269,10 @@ fn pass1_guide_lists_every_inferred_type() {
     let root = workspace_root();
     let guide = fs::read_to_string(root.join(PASS1_GUIDE)).unwrap();
     let variants = enum_variants(&root, "src/schema/type_tracker.rs", "InferredType");
-    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    assert!(
+        variants.len() > 1,
+        "extraction des variantes cassée : {variants:?}"
+    );
     let missing = variants_missing_from_table(&guide, &variants);
     assert!(
         missing.is_empty(),
@@ -267,7 +289,10 @@ fn finalisation_guide_lists_key_shapes_and_child_kinds() {
     let guide = fs::read_to_string(root.join(FINALISATION_GUIDE)).unwrap();
     for enum_name in ["KeyShape", "ChildKind"] {
         let variants = enum_variants(&root, "src/schema/table_schema.rs", enum_name);
-        assert!(variants.len() > 1, "extraction des variantes de {enum_name} cassée : {variants:?}");
+        assert!(
+            variants.len() > 1,
+            "extraction des variantes de {enum_name} cassée : {variants:?}"
+        );
         let missing = variants_missing_from_table(&guide, &variants);
         assert!(
             missing.is_empty(),
@@ -283,7 +308,10 @@ fn worker_ipc_guide_lists_every_progress_event() {
     let root = workspace_root();
     let guide = fs::read_to_string(root.join(WORKER_IPC_GUIDE)).unwrap();
     let variants = enum_variants(&root, "src/io/progress_event.rs", "ProgressEvent");
-    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    assert!(
+        variants.len() > 1,
+        "extraction des variantes cassée : {variants:?}"
+    );
     let missing = variants_missing_from_table(&guide, &variants);
     assert!(
         missing.is_empty(),
@@ -309,11 +337,16 @@ fn cli_options_documented() {
         .and_then(|(_, rest)| rest.split("\n### ").next())
         .expect("section « Paramètres de `inspect` » introuvable dans usage.md");
     let cli = json2sql::cli::Cli::command();
-    let inspect = cli.find_subcommand("inspect").expect("sous-commande `inspect` introuvable");
+    let inspect = cli
+        .find_subcommand("inspect")
+        .expect("sous-commande `inspect` introuvable");
 
     let mut errors = Vec::new();
     let mut checked = 0;
-    for (cmd, text, where_) in [(&cli, usage.as_str(), "usage.md"), (inspect, inspect_section, "usage.md § inspect")] {
+    for (cmd, text, where_) in [
+        (&cli, usage.as_str(), "usage.md"),
+        (inspect, inspect_section, "usage.md § inspect"),
+    ] {
         for arg in cmd.get_arguments() {
             let Some(long) = arg.get_long() else { continue }; // `FILE` d'inspect, positionnel
             if long == "help" || long == "version" {
@@ -325,15 +358,25 @@ fn cli_options_documented() {
                 continue;
             };
             // Les booléens ont `true`/`false` pour valeurs : seules comptent les options à valeur.
-            let values = if arg.get_action().takes_values() { arg.get_possible_values() } else { Vec::new() };
+            let values = if arg.get_action().takes_values() {
+                arg.get_possible_values()
+            } else {
+                Vec::new()
+            };
             for value in values {
                 if !row.contains(&format!("`{}`", value.get_name())) {
-                    errors.push(format!("  {where_} : `{}` absent de la ligne `--{long}`", value.get_name()));
+                    errors.push(format!(
+                        "  {where_} : `{}` absent de la ligne `--{long}`",
+                        value.get_name()
+                    ));
                 }
             }
         }
     }
-    assert!(checked > 20, "extraction des options cassée : {checked} options");
+    assert!(
+        checked > 20,
+        "extraction des options cassée : {checked} options"
+    );
 
     // L'aide de `--disable-strategy` recopie les valeurs de `StrategyName::OPTIONAL` (odeur 4 de #96).
     let help = cli
@@ -344,10 +387,17 @@ fn cli_options_documented() {
         .unwrap_or_default();
     for s in StrategyName::OPTIONAL {
         if !help.contains(s.as_str()) {
-            errors.push(format!("  src/cli.rs : `{}` absent de l'aide de `--disable-strategy`", s.as_str()));
+            errors.push(format!(
+                "  src/cli.rs : `{}` absent de l'aide de `--disable-strategy`",
+                s.as_str()
+            ));
         }
     }
-    assert!(errors.is_empty(), "Options de la CLI non documentées :\n{}", errors.join("\n"));
+    assert!(
+        errors.is_empty(),
+        "Options de la CLI non documentées :\n{}",
+        errors.join("\n")
+    );
 }
 
 /// Niveau 2 : chaque variante de `PgType` a sa ligne dans le tableau des types de la fiche base
@@ -358,7 +408,10 @@ fn db_guide_lists_every_pg_type() {
     let root = workspace_root();
     let guide = fs::read_to_string(root.join(DB_GUIDE)).unwrap();
     let variants = enum_variants(&root, "src/schema/type_tracker.rs", "PgType");
-    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    assert!(
+        variants.len() > 1,
+        "extraction des variantes cassée : {variants:?}"
+    );
     let missing = variants_missing_from_table(&guide, &variants);
     assert!(
         missing.is_empty(),
@@ -374,7 +427,10 @@ fn groups_guide_lists_every_signal() {
     let root = workspace_root();
     let guide = fs::read_to_string(root.join(GROUPS_GUIDE)).unwrap();
     let variants = enum_variants(&root, "src/schema/grouping/proposal.rs", "Signal");
-    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    assert!(
+        variants.len() > 1,
+        "extraction des variantes cassée : {variants:?}"
+    );
     let missing = variants_missing_from_table(&guide, &variants);
     assert!(
         missing.is_empty(),
@@ -388,7 +444,10 @@ fn ihm_guide_lists_every_app_screen() {
     let root = workspace_root();
     let guide = fs::read_to_string(root.join(IHM_GUIDE)).unwrap();
     let variants = enum_variants(&root, "json2sql-ui/src/state/mod.rs", "AppScreen");
-    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    assert!(
+        variants.len() > 1,
+        "extraction des variantes cassée : {variants:?}"
+    );
     let missing = variants_missing_from_table(&guide, &variants);
     assert!(
         missing.is_empty(),
@@ -407,7 +466,10 @@ fn config_guide_lists_every_warning_and_override() {
         ("src/schema/table_schema.rs", "UserOverride"),
     ] {
         let variants = enum_variants(&root, file, enum_name);
-        assert!(variants.len() > 1, "extraction des variantes de {enum_name} cassée : {variants:?}");
+        assert!(
+            variants.len() > 1,
+            "extraction des variantes de {enum_name} cassée : {variants:?}"
+        );
         let missing = variants_missing_from_table(&guide, &variants);
         assert!(
             missing.is_empty(),
@@ -438,13 +500,21 @@ fn optional_strategies_documented() {
     for s in StrategyName::OPTIONAL {
         let name = format!("`{}`", s.as_str());
         if !disable_column.contains(&name) {
-            errors.push(format!("  {STRATEGY_GUIDE} : {name} absent de la colonne « Désactivable »"));
+            errors.push(format!(
+                "  {STRATEGY_GUIDE} : {name} absent de la colonne « Désactivable »"
+            ));
         }
         if !usage_line.contains(&name) {
-            errors.push(format!("  usage.md : {name} absent de la ligne `--disable-strategy`"));
+            errors.push(format!(
+                "  usage.md : {name} absent de la ligne `--disable-strategy`"
+            ));
         }
     }
-    assert!(errors.is_empty(), "Stratégies désactivables non documentées :\n{}", errors.join("\n"));
+    assert!(
+        errors.is_empty(),
+        "Stratégies désactivables non documentées :\n{}",
+        errors.join("\n")
+    );
 }
 
 #[cfg(test)]
@@ -472,7 +542,11 @@ mod tests {
 
     #[test]
     fn enum_variants_reads_explicit_discriminants() {
-        let variants = enum_variants(&workspace_root(), "src/schema/type_tracker.rs", "InferredType");
+        let variants = enum_variants(
+            &workspace_root(),
+            "src/schema/type_tracker.rs",
+            "InferredType",
+        );
         assert_eq!(variants.first().map(String::as_str), Some("Null"));
         assert!(variants.contains(&"Array".to_string()), "{variants:?}");
     }

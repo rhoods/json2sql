@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use json2sql::ipc::{WorkerConfig, WorkerResult};
 use json2sql::io::progress_event::ProgressEvent;
+use json2sql::ipc::{WorkerConfig, WorkerResult};
 
 use crate::cancel::CancelToken;
 use crate::summary::ImportSummary;
@@ -71,7 +71,9 @@ pub async fn run_pipeline(
         .map_err(|_| "PostgreSQL connection timed out (10s)".to_string())?
         .map_err(|e| e.to_string())?;
 
-        tokio::spawn(async move { let _ = connection.await; });
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
 
         if cancel.is_cancelled() {
             return Err("cancelled".to_string());
@@ -172,7 +174,10 @@ mod tests {
     fn build_pg_url_special_chars_in_password() {
         let cfg = base_cfg();
         let url = build_pg_url(&cfg, "p@ss:word");
-        assert!(url.contains("p%40ss%3Aword"), "@ and : must be percent-encoded");
+        assert!(
+            url.contains("p%40ss%3Aword"),
+            "@ and : must be percent-encoded"
+        );
         assert!(!url.contains("p@ss"), "raw @ must not appear in URL");
     }
 
@@ -183,6 +188,9 @@ mod tests {
             ..base_cfg()
         };
         let url = build_pg_url(&cfg, "pw");
-        assert!(url.contains("[%3A%3A1]"), "IPv6 host must be bracketed and encoded");
+        assert!(
+            url.contains("[%3A%3A1]"),
+            "IPv6 host must be bracketed and encoded"
+        );
     }
 }

@@ -3,8 +3,8 @@ mod common;
 
 // pass2 is used by all async tests in this file; pass1-only test_schema_inference_no_db
 // does not use it but sharing the import avoids per-test redundancy.
-use json2sql::{db, pass1, pass2};
 use json2sql::schema::table_schema::InferredStrategy;
+use json2sql::{db, pass1, pass2};
 use std::io::Write;
 
 #[tokio::test]
@@ -12,9 +12,19 @@ async fn test_nested_row_counts_json_array() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("users", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("users_address").unwrap(), 3);
@@ -22,13 +32,23 @@ async fn test_nested_row_counts_json_array() {
         assert_eq!(*p2.rows_per_table.get("users_orders_items").unwrap(), 3);
 
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
-        assert_eq!(common::row_count(&client, &schema, "users_address").await, 3);
-        assert_eq!(common::array_elements(&client, &schema, "users", "tags").await, 6);
+        assert_eq!(
+            common::row_count(&client, &schema, "users_address").await,
+            3
+        );
+        assert_eq!(
+            common::array_elements(&client, &schema, "users", "tags").await,
+            6
+        );
         assert_eq!(common::row_count(&client, &schema, "users_orders").await, 3);
-        assert_eq!(common::row_count(&client, &schema, "users_orders_items").await, 3);
+        assert_eq!(
+            common::row_count(&client, &schema, "users_orders_items").await,
+            3
+        );
 
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
-    }).await;
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -36,16 +56,30 @@ async fn test_nested_row_counts_ndjson() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.jsonl");
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("users", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
-        assert_eq!(common::array_elements(&client, &schema, "users", "tags").await, 6);
+        assert_eq!(
+            common::array_elements(&client, &schema, "users", "tags").await,
+            6
+        );
         assert_eq!(common::row_count(&client, &schema, "users_orders").await, 3);
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -58,18 +92,39 @@ async fn test_drop_existing() {
         let path = common::fixture("users.json");
 
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("users", &schema),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
 
         let p1b = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1b.schemas, &schema, true, None).await.unwrap();
-        pass2::runner::run(&path, &p1b.schemas, &client, &url, &common::pass2_config("users", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1b.schemas, &schema, true, None)
+            .await
+            .unwrap();
+        pass2::runner::run(
+            &path,
+            &p1b.schemas,
+            &client,
+            &url,
+            &common::pass2_config("users", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,16 +135,30 @@ async fn test_transaction_commit() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("users", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
-        assert_eq!(common::array_elements(&client, &schema, "users", "tags").await, 6);
+        assert_eq!(
+            common::array_elements(&client, &schema, "users", "tags").await,
+            6
+        );
         assert_eq!(common::row_count(&client, &schema, "users_orders").await, 3);
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +176,10 @@ fn test_schema_inference_no_db() {
     let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"users"));
     assert!(names.contains(&"users_address"));
-    assert!(!names.contains(&"users_tags"), "scalar arrays are columns, not junction tables");
+    assert!(
+        !names.contains(&"users_tags"),
+        "scalar arrays are columns, not junction tables"
+    );
     assert!(names.contains(&"users_orders"));
     assert!(names.contains(&"users_orders_items"));
 
@@ -146,32 +218,77 @@ fn test_keyed_pivot_mixed_key_shapes() {
 
     // products + products_images (parent SiblingCollapseMulti) + 2 tables pivots synthétiques.
     assert_eq!(p1.schemas.len(), 4, "attendu 4 schemas, obtenu: {names:?}");
-    assert!(names.contains(&"products"),              "products manquant");
-    assert!(names.contains(&"products_images"),       "products_images (parent) manquant");
-    assert!(names.contains(&"products_images_num"),   "products_images_num (pivot numérique) manquant");
-    assert!(names.contains(&"products_images_key"),   "products_images_key (pivot textuel) manquant");
-
-    let images = p1.schemas.iter().find(|s| s.name == "products_images").unwrap();
+    assert!(names.contains(&"products"), "products manquant");
     assert!(
-        matches!(images.inferred_strategy, InferredStrategy::SiblingCollapseMulti(_)),
+        names.contains(&"products_images"),
+        "products_images (parent) manquant"
+    );
+    assert!(
+        names.contains(&"products_images_num"),
+        "products_images_num (pivot numérique) manquant"
+    );
+    assert!(
+        names.contains(&"products_images_key"),
+        "products_images_key (pivot textuel) manquant"
+    );
+
+    let images = p1
+        .schemas
+        .iter()
+        .find(|s| s.name == "products_images")
+        .unwrap();
+    assert!(
+        matches!(
+            images.inferred_strategy,
+            InferredStrategy::SiblingCollapseMulti(_)
+        ),
         "products_images doit avoir SiblingCollapseMulti"
     );
 
     // Table pivot numérique : key_id + imgid + uploader
-    let num_pivot = p1.schemas.iter().find(|s| s.name == "products_images_num").unwrap();
-    assert!(matches!(num_pivot.inferred_strategy, InferredStrategy::SiblingCollapse(_)));
+    let num_pivot = p1
+        .schemas
+        .iter()
+        .find(|s| s.name == "products_images_num")
+        .unwrap();
+    assert!(matches!(
+        num_pivot.inferred_strategy,
+        InferredStrategy::SiblingCollapse(_)
+    ));
     let num_cols: Vec<&str> = num_pivot.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(num_cols.contains(&"imgid"),    "pivot numérique : imgid manquant");
-    assert!(num_cols.contains(&"uploader"), "pivot numérique : uploader manquant");
-    assert!(!num_cols.contains(&"rev"),     "pivot numérique ne doit pas avoir rev");
+    assert!(
+        num_cols.contains(&"imgid"),
+        "pivot numérique : imgid manquant"
+    );
+    assert!(
+        num_cols.contains(&"uploader"),
+        "pivot numérique : uploader manquant"
+    );
+    assert!(
+        !num_cols.contains(&"rev"),
+        "pivot numérique ne doit pas avoir rev"
+    );
 
     // Table pivot textuelle : key + imgid + rev
-    let key_pivot = p1.schemas.iter().find(|s| s.name == "products_images_key").unwrap();
-    assert!(matches!(key_pivot.inferred_strategy, InferredStrategy::SiblingCollapse(_)));
+    let key_pivot = p1
+        .schemas
+        .iter()
+        .find(|s| s.name == "products_images_key")
+        .unwrap();
+    assert!(matches!(
+        key_pivot.inferred_strategy,
+        InferredStrategy::SiblingCollapse(_)
+    ));
     let key_cols: Vec<&str> = key_pivot.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(key_cols.contains(&"imgid"),     "pivot textuel : imgid manquant");
-    assert!(key_cols.contains(&"rev"),       "pivot textuel : rev manquant");
-    assert!(!key_cols.contains(&"uploader"), "pivot textuel ne doit pas avoir uploader");
+    assert!(
+        key_cols.contains(&"imgid"),
+        "pivot textuel : imgid manquant"
+    );
+    assert!(key_cols.contains(&"rev"), "pivot textuel : rev manquant");
+    assert!(
+        !key_cols.contains(&"uploader"),
+        "pivot textuel ne doit pas avoir uploader"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -197,30 +314,60 @@ fn test_sibling_significant_container_not_diluting_jaccard() {
 
     // T1: images_uploaded must NOT have been absorbed into the text pivot.
     // It is a significant container (pure container with many children) — left independent.
-    assert!(names.contains(&"root_images_uploaded"),
-        "images_uploaded doit rester indépendant (significant container); schemas: {names:?}");
+    assert!(
+        names.contains(&"root_images_uploaded"),
+        "images_uploaded doit rester indépendant (significant container); schemas: {names:?}"
+    );
 
     // T1: text pivot must exist (front/ingredients/nutrition collapsed, uploaded excluded).
-    assert!(names.contains(&"root_images_key"),
-        "root_images_key (pivot textuel) doit exister; schemas: {names:?}");
+    assert!(
+        names.contains(&"root_images_key"),
+        "root_images_key (pivot textuel) doit exister; schemas: {names:?}"
+    );
 
     // T1: images parent — all text children → synthetic pivot → SiblingCollapseMulti with one group.
     let images = p1.schemas.iter().find(|s| s.name == "root_images").unwrap();
-    assert!(matches!(images.inferred_strategy, InferredStrategy::SiblingCollapseMulti(_)),
-        "root_images doit avoir SiblingCollapseMulti; actual: {:?}", images.inferred_strategy);
+    assert!(
+        matches!(
+            images.inferred_strategy,
+            InferredStrategy::SiblingCollapseMulti(_)
+        ),
+        "root_images doit avoir SiblingCollapseMulti; actual: {:?}",
+        images.inferred_strategy
+    );
 
     // Pure container detection: images_uploaded is itself a pure container → classic SiblingCollapse.
     // Its numeric children (100..108) are collapsed into it directly.
-    let uploaded = p1.schemas.iter().find(|s| s.name == "root_images_uploaded").unwrap();
-    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-        "root_images_uploaded doit avoir SiblingCollapse (pure container); actual: {:?}", uploaded.inferred_strategy);
+    let uploaded = p1
+        .schemas
+        .iter()
+        .find(|s| s.name == "root_images_uploaded")
+        .unwrap();
+    assert!(
+        matches!(
+            uploaded.inferred_strategy,
+            InferredStrategy::SiblingCollapse(_)
+        ),
+        "root_images_uploaded doit avoir SiblingCollapse (pure container); actual: {:?}",
+        uploaded.inferred_strategy
+    );
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(cols.contains(&"uploaded_t"), "SiblingCollapse uploaded : uploaded_t manquant; cols: {cols:?}");
-    assert!(cols.contains(&"uploader"),   "SiblingCollapse uploaded : uploader manquant; cols: {cols:?}");
+    assert!(
+        cols.contains(&"uploaded_t"),
+        "SiblingCollapse uploaded : uploaded_t manquant; cols: {cols:?}"
+    );
+    assert!(
+        cols.contains(&"uploader"),
+        "SiblingCollapse uploaded : uploader manquant; cols: {cols:?}"
+    );
 
     // The individual numeric children must have been absorbed (excluded from schema).
-    assert!(!names.iter().any(|n| n.starts_with("root_images_uploaded_1")),
-        "root_images_uploaded_1xx doivent être absorbés; schemas: {names:?}");
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.starts_with("root_images_uploaded_1")),
+        "root_images_uploaded_1xx doivent être absorbés; schemas: {names:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -246,20 +393,36 @@ fn test_sibling_noisy_schema_jaccard_filter() {
     // Le groupe {uploaded.1, uploaded.2, uploaded.3, uploaded.4} doit avoir collapser
     // malgré les colonnes parasites dans uploaded.4.
     let uploaded = p1.schemas.iter().find(|s| s.name == "root_images_uploaded");
-    assert!(uploaded.is_some(),
-        "root_images_uploaded doit exister; schemas: {names:?}");
+    assert!(
+        uploaded.is_some(),
+        "root_images_uploaded doit exister; schemas: {names:?}"
+    );
     let uploaded = uploaded.unwrap();
-    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-        "root_images_uploaded doit avoir SiblingCollapse; actual: {:?}", uploaded.inferred_strategy);
+    assert!(
+        matches!(
+            uploaded.inferred_strategy,
+            InferredStrategy::SiblingCollapse(_)
+        ),
+        "root_images_uploaded doit avoir SiblingCollapse; actual: {:?}",
+        uploaded.inferred_strategy
+    );
 
     // Les colonnes stables (uploaded_t, uploader) doivent être présentes.
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(cols.contains(&"uploaded_t"), "uploaded_t manquant; cols: {cols:?}");
-    assert!(cols.contains(&"uploader"),   "uploader manquant; cols: {cols:?}");
+    assert!(
+        cols.contains(&"uploaded_t"),
+        "uploaded_t manquant; cols: {cols:?}"
+    );
+    assert!(
+        cols.contains(&"uploader"),
+        "uploader manquant; cols: {cols:?}"
+    );
 
     // Les tables individuelles uploaded.N doivent être absorbées.
-    assert!(!names.iter().any(|n| n.starts_with("root_images_uploaded_")),
-        "root_images_uploaded_N doivent être absorbés; schemas: {names:?}");
+    assert!(
+        !names.iter().any(|n| n.starts_with("root_images_uploaded_")),
+        "root_images_uploaded_N doivent être absorbés; schemas: {names:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -285,26 +448,44 @@ fn test_sibling_all_pure_container_collapse() {
 
     // root_uploaded doit exister et avoir SiblingCollapse.
     let uploaded = p1.schemas.iter().find(|s| s.name == "root_uploaded");
-    assert!(uploaded.is_some(),
-        "root_uploaded doit exister; schemas: {names:?}");
-    assert!(matches!(uploaded.unwrap().inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-        "root_uploaded doit avoir SiblingCollapse; actual: {:?}", uploaded.unwrap().inferred_strategy);
+    assert!(
+        uploaded.is_some(),
+        "root_uploaded doit exister; schemas: {names:?}"
+    );
+    assert!(
+        matches!(
+            uploaded.unwrap().inferred_strategy,
+            InferredStrategy::SiblingCollapse(_)
+        ),
+        "root_uploaded doit avoir SiblingCollapse; actual: {:?}",
+        uploaded.unwrap().inferred_strategy
+    );
 
     // Les tables sibling individuelles (1, 2, 3) doivent être absorbées.
     for n in &["root_uploaded_1", "root_uploaded_2", "root_uploaded_3"] {
-        assert!(!names.contains(n),
-            "{n} doit être absorbé; schemas: {names:?}");
+        assert!(
+            !names.contains(n),
+            "{n} doit être absorbé; schemas: {names:?}"
+        );
     }
 
     // Les tables de cascade (co-siblings fusionnés) doivent survivre.
-    assert!(names.contains(&"root_uploaded_sizes"),
-        "root_uploaded_sizes doit survivre (wave-1 merge); schemas: {names:?}");
-    assert!(names.contains(&"root_uploaded_imgid"),
-        "root_uploaded_imgid doit survivre (wave-1 merge); schemas: {names:?}");
-    assert!(names.contains(&"root_uploaded_selected"),
-        "root_uploaded_selected doit survivre (wave-1 merge); schemas: {names:?}");
-    assert!(names.contains(&"root_uploaded_sizes_100"),
-        "root_uploaded_sizes_100 doit survivre (wave-2 merge); schemas: {names:?}");
+    assert!(
+        names.contains(&"root_uploaded_sizes"),
+        "root_uploaded_sizes doit survivre (wave-1 merge); schemas: {names:?}"
+    );
+    assert!(
+        names.contains(&"root_uploaded_imgid"),
+        "root_uploaded_imgid doit survivre (wave-1 merge); schemas: {names:?}"
+    );
+    assert!(
+        names.contains(&"root_uploaded_selected"),
+        "root_uploaded_selected doit survivre (wave-1 merge); schemas: {names:?}"
+    );
+    assert!(
+        names.contains(&"root_uploaded_sizes_100"),
+        "root_uploaded_sizes_100 doit survivre (wave-2 merge); schemas: {names:?}"
+    );
 
     // root_uploaded.child_routes doit pointer vers les tables fusionnées.
     let uploaded = uploaded.unwrap();
@@ -315,8 +496,7 @@ fn test_sibling_all_pure_container_collapse() {
     );
 
     // root + root_uploaded + sizes + imgid + selected + sizes_100 = 6.
-    assert_eq!(p1.schemas.len(), 6,
-        "attendu 6 schemas; obtenu: {names:?}");
+    assert_eq!(p1.schemas.len(), 6, "attendu 6 schemas; obtenu: {names:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -341,10 +521,17 @@ fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
 
     // root_front doit avoir SiblingCollapse (wave 0 a fusionné en, fr, de).
     let front = p1.schemas.iter().find(|s| s.name == "root_front");
-    assert!(front.is_some(), "root_front doit exister; schemas: {names:?}");
     assert!(
-        matches!(front.unwrap().inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-        "root_front doit avoir SiblingCollapse; actual: {:?}", front.unwrap().inferred_strategy
+        front.is_some(),
+        "root_front doit exister; schemas: {names:?}"
+    );
+    assert!(
+        matches!(
+            front.unwrap().inferred_strategy,
+            InferredStrategy::SiblingCollapse(_)
+        ),
+        "root_front doit avoir SiblingCollapse; actual: {:?}",
+        front.unwrap().inferred_strategy
     );
 
     // root_front_sizes doit survivre (target de child_routes, wave 1).
@@ -357,8 +544,14 @@ fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
     // root_front_sizes doit avoir les colonnes w et h (union des co-siblings).
     let sizes = sizes.unwrap();
     let cols: Vec<&str> = sizes.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(cols.contains(&"w"), "w manquant dans root_front_sizes; cols: {cols:?}");
-    assert!(cols.contains(&"h"), "h manquant dans root_front_sizes; cols: {cols:?}");
+    assert!(
+        cols.contains(&"w"),
+        "w manquant dans root_front_sizes; cols: {cols:?}"
+    );
+    assert!(
+        cols.contains(&"h"),
+        "h manquant dans root_front_sizes; cols: {cols:?}"
+    );
 
     // root_front.child_routes["sizes"] doit pointer vers root_front_sizes.
     let front = front.unwrap();
@@ -369,14 +562,22 @@ fn test_cascade_wave1_child_route_target_survives_keyed_pivot_parent() {
     );
 
     // Tables individuelles absorbées.
-    for n in &["root_front_en", "root_front_fr", "root_front_de",
-               "root_front_en_sizes", "root_front_fr_sizes", "root_front_de_sizes"] {
-        assert!(!names.contains(n), "{n} doit être absorbé; schemas: {names:?}");
+    for n in &[
+        "root_front_en",
+        "root_front_fr",
+        "root_front_de",
+        "root_front_en_sizes",
+        "root_front_fr_sizes",
+        "root_front_de_sizes",
+    ] {
+        assert!(
+            !names.contains(n),
+            "{n} doit être absorbé; schemas: {names:?}"
+        );
     }
 
     // root + root_front + root_front_sizes = 3.
-    assert_eq!(p1.schemas.len(), 3,
-        "attendu 3 schemas; obtenu: {names:?}");
+    assert_eq!(p1.schemas.len(), 3, "attendu 3 schemas; obtenu: {names:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -399,20 +600,36 @@ fn test_sibling_pure_diluter_absorbed() {
 
     // root_uploaded doit avoir SiblingCollapse.
     let uploaded = p1.schemas.iter().find(|s| s.name == "root_uploaded");
-    assert!(uploaded.is_some(),
-        "root_uploaded doit exister; schemas: {names:?}");
+    assert!(
+        uploaded.is_some(),
+        "root_uploaded doit exister; schemas: {names:?}"
+    );
     let uploaded = uploaded.unwrap();
-    assert!(matches!(uploaded.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-        "root_uploaded doit avoir SiblingCollapse; actual: {:?}", uploaded.inferred_strategy);
+    assert!(
+        matches!(
+            uploaded.inferred_strategy,
+            InferredStrategy::SiblingCollapse(_)
+        ),
+        "root_uploaded doit avoir SiblingCollapse; actual: {:?}",
+        uploaded.inferred_strategy
+    );
 
     // Les colonnes data-bearing (x, y) doivent être présentes.
     let cols: Vec<&str> = uploaded.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(cols.contains(&"x"), "x manquant dans root_uploaded; cols: {cols:?}");
-    assert!(cols.contains(&"y"), "y manquant dans root_uploaded; cols: {cols:?}");
+    assert!(
+        cols.contains(&"x"),
+        "x manquant dans root_uploaded; cols: {cols:?}"
+    );
+    assert!(
+        cols.contains(&"y"),
+        "y manquant dans root_uploaded; cols: {cols:?}"
+    );
 
     // Tous les enfants (1, 2, 3, 4) doivent être absorbés.
-    assert!(!names.iter().any(|n| n.starts_with("root_uploaded_")),
-        "root_uploaded_N doivent être absorbés; schemas: {names:?}");
+    assert!(
+        !names.iter().any(|n| n.starts_with("root_uploaded_")),
+        "root_uploaded_N doivent être absorbés; schemas: {names:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -436,24 +653,43 @@ fn test_sibling_mixed_unified_fallback() {
 
     // root_sizes doit exister et avoir SiblingCollapse (pas SiblingCollapseMulti).
     let sizes = p1.schemas.iter().find(|s| s.name == "root_sizes");
-    assert!(sizes.is_some(),
-        "root_sizes doit exister; schemas: {names:?}");
+    assert!(
+        sizes.is_some(),
+        "root_sizes doit exister; schemas: {names:?}"
+    );
     let sizes = sizes.unwrap();
-    assert!(matches!(sizes.inferred_strategy, InferredStrategy::SiblingCollapse(_)),
-        "root_sizes doit avoir SiblingCollapse (fallback unifié); actual: {:?}", sizes.inferred_strategy);
+    assert!(
+        matches!(
+            sizes.inferred_strategy,
+            InferredStrategy::SiblingCollapse(_)
+        ),
+        "root_sizes doit avoir SiblingCollapse (fallback unifié); actual: {:?}",
+        sizes.inferred_strategy
+    );
 
     // Les colonnes w et h doivent être présentes.
     let cols: Vec<&str> = sizes.data_columns().map(|c| c.name.as_str()).collect();
-    assert!(cols.contains(&"w"), "w manquant dans root_sizes; cols: {cols:?}");
-    assert!(cols.contains(&"h"), "h manquant dans root_sizes; cols: {cols:?}");
+    assert!(
+        cols.contains(&"w"),
+        "w manquant dans root_sizes; cols: {cols:?}"
+    );
+    assert!(
+        cols.contains(&"h"),
+        "h manquant dans root_sizes; cols: {cols:?}"
+    );
 
     // Toutes les tables enfants (100, 400, full) doivent être absorbées.
-    assert!(!names.iter().any(|n| n.starts_with("root_sizes_")),
-        "root_sizes_N doivent être absorbés; schemas: {names:?}");
+    assert!(
+        !names.iter().any(|n| n.starts_with("root_sizes_")),
+        "root_sizes_N doivent être absorbés; schemas: {names:?}"
+    );
 
     // Seuls root et root_sizes doivent rester.
-    assert_eq!(p1.schemas.len(), 2,
-        "attendu 2 schemas (root + root_sizes), obtenu: {names:?}");
+    assert_eq!(
+        p1.schemas.len(),
+        2,
+        "attendu 2 schemas (root + root_sizes), obtenu: {names:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -463,27 +699,53 @@ fn test_sibling_mixed_unified_fallback() {
 fn test_schema_inference_parallel_parity_ndjson() {
     let path = common::fixture("users.jsonl");
 
-    let seq = pass1::runner::run(
-        &path, &common::pass1_config("users"), None,
-    ).unwrap();
+    let seq = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
 
     let par = pass1::runner::run_parallel(
-        &path, &pass1::runner::Pass1Config { num_workers: Some(2), ..common::pass1_config("users") }, None,
-    ).unwrap();
+        &path,
+        &pass1::runner::Pass1Config {
+            num_workers: Some(2),
+            ..common::pass1_config("users")
+        },
+        None,
+    )
+    .unwrap();
 
     assert_eq!(seq.total_rows, par.total_rows, "row count must match");
-    assert_eq!(seq.schemas.len(), par.schemas.len(), "table count must match");
+    assert_eq!(
+        seq.schemas.len(),
+        par.schemas.len(),
+        "table count must match"
+    );
 
     for s in &seq.schemas {
-        let p = par.schemas.iter().find(|ps| ps.name == s.name)
+        let p = par
+            .schemas
+            .iter()
+            .find(|ps| ps.name == s.name)
             .unwrap_or_else(|| panic!("table {} missing from parallel result", s.name));
-        assert_eq!(s.columns.len(), p.columns.len(),
-            "column count mismatch for table {}", s.name);
+        assert_eq!(
+            s.columns.len(),
+            p.columns.len(),
+            "column count mismatch for table {}",
+            s.name
+        );
         for col in &s.columns {
-            let pc = p.columns.iter().find(|c| c.name == col.name)
-                .unwrap_or_else(|| panic!("column {}.{} missing from parallel result", s.name, col.name));
-            assert_eq!(col.pg_type, pc.pg_type,
-                "pg_type mismatch for {}.{}", s.name, col.name);
+            let pc = p
+                .columns
+                .iter()
+                .find(|c| c.name == col.name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "column {}.{} missing from parallel result",
+                        s.name, col.name
+                    )
+                });
+            assert_eq!(
+                col.pg_type, pc.pg_type,
+                "pg_type mismatch for {}.{}",
+                s.name, col.name
+            );
         }
     }
 }
@@ -500,11 +762,18 @@ fn test_parallel_non_object_root_returns_error() {
     f.flush().unwrap();
 
     let result = pass1::runner::run_parallel(
-        f.path(), &pass1::runner::Pass1Config { num_workers: Some(2), ..common::pass1_config("root") }, None,
+        f.path(),
+        &pass1::runner::Pass1Config {
+            num_workers: Some(2),
+            ..common::pass1_config("root")
+        },
+        None,
     );
     match result {
-        Err(e) => assert!(e.to_string().contains("root level"),
-            "error message should mention root level: {e}"),
+        Err(e) => assert!(
+            e.to_string().contains("root level"),
+            "error message should mention root level: {e}"
+        ),
         Ok(_) => panic!("expected Err for non-object root element, got Ok"),
     };
 }
@@ -516,29 +785,58 @@ fn test_parallel_non_object_root_returns_error() {
 fn test_schema_inference_parallel_parity() {
     let path = common::fixture("users.json");
 
-    let seq = pass1::runner::run(
-        &path, &common::pass1_config("users"), None,
-    ).unwrap();
+    let seq = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
 
     let par = pass1::runner::run_parallel(
-        &path, &pass1::runner::Pass1Config { num_workers: Some(2), ..common::pass1_config("users") }, None,
-    ).unwrap();
+        &path,
+        &pass1::runner::Pass1Config {
+            num_workers: Some(2),
+            ..common::pass1_config("users")
+        },
+        None,
+    )
+    .unwrap();
 
     assert_eq!(seq.total_rows, par.total_rows, "row count must match");
-    assert_eq!(seq.schemas.len(), par.schemas.len(), "table count must match");
+    assert_eq!(
+        seq.schemas.len(),
+        par.schemas.len(),
+        "table count must match"
+    );
 
     for s in &seq.schemas {
-        let p = par.schemas.iter().find(|ps| ps.name == s.name)
+        let p = par
+            .schemas
+            .iter()
+            .find(|ps| ps.name == s.name)
             .unwrap_or_else(|| panic!("table {} missing from parallel result", s.name));
-        assert_eq!(s.columns.len(), p.columns.len(),
-            "column count mismatch for table {}", s.name);
+        assert_eq!(
+            s.columns.len(),
+            p.columns.len(),
+            "column count mismatch for table {}",
+            s.name
+        );
         for col in &s.columns {
-            let pc = p.columns.iter().find(|c| c.name == col.name)
-                .unwrap_or_else(|| panic!("column {}.{} missing from parallel result", s.name, col.name));
-            assert_eq!(col.pg_type, pc.pg_type,
-                "pg_type mismatch for {}.{}", s.name, col.name);
-            assert_eq!(col.not_null, pc.not_null,
-                "not_null mismatch for {}.{}", s.name, col.name);
+            let pc = p
+                .columns
+                .iter()
+                .find(|c| c.name == col.name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "column {}.{} missing from parallel result",
+                        s.name, col.name
+                    )
+                });
+            assert_eq!(
+                col.pg_type, pc.pg_type,
+                "pg_type mismatch for {}.{}",
+                s.name, col.name
+            );
+            assert_eq!(
+                col.not_null, pc.not_null,
+                "not_null mismatch for {}.{}",
+                s.name, col.name
+            );
         }
     }
 }
@@ -556,18 +854,34 @@ async fn test_scalar_arrays_are_array_columns() {
         assert_eq!(p1.schemas.len(), 4);
         let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"users"));
-        assert!(!names.contains(&"users_tags"), "users_tags should not exist: tags is an array column");
+        assert!(
+            !names.contains(&"users_tags"),
+            "users_tags should not exist: tags is an array column"
+        );
 
         let users_schema = p1.schemas.iter().find(|s| s.name == "users").unwrap();
         let tags_col = users_schema.find_by_original("tags").unwrap();
         assert!(
-            matches!(&tags_col.pg_type, json2sql::schema::type_tracker::PgType::Array(_)),
+            matches!(
+                &tags_col.pg_type,
+                json2sql::schema::type_tracker::PgType::Array(_)
+            ),
             "tags column should be PgType::Array"
         );
 
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("users", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
@@ -579,7 +893,8 @@ async fn test_scalar_arrays_are_array_columns() {
         let row = client.query_one(&sql, &[]).await.unwrap();
         let len: i32 = row.get(0);
         assert_eq!(len, 2);
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -603,42 +918,59 @@ async fn test_column_limit_guard_jsonb_non_root_with_children() {
         f.write_all(json).unwrap();
         f.flush().unwrap();
 
-        let mut p1 = pass1::runner::run(
-            f.path(), &common::pass1_config("root"), None,
-        ).unwrap();
+        let mut p1 = pass1::runner::run(f.path(), &common::pass1_config("root"), None).unwrap();
 
         // Force Jsonb sur "root_middle" (non-racine — a un parent_table = "root").
         {
-            use json2sql::schema::wide_strategies::apply_wide_strategy_columns;
             use json2sql::schema::table_schema::InferredStrategy;
+            use json2sql::schema::wide_strategies::apply_wide_strategy_columns;
             if let Some(mid) = p1.schemas.iter_mut().find(|s| s.name == "root_middle") {
                 apply_wide_strategy_columns(mid, InferredStrategy::Jsonb);
             }
         }
 
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        let p2 = pass2::runner::run(f.path(), &p1.schemas, &client, &url, &common::pass2_config("root", &schema), None)
-        .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            f.path(),
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("root", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(common::row_count(&client, &schema, "root").await, 2);
-        assert_eq!(common::row_count(&client, &schema, "root_middle").await, 2,
-            "JSONB non-root table must have 2 rows");
+        assert_eq!(
+            common::row_count(&client, &schema, "root_middle").await,
+            2,
+            "JSONB non-root table must have 2 rows"
+        );
 
         // La colonne data ne doit pas être NULL
-        let sql = format!(
-            "SELECT COUNT(*) FROM \"{schema}\".\"root_middle\" WHERE \"data\" IS NOT NULL"
-        );
+        let sql =
+            format!("SELECT COUNT(*) FROM \"{schema}\".\"root_middle\" WHERE \"data\" IS NOT NULL");
         let row = client.query_one(&sql, &[]).await.unwrap();
         let non_null: i64 = row.get(0);
-        assert_eq!(non_null, 2, "data column must not be NULL for non-root JSONB table");
+        assert_eq!(
+            non_null, 2,
+            "data column must not be NULL for non-root JSONB table"
+        );
 
         // L'enfant de la table JSONB doit toujours recevoir ses lignes
-        assert_eq!(common::row_count(&client, &schema, "root_middle_leaf").await, 2,
-            "children of JSONB non-root table must still receive their rows");
+        assert_eq!(
+            common::row_count(&client, &schema, "root_middle_leaf").await,
+            2,
+            "children of JSONB non-root table must still receive their rows"
+        );
 
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
         let _ = p2;
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -656,10 +988,15 @@ async fn test_parallel_copy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
 
         let p2 = pass2::runner::run(
-            &path, &p1.schemas, &client, &url,
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
             &json2sql::pass2::Pass2Config {
                 root_table: "users".to_string(),
                 pg_schema: schema.clone(),
@@ -675,7 +1012,9 @@ async fn test_parallel_copy() {
                 tune_wal: false,
             },
             None,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*p2.rows_per_table.get("users").unwrap(), 3);
         assert_eq!(*p2.rows_per_table.get("users_address").unwrap(), 3);
@@ -683,10 +1022,17 @@ async fn test_parallel_copy() {
         assert_eq!(*p2.rows_per_table.get("users_orders_items").unwrap(), 3);
 
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
-        assert_eq!(common::array_elements(&client, &schema, "users", "tags").await, 6);
-        assert_eq!(common::row_count(&client, &schema, "users_orders_items").await, 3);
+        assert_eq!(
+            common::array_elements(&client, &schema, "users", "tags").await,
+            6
+        );
+        assert_eq!(
+            common::row_count(&client, &schema, "users_orders_items").await,
+            3
+        );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
-    }).await;
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -694,15 +1040,32 @@ async fn test_pass2_timing_fields_populated() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        let p2 = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("users", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         // Identity sanity — total_ms() is defined as the sum of both phases.
-        assert_eq!(p2.timing.total_ms(), p2.timing.streaming_ms + p2.timing.copy_ms);
+        assert_eq!(
+            p2.timing.total_ms(),
+            p2.timing.streaming_ms + p2.timing.copy_ms
+        );
         // Fields must be populated: a real COPY to PostgreSQL always takes ≥ 1 ms.
-        assert!(p2.timing.copy_ms > 0, "copy_ms must be > 0 after a real COPY to PostgreSQL");
-    }).await;
+        assert!(
+            p2.timing.copy_ms > 0,
+            "copy_ms must be > 0 after a real COPY to PostgreSQL"
+        );
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -713,22 +1076,38 @@ async fn test_pass2_timing_fields_populated() {
 async fn test_parallel_streaming_matches_sequential() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("users.json");
-        let p1 = pass1::runner::run(
-            &path, &common::pass1_config("users"), None,
-        ).unwrap();
+        let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
 
         // Sequential run on the schema provided by with_schema_url
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        let seq = pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
-        .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let seq = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("users", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         // Parallel streaming run on a second schema
         let schema2 = common::unique_schema();
         let client2 = db::connection::connect(&url).await.unwrap();
-        client2.execute(&format!("CREATE SCHEMA \"{schema2}\""), &[]).await.unwrap();
-        db::ddl::create_tables_no_constraints(&client2, &p1.schemas, &schema2, false, None).await.unwrap();
+        client2
+            .execute(&format!("CREATE SCHEMA \"{schema2}\""), &[])
+            .await
+            .unwrap();
+        db::ddl::create_tables_no_constraints(&client2, &p1.schemas, &schema2, false, None)
+            .await
+            .unwrap();
         let par = pass2::runner::run(
-            &path, &p1.schemas, &client2, &url,
+            &path,
+            &p1.schemas,
+            &client2,
+            &url,
             &json2sql::pass2::Pass2Config {
                 root_table: "users".to_string(),
                 pg_schema: schema2.clone(),
@@ -744,7 +1123,9 @@ async fn test_parallel_streaming_matches_sequential() {
                 tune_wal: false,
             },
             None,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         common::drop_schema(&client2, &schema2).await;
 
         for (table, &seq_count) in &seq.rows_per_table {
@@ -754,9 +1135,13 @@ async fn test_parallel_streaming_matches_sequential() {
                 "table {table}: seq={seq_count} par={par_count}"
             );
         }
-        assert_eq!(par.timing.total_ms(), par.timing.streaming_ms + par.timing.copy_ms);
+        assert_eq!(
+            par.timing.total_ms(),
+            par.timing.streaming_ms + par.timing.copy_ms
+        );
         assert_eq!(par.anomaly_collector.total_anomalies(), 0);
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -770,15 +1155,29 @@ async fn test_warn_on_nonempty_root_table_before_import() {
         let p1 = pass1::runner::run(&path, &common::pass1_config("users"), None).unwrap();
 
         // Premier import — remplit la table racine "users" avec 3 lignes.
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
-        pass2::runner::run(&path, &p1.schemas, &client, &url, &common::pass2_config("users", &schema), None)
-            .await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("users", &schema),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(common::row_count(&client, &schema, "users").await, 3);
 
         // Second import — la table racine est non-vide, un warning doit être émis.
-        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<json2sql::io::progress_event::ProgressEvent>();
+        let (ptx, mut prx) =
+            tokio::sync::mpsc::unbounded_channel::<json2sql::io::progress_event::ProgressEvent>();
         let result = pass2::runner::run(
-            &path, &p1.schemas, &client, &url,
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
             &json2sql::pass2::Pass2Config {
                 root_table: "users".to_string(),
                 pg_schema: schema.clone(),
@@ -794,10 +1193,14 @@ async fn test_warn_on_nonempty_root_table_before_import() {
                 tune_wal: false,
             },
             Some(ptx),
-        ).await;
+        )
+        .await;
 
         // Doit toujours réussir (warning, pas erreur).
-        assert!(result.is_ok(), "Pass 2 doit réussir même si la table racine est non-vide");
+        assert!(
+            result.is_ok(),
+            "Pass 2 doit réussir même si la table racine est non-vide"
+        );
 
         // Doit avoir émis un Pass2Log WARNING mentionnant "users".
         let mut had_warning = false;
@@ -808,7 +1211,10 @@ async fn test_warn_on_nonempty_root_table_before_import() {
                 }
             }
         }
-        assert!(had_warning, "expected a Pass2Log WARNING about non-empty root table 'users'");
+        assert!(
+            had_warning,
+            "expected a Pass2Log WARNING about non-empty root table 'users'"
+        );
 
         // Les données ont été appendées — 6 lignes au total.
         assert_eq!(
@@ -816,7 +1222,8 @@ async fn test_warn_on_nonempty_root_table_before_import() {
             6,
             "rows should be doubled after second import (append, not replace)"
         );
-    }).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -834,20 +1241,37 @@ async fn test_no_duplicate_pk_on_num_key_collision_structure() {
         // Invariant: no duplicate names in finalized schemas.
         let mut seen = std::collections::HashSet::new();
         for s in &p1.schemas {
-            assert!(seen.insert(s.name.clone()),
-                "duplicate table name in pass1 schemas: '{}' — regression for 42P16", s.name);
+            assert!(
+                seen.insert(s.name.clone()),
+                "duplicate table name in pass1 schemas: '{}' — regression for 42P16",
+                s.name
+            );
         }
 
         // Full import must succeed without 42P16 error.
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None).await.unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
         let result = pass2::runner::run(
-            &path, &p1.schemas, &client, &url, &common::pass2_config("root", &schema), None,
-        ).await;
-        assert!(result.is_ok(), "pass2 failed (possible duplicate PK): {:?}",
-            result.err().map(|e| e.to_string()));
-        assert!(result.unwrap().constraint_warnings.is_empty(),
-            "unexpected constraint warnings on num_key_collision fixture");
-    }).await;
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("root", &schema),
+            None,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "pass2 failed (possible duplicate PK): {:?}",
+            result.err().map(|e| e.to_string())
+        );
+        assert!(
+            result.unwrap().constraint_warnings.is_empty(),
+            "unexpected constraint warnings on num_key_collision fixture"
+        );
+    })
+    .await;
 }
 
 /// Regression test for findings 1+2: `SiblingCollapseMulti` with two non-numeric clusters must
@@ -867,10 +1291,17 @@ async fn test_multi_cluster_non_numeric_both_pivots_populated() {
         let p1 = pass1::runner::run(&path, &cfg, None).unwrap();
 
         // Find the SiblingCollapseMulti parent and extract both pivot table names.
-        let pivot_tables: Vec<String> = p1.schemas.iter()
+        let pivot_tables: Vec<String> = p1
+            .schemas
+            .iter()
             .filter_map(|s| {
                 if let InferredStrategy::SiblingCollapseMulti(groups) = &s.inferred_strategy {
-                    Some(groups.iter().map(|g| g.pivot_table.clone()).collect::<Vec<_>>())
+                    Some(
+                        groups
+                            .iter()
+                            .map(|g| g.pivot_table.clone())
+                            .collect::<Vec<_>>(),
+                    )
                 } else {
                     None
                 }
@@ -878,21 +1309,35 @@ async fn test_multi_cluster_non_numeric_both_pivots_populated() {
             .flatten()
             .collect();
 
-        assert_eq!(pivot_tables.len(), 2,
-            "expected exactly 2 pivot tables from SiblingCollapseMulti; got {pivot_tables:?}");
+        assert_eq!(
+            pivot_tables.len(),
+            2,
+            "expected exactly 2 pivot tables from SiblingCollapseMulti; got {pivot_tables:?}"
+        );
 
         db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
-            .await.unwrap();
+            .await
+            .unwrap();
         let p2 = pass2::runner::run(
-            &path, &p1.schemas, &client, &url, &common::pass2_config("root", &schema), None,
-        ).await.unwrap();
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("root", &schema),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
         for pivot_name in &pivot_tables {
             let count = common::row_count(&client, &schema, pivot_name).await;
-            assert_eq!(count, 9,
-                "pivot table '{pivot_name}' must have 9 rows (3 keys × 3 docs); got {count}");
+            assert_eq!(
+                count, 9,
+                "pivot table '{pivot_name}' must have 9 rows (3 keys × 3 docs); got {count}"
+            );
         }
-    }).await;
+    })
+    .await;
 }

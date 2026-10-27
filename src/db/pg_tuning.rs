@@ -75,7 +75,9 @@ pub fn wal_restore_sql(prev_mb: i64, prev_from_auto_conf: bool) -> String {
 fn marker_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("state")))?;
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("state"))
+        })?;
     Some(base.join("json2sql").join("pg_tuning_restore.json"))
 }
 
@@ -99,7 +101,10 @@ fn write_markers(path: &Path, markers: &HashMap<String, String>) -> std::io::Res
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(markers).map_err(std::io::Error::other)?)?;
+    std::fs::write(
+        &tmp,
+        serde_json::to_string_pretty(markers).map_err(std::io::Error::other)?,
+    )?;
     std::fs::rename(tmp, path)
 }
 
@@ -114,8 +119,12 @@ fn set_marker(key: &str, sql: Option<&str>) -> std::io::Result<()> {
     lock.lock()?; // released when `lock` is dropped
     let mut markers = read_markers(&path);
     match sql {
-        Some(sql) => { markers.insert(key.to_string(), sql.to_string()); }
-        None => { markers.remove(key); }
+        Some(sql) => {
+            markers.insert(key.to_string(), sql.to_string());
+        }
+        None => {
+            markers.remove(key);
+        }
     }
     write_markers(&path, &markers)
 }
@@ -123,7 +132,10 @@ fn set_marker(key: &str, sql: Option<&str>) -> std::io::Result<()> {
 /// Identifies the PG cluster. Readable by the roles that may `ALTER SYSTEM` anyway.
 async fn server_key(client: &Client) -> Option<String> {
     let row = client
-        .query_one("SELECT current_setting('data_directory') || ':' || current_setting('port')", &[])
+        .query_one(
+            "SELECT current_setting('data_directory') || ':' || current_setting('port')",
+            &[],
+        )
         .await
         .ok()?;
     Some(row.get(0))
@@ -140,7 +152,10 @@ fn autovacuum_key(pg_url: &str, pg_schema: &str) -> Option<String> {
         None => "localhost".to_string(),
     };
     let port = cfg.get_ports().first().copied().unwrap_or(5432);
-    let db = cfg.get_dbname().or_else(|| cfg.get_user()).unwrap_or_default();
+    let db = cfg
+        .get_dbname()
+        .or_else(|| cfg.get_user())
+        .unwrap_or_default();
     Some(format!("autovacuum:{host}:{port}/{db}/{pg_schema}"))
 }
 
@@ -154,8 +169,15 @@ pub fn record_autovacuum_restore(
 ) -> Option<String> {
     use crate::db::ddl::quote_ident;
     let key = autovacuum_key(pg_url, pg_schema)?;
-    let sql = schemas.iter()
-        .map(|s| format!("ALTER TABLE IF EXISTS {}.{} RESET (autovacuum_enabled)", quote_ident(pg_schema), quote_ident(&s.name)))
+    let sql = schemas
+        .iter()
+        .map(|s| {
+            format!(
+                "ALTER TABLE IF EXISTS {}.{} RESET (autovacuum_enabled)",
+                quote_ident(pg_schema),
+                quote_ident(&s.name)
+            )
+        })
         .collect::<Vec<_>>()
         .join(";\n");
     match set_marker(&key, Some(&sql)) {
@@ -170,7 +192,10 @@ pub fn record_autovacuum_restore(
 /// Drops `key` from the marker once its restore has been applied.
 pub fn forget_restore(key: &str, progress_tx: Option<&ProgressTx>) {
     if let Err(e) = set_marker(key, None) {
-        log(progress_tx, format!("WARNING: could not clear the restore marker ({e})"));
+        log(
+            progress_tx,
+            format!("WARNING: could not clear the restore marker ({e})"),
+        );
     }
 }
 
@@ -188,9 +213,18 @@ pub async fn restore_pending(client: &Client, pg_url: &str, progress_tx: Option<
 
 /// Re-enables autovacuum on the tables an interrupted import left it off, in any schema of
 /// the database `pg_url` points to. `IF EXISTS`: tables dropped since then are skipped.
-async fn restore_pending_autovacuum(client: &Client, pg_url: &str, progress_tx: Option<&ProgressTx>) {
-    let (Some(path), Some(prefix)) = (marker_path(), autovacuum_key(pg_url, "")) else { return };
-    for (key, sql) in read_markers(&path).into_iter().filter(|(k, _)| k.starts_with(&prefix)) {
+async fn restore_pending_autovacuum(
+    client: &Client,
+    pg_url: &str,
+    progress_tx: Option<&ProgressTx>,
+) {
+    let (Some(path), Some(prefix)) = (marker_path(), autovacuum_key(pg_url, "")) else {
+        return;
+    };
+    for (key, sql) in read_markers(&path)
+        .into_iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+    {
         match client.batch_execute(&sql).await {
             Ok(()) => {
                 log(progress_tx, format!("Autovacuum re-enabled on tables left without it by an interrupted import ({key})"));
@@ -208,7 +242,9 @@ async fn restore_pending_wal(client: &Client, progress_tx: Option<&ProgressTx>) 
     if markers.is_empty() {
         return;
     }
-    let Some(key) = server_key(client).await else { return };
+    let Some(key) = server_key(client).await else {
+        return;
+    };
     let Some(sql) = markers.get(&key) else { return };
     match apply_restore(client, sql).await {
         Ok(()) => {
@@ -229,19 +265,30 @@ async fn current_max_wal_size(client: &Client) -> Result<(i64, bool), tokio_post
     let row = client
         .query_one("SELECT setting::bigint, coalesce(sourcefile, '') FROM pg_settings WHERE name = 'max_wal_size'", &[])
         .await?;
-    Ok((row.get(0), row.get::<_, String>(1).ends_with("postgresql.auto.conf")))
+    Ok((
+        row.get(0),
+        row.get::<_, String>(1).ends_with("postgresql.auto.conf"),
+    ))
 }
 
 /// Raises `max_wal_size` to `TUNED_MAX_WAL_SIZE_MB` server-wide. Best-effort: returns `None`
 /// (with a warning) when the role lacks the privilege, when the restore cannot be recorded first,
 /// or when the value is already high enough.
-pub async fn raise_max_wal_size(client: &Client, progress_tx: Option<&ProgressTx>) -> Option<WalRestore> {
+pub async fn raise_max_wal_size(
+    client: &Client,
+    progress_tx: Option<&ProgressTx>,
+) -> Option<WalRestore> {
     // An earlier interrupted import may have left 16 GB in place: put the real value back first.
     restore_pending_wal(client, progress_tx).await;
     let (prev_mb, from_auto_conf) = match current_max_wal_size(client).await {
         Ok(v) => v,
         Err(e) => {
-            log(progress_tx, format!("WARNING: --tune-wal: cannot read max_wal_size ({e}) — continuing without it"));
+            log(
+                progress_tx,
+                format!(
+                    "WARNING: --tune-wal: cannot read max_wal_size ({e}) — continuing without it"
+                ),
+            );
             return None;
         }
     };
@@ -252,7 +299,10 @@ pub async fn raise_max_wal_size(client: &Client, progress_tx: Option<&ProgressTx
         log(progress_tx, "WARNING: --tune-wal: cannot identify the server (data_directory) — continuing without it".to_string());
         return None;
     };
-    let restore = WalRestore { sql: wal_restore_sql(prev_mb, from_auto_conf), key };
+    let restore = WalRestore {
+        sql: wal_restore_sql(prev_mb, from_auto_conf),
+        key,
+    };
     if !record_then_raise(client, &restore, progress_tx).await {
         return None;
     }
@@ -266,7 +316,11 @@ pub async fn raise_max_wal_size(client: &Client, progress_tx: Option<&ProgressTx
 
 /// Records `restore` in the marker, then raises `max_wal_size`. Recording first means even a
 /// kill -9 right after leaves a way back for the next run. Returns `false` (warned) on failure.
-async fn record_then_raise(client: &Client, restore: &WalRestore, progress_tx: Option<&ProgressTx>) -> bool {
+async fn record_then_raise(
+    client: &Client,
+    restore: &WalRestore,
+    progress_tx: Option<&ProgressTx>,
+) -> bool {
     if let Err(e) = set_marker(&restore.key, Some(&restore.sql)) {
         log(progress_tx, format!("WARNING: --tune-wal: cannot record the restore command ({e}) — continuing without it"));
         return false;
@@ -275,33 +329,49 @@ async fn record_then_raise(client: &Client, restore: &WalRestore, progress_tx: O
     let set = format!("ALTER SYSTEM SET max_wal_size = '{TUNED_MAX_WAL_SIZE_MB}MB'");
     if let Err(e) = client.batch_execute(&set).await {
         let _ = set_marker(&restore.key, None);
-        log(progress_tx, format!(
-            "WARNING: --tune-wal: cannot raise max_wal_size ({e}) — needs a superuser role or \
+        log(
+            progress_tx,
+            format!(
+                "WARNING: --tune-wal: cannot raise max_wal_size ({e}) — needs a superuser role or \
              GRANT ALTER SYSTEM ON PARAMETER max_wal_size; continuing without it"
-        ));
+            ),
+        );
         return false;
     }
     if let Err(e) = client.batch_execute("SELECT pg_reload_conf()").await {
-        log(progress_tx, format!("WARNING: --tune-wal: pg_reload_conf failed ({e})"));
+        log(
+            progress_tx,
+            format!("WARNING: --tune-wal: pg_reload_conf failed ({e})"),
+        );
     }
     true
 }
 
 /// Applies `restore` then reloads the config. Best-effort: on failure the marker is kept, so the
 /// next import retries, and the manual command is logged.
-pub async fn restore_max_wal_size(client: &Client, restore: &WalRestore, progress_tx: Option<&ProgressTx>) {
+pub async fn restore_max_wal_size(
+    client: &Client,
+    restore: &WalRestore,
+    progress_tx: Option<&ProgressTx>,
+) {
     match apply_restore(client, &restore.sql).await {
         Ok(()) => {
             log(progress_tx, "--tune-wal: max_wal_size restored".to_string());
             if let Err(e) = set_marker(&restore.key, None) {
-                log(progress_tx, format!("WARNING: --tune-wal: could not clear the restore marker ({e})"));
+                log(
+                    progress_tx,
+                    format!("WARNING: --tune-wal: could not clear the restore marker ({e})"),
+                );
             }
         }
-        Err(e) => log(progress_tx, format!(
+        Err(e) => log(
+            progress_tx,
+            format!(
             "WARNING: --tune-wal: could not restore max_wal_size ({e}); the next import retries. \
              Run manually: {}; SELECT pg_reload_conf();",
             restore.sql
-        )),
+        ),
+        ),
     }
 }
 
@@ -328,7 +398,9 @@ pub fn tuning_hints(shared_buffers_mb: i64, max_wal_size_mb: i64, tune_wal: bool
 pub async fn warn_pg_tuning(client: &Client, tune_wal: bool, progress_tx: Option<&ProgressTx>) {
     let sql = "SELECT pg_size_bytes(current_setting('shared_buffers')) / 1048576, \
                pg_size_bytes(current_setting('max_wal_size')) / 1048576";
-    let Ok(row) = client.query_one(sql, &[]).await else { return };
+    let Ok(row) = client.query_one(sql, &[]).await else {
+        return;
+    };
     for hint in tuning_hints(row.get(0), row.get(1), tune_wal) {
         log(progress_tx, hint);
     }
@@ -350,7 +422,12 @@ pub fn wal_level_hint(wal_level: &str) -> Option<String> {
 /// Reads `wal_level`, logs `wal_level_hint` and returns whether it is `minimal`. Silent (and
 /// `false`) if the query fails.
 pub async fn warn_wal_level(client: &Client, progress_tx: Option<&ProgressTx>) -> bool {
-    let Ok(row) = client.query_one("SELECT current_setting('wal_level')", &[]).await else { return false };
+    let Ok(row) = client
+        .query_one("SELECT current_setting('wal_level')", &[])
+        .await
+    else {
+        return false;
+    };
     let level: &str = row.get(0);
     if let Some(hint) = wal_level_hint(level) {
         log(progress_tx, hint);
@@ -365,21 +442,33 @@ mod tests {
 
     #[test]
     fn restore_puts_back_an_alter_system_value() {
-        assert_eq!(wal_restore_sql(2048, true), "ALTER SYSTEM SET max_wal_size = '2048MB'");
+        assert_eq!(
+            wal_restore_sql(2048, true),
+            "ALTER SYSTEM SET max_wal_size = '2048MB'"
+        );
     }
 
     #[test]
     fn restore_resets_when_value_came_from_postgresql_conf() {
-        assert_eq!(wal_restore_sql(1024, false), "ALTER SYSTEM RESET max_wal_size");
+        assert_eq!(
+            wal_restore_sql(1024, false),
+            "ALTER SYSTEM RESET max_wal_size"
+        );
     }
 
     #[test]
     fn markers_round_trip_and_file_removed_when_empty() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("sub").join("m.json");
-        assert!(read_markers(&path).is_empty(), "missing file → nothing pending");
+        assert!(
+            read_markers(&path).is_empty(),
+            "missing file → nothing pending"
+        );
         let mut m = HashMap::new();
-        m.insert("/data:5432".to_string(), "ALTER SYSTEM RESET max_wal_size".to_string());
+        m.insert(
+            "/data:5432".to_string(),
+            "ALTER SYSTEM RESET max_wal_size".to_string(),
+        );
         write_markers(&path, &m).unwrap();
         assert_eq!(read_markers(&path), m);
         write_markers(&path, &HashMap::new()).unwrap();
@@ -392,8 +481,13 @@ mod tests {
         let key = autovacuum_key("postgres://bob:secret@db.local:5433/lab", "public").unwrap();
         assert_eq!(key, "autovacuum:db.local:5433/lab/public");
         let sock = autovacuum_key("host=/var/run/postgresql user=dylan dbname=lab", "s").unwrap();
-        assert!(sock.contains("/var/run/postgresql") && sock.ends_with(":5432/lab/s"), "{sock}");
-        assert!(autovacuum_key("host=h dbname=lab", "x").unwrap().starts_with(&autovacuum_key("host=h dbname=lab", "").unwrap()));
+        assert!(
+            sock.contains("/var/run/postgresql") && sock.ends_with(":5432/lab/s"),
+            "{sock}"
+        );
+        assert!(autovacuum_key("host=h dbname=lab", "x")
+            .unwrap()
+            .starts_with(&autovacuum_key("host=h dbname=lab", "").unwrap()));
     }
 
     #[test]
@@ -413,7 +507,10 @@ mod tests {
     #[test]
     fn wal_level_hint_only_when_not_minimal() {
         let hint = wal_level_hint("replica").unwrap();
-        assert!(hint.contains("wal_level = replica") && hint.contains("max_wal_senders = 0"), "{hint}");
+        assert!(
+            hint.contains("wal_level = replica") && hint.contains("max_wal_senders = 0"),
+            "{hint}"
+        );
         assert_eq!(wal_level_hint("minimal"), None);
     }
 }

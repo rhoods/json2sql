@@ -59,15 +59,9 @@ pub enum ProgressEvent {
         rows_flushed: u64,
     },
     /// A COPY failed for a specific table — emitted in real time before `run()` returns Err.
-    Pass2Error {
-        table_name: String,
-        message: String,
-    },
+    Pass2Error { table_name: String, message: String },
     /// Per-table anomaly count, emitted once per table after all workers complete.
-    Pass2AnomalyUpdate {
-        table_name: String,
-        count: u64,
-    },
+    Pass2AnomalyUpdate { table_name: String, count: u64 },
     /// A plain-text log message (mirrors what the CLI prints to stderr).
     Pass2Log(String),
     /// Pass 2 finished — all rows imported.
@@ -93,7 +87,8 @@ mod tests {
 
     #[test]
     fn pass1_log_constructs_and_clones() {
-        let e = ProgressEvent::Pass1Log("Root wrapper detected — streaming keys: [Foods]".to_string());
+        let e =
+            ProgressEvent::Pass1Log("Root wrapper detected — streaming keys: [Foods]".to_string());
         let cloned = e;
         assert!(format!("{cloned:?}").contains("Foods"));
     }
@@ -129,8 +124,15 @@ mod tests {
     #[test]
     fn progress_event_serde_round_trip() {
         let events = vec![
-            ProgressEvent::Pass2Done { total_rows: 42, anomaly_count: 1, constraint_warning_count: 0 },
-            ProgressEvent::Pass2Flush { table_name: "orders".to_string(), rows_flushed: 100 },
+            ProgressEvent::Pass2Done {
+                total_rows: 42,
+                anomaly_count: 1,
+                constraint_warning_count: 0,
+            },
+            ProgressEvent::Pass2Flush {
+                table_name: "orders".to_string(),
+                rows_flushed: 100,
+            },
             ProgressEvent::DdlStart { table_count: 5 },
             ProgressEvent::Pass1Log("hello".to_string()),
             ProgressEvent::ConstraintsStart { table_count: 3 },

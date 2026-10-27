@@ -1047,12 +1047,29 @@ fn attach_report() {
         }
         let signals = DataSignals::new(&sample_of(&ds, &file));
         let proposal = proposal_with(&ds, Ok(&signals));
-        let linked: HashSet<(usize, usize)> = ds.linked.iter().flat_map(|r| r.pairs.iter().copied()).collect();
-        let separated: HashSet<(usize, usize)> = ds.separated.iter().flat_map(|r| r.pairs.iter().copied()).collect();
-        println!("== {} ({} columns left out, {} candidates)", ds.name, proposal.ungrouped.len(), proposal.attachments.len());
+        let linked: HashSet<(usize, usize)> = ds
+            .linked
+            .iter()
+            .flat_map(|r| r.pairs.iter().copied())
+            .collect();
+        let separated: HashSet<(usize, usize)> = ds
+            .separated
+            .iter()
+            .flat_map(|r| r.pairs.iter().copied())
+            .collect();
+        println!(
+            "== {} ({} columns left out, {} candidates)",
+            ds.name,
+            proposal.ungrouped.len(),
+            proposal.attachments.len()
+        );
         for a in &proposal.attachments {
             let group = &proposal.groups[a.group];
-            let pairs: Vec<(usize, usize)> = group.columns.iter().map(|&m| (a.column.min(m), a.column.max(m))).collect();
+            let pairs: Vec<(usize, usize)> = group
+                .columns
+                .iter()
+                .map(|&m| (a.column.min(m), a.column.max(m)))
+                .collect();
             let label = if pairs.iter().any(|p| separated.contains(p)) {
                 " [SEPARATED]"
             } else if pairs.iter().any(|p| linked.contains(p)) {
@@ -1060,7 +1077,10 @@ fn attach_report() {
             } else {
                 ""
             };
-            println!("   {} -> {} (lift {:.2}, next {:.2}, {} rows){label}", ds.columns[a.column], group.name, a.lift, a.next, a.rows);
+            println!(
+                "   {} -> {} (lift {:.2}, next {:.2}, {} rows){label}",
+                ds.columns[a.column], group.name, a.lift, a.next, a.rows
+            );
         }
     }
 }

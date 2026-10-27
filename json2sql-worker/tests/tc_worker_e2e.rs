@@ -9,9 +9,9 @@ use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::postgres::Postgres;
 use tokio::io::AsyncBufReadExt as _;
 
-use json2sql::ipc::{new_socket_path, WorkerConfig, WorkerResult};
 use json2sql::io::progress_event::ProgressEvent;
-use json2sql::pass1::runner::{Pass1Config, run as run_pass1};
+use json2sql::ipc::{new_socket_path, WorkerConfig, WorkerResult};
+use json2sql::pass1::runner::{run as run_pass1, Pass1Config};
 use json2sql::schema::registry::RegistryConfig;
 
 // Path to the compiled worker binary, injected by Cargo at test build time.
@@ -43,8 +43,7 @@ fn worker_bin_path() -> std::path::PathBuf {
 
 /// Write a tiny 3-row JSON fixture and return its path.
 fn write_fixture() -> std::path::PathBuf {
-    let path = std::env::temp_dir()
-        .join(format!("worker_e2e_{}.json", uuid::Uuid::now_v7()));
+    let path = std::env::temp_dir().join(format!("worker_e2e_{}.json", uuid::Uuid::now_v7()));
     std::fs::write(
         &path,
         b"{\"id\":1,\"name\":\"Alice\",\"age\":30}\n\
@@ -104,18 +103,24 @@ async fn worker_e2e_small_import_streams_events_and_writes_result() {
     )
     .expect("pass1 must succeed");
 
-    assert!(!pass1_result.schemas.is_empty(), "pass1 must infer at least one table");
+    assert!(
+        !pass1_result.schemas.is_empty(),
+        "pass1 must infer at least one table"
+    );
 
     // ── Create the target schema in PG ────────────────────────────────────
-    let schema_name = format!("e2e_{}", &uuid::Uuid::now_v7().to_string().replace('-', "")[20..]);
+    let schema_name = format!(
+        "e2e_{}",
+        &uuid::Uuid::now_v7().to_string().replace('-', "")[20..]
+    );
     {
-        let pg_url = format!(
-            "postgres://postgres:postgres@127.0.0.1:{port}/postgres"
-        );
+        let pg_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
         let (client, conn) = tokio_postgres::connect(&pg_url, tokio_postgres::NoTls)
             .await
             .expect("connect to PG for schema creation");
-        tokio::spawn(async move { let _ = conn.await; });
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
         client
             .execute(&format!("CREATE SCHEMA \"{}\"", schema_name), &[])
             .await
@@ -213,7 +218,10 @@ async fn worker_e2e_small_import_streams_events_and_writes_result() {
     let result: WorkerResult =
         serde_json::from_str(&result_content).expect("result file must be valid JSON");
     eprintln!("  result: {result:?}");
-    assert_eq!(result.status, "success", "import must succeed — got: {result:?}\nevents received: {received:?}");
+    assert_eq!(
+        result.status, "success",
+        "import must succeed — got: {result:?}\nevents received: {received:?}"
+    );
     assert_eq!(result.total_rows, 3, "must import all 3 rows: {result:?}");
 
     // ── Assert event stream ────────────────────────────────────────────────

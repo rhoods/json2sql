@@ -17,16 +17,11 @@ mod worker_client;
 
 use dioxus::prelude::*;
 
-use state::{AppScreen, AppState};
 use screens::{
-    analysis::AnalysisScreen,
-    import::ImportScreen,
-    preview::PreviewScreen,
-    resume::ResumeScreen,
-    setup::SetupScreen,
-    strategy::StrategyScreen,
+    analysis::AnalysisScreen, import::ImportScreen, preview::PreviewScreen, resume::ResumeScreen,
+    setup::SetupScreen, strategy::StrategyScreen,
 };
-
+use state::{AppScreen, AppState};
 
 #[allow(clippy::too_many_lines)]
 fn main() {

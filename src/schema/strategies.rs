@@ -23,11 +23,7 @@ pub enum StrategyName {
 
 impl StrategyName {
     #[allow(dead_code)] // used in tests + available as public API
-    pub const OPTIONAL: &'static [Self] = &[
-        Self::Sibling,
-        Self::Pivot,
-        Self::StructuredPivot,
-    ];
+    pub const OPTIONAL: &'static [Self] = &[Self::Sibling, Self::Pivot, Self::StructuredPivot];
 
     #[allow(dead_code)] // used by json2sql-ui::config for TOML serialization
     #[must_use]
@@ -84,12 +80,18 @@ mod tests {
 
     #[test]
     fn test_mandatory_strategy_rejected() {
-        assert!(matches!(StrategyName::try_from("split"), Err(StrategyError::Mandatory(_))));
+        assert!(matches!(
+            StrategyName::try_from("split"),
+            Err(StrategyError::Mandatory(_))
+        ));
     }
 
     #[test]
     fn test_unknown_strategy_rejected() {
-        assert!(matches!(StrategyName::try_from("foobar"), Err(StrategyError::Unknown(_))));
+        assert!(matches!(
+            StrategyName::try_from("foobar"),
+            Err(StrategyError::Unknown(_))
+        ));
     }
 
     #[test]

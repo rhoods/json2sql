@@ -25,14 +25,31 @@ const PROGRESS_INTERVAL: u64 = 1_000;
 /// Spawn the blocking anomaly writer task. Returns `(sender, handle)`.
 pub(super) fn spawn_anomaly_writer(
     anomaly_dir: Option<std::path::PathBuf>,
-) -> (tokio::sync::mpsc::UnboundedSender<AnomalyEvent>, tokio::task::JoinHandle<Result<AnomalyCollector>>) {
+) -> (
+    tokio::sync::mpsc::UnboundedSender<AnomalyEvent>,
+    tokio::task::JoinHandle<Result<AnomalyCollector>>,
+) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AnomalyEvent>();
     let handle = tokio::task::spawn_blocking(move || {
         let mut collector = AnomalyCollector::new(anomaly_dir);
         while let Some(event) = rx.blocking_recv() {
             match event {
-                AnomalyEvent::Record { table, column, row_id, expected_type, actual_value, actual_type } => {
-                    collector.record(&table, &column, &row_id, &expected_type, &actual_value, &actual_type)?;
+                AnomalyEvent::Record {
+                    table,
+                    column,
+                    row_id,
+                    expected_type,
+                    actual_value,
+                    actual_type,
+                } => {
+                    collector.record(
+                        &table,
+                        &column,
+                        &row_id,
+                        &expected_type,
+                        &actual_value,
+                        &actual_type,
+                    )?;
                 }
                 AnomalyEvent::IncTotal { table } => collector.inc_total(&table),
             }
@@ -107,10 +124,16 @@ pub(super) fn finalize_dispatch(
 ) {
     if let Some(tx) = progress_tx {
         if rows_processed > 0 && !rows_processed.is_multiple_of(PROGRESS_INTERVAL) {
-            let _ = tx.send(ProgressEvent::Pass2Progress { rows_processed, bytes_read, total_bytes });
+            let _ = tx.send(ProgressEvent::Pass2Progress {
+                rows_processed,
+                bytes_read,
+                total_bytes,
+            });
         }
     }
-    if let Some(bar) = progress { bar.finish(); }
+    if let Some(bar) = progress {
+        bar.finish();
+    }
 }
 
 /// Emit per-table anomaly updates and the final `Pass2Done` event.
@@ -131,9 +154,17 @@ pub(super) fn emit_completion_events(
 }
 
 /// Log FK constraint warnings to stderr and the progress channel.
-pub(super) fn log_constraint_warnings(warnings: &[crate::db::ddl::ConstraintWarning], progress_tx: Option<&ProgressTx>) {
-    if warnings.is_empty() { return; }
-    eprintln!("WARNING: {} FK constraint(s) could not be applied after import:", warnings.len());
+pub(super) fn log_constraint_warnings(
+    warnings: &[crate::db::ddl::ConstraintWarning],
+    progress_tx: Option<&ProgressTx>,
+) {
+    if warnings.is_empty() {
+        return;
+    }
+    eprintln!(
+        "WARNING: {} FK constraint(s) could not be applied after import:",
+        warnings.len()
+    );
     for w in warnings {
         let msg = format!("FK warning — {} : {}", w.table, w.message);
         eprintln!("  {msg}");
@@ -150,10 +181,16 @@ fn update_row_progress(
     bytes_read: u64,
     total_bytes: u64,
 ) {
-    if let Some(bar) = progress { bar.inc_rows(1); }
+    if let Some(bar) = progress {
+        bar.inc_rows(1);
+    }
     if rows_processed.is_multiple_of(PROGRESS_INTERVAL) {
         if let Some(tx) = progress_tx {
-            let _ = tx.send(ProgressEvent::Pass2Progress { rows_processed, bytes_read, total_bytes });
+            let _ = tx.send(ProgressEvent::Pass2Progress {
+                rows_processed,
+                bytes_read,
+                total_bytes,
+            });
         }
     }
 }
@@ -183,11 +220,23 @@ pub(super) async fn dispatch_loop(
                 break 'dispatch;
             }
             rows_processed += 1;
-            if limit.is_some_and(|n| rows_processed >= n) { break 'dispatch; }
+            if limit.is_some_and(|n| rows_processed >= n) {
+                break 'dispatch;
+            }
             robin = (robin + 1) % parallel;
-            update_row_progress(progress, progress_tx, rows_processed, reader.bytes_read(), total_bytes);
+            update_row_progress(
+                progress,
+                progress_tx,
+                rows_processed,
+                reader.bytes_read(),
+                total_bytes,
+            );
             if verbose && rows_processed.is_multiple_of(10_000) {
-                eprintln!("[DISPATCH] {} records, {} MB scanned", rows_processed, reader.bytes_read() / 1024 / 1024);
+                eprintln!(
+                    "[DISPATCH] {} records, {} MB scanned",
+                    rows_processed,
+                    reader.bytes_read() / 1024 / 1024
+                );
             }
         }
     }
@@ -211,6 +260,9 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
         // rows_processed == 1 → not a multiple of PROGRESS_INTERVAL (which is > 1)
         super::update_row_progress(None, Some(&tx), 1, 0, 0);
-        assert!(rx.try_recv().is_err(), "must not send between interval boundaries");
+        assert!(
+            rx.try_recv().is_err(),
+            "must not send between interval boundaries"
+        );
     }
 }

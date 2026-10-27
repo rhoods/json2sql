@@ -6,11 +6,11 @@
 #![forbid(unsafe_code)]
 #![deny(dead_code)]
 pub mod anomaly;
-pub mod ipc;
 pub mod cli;
 pub mod db;
 pub mod error;
 pub mod io;
+pub mod ipc;
 pub mod pass1;
 pub mod pass2;
 pub mod pipeline;

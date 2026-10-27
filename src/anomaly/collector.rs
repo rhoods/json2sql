@@ -312,25 +312,31 @@ impl AnomalyCollector {
 
     /// Append one NDJSON line to the per-table anomaly file, creating it if necessary.
     fn stream_to_file(&mut self, entry: &AnomalyEntry<'_>) -> Result<()> {
-        let dir = self.anomaly_dir.as_ref().expect("called only when anomaly_dir is Some");
+        let dir = self
+            .anomaly_dir
+            .as_ref()
+            .expect("called only when anomaly_dir is Some");
         if !self.writers.contains_key(entry.table) {
             let safe_name = sanitize_table_name(entry.table);
             let path = dir.join(format!("{safe_name}_anomalies.ndjson"));
             let file = File::create(&path).map_err(J2sError::Io)?;
-            self.writers.insert(entry.table.to_string(), BufWriter::new(file));
+            self.writers
+                .insert(entry.table.to_string(), BufWriter::new(file));
             self.written_files.insert(entry.table.to_string(), path);
         }
-        let writer = self.writers.get_mut(entry.table)
+        let writer = self
+            .writers
+            .get_mut(entry.table)
             .expect("writer was inserted above in this same block");
         // serde_json::Map is infallible — avoids json! macro's internal unwrap.
         let mut obj = serde_json::Map::new();
-        obj.insert("table".into(),            entry.table.into());
-        obj.insert("column".into(),           entry.column.into());
-        obj.insert("row_id".into(),           entry.row_id.into());
-        obj.insert("expected_type".into(),    entry.expected_type.into());
-        obj.insert("actual_value".into(),     entry.truncated_value.into());
+        obj.insert("table".into(), entry.table.into());
+        obj.insert("column".into(), entry.column.into());
+        obj.insert("row_id".into(), entry.row_id.into());
+        obj.insert("expected_type".into(), entry.expected_type.into());
+        obj.insert("actual_value".into(), entry.truncated_value.into());
         obj.insert("actual_value_len".into(), entry.char_len.into());
-        obj.insert("actual_type".into(),      entry.actual_type.into());
+        obj.insert("actual_type".into(), entry.actual_type.into());
         writeln!(writer, "{}", serde_json::Value::Object(obj)).map_err(J2sError::Io)
     }
 
@@ -429,7 +435,14 @@ impl AnomalyCollect for AnomalyCollector {
         actual_value: &str,
         actual_type: &str,
     ) -> Result<()> {
-        self.record(table, column, row_id, expected_type, actual_value, actual_type)
+        self.record(
+            table,
+            column,
+            row_id,
+            expected_type,
+            actual_value,
+            actual_type,
+        )
     }
 
     fn inc_total(&mut self, table: &str) {
@@ -456,7 +469,13 @@ impl AnomalyCollect for AnomalyCollector {
 /// callers should not rely on this for externally-supplied table names.
 fn sanitize_table_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -484,7 +503,15 @@ mod tests {
         c.inc_total("products");
         c.inc_total("products");
         c.inc_total("products");
-        c.record("products", "price", "row1", "double precision", "\"gratuit\"", "string").unwrap();
+        c.record(
+            "products",
+            "price",
+            "row1",
+            "double precision",
+            "\"gratuit\"",
+            "string",
+        )
+        .unwrap();
 
         assert_eq!(c.total_anomalies(), 1);
         let sums = c.summaries();
@@ -500,7 +527,8 @@ mod tests {
     fn test_example_cap() {
         let mut c = AnomalyCollector::new(None);
         for i in 0..10 {
-            c.record("t", "col", &format!("row{i}"), "integer", "bad", "string").unwrap();
+            c.record("t", "col", &format!("row{i}"), "integer", "bad", "string")
+                .unwrap();
         }
         assert_eq!(c.total_anomalies(), 10);
         let sums = c.summaries();
@@ -515,8 +543,24 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut c = AnomalyCollector::new(Some(dir.path().to_path_buf()));
         c.inc_total("products");
-        c.record("products", "price", "row1", "double precision", "gratuit", "string").unwrap();
-        c.record("products", "price", "row2", "double precision", "N/A", "string").unwrap();
+        c.record(
+            "products",
+            "price",
+            "row1",
+            "double precision",
+            "gratuit",
+            "string",
+        )
+        .unwrap();
+        c.record(
+            "products",
+            "price",
+            "row2",
+            "double precision",
+            "N/A",
+            "string",
+        )
+        .unwrap();
         c.finish().unwrap();
         let files = c.written_paths();
 
@@ -541,7 +585,10 @@ mod tests {
         c.inc_total("products");
         // No anomalies recorded
         c.finish().unwrap();
-        assert!(c.written_paths().is_empty(), "no file should be created for a clean table");
+        assert!(
+            c.written_paths().is_empty(),
+            "no file should be created for a clean table"
+        );
     }
 
     #[test]
@@ -551,20 +598,25 @@ mod tests {
         c.inc_total("t");
         c.inc_total("t");
         c.inc_total("t");
-        c.record("t", "x", "r1", "integer", "bad", "string").unwrap();
-        c.record("t", "x", "r2", "integer", "bad", "string").unwrap();
+        c.record("t", "x", "r1", "integer", "bad", "string")
+            .unwrap();
+        c.record("t", "x", "r2", "integer", "bad", "string")
+            .unwrap();
         assert!((c.overall_anomaly_rate() - 0.5).abs() < 1e-9);
     }
 
     #[test]
     fn per_table_anomaly_counts_aggregates_columns() {
         let mut c = AnomalyCollector::new(None);
-        c.record("orders", "price", "r1", "float8", "bad", "string").unwrap();
-        c.record("orders", "qty",   "r2", "int4",   "bad", "string").unwrap();
-        c.record("users",  "age",   "r3", "int4",   "bad", "string").unwrap();
+        c.record("orders", "price", "r1", "float8", "bad", "string")
+            .unwrap();
+        c.record("orders", "qty", "r2", "int4", "bad", "string")
+            .unwrap();
+        c.record("users", "age", "r3", "int4", "bad", "string")
+            .unwrap();
         let counts = c.per_table_anomaly_counts();
         assert_eq!(counts.get("orders").copied().unwrap_or(0), 2);
-        assert_eq!(counts.get("users").copied().unwrap_or(0),  1);
+        assert_eq!(counts.get("users").copied().unwrap_or(0), 1);
         assert_eq!(counts.len(), 2);
     }
 
@@ -572,7 +624,13 @@ mod tests {
     fn collector_implements_anomaly_collect_record() {
         let mut c = AnomalyCollector::new(None);
         let result = AnomalyCollect::record(
-            &mut c, "products", "price", "row1", "double precision", "gratuit", "string",
+            &mut c,
+            "products",
+            "price",
+            "row1",
+            "double precision",
+            "gratuit",
+            "string",
         );
         assert!(result.is_ok());
         assert_eq!(c.total_anomalies(), 1);
@@ -595,7 +653,14 @@ mod tests {
             .unwrap();
         let event = rx.try_recv().expect("event must be in channel");
         match event {
-            AnomalyEvent::Record { table, column, row_id, expected_type, actual_value, actual_type } => {
+            AnomalyEvent::Record {
+                table,
+                column,
+                row_id,
+                expected_type,
+                actual_value,
+                actual_type,
+            } => {
                 assert_eq!(table, "orders");
                 assert_eq!(column, "qty");
                 assert_eq!(row_id, "r1");
@@ -632,7 +697,8 @@ mod tests {
     fn streaming_writes_all_ndjson_fields() {
         let dir = TempDir::new().unwrap();
         let mut c = AnomalyCollector::new(Some(dir.path().to_path_buf()));
-        c.record("t1", "col_a", "row42", "integer", "hello!", "string").unwrap();
+        c.record("t1", "col_a", "row42", "integer", "hello!", "string")
+            .unwrap();
         c.finish().unwrap();
         let files = c.written_paths();
         let content = std::fs::read_to_string(&files["t1"]).unwrap();

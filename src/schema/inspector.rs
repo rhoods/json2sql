@@ -9,12 +9,17 @@
 //! - fn `collect_stats` — point d'entrée : construit les `ColumnStats` de toutes les tables, triées.
 //! - fn `type_histogram` — histogramme des types JSON observés, trié par fréquence décroissante.
 
-use super::naming::{NamingRegistry};
+use super::naming::NamingRegistry;
 use super::observer::SchemaObserver;
 use super::stats::ColumnStats;
 use super::type_tracker::{InferredType, PgType, TypeTracker};
 
-fn make_stat(table_name: &str, column_name: String, pg_type: PgType, tracker: &TypeTracker) -> ColumnStats {
+fn make_stat(
+    table_name: &str,
+    column_name: String,
+    pg_type: PgType,
+    tracker: &TypeTracker,
+) -> ColumnStats {
     ColumnStats {
         table_name: table_name.to_string(),
         column_name,
@@ -30,12 +35,27 @@ fn make_stat(table_name: &str, column_name: String, pg_type: PgType, tracker: &T
 fn collect_entry_stats(entry: &super::observer::TableEntry, table_name: &str) -> Vec<ColumnStats> {
     let mut stats = Vec::new();
     for (original_field, tracker) in &entry.columns {
-        if tracker.is_object_field() || tracker.is_array_field() || entry.array_columns.contains_key(original_field) { continue; }
-        stats.push(make_stat(table_name, NamingRegistry::column_name(original_field), tracker.to_pg_type(), tracker));
+        if tracker.is_object_field()
+            || tracker.is_array_field()
+            || entry.array_columns.contains_key(original_field)
+        {
+            continue;
+        }
+        stats.push(make_stat(
+            table_name,
+            NamingRegistry::column_name(original_field),
+            tracker.to_pg_type(),
+            tracker,
+        ));
     }
     for (original_field, tracker) in &entry.array_columns {
         let pg_type = entry.array_column_type(original_field, tracker);
-        stats.push(make_stat(table_name, NamingRegistry::column_name(original_field), pg_type, tracker));
+        stats.push(make_stat(
+            table_name,
+            NamingRegistry::column_name(original_field),
+            pg_type,
+            tracker,
+        ));
     }
     stats
 }
@@ -46,7 +66,11 @@ pub fn collect_stats(observer: &SchemaObserver, naming: &mut NamingRegistry) -> 
         let table_name = naming.table_name_from_dot_key(&entry.path_key);
         result.extend(collect_entry_stats(entry, &table_name));
     }
-    result.sort_by(|a, b| a.table_name.cmp(&b.table_name).then(a.column_name.cmp(&b.column_name)));
+    result.sort_by(|a, b| {
+        a.table_name
+            .cmp(&b.table_name)
+            .then(a.column_name.cmp(&b.column_name))
+    });
     result
 }
 

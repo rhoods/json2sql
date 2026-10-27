@@ -13,8 +13,8 @@
 //! - [`detection`] — BFS cascade, `finalize_cascading`
 //! - [`merge`]     — API publique pour la fusion manuelle depuis l'IHM
 
-pub mod scoring;
 pub mod detection;
 pub mod merge;
+pub mod scoring;
 
 pub use detection::finalize_cascading;
