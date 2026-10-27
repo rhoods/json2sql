@@ -85,7 +85,7 @@ rien sur le schéma : elle suit `schemas` (une liste de `TableSchema` finalisés
 | Changement | Où | Le compilateur aide ? |
 |---|---|---|
 | Nouvelle stratégie, ou routage d'une stratégie | `insert_child_object`, `dispatch_child_object`, puis la fiche [ajouter-une-strategie.md](ajouter-une-strategie.md) | oui pour ces deux `match`, non pour le reste |
-| Nouveau type PostgreSQL | `coerce` (un `match` exhaustif sur `PgType`) | oui |
+| Nouveau type PostgreSQL | `coerce` (un `match` sans cas par défaut sur `PgType`) | oui |
 | Nouvelle colonne générée (`j2s_…`) | `push_generated_col_insert`, et chaque écriture de ligne codée en dur (§ 3) | **non** |
 | Nouvelle forme de ligne (une table écrite autrement) | une fonction `insert_*` dans `traversal.rs`, appelée depuis le répartiteur | non |
 | Nouveau paramètre du run | `Pass2Config`, `validate_run_params` si besoin ; il se remplit dans `run_pass2` (CLI) et `WorkerConfig::into_pass2_config` (IHM) | oui : `Pass2Config` est construit en littéral partout, tests compris |
@@ -141,21 +141,26 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
 - **Les tests PostgreSQL passent au vert sans base.** Sans `TEST_DATABASE_URL`, ils affichent `[SKIP]` : un run vert
   n'a alors pas testé le `COPY`, le flusher ni les contraintes.
 
-## 4. Recette
+## 4. Points d'extension
+
+Les endroits prévus pour étendre la zone sont listés au § 1. Deux d'entre eux demandent des étapes que le
+compilateur ne rappelle pas.
 
 Les écritures de ligne se testent sans base : `CaptureSink` (dans `test_utils.rs`) implémente `RowSink` et garde les
 lignes en mémoire. C'est le premier test à écrire pour une nouvelle forme de ligne, en comparant la ligne à
 `schema.columns`.
 
-Pour une nouvelle colonne générée, le compilateur ne voit rien :
+**Nouvelle colonne générée** (une colonne `j2s_…` que json2sql remplit lui-même). `push_generated_col_insert` choisit
+la valeur à écrire d'après le **nom** de la colonne, avec un cas par défaut qui écrit `NULL`. Une nouvelle colonne
+compile donc sans erreur et reste vide en base. À faire à la main :
 
 - [ ] la créer côté schéma (`ColumnSchema::generated`) ;
-- [ ] un bras dans `push_generated_col_insert` ;
-- [ ] chaque écriture en dur de `traversal.rs` (`insert_pivot_object` et les autres `insert_*` qui créent un
-  `RowBuilder` sans parcourir `schema.columns`) ;
+- [ ] ajouter son nom au `match` de `push_generated_col_insert`, avec la valeur à écrire ;
+- [ ] mettre à jour chaque écriture de `traversal.rs` qui pose ses valeurs dans un ordre fixe au lieu de suivre
+  `schema.columns` (`insert_pivot_object` et les autres `insert_*` qui remplissent un `RowBuilder` elles-mêmes) ;
 - [ ] un test `CaptureSink` par forme de ligne touchée, puis un test PostgreSQL.
 
-Pour un nouveau paramètre : `Pass2Config` force tous les sites de construction, mais chacun y met sa valeur à la main.
+**Nouveau paramètre du run.** `Pass2Config` force tous les sites de construction, mais chacun y met sa valeur à la main.
 Vérifier que la CLI (`run_pass2`) et l'IHM (`WorkerConfig::into_pass2_config`) passent bien la valeur voulue, pas
 une valeur par défaut recopiée.
 

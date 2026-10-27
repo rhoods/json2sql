@@ -27,14 +27,17 @@ symbols:
 # Titre
 ## Rôle                    3 lignes et des liens vers les docs de référence (ne pas les recopier)
 ## 1. Quel cas ?           (recette) genre de changement → étapes à suivre
+## 1. Où intervenir        (carte) type de changement → fichier ou fonction
 ## 2. Flux                 du point d'entrée à la sortie, en symboles
 ## 3. Invariants et pièges ce qui casse sans erreur de compilation
-## 4. Recette              ce que le compilateur impose (`match` exhaustifs), puis la checklist de ce qu'il ne voit pas
+## 4. Recette              (recette) ce que le compilateur impose, puis la checklist de ce qu'il ne voit pas
+## 4. Points d'extension   (carte) les endroits prévus pour étendre la zone, et les étapes que le compilateur ne rappelle pas
 ## 5. Vérifier             commandes exactes
 ## 6. Odeurs constatées    vu en écrivant, pas tranché → issues de refacto
 ```
 
-Les listes de l'en-tête s'écrivent une entrée par ligne (`  - x`) : c'est la forme que lit le test.
+Les listes de l'en-tête s'écrivent une entrée par ligne (`  - x`) : c'est la forme que lit le test. Les sections 1 et
+4 changent de nom selon le type de fiche ; les autres sont les mêmes.
 
 ## Règles
 
@@ -44,6 +47,18 @@ Les listes de l'en-tête s'écrivent une entrée par ligne (`  - x`) : c'est la 
   ```` ``` ````) qui est le nom exact d'une définition du code est listé. Il ne voit pas un symbole cité qui n'existe
   déjà plus : la liste complète, le niveau 1 le signale dès qu'il disparaît.
 - Commencer par les zones qui changent le plus (`git log --stat`).
+- Écrire pour quelqu'un qui découvre la zone : pas de jargon sans explication. Utiliser les termes ci-dessous, les
+  mêmes d'une fiche à l'autre.
+
+## Vocabulaire
+
+| Dire | Pour | Plutôt que |
+|---|---|---|
+| un **cas** d'un `match` | une ligne `motif => action` d'un `match` | « un bras » |
+| un `match` **sans cas par défaut** | un `match` sur un enum sans `_ =>` : le compilateur refuse de compiler tant qu'une variante n'est pas traitée. C'est ce qui protège une fiche ; un `match` avec `_ =>` ou sur des chaînes ne protège rien | « `match` exhaustif » sans explication |
+| **le compilateur le signale / ne le voit pas** | une étape qu'une erreur de compilation rappelle, ou non | — |
+| **écrit en dur** | des valeurs posées dans un ordre ou une liste fixe dans le code, au lieu d'être lues dans le schéma | — |
+| **en silence** | sans erreur, sans avertissement, sans anomalie | — |
 
 ## Garder les fiches à jour
 

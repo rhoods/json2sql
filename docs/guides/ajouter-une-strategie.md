@@ -161,7 +161,7 @@ Pass 2 : insert_object → recurse_children → insert_child_object
 ### Socle
 
 Ajoute la variante à `InferredStrategy`, puis lance `cargo check --workspace --all-targets`. Le compilateur liste les
-`match` exhaustifs à compléter (état au commit `verified_at`) :
+`match` sans cas par défaut à compléter (état au commit `verified_at`) :
 
 - `apply_wide_strategy_columns` : forme des colonnes de la table ;
 - `insert_child_object` : Pass 2, enfant d'un objet ordinaire ;
@@ -187,7 +187,7 @@ Le compilateur ne voit pas le reste :
 
 - [ ] Choisir la phase : entre tables, phase 2 (`finalize_cascading`, dossier `cascading/`) ; table par table, phase 3
   (`apply_wide_strategy` et `apply_non_autosplit_strategy` dans `finalizer/wide_strategy.rs`).
-- [ ] Construire les colonnes : un bras de `apply_wide_strategy_columns`, ou une fonction `apply_*` dédiée dans
+- [ ] Construire les colonnes : un cas dans le `match` d'`apply_wide_strategy_columns`, ou une fonction `apply_*` dédiée dans
   `wide_strategies.rs`.
 - [ ] Décrire l'heuristique dans `schema-inference.md`.
 
@@ -195,9 +195,9 @@ Le compilateur ne voit pas le reste :
 
 - [ ] Ajouter la variante à `UserOverride`. Le compilateur signale : `InferredStrategy::from` (projection vers la
   stratégie), `apply_single_user_override`, `user_override_badge`, `PreviewScreen`.
-- [ ] TOML : un bras dans `apply_strategy_override`, et la valeur dans les listes de `conflicting_strategy_override` et
+- [ ] TOML : un cas pour la valeur TOML dans le `match` d'`apply_strategy_override`, et la valeur dans les listes de `conflicting_strategy_override` et
   de `rebuilds_columns`. Ce sont trois listes de chaînes à garder alignées.
-- [ ] Si l'override réutilise `apply_wide_strategy_columns` : cette fonction écrit aussi `inferred_strategy`. Les bras
+- [ ] Si l'override réutilise `apply_wide_strategy_columns` : cette fonction écrit aussi `inferred_strategy`. Les cas
   `pivot` et `jsonb` (`apply_strategy_override`, `apply_single_user_override`) sauvegardent la valeur avant l'appel et
   la restaurent après ; faire de même.
 - [ ] Si l'application touche d'autres tables que la table visée (comme `flatten`) : passer par le mécanisme différé
@@ -263,8 +263,8 @@ Vues en écrivant la fiche, pas tranchées. Chacune peut devenir une issue de re
    plus les chaînes TOML. Une stratégie que l'utilisateur peut demander existe deux fois, reliée par
    `InferredStrategy::from`. Leurs rôles diffèrent (résultat, choix, interrupteur) ; reste à voir si la duplication est
    nécessaire.
-2. **Deux répartiteurs presque identiques en Pass 2.** `insert_child_object` et `dispatch_child_object` ont les mêmes
-   bras et appellent les mêmes fonctions ; seul le passage du contexte diffère. Une nouvelle stratégie s'y ajoute deux
+2. **Deux répartiteurs presque identiques en Pass 2.** `insert_child_object` et `dispatch_child_object` traitent les mêmes
+   cas et appellent les mêmes fonctions ; seul le passage du contexte diffère. Une nouvelle stratégie s'y ajoute deux
    fois.
 3. **Des décisions en `matches!`, invisibles au compilateur.** `InferredStrategy::absorbs_children`,
    `TableSchema::takes_column_groups`, `apply_user_overrides` et la mention de `StrategyScreen` classent les
