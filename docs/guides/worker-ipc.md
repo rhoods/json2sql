@@ -246,21 +246,21 @@ de bout en bout : le chemin complet IHM → worker → PostgreSQL se vérifie à
 
 ## 6. Odeurs constatées
 
-Vues en écrivant la fiche, pas tranchées.
+Vues en écrivant la fiche, pas tranchées. Voir aussi #80 (annulation lente) et #72 (test du socket instable).
 
-1. **Protocole en chaînes.** `WorkerCommand` porte une chaîne, `WorkerResult` un statut en chaîne ; la commande
-   d'annulation est recopiée en texte dans deux écrans ; `"cancelled"` est annoncé et jamais écrit. Des enums
-   sérialisés feraient signaler au compilateur chaque côté à modifier.
-2. **Messages perdus après `Pass2Done`.** La remise en place des réglages PostgreSQL logue après la fermeture du flux,
-   et l'IHM se dit terminée avant le worker. Un événement de fin émis par le worker après `run_interruptible`
-   réglerait les deux.
-3. **Deux usages de `Notify` à vérifier.** `CancelToken::cancelled` lit l'état puis se met en attente : une annulation
-   qui tombe entre les deux ne réveille rien (`notify_waiters` ne garde pas de trace), et la Pass 2 ne serait arrêtée
-   que par le SIGKILL de secours. `CancellationToken` de tokio-util, déjà utilisé par la Pass 2, fait la même chose
-   sans ce trou. `ImportSummary::push` réveille un seul client (`notify_one`) : avec deux connexions, l'autre attend
-   l'événement suivant.
-4. **Fichiers temporaires.** Le chemin du résultat est déduit de celui du socket en trois endroits de l'IHM ; le socket
-   et le fichier résultat ne sont jamais supprimés après un import normal, seulement par « Abandonner » ou au
+1. **Protocole en chaînes** (#119). `WorkerCommand` porte une chaîne, `WorkerResult` un statut en chaîne ; la commande
+   d'annulation est recopiée en texte dans deux écrans ; `"cancelled"` est annoncé et jamais écrit. Des enums sérialisés
+   feraient signaler au compilateur chaque côté à modifier.
+2. **Messages perdus après `Pass2Done`** (#120, non reproduit). La remise en place des réglages PostgreSQL logue après
+   la fermeture du flux, et l'IHM se dit terminée avant le worker. Un événement de fin émis par le worker après
+   `run_interruptible` réglerait les deux.
+3. **Deux usages de `Notify` à vérifier** (#121, non reproduit). `CancelToken::cancelled` lit l'état puis se met en
+   attente : une annulation qui tombe entre les deux ne réveille rien (`notify_waiters` ne garde pas de trace), et la
+   Pass 2 ne serait arrêtée que par le SIGKILL de secours. `CancellationToken` de tokio-util, déjà utilisé par la Pass
+   2, fait la même chose sans ce trou. `ImportSummary::push` réveille un seul client (`notify_one`) : avec deux
+   connexions, l'autre attend l'événement suivant.
+4. **Fichiers temporaires** (#122). Le chemin du résultat est déduit de celui du socket en trois endroits de l'IHM ; le
+   socket et le fichier résultat ne sont jamais supprimés après un import normal, seulement par « Abandonner » ou au
    démarrage suivant de l'IHM (sockets seulement).
-5. **Tests recopiés.** La `WorkerConfig` de test existe en trois copies (`ipc.rs`, `main.rs`, `pipeline.rs`), et le
-   test de `WorkerConfig::into_pass2_config` en deux (`ipc.rs`, `main.rs`).
+5. **Tests recopiés** (#123). La `WorkerConfig` de test existe en trois copies (`ipc.rs`, `main.rs`, `pipeline.rs`), et
+   le test de `WorkerConfig::into_pass2_config` en deux (`ipc.rs`, `main.rs`).
