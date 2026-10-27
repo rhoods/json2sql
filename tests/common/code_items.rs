@@ -1,4 +1,4 @@
-//! Extraction des définitions Rust (fn, struct, enum, const) d'un fichier source, partagée par
+//! Extraction des définitions Rust (fn, struct, enum, const, trait) d'un fichier source, partagée par
 //! `tests/header_consistency.rs` (#33) et `tests/guides_consistency.rs` (#96). Inclus par
 //! `#[path = "common/code_items.rs"] mod code_items;` plutôt que via `tests/common/mod.rs`, que
 //! compilent les tests PostgreSQL.
@@ -42,6 +42,7 @@ pub enum Kind {
     Struct,
     Enum,
     Const,
+    Trait,
 }
 
 impl Kind {
@@ -51,6 +52,7 @@ impl Kind {
             Kind::Struct => "struct",
             Kind::Enum => "enum",
             Kind::Const => "const",
+            Kind::Trait => "trait",
         }
     }
 }
@@ -243,7 +245,8 @@ pub fn parse_impl_header(after: &str) -> Option<ImplHeader> {
     None
 }
 
-/// Extracts every real fn/struct/enum/const item defined in `content` (consts follow the fn rules). Free functions and structs/
+/// Extracts every real fn/struct/enum/const/trait item defined in `content` (consts follow the fn
+/// rules, traits the struct/enum ones). Free functions and structs/
 /// enums keep their bare name; `impl` methods are qualified `Type::method` (an
 /// `impl Trait for Type` block yields `Type::method`, never `Trait::method`, and a generic
 /// self-type like `Arc<Mutex<MemSink>>` is kept verbatim). Items nested inside any
@@ -329,11 +332,15 @@ pub fn extract_code_items(content: &str) -> HashSet<Item> {
 
     let enum_re =
         Regex::new(r"(?m)^(?:pub(?:\([^)]*\))?\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap();
-    for cap in enum_re.captures_iter(&stripped) {
-        items.insert(Item {
-            kind: Kind::Enum,
-            name: cap[1].to_string(),
-        });
+    let trait_re =
+        Regex::new(r"(?m)^(?:pub(?:\([^)]*\))?\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap();
+    for (re, kind) in [(&enum_re, Kind::Enum), (&trait_re, Kind::Trait)] {
+        for cap in re.captures_iter(&stripped) {
+            items.insert(Item {
+                kind,
+                name: cap[1].to_string(),
+            });
+        }
     }
 
     items

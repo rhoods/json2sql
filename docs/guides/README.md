@@ -49,7 +49,7 @@ Les listes de l'en-tête s'écrivent une entrée par ligne (`  - x`) : c'est la 
 
 | Niveau | Ce qui est vérifié | Où |
 |---|---|---|
-| 1. Les références existent | chaque chemin de `files:` existe ; chaque nom de `symbols:` est défini (fn, struct, enum, const, `Type::méthode`) dans `src/`, `json2sql-ui/src/` ou `json2sql-worker/src/` ; tout symbole du code cité dans le texte est dans `symbols:` | `tests/guides_consistency.rs`, en CI |
+| 1. Les références existent | chaque chemin de `files:` existe ; chaque nom de `symbols:` est défini (fn, struct, enum, const, trait, `Type::méthode`) dans `src/`, `json2sql-ui/src/` ou `json2sql-worker/src/` ; tout symbole du code cité dans le texte est dans `symbols:` | `tests/guides_consistency.rs`, en CI |
 | 2. Rien n'échappe à la fiche | ce qui s'énumère dans le code est mentionné dans la fiche (pilote : variantes d'`InferredStrategy`, valeurs de `StrategyName::OPTIONAL`) | `tests/guides_consistency.rs`, en CI ; à étendre fiche par fiche |
 | 3. Relecture après un changement | une fiche dont un fichier de `files:` a changé depuis `verified_at` est relue | fin de session `brain-dev`, pas en CI |
 

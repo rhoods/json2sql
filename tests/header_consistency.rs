@@ -82,8 +82,8 @@ fn check_file(path: &Path, content: &str) -> Option<FileInconsistency> {
     }
     let documented = documented_items(content);
     let mut code = extract_code_items(content);
-    // Les blocs `Fonctions :` ne listent pas les constantes.
-    code.retain(|item| item.kind != Kind::Const);
+    // Les blocs `Fonctions :` ne listent ni les constantes ni les traits.
+    code.retain(|item| !matches!(item.kind, Kind::Const | Kind::Trait));
 
     let mut doc_missing: Vec<Item> = documented.difference(&code).cloned().collect();
     let mut code_missing: Vec<Item> = code.difference(&documented).cloned().collect();

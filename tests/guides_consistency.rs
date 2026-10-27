@@ -2,7 +2,7 @@
 //! de `docs/guides/README.md`).
 //!
 //! - Niveau 1 : chaque chemin de `files:` existe ; chaque nom de `symbols:` est défini (fn,
-//!   struct, enum, const, méthode `Type::nom`) dans `src/`, `json2sql-ui/src/` ou
+//!   struct, enum, const, trait, méthode `Type::nom`) dans `src/`, `json2sql-ui/src/` ou
 //!   `json2sql-worker/src/`. L'extraction est celle de `tests/header_consistency.rs` (#33),
 //!   partagée dans `tests/common/code_items.rs`. Filet : un mot cité entre backticks dans le texte
 //!   qui est le nom exact d'une définition doit figurer dans `symbols:`.

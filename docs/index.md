@@ -45,6 +45,7 @@ fiche ou avancer `verified_at`. `tests/guides_consistency.rs` vérifie en CI que
 | Document | Consulter pour... |
 |---|---|
 | [guides/ajouter-une-strategie.md](guides/ajouter-une-strategie.md) | Ajouter une stratégie de matérialisation : tableau des stratégies existantes, flux, checklist (ce que le compilateur impose, et le reste), odeurs constatées (fiche pilote) |
+| [guides/pass2.md](guides/pass2.md) | Modifier la Pass 2 (parcours du JSON, écriture des lignes, COPY) : où intervenir, pièges silencieux (ordre des colonnes, tables et sinks sautés, colonnes générées), tests sans base avec `CaptureSink` |
 
 ---
 
