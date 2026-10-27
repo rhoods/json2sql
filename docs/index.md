@@ -45,6 +45,7 @@ fiche ou avancer `verified_at`. `tests/guides_consistency.rs` vérifie en CI que
 | Document | Consulter pour... |
 |---|---|
 | [guides/ajouter-une-strategie.md](guides/ajouter-une-strategie.md) | Ajouter une stratégie de matérialisation : tableau des stratégies existantes, flux, checklist (ce que le compilateur impose, et le reste), odeurs constatées (fiche pilote) |
+| [guides/finalisation.md](guides/finalisation.md) | Modifier la finalisation du schéma (phases de `SchemaFinalizer`, fusion des tables sœurs, noms, garde des 1 600 colonnes) : où intervenir, formes de clé, pièges silencieux (tables synthétiques, dédoublonnage, colonne clé), checklists |
 | [guides/groupes-colonnes.md](guides/groupes-colonnes.md) | Modifier les groupes de colonnes (`--suggest-groups`, `column_groups`, `--group-columns`, IHM) : où intervenir, tableau des signaux de données, pièges silencieux (ordre des colonnes, signaux éteints, deux échantillons, snapshot), checklists signal, seuil et échantillon |
 | [guides/pass1.md](guides/pass1.md) | Modifier la Pass 1 (lecture du fichier, observation des types, échantillon) : où intervenir, tableau des types inférés, pièges silencieux (fusion parallèle, ordre des colonnes, nouveau type qui devient `TEXT`), checklists statistique et type inféré |
 | [guides/pass2.md](guides/pass2.md) | Modifier la Pass 2 (parcours du JSON, écriture des lignes, COPY) : où intervenir, pièges silencieux (ordre des colonnes, tables et sinks sautés, colonnes générées), tests sans base avec `CaptureSink` |
