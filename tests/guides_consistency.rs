@@ -8,7 +8,7 @@
 //!   qui est le nom exact d'une définition doit figurer dans `symbols:`.
 //! - Niveau 2 : ce qui s'énumère dans le code est mentionné dans la fiche. Pilote : variantes
 //!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`),
-//!   variantes d'`InferredType` (fiche `pass1.md`).
+//!   variantes d'`InferredType` (fiche `pass1.md`), variantes de `PgType` (fiche `db.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
@@ -26,6 +26,7 @@ use code_items::{collect_rs_files, extract_code_items, find_matching_brace};
 
 const STRATEGY_GUIDE: &str = "docs/guides/ajouter-une-strategie.md";
 const PASS1_GUIDE: &str = "docs/guides/pass1.md";
+const DB_GUIDE: &str = "docs/guides/db.md";
 
 /// En-tête YAML d'une fiche : `verified_at` et les listes `files:` / `symbols:`.
 #[derive(Debug, Default, PartialEq)]
@@ -244,6 +245,22 @@ fn pass1_guide_lists_every_inferred_type() {
     assert!(
         missing.is_empty(),
         "{PASS1_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des types pour {missing:?}"
+    );
+}
+
+/// Niveau 2 : chaque variante de `PgType` a sa ligne dans le tableau des types de la fiche base
+/// de données (rendu DDL, accepté ou non dans un override TOML). `PgType::as_sql` est protégé
+/// par le compilateur, `parse_pg_type` non : la ligne dit s'il faut aussi le toucher.
+#[test]
+fn db_guide_lists_every_pg_type() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join(DB_GUIDE)).unwrap();
+    let variants = enum_variants(&root, "src/schema/type_tracker.rs", "PgType");
+    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    let missing = variants_missing_from_table(&guide, &variants);
+    assert!(
+        missing.is_empty(),
+        "{DB_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des types pour {missing:?}"
     );
 }
 
