@@ -1,7 +1,7 @@
 ---
 type: recette
 sujet: Ajouter une stratégie de matérialisation
-verified_at: 4691041
+verified_at: 37ac338
 files:
   - src/schema/table_schema.rs
   - src/schema/strategies.rs
@@ -12,10 +12,12 @@ files:
   - src/schema/cascading/
   - src/schema/config.rs
   - src/schema/persistence.rs
+  - src/pipeline.rs
   - src/pass2/insert.rs
   - src/pass2/traversal.rs
   - src/cli.rs
   - json2sql-ui/src/screens/common/strategy_badges.rs
+  - json2sql-ui/src/screens/common/overrides.rs
   - json2sql-ui/src/screens/strategy.rs
   - json2sql-ui/src/screens/setup.rs
   - json2sql-ui/src/screens/preview.rs
@@ -55,6 +57,8 @@ symbols:
   - apply_user_overrides
   - apply_single_user_override
   - dissolve_column_groups
+  - apply_group_columns
+  - build_effective_schemas
   - DeferredFlatten
   - DeferredNormalize
   - format_version
@@ -120,6 +124,12 @@ Toute nouvelle stratégie passe par le **socle** (§ 4). Selon ses lignes dans c
 - **B** si l'utilisateur peut la demander (TOML, IHM) ;
 - **C** si `--disable-strategy` peut la couper.
 
+**Hors du tableau : les groupes de colonnes** (`--group-columns`, case « Column groups » de l'IHM, #91). Ce n'est pas
+une variante d'`InferredStrategy` : c'est une couche posée après coup, qui découpe une table déjà `Columns` ou
+`AutoSplit` en tables 1:1, une par famille de colonnes. La table garde sa stratégie. Une nouvelle stratégie n'a qu'une
+décision à prendre de ce côté : `TableSchema::takes_column_groups` (§ 4). Le reste relève de la carte des groupes de
+colonnes (#107).
+
 ## 2. Flux
 
 ```text
@@ -132,6 +142,9 @@ Pass 1 (observation)
 Overrides : TOML (apply_overrides_complete), IHM (apply_user_overrides)
    → TableSchema::effective_strategy : IHM > TOML > inférée
 Snapshot (persistence.rs) : schéma et overrides sauvegardés entre Pass 1 et Pass 2
+Groupes de colonnes, seulement si TableSchema::takes_column_groups :
+   CLI  apply_group_columns, après la sauvegarde du snapshot ; une clé column_groups du TOML l'emporte
+   IHM  build_effective_schemas, pour les tables cochées
 Pass 2 : insert_object → recurse_children → insert_child_object
          (enfant d'un objet JSONB : dispatch_child_object ; tableau d'objets : insert_array)
 ```
@@ -176,7 +189,8 @@ Le compilateur ne voit pas le reste :
 - [ ] `InferredStrategy::absorbs_children` : la stratégie absorbe-t-elle ses enfants ? (voir § 3)
 - [ ] `InferredStrategy::is_wide` : vrai pour tout sauf `Columns` ; vérifier que c'est voulu.
 - [ ] `TableSchema::takes_column_groups` : la table peut-elle être découpée en groupes de colonnes ? (aujourd'hui
-  `Columns` et `AutoSplit`)
+  `Columns` et `AutoSplit`). `--group-columns`, la case de l'IHM et `--suggest-groups` passent tous par ce test :
+  une stratégie oubliée ici n'est jamais découpée, sans avertissement.
 - [ ] Pass 2, table racine : `insert_object` traite à part `Jsonb` (`write_root_jsonb`), `SiblingCollapseMulti` et
   `AutoSplit` (`write_autosplit_rows`).
 - [ ] Pass 2, tableau d'objets : `insert_array` traite à part `Jsonb`.
