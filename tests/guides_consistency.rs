@@ -8,7 +8,7 @@
 //!   qui est le nom exact d'une définition doit figurer dans `symbols:`.
 //! - Niveau 2 : ce qui s'énumère dans le code est mentionné dans la fiche. Pilote : variantes
 //!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`),
-//!   variantes d'`InferredType` (fiche `pass1.md`).
+//!   variantes d'`InferredType` (fiche `pass1.md`), variantes d'`AppScreen` (fiche `ihm.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
@@ -26,6 +26,7 @@ use code_items::{collect_rs_files, extract_code_items, find_matching_brace};
 
 const STRATEGY_GUIDE: &str = "docs/guides/ajouter-une-strategie.md";
 const PASS1_GUIDE: &str = "docs/guides/pass1.md";
+const IHM_GUIDE: &str = "docs/guides/ihm.md";
 
 /// En-tête YAML d'une fiche : `verified_at` et les listes `files:` / `symbols:`.
 #[derive(Debug, Default, PartialEq)]
@@ -244,6 +245,20 @@ fn pass1_guide_lists_every_inferred_type() {
     assert!(
         missing.is_empty(),
         "{PASS1_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des types pour {missing:?}"
+    );
+}
+
+/// Niveau 2 : chaque variante d'`AppScreen` a sa ligne dans le tableau des écrans de la fiche IHM.
+#[test]
+fn ihm_guide_lists_every_app_screen() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join(IHM_GUIDE)).unwrap();
+    let variants = enum_variants(&root, "json2sql-ui/src/state/mod.rs", "AppScreen");
+    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    let missing = variants_missing_from_table(&guide, &variants);
+    assert!(
+        missing.is_empty(),
+        "{IHM_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des écrans pour {missing:?}"
     );
 }
 
