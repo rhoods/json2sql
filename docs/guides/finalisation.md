@@ -239,14 +239,14 @@ Vues en écrivant la fiche, pas tranchées. Déjà suivies ailleurs : réglages 
 finaliseur dans `registry.rs` (#113), décisions en `matches!` et effet de bord sur `inferred_strategy` (odeurs 3 et 8
 de la fiche des stratégies).
 
-1. **Colonne clé choisie en trois copies.** `KeyShape` → `key_id` / `lang_code` / `"key"` est écrit trois fois avec un
+1. **Colonne clé choisie en trois copies** (#135). `KeyShape` → `key_id` / `lang_code` / `"key"` est écrit trois fois avec un
    cas par défaut. Une méthode de `KeyShape` sans cas par défaut ferait signaler une forme oubliée.
-2. **Noms synthétiques hors `NamingRegistry`.** La phase 2 a ses propres règles de nom (63 au lieu de 53, colonne
+2. **Noms synthétiques hors `NamingRegistry`** (#136). La phase 2 a ses propres règles de nom (63 au lieu de 53, colonne
    parente à la main). L'effet réel sur un nom long (contraintes `pk_` / `fk_` coupées par PostgreSQL) reste à
    mesurer.
-3. **La phase 3 parcourt les `TableEntry` pré-fusion** au lieu des schémas, d'où la garde de #45 et les tables
+3. **La phase 3 parcourt les `TableEntry` pré-fusion** (#137) au lieu des schémas, d'où la garde de #45 et les tables
    synthétiques jamais élargies. `build_base_schemas` garde aussi un paramètre inutilisé.
-4. **Docs décalées.** `schema-inference.md` situe la finalisation dans `registry.rs` (`finalize_siblings`, aujourd'hui
+4. **Docs décalées** (#138). `schema-inference.md` situe la finalisation dans `registry.rs` (`finalize_siblings`, aujourd'hui
    `finalize_cascading`), parle de stratégie « KeyedPivot » et d'une colonne `j2s_data` qui n'existe pas, et dit que
    l'exclusion des tables absorbées tourne dans `main.rs`. La doc d'`apply_column_limit_guard` (enfants gardés) et
    celle du champ `inferred_strategy` (jamais modifié) sont fausses (§ 3).
