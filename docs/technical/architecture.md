@@ -444,7 +444,7 @@ Détection automatique de patterns `{base}_{suffixe}` dans les tables larges.
 
 Sérialisation et désérialisation du résultat Pass 1 — permet à l'IHM de découpler les deux passes.
 
-- **`SchemaSnapshot`** : struct sérialisable contenant `version`, `total_rows`, `schemas`, `truncated_names`, `column_collisions`, `stats`
+- **`SchemaSnapshot`** : struct sérialisable contenant `version`, `total_rows`, `schemas`, `truncated_names`, `column_collisions`, `stats`, et deux champs optionnels de #91 : `group_columns` (tables cochées dans l'IHM) et `samples` (présence et valeurs des tables larges dans l'échantillon du Pass 1, tables de nombres en hexadécimal). Ces champs ne changent pas la version : une version antérieure les ignore sans perte
 - **`save()`** : sérialise un résultat Pass 1 en JSON vers un fichier
 - **`load()`** : désérialise et vérifie la version (`SCHEMA_FORMAT_VERSION = 2`) ; refuse, avec un message qui demande de relancer la Pass 1, un snapshot d'avant #84 qui contient une table de jonction `ScalarArray`
 

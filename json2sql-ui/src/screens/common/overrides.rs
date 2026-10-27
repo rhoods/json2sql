@@ -100,6 +100,8 @@ pub struct PreviewGroup {
     pub columns: Vec<String>,
     /// Columns left in the table that the data tie to this group: candidates to confirm, never moved (#91, T8).
     pub candidates: Vec<String>,
+    /// The group fuses several families of names, which the data of Pass 1 confirmed (#91, T8).
+    pub fused: bool,
 }
 
 /// What splitting a table into column groups would give.
@@ -136,6 +138,7 @@ pub fn group_preview(
                 table: group_table_name(table, &g.name),
                 columns: g.columns.iter().map(|&c| p.columns[c].name.clone()).collect(),
                 candidates: p.attachments.iter().filter(|a| a.group == at).map(|a| p.columns[a.column].name.clone()).collect(),
+                fused: g.families > 1,
             })
         })
         .collect();
@@ -362,6 +365,7 @@ mod tests {
                 assert_eq!(tables, ["a_kiwi", "a_zulu"]);
                 assert_eq!(groups[0].columns.len(), 6);
                 assert!(groups[0].candidates.is_empty(), "no data signal, no candidate");
+                assert!(!groups[0].fused, "one family of names");
             }
             GroupPreview::Unavailable(why) => panic!("{why}"),
         }

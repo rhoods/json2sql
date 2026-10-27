@@ -446,6 +446,8 @@ CREATE TABLE foods_packaging (
 );
 ```
 
+Les données de la Pass 1 (un échantillon des lignes, gardé dans le snapshot) peuvent aussi confirmer la fusion de deux familles, par exemple `nutrition_*` et `nutriscore_*` quand leurs colonnes partagent les mêmes valeurs : les deux familles forment alors une seule table de groupe, `{table}_nutriscore_nutrition`. Une colonne isolée que les données rapprochent d'un groupe est seulement signalée (« might join, to confirm »), jamais déplacée.
+
 Les mêmes groupes s'écrivent à la main dans le TOML (`[foods.column_groups]`, voir
 [usage.md](usage.md#découper-une-table-en-groupes-de-colonnes-column_groups)), et `--suggest-groups` les propose
 avec un rapport.

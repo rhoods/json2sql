@@ -16,7 +16,7 @@ use dioxus::prelude::*;
 use dioxus::prelude::Modifiers;
 use json2sql::schema::table_schema::{InferredStrategy, TableSchema, UserOverride};
 
-use crate::screens::{build_table_rows, display_schemas, group_preview, pick_save_file, strategy_badge, strategy_label, user_override_badge, GroupPreview, PickResult, TableRowsCtx};
+use crate::screens::{build_table_rows, display_schemas, group_preview, pick_save_file, strategy_badge, strategy_label, user_override_badge, GroupPreview, PickResult, PreviewGroup, TableRowsCtx};
 use crate::state::select_children_visible;
 use crate::screens::table_list::TableListPanel;
 use crate::state::{AppScreen, AppState};
@@ -128,15 +128,9 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
     // Column groups of the selected table (#91): what the switch would split, or why it cannot.
     let group_columns_snap = state.read().schema.group_columns.clone();
     let groups_on = group_columns_snap.contains(&selected_table.name);
-    let (preview_groups, preview_note): (Vec<(String, usize, String, String)>, String) =
+    let (preview_groups, preview_note): (Vec<PreviewGroup>, String) =
         match group_preview(&originals, &overrides_snap, &group_columns_snap, &state.read().schema.pass1_samples, &selected_table.name) {
-            GroupPreview::Groups(groups) => (
-                groups
-                    .into_iter()
-                    .map(|g| (g.table, g.columns.len(), g.columns.join(", "), g.candidates.join(", ")))
-                    .collect(),
-                String::new(),
-            ),
+            GroupPreview::Groups(groups) => (groups, String::new()),
             GroupPreview::Unavailable(why) if groups_on => (Vec::new(), format!("No group will be made: {why}.")),
             GroupPreview::Unavailable(why) => (Vec::new(), format!("Not available: {why}.")),
         };
@@ -882,10 +876,21 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                         if !preview_note.is_empty() {
                                             p { style: "font-size:var(--fs-xs);color:var(--fg-4);font-style:italic;line-height:1.5;", "{preview_note}" }
                                         }
-                                        for (group_table, count, columns, candidates) in preview_groups.iter() {
+                                        for group in preview_groups.iter() {
+                                            {
+                                            let (group_table, count, fused) = (&group.table, group.columns.len(), group.fused);
+                                            let (columns, candidates) = (group.columns.join(", "), group.candidates.join(", "));
+                                            rsx! {
                                             div { style: "margin-bottom:6px;",
                                                 div { style: "display:flex;gap:8px;font-size:var(--fs-xs);",
                                                     span { style: "font-family:'JetBrains Mono',monospace;color:var(--fg-2);", "{group_table}" }
+                                                    if fused {
+                                                        span {
+                                                            class: "badge default",
+                                                            title: "several families of names, fused because the data of Pass 1 back it",
+                                                            "fusion confirmed by the data"
+                                                        }
+                                                    }
                                                     span { style: "color:var(--fg-4);margin-left:auto;", "{count} columns" }
                                                 }
                                                 div { style: "font-size:var(--fs-xs);color:var(--fg-4);line-height:1.4;", "{columns}" }
@@ -896,6 +901,8 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                                         "might join, to confirm: {candidates}"
                                                     }
                                                 }
+                                            }
+                                            }
                                             }
                                         }
                                     }

@@ -25,6 +25,6 @@ pub use common::{
     PickResult, pick_file, pick_folder, pick_save_file,
     strategy_label, strategy_badge, user_override_badge,
     progress_pct, ProgressBar,
-    build_effective_schemas, display_schemas, group_preview, skip_cascade_names, splittable_tables, GroupPreview,
+    build_effective_schemas, display_schemas, group_preview, skip_cascade_names, splittable_tables, GroupPreview, PreviewGroup,
     TableRowViewModel, TableRowsCtx, build_table_rows,
 };

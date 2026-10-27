@@ -25,7 +25,7 @@ mod progress;
 pub use progress::{progress_pct, ProgressBar};
 
 mod overrides;
-pub use overrides::{build_effective_schemas, display_schemas, group_preview, skip_cascade_names, splittable_tables, GroupPreview};
+pub use overrides::{build_effective_schemas, display_schemas, group_preview, skip_cascade_names, splittable_tables, GroupPreview, PreviewGroup};
 
 mod table_rows;
 pub use table_rows::{TableRowViewModel, TableRowsCtx, build_table_rows};

@@ -97,7 +97,7 @@ Hook partagé : incrémente un compteur de secondes chaque seconde jusqu'à ce q
 Utilisé par `analysis.rs` (fin de Pass 1) et `import.rs` (fin de Pass 2).  
 Contrainte : `F: Fn() -> bool + Clone + 'static` (pas `Send` — `Signal` utilise `UnsyncStorage`).
 
-### `build_effective_schemas(schemas, overrides, group_columns) -> Vec<TableSchema>`
+### `build_effective_schemas(schemas, overrides, group_columns, samples) -> Vec<TableSchema>`
 Applique les overrides utilisateur sur une copie des schémas. Trois passes :
 1. Overrides simples (changement de colonnes uniquement)
 2. `NormalizeDynamicKeys` (supprime des tables enfants — nécessite la slice complète)
@@ -111,7 +111,8 @@ Appelé par `analysis.rs`, `preview.rs`, `import.rs`, et `strategy.rs`.
 ### Groupes de colonnes (#91)
 - `splittable_tables(schemas, overrides)` : les tables que les noms permettent de découper ; la case « Column groups » de Setup (`ProjectState.group_columns`, sauvée dans `last_project.toml`) les coche toutes après la Pass 1 ou le chargement d'un snapshot.
 - `display_schemas(schemas, overrides, group_columns)` : la liste de l'écran Strategy. Les tables d'origine gardent leurs index (une table découpée y est montrée sans ses colonnes déplacées), les tables de groupe viennent après ; l'arbre les place sous leur parent, en lecture seule.
-- `group_preview(schemas, overrides, group_columns, table)` : les tables de groupe d'une table avec leurs colonnes, ou la raison de leur absence ; calculé avec les autres tables cochées, pour montrer les noms de l'import.
+- `group_preview(schemas, overrides, group_columns, samples, table)` : les tables de groupe d'une table (`PreviewGroup` : colonnes, candidats à confirmer, fusion confirmée par les données), ou la raison de leur absence ; calculé avec les autres tables cochées, pour montrer les noms de l'import.
+- `samples` est `SchemaState.pass1_samples` : les échantillons du Pass 1, remplis par l'écran Analysis ou par le chargement d'un snapshot, écrits par « Save schema ». Toutes ces fonctions les prennent, pour que l'aperçu et l'import appliquent les mêmes fusions.
 - Les cases cochées vivent dans `SchemaState.group_columns`, sont écrites par « Save schema » (`SchemaSnapshot.group_columns`) et relues par `load_snapshot`.
 
 ### `compute_last_child(schemas) -> Vec<bool>`
