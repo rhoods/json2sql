@@ -8,8 +8,9 @@
 //!   qui est le nom exact d'une définition doit figurer dans `symbols:`.
 //! - Niveau 2 : ce qui s'énumère dans le code est mentionné dans la fiche. Pilote : variantes
 //!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`),
-//!   variantes d'`InferredType` (fiche `pass1.md`), options de la CLI et leurs valeurs dans `usage.md`
-//!   (fiche `cli-pipeline.md`).
+//!   variantes d'`InferredType` (fiche `pass1.md`), variantes de `KeyShape` et `ChildKind`
+//!   (fiche `finalisation.md`), options de la CLI et leurs valeurs
+//!   dans `usage.md` (fiche `cli-pipeline.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
@@ -27,6 +28,7 @@ use code_items::{collect_rs_files, extract_code_items, find_matching_brace};
 
 const STRATEGY_GUIDE: &str = "docs/guides/ajouter-une-strategie.md";
 const PASS1_GUIDE: &str = "docs/guides/pass1.md";
+const FINALISATION_GUIDE: &str = "docs/guides/finalisation.md";
 
 /// En-tête YAML d'une fiche : `verified_at` et les listes `files:` / `symbols:`.
 #[derive(Debug, Default, PartialEq)]
@@ -248,35 +250,22 @@ fn pass1_guide_lists_every_inferred_type() {
     );
 }
 
-/// Niveau 2 : chaque stratégie désactivable figure dans la colonne « Désactivable » du tableau
-/// de la fiche et sur la ligne `--disable-strategy` d'`usage.md`.
+/// Niveau 2 : chaque variante de `KeyShape` et de `ChildKind` a sa ligne dans un tableau de la
+/// fiche finalisation. Le nom de colonne clé est choisi par des `match` avec cas par défaut : une
+/// forme de clé ajoutée compile sans qu'on y pense.
 #[test]
-fn optional_strategies_documented() {
+fn finalisation_guide_lists_key_shapes_and_child_kinds() {
     let root = workspace_root();
-    let guide = fs::read_to_string(root.join(STRATEGY_GUIDE)).unwrap();
-    // 4e cellule des lignes du tableau des stratégies.
-    let disable_column: String = guide
-        .lines()
-        .filter(|l| l.starts_with("| `"))
-        .filter_map(|l| l.split('|').nth(4))
-        .collect();
-    let usage = fs::read_to_string(root.join("docs/functional/usage.md")).unwrap();
-    let usage_line = usage
-        .lines()
-        .find(|l| l.starts_with("| `--disable-strategy`"))
-        .expect("ligne `--disable-strategy` introuvable dans usage.md");
-
-    let mut errors = Vec::new();
-    for s in StrategyName::OPTIONAL {
-        let name = format!("`{}`", s.as_str());
-        if !disable_column.contains(&name) {
-            errors.push(format!("  {STRATEGY_GUIDE} : {name} absent de la colonne « Désactivable »"));
-        }
-        if !usage_line.contains(&name) {
-            errors.push(format!("  usage.md : {name} absent de la ligne `--disable-strategy`"));
-        }
+    let guide = fs::read_to_string(root.join(FINALISATION_GUIDE)).unwrap();
+    for enum_name in ["KeyShape", "ChildKind"] {
+        let variants = enum_variants(&root, "src/schema/table_schema.rs", enum_name);
+        assert!(variants.len() > 1, "extraction des variantes de {enum_name} cassée : {variants:?}");
+        let missing = variants_missing_from_table(&guide, &variants);
+        assert!(
+            missing.is_empty(),
+            "{FINALISATION_GUIDE} : pas de ligne `| `Variante` |` dans le tableau {enum_name} pour {missing:?}"
+        );
     }
-    assert!(errors.is_empty(), "Stratégies désactivables non documentées :\n{}", errors.join("\n"));
 }
 
 /// Lignes de tableau `| `--x` |` d'un texte, par nom d'option.
@@ -336,6 +325,37 @@ fn cli_options_documented() {
         }
     }
     assert!(errors.is_empty(), "Options de la CLI non documentées :\n{}", errors.join("\n"));
+}
+
+/// Niveau 2 : chaque stratégie désactivable figure dans la colonne « Désactivable » du tableau
+/// de la fiche et sur la ligne `--disable-strategy` d'`usage.md`.
+#[test]
+fn optional_strategies_documented() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join(STRATEGY_GUIDE)).unwrap();
+    // 4e cellule des lignes du tableau des stratégies.
+    let disable_column: String = guide
+        .lines()
+        .filter(|l| l.starts_with("| `"))
+        .filter_map(|l| l.split('|').nth(4))
+        .collect();
+    let usage = fs::read_to_string(root.join("docs/functional/usage.md")).unwrap();
+    let usage_line = usage
+        .lines()
+        .find(|l| l.starts_with("| `--disable-strategy`"))
+        .expect("ligne `--disable-strategy` introuvable dans usage.md");
+
+    let mut errors = Vec::new();
+    for s in StrategyName::OPTIONAL {
+        let name = format!("`{}`", s.as_str());
+        if !disable_column.contains(&name) {
+            errors.push(format!("  {STRATEGY_GUIDE} : {name} absent de la colonne « Désactivable »"));
+        }
+        if !usage_line.contains(&name) {
+            errors.push(format!("  usage.md : {name} absent de la ligne `--disable-strategy`"));
+        }
+    }
+    assert!(errors.is_empty(), "Stratégies désactivables non documentées :\n{}", errors.join("\n"));
 }
 
 #[cfg(test)]
