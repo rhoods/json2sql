@@ -232,19 +232,19 @@ Les tests `tc_*` démarrent un PostgreSQL dans Docker (testcontainers) : il faut
 
 ## 6. Odeurs constatées
 
-Vues en écrivant la fiche, pas tranchées.
+Vues en écrivant la fiche, pas tranchées ; chacune a son issue.
 
 1. **Noms de contraintes recopiés.** `pk_<table>`, `fk_<table>_parent` et la recherche de la colonne parente sont
-   écrits dans cinq fonctions, dont une dans `pipeline.rs`. Une fonction par nom les garderait d'accord.
+   écrits dans cinq fonctions, dont une dans `pipeline.rs`. Une fonction par nom les garderait d'accord. (#147)
 2. **Trois rendus du `CREATE TABLE`**, déjà différents de ce qui est exécuté (§ 3). Le dry-run et l'aperçu
-   pourraient afficher la suite exacte des requêtes exécutées.
+   pourraient afficher la suite exacte des requêtes exécutées. (#148)
 3. **Quatre façons d'ouvrir une connexion**, avec des délais différents ; `to_fk_warning` recopie la mise en forme
-   de `pg_err`.
+   de `pg_err`. (#149)
 4. **Une variante jamais utilisée.** `ConstraintKind` a une variante `PrimaryKey` jamais construite, et le champ qui
-   la porte n'est jamais lu (tous deux marqués `#[allow(dead_code)]`).
+   la porte n'est jamais lu (tous deux marqués `#[allow(dead_code)]`). (#150)
 5. **Docs décalées.** architecture.md dit que l'aperçu sert au dry-run (c'est `generate_create_table`), que
    l'autovacuum revient « avec un `ANALYZE` avant les contraintes » (il revient après, le `VACUUM (ANALYZE)` est
    lancé à part) et que `PrimaryKey` est « toujours fatal » (la variante n'est jamais créée) ; modules.md parle
-   d'« ordre topologique » et n'a pas de ligne pour `pg_tuning.rs`.
+   d'« ordre topologique » et n'a pas de ligne pour `pg_tuning.rs`. (#151)
 6. **Relance sans `--drop-existing`** : échec fatal après un chargement validé, données en double (§ 3). Plutôt un
-   bug : poser les contraintes seulement si elles n'existent pas, ou refuser la relance avant de charger.
+   bug : poser les contraintes seulement si elles n'existent pas, ou refuser la relance avant de charger. (#146)
