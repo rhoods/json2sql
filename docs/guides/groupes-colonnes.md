@@ -285,11 +285,11 @@ tables de groupe. Les autres ne demandent pas de base.
 
 Vues en écrivant la fiche, pas tranchées.
 
-1. **Deux échantillonneurs.** `--suggest-groups` relit le fichier avec sa propre règle (`sample_tables`), alors que
+1. **Deux échantillonneurs** (#152). `--suggest-groups` relit le fichier avec sa propre règle (`sample_tables`), alors que
    `--group-columns` et l'IHM utilisent l'échantillon de la Pass 1 : deux codes, et un TOML proposé qui peut confirmer
    d'autres fusions que celles appliquées.
-2. **La lecture d'une colonne est écrite deux fois** : `key_path` (`suggest.rs`) et `column_value` (`insert.rs`).
-3. **La liste des signaux est écrite en dur** dans `DataSignals::evidence` ; une constante de toutes les variantes,
+2. **La lecture d'une colonne est écrite deux fois** (#153) : `key_path` (`suggest.rs`) et `column_value` (`insert.rs`).
+3. **La liste des signaux est écrite en dur** (#154) dans `DataSignals::evidence` ; une constante de toutes les variantes,
    vérifiée par un `match` sans cas par défaut, rendrait l'oubli visible au compilateur.
-4. **La raison des signaux éteints se perd** en CLI et dans l'IHM (`signals_of` de `auto.rs`) : un `flatten` du TOML
+4. **La raison des signaux éteints se perd** (#155) en CLI et dans l'IHM (`signals_of` de `auto.rs`) : un `flatten` du TOML
    retire toutes les fusions sans que l'utilisateur le sache.
