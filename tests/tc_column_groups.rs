@@ -66,6 +66,7 @@ fn config(url: &str, schema: &str, toml: &str, anomaly_dir: Option<&Path>) -> (P
         schema_report_output: None,
         skip_constraints: false,
         tune_wal: false,
+        group_columns: false,
     };
     (cfg, file)
 }
@@ -224,6 +225,32 @@ async fn test_column_groups_are_written_from_the_object_of_their_table() {
         let lines = std::fs::read_to_string(&file).unwrap_or_default().lines().count();
         assert_eq!(lines, 3, "rows 11, 22 and 33 have text in zulu_a: {}", file.display());
         assert_eq!(std::fs::read_dir(anomalies.path()).unwrap().count(), 1, "no other table has anomalies");
+    })
+    .await;
+}
+
+/// #91: `--group-columns` makes the groups the names confirm and Pass 2 fills them like groups of a config.
+#[tokio::test]
+async fn test_group_columns_writes_the_groups_its_names_find() {
+    integration::with_pg_container(|client, schema, url| async move {
+        let plain = format!("{schema}_plain");
+        client.execute(&format!("CREATE SCHEMA \"{plain}\""), &[]).await.unwrap();
+        let (grouped_cfg, _keep) = config(&url, &schema, PLAIN, None);
+        run_pipeline(PipelineConfig { group_columns: true, ..grouped_cfg }).await.expect("import with --group-columns");
+        let (plain_cfg, _keep2) = config(&url, &plain, PLAIN, None);
+        run_pipeline(plain_cfg).await.expect("import without groups");
+
+        let rows = fixture_rows();
+        let kiwi = ["kiwi_a", "kiwi_b", "kiwi_c", "kiwi_d", "kiwi_e", "kiwi_f"];
+        let zulu = ["zulu_a", "zulu_b", "zulu_c", "zulu_d", "zulu_e", "zulu_f"];
+        assert_eq!(integration::row_count(&client, &schema, "items_kiwi").await, with_a_value(&rows, None, &kiwi));
+        assert_eq!(integration::row_count(&client, &schema, "items_zulu").await, with_a_value(&rows, None, &zulu));
+        assert_eq!(columns_left(&client, &schema, "items", &kiwi).await, 0);
+        let pair = (schema.as_str(), plain.as_str());
+        assert_eq!(differences(&client, pair, ("items", "items_kiwi", "id"), &kiwi).await, 0);
+        assert_eq!(differences(&client, pair, ("items", "items_zulu", "id"), &zulu).await, 0);
+        assert_eq!(all_rows(&client, &plain).await + with_a_value(&rows, None, &kiwi) + with_a_value(&rows, None, &zulu),
+            all_rows(&client, &schema).await, "only the group rows are added");
     })
     .await;
 }

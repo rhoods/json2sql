@@ -21,6 +21,7 @@
 //! - fn `flush_final_progress` — émet un dernier événement de progression si nécessaire.
 //! - fn `scan_json_rows` — boucle principale (observe chaque objet racine).
 //! - fn `build_pass1_result` — finalise le registre et construit `Pass1Result`.
+//! - fn `samples_of` — échantillons par table des tables larges éligibles, à partir des lignes gardées par le thread de lecture (#91, phase 2).
 //!
 //! Inspection (`run_inspect`, aperçu sans stratégies) :
 //! - struct `InspectResult` — résultat d'un run d'inspection (schéma brut, pas de guard ni stratégies).
@@ -52,6 +53,8 @@ use crate::schema::finalizer::OverflowWarning;
 use crate::schema::registry::{RegistryConfig, SchemaRegistry};
 use crate::schema::stats::ColumnStats;
 use crate::schema::table_schema::TableSchema;
+use crate::schema::grouping::sample::StoredSample;
+use super::row_sample::{RowSampler, SampledRow};
 
 const PROGRESS_INTERVAL: u64 = 1_000;
 
@@ -90,6 +93,11 @@ pub struct Pass1Result {
     /// JSON format detected during pass1. `None` when restored from an old snapshot that
     /// predates this field — pass2 will re-detect in that case.
     pub detected_format: Option<JsonFormat>,
+    /// Tables ticked for column groups in the UI (#91), read from a snapshot. Always empty on a fresh Pass 1 run.
+    pub group_columns: Vec<String>,
+    /// Presence and values of the eligible wide tables in a bounded sample of the rows (#91, phase 2): the data
+    /// signals of the column groups, without reading the file again.
+    pub samples: Vec<StoredSample>,
 }
 
 /// Run Pass 1: stream through the entire file and build the schema.
@@ -116,10 +124,11 @@ pub fn run(
     }
     let (mut reader, format) = JsonReader::open(path)?;
     emit_root_wrapper_warning(&format, progress_tx.as_ref());
-    let total_rows = scan_json_rows(&mut reader, &mut registry, config, progress.as_ref(), progress_tx.as_ref(), total_bytes)?;
+    let mut sampler = RowSampler::new(total_bytes);
+    let total_rows = scan_json_rows(&mut reader, &mut registry, config, progress.as_ref(), progress_tx.as_ref(), total_bytes, &mut sampler)?;
     if let Some(ref bar) = progress { bar.finish(); }
     eprintln!("Pass 1 complete: {total_rows} rows, building schema...");
-    Ok(build_pass1_result(registry, total_rows, format, progress_tx.as_ref()))
+    Ok(build_pass1_result(registry, total_rows, format, progress_tx.as_ref(), sampler.into_rows()))
 }
 
 fn report_progress(
@@ -155,6 +164,7 @@ fn scan_json_rows(
     progress: Option<&ProgressTracker>,
     progress_tx: Option<&ProgressTx>,
     total_bytes: u64,
+    sampler: &mut RowSampler,
 ) -> Result<u64> {
     let mut total_rows = 0u64;
     while let Some(item) = reader.next() {
@@ -164,6 +174,10 @@ fn scan_json_rows(
                 let root = reader.current_key().unwrap_or(&config.root_table);
                 registry.observe_root(root, obj);
                 total_rows += 1;
+                let end = reader.bytes_read();
+                if sampler.wants(end) {
+                    sampler.keep(end, reader.current_key().map(str::to_string), serde_json::to_vec(&value).unwrap_or_default());
+                }
             }
             other => {
                 return Err(crate::error::J2sError::InvalidInput(format!(
@@ -182,8 +196,10 @@ fn build_pass1_result(
     total_rows: u64,
     format: JsonFormat,
     progress_tx: Option<&ProgressTx>,
+    kept_rows: Vec<SampledRow>,
 ) -> Pass1Result {
     let (schemas, overflow_warnings) = registry.finalize_with_pg_guard();
+    let samples = samples_of(&schemas, kept_rows);
     let stats = registry.collect_stats();
     let truncated_names = registry.truncated_names().to_vec();
     let column_collisions = registry.column_collisions().to_vec();
@@ -197,7 +213,20 @@ fn build_pass1_result(
         schemas, total_rows, stats, truncated_names, column_collisions, overflow_warnings,
         skip_cascade_warnings: Vec::new(),
         detected_format: Some(format),
+        group_columns: Vec::new(),
+        samples,
     }
+}
+
+/// The per-table samples of the eligible wide tables, from the rows the reading thread kept; the rows are dropped.
+fn samples_of(schemas: &[TableSchema], sampled: Vec<SampledRow>) -> Vec<StoredSample> {
+    let count = sampled.len();
+    // parsed one at a time: a parsed row weighs several times its bytes
+    let rows = sampled.into_iter().filter_map(|row| {
+        let mut bytes = row.bytes;
+        simd_json::from_slice::<Value>(&mut bytes).ok().map(|value| (row.key, value))
+    });
+    crate::schema::grouping::suggest::samples_of_rows(schemas, rows, count)
 }
 
 /// Result of an inspect run (raw schema, no strategies or guards applied).
@@ -329,8 +358,9 @@ pub fn run_parallel(
     let (tx, rx) = crossbeam_channel::bounded::<(Option<String>, Vec<u8>)>(num_workers * 4);
     let worker_handles = spawn_worker_threads(rx, config, num_workers);
 
+    let mut sampler = RowSampler::new(total_bytes);
     let (total_rows, reader_err, format) =
-        read_and_dispatch(path, tx, progress.as_ref(), progress_tx.as_ref(), total_bytes)?;
+        read_and_dispatch(path, tx, progress.as_ref(), progress_tx.as_ref(), total_bytes, &mut sampler)?;
 
     let (merged, worker_err) = join_and_merge_workers(worker_handles, config);
 
@@ -342,7 +372,7 @@ pub fn run_parallel(
 
     flush_final_progress(progress_tx.as_ref(), total_rows, total_bytes, total_bytes);
     eprintln!("Pass 1 complete (parallel, {num_workers} workers): {total_rows} rows, building schema...");
-    Ok(build_pass1_result(merged, total_rows, format, progress_tx.as_ref()))
+    Ok(build_pass1_result(merged, total_rows, format, progress_tx.as_ref(), sampler.into_rows()))
 }
 
 /// Spawn `num_workers` threads, each consuming JSON object bytes from `rx` and building
@@ -398,6 +428,7 @@ fn read_and_dispatch(
     progress: Option<&ProgressTracker>,
     progress_tx: Option<&ProgressTx>,
     total_bytes: u64,
+    sampler: &mut RowSampler,
 ) -> Result<(u64, Option<crate::error::J2sError>, JsonFormat)> {
     const PROGRESS_INTERVAL: u64 = 1_000;
     if let Some(tx_prog) = progress_tx {
@@ -412,6 +443,11 @@ fn read_and_dispatch(
         match item {
             Ok(bytes) => {
                 let key = reader.current_key().map(str::to_string);
+                // the reading thread picks the sampled rows: the same sample whatever the number of workers
+                let end = reader.bytes_read();
+                if sampler.wants(end) {
+                    sampler.keep(end, key.clone(), bytes.clone());
+                }
                 if tx.send((key, bytes)).is_err() { break; } // all workers died
                 total_rows += 1;
             }
@@ -594,6 +630,44 @@ mod tests {
             },
             None,
         )
+    }
+
+    /// 40 000 rows of a dense table of 24 columns: more rows than the sample keeps.
+    fn wide_file() -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        for i in 0..40_000_u32 {
+            let row: serde_json::Map<String, Value> =
+                (0..24).map(|c| (format!("k{c:02}"), serde_json::json!(format!("v{}", (i + c) % 7)))).collect();
+            writeln!(f, "{}", Value::Object(row)).unwrap();
+        }
+        f
+    }
+
+    #[test]
+    fn pass_1_keeps_the_same_bounded_sample_whatever_the_number_of_workers() {
+        // #91 phase 2: the data signals come with the schema, the same for every run of the same file
+        let f = wide_file();
+        let config = Pass1Config { num_workers: Some(4), ..run_config_for("users") };
+        let (one, four) = (run(f.path(), &config, None).unwrap(), run_parallel(f.path(), &config, None).unwrap());
+        assert_eq!(one.samples.len(), 1);
+        let (a, b) = (&one.samples[0], &four.samples[0]);
+        assert_eq!((a.table.as_str(), a.columns.len()), ("users", 24));
+        assert_eq!(a.columns, b.columns);
+        let rows = a.sample.presence.rows();
+        assert!((10_000..=20_000).contains(&rows), "{rows} rows, at most the budget, spread over the file");
+        assert_eq!(rows, b.sample.presence.rows());
+        for c in 0..24 {
+            assert_eq!(a.sample.values.vocabulary(c), b.sample.values.vocabulary(c), "column {c}");
+        }
+    }
+
+    fn run_config_for(root: &str) -> Pass1Config {
+        Pass1Config {
+            root_table: root.to_string(),
+            registry: RegistryConfig { wide_column_threshold: usize::MAX, ..RegistryConfig::default() },
+            num_workers: None,
+        }
     }
 
     #[test]

@@ -37,6 +37,7 @@ fn base_config(url: String, schema: String) -> PipelineConfig {
         schema_report_output: None,
         skip_constraints: false,
         tune_wal: false,
+        group_columns: false,
     }
 }
 

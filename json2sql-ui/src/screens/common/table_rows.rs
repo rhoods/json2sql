@@ -10,7 +10,7 @@
 //! - fn `build_table_rows` — construit le view-model de toutes les lignes (ordre, filtre, visibilité)
 //! - fn `tree_display_order` — ordre d'affichage DFS (racines triées, enfants groupés, orphelins en fin)
 //! - fn `compute_last_child` — pour chaque position, vrai si dernier enfant de son parent (connecteur └─/├─)
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use json2sql::schema::table_schema::{TableSchema, InferredStrategy, UserOverride};
 
 use super::{strategy_badge, user_override_badge};
@@ -46,6 +46,8 @@ pub struct TableRowViewModel {
     pub has_children: bool,
     /// Anomaly count from Pass 2 (0 if Pass 2 hasn't run yet).
     pub anomaly_count: u64,
+    /// The table is ticked for column groups (#91): a `groups` badge next to its strategy.
+    pub has_groups: bool,
 }
 
 /// Input context for [`build_table_rows`]. Groups the per-call parameters so the
@@ -61,6 +63,10 @@ pub struct TableRowsCtx<'a> {
     pub filter:           &'a str,
     pub show_warn_only:   bool,
     pub anomaly_counts:   &'a HashMap<String, u64>,
+    /// Tables ticked for column groups (#91).
+    pub grouped:          &'a BTreeSet<String>,
+    /// Show only the tables the user changed: an override, ticked column groups, or a group table of those.
+    pub show_modified_only: bool,
 }
 
 #[allow(clippy::struct_excessive_bools)] // each flag is an independent, orthogonal row category
@@ -114,7 +120,12 @@ fn build_row(
     let is_selected = ctx.selected_indices.contains(&i);
     let row_cls: &'static str = if is_selected { "sel" }
         else if flags.is_routing || flags.is_absorbed || flags.is_cascaded_skip { "muted" } else { "" };
+    let has_groups = ctx.grouped.contains(&table.name);
+    let is_group_table = table.parent_table.as_ref().is_some_and(|p| ctx.grouped.contains(p))
+        && schemas.iter().any(|s| s.column_groups.contains(&table.name));
+    let modified = ctx.overrides.contains_key(&table.name) || has_groups || is_group_table;
     let visible = (!ctx.show_warn_only || flags.has_warn)
+        && (!ctx.show_modified_only || modified)
         && (filter_lc.is_empty() || table.name.to_lowercase().contains(filter_lc));
     TableRowViewModel {
         index: i, name: table.name.clone(),
@@ -124,13 +135,14 @@ fn build_row(
         is_routing: flags.is_routing, has_warn: flags.has_warn, row_cls, visible,
         has_children: parent_names.contains(table.name.as_str()),
         anomaly_count: ctx.anomaly_counts.get(&table.name).copied().unwrap_or(0),
+        has_groups,
     }
 }
 
 /// Build the view-model for every table row.
 ///
 /// - Computes badge, overflow/routing flags, tree connectors and indentation.
-/// - Filters rows according to `filter` (substring match on name) and `show_warn_only`.
+/// - Filters rows according to `filter` (substring match on name), `show_warn_only` and `show_modified_only`.
 /// - `visible: false` rows are excluded from rendering but retained for index stability.
 /// - `overflow_names`: tables auto-promoted to Jsonb by Pass 1 without user override.
 /// - `selected_indices`: set of selected row indices (empty → all unselected).
@@ -386,11 +398,46 @@ mod tests {
             (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
         build_table_rows(schemas, &TableRowsCtx {
             overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an,
+            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
         })
     }
 
     // --- build_table_rows tests ---
+
+    /// `a` ticked for column groups with its group table `a_kiwi`, `b` turned into a pivot, `c` untouched.
+    fn modified_schemas() -> Vec<TableSchema> {
+        let mut a = make_table("a", None);
+        a.column_groups.push("a_kiwi".to_string());
+        vec![a, make_table("a_kiwi", Some("a")), make_table("b", None), make_table("c", None)]
+    }
+
+    fn rows_with(schemas: &[TableSchema], show_modified_only: bool) -> Vec<TableRowViewModel> {
+        let overrides = HashMap::from([("b".to_string(), UserOverride::Pivot)]);
+        let grouped = BTreeSet::from(["a".to_string()]);
+        let (ov_n, sel, abs, casc, an) = (HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
+        build_table_rows(schemas, &TableRowsCtx {
+            overrides: &overrides, overflow_names: &ov_n, selected_indices: &sel,
+            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an,
+            grouped: &grouped, show_modified_only,
+        })
+    }
+
+    #[test]
+    fn a_table_ticked_for_column_groups_shows_the_groups_badge() {
+        // #91: the left panel tells which tables are split
+        let rows = rows_with(&modified_schemas(), false);
+        let grouped: Vec<&str> = rows.iter().filter(|r| r.has_groups).map(|r| r.name.as_str()).collect();
+        assert_eq!(grouped, ["a"]);
+    }
+
+    #[test]
+    fn the_modified_filter_keeps_the_overridden_and_ticked_tables_and_their_group_tables() {
+        let visible = |rows: Vec<TableRowViewModel>| -> Vec<String> {
+            rows.into_iter().filter(|r| r.visible).map(|r| r.name).collect()
+        };
+        assert_eq!(visible(rows_with(&modified_schemas(), true)), ["a", "a_kiwi", "b"]);
+        assert_eq!(visible(rows_with(&modified_schemas(), false)).len(), 4);
+    }
 
     #[test]
     fn normal_table_has_correct_badge_and_visible() {
@@ -410,7 +457,7 @@ mod tests {
         let (ov, sel, abs, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
         let rows = build_table_rows(&schemas, &TableRowsCtx {
             overrides: &ov, overflow_names: &overflow, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an,
+            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
         });
         assert!(rows[0].has_warn);
         assert_eq!(rows[0].badge_cls, "warn");
@@ -426,7 +473,7 @@ mod tests {
         let (sel, abs, casc, an) = (HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
         let rows = build_table_rows(&schemas, &TableRowsCtx {
             overrides: &overrides, overflow_names: &overflow, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an,
+            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
         });
         assert!(!rows[0].has_warn, "user override must suppress overflow flag");
         assert_ne!(rows[0].badge_cls, "warn");
@@ -448,7 +495,7 @@ mod tests {
         let (ov, ov_n, sel, abs, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
         let rows = build_table_rows(&schemas, &TableRowsCtx {
             overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "user", show_warn_only: false, anomaly_counts: &an,
+            absorbed_names: &abs, cascaded_names: &casc, filter: "user", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
         });
         assert!(!rows[0].visible, "orders should be hidden");
         assert!(rows[1].visible, "users should match");
@@ -468,7 +515,7 @@ mod tests {
         let (ov, sel, abs, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
         let rows = build_table_rows(&schemas, &TableRowsCtx {
             overrides: &ov, overflow_names: &overflow, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: true, anomaly_counts: &an,
+            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: true, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
         });
         // tree_display_order sorts alphabetically: "big" appears before "clean".
         let clean = rows.iter().find(|r| r.name == "clean").unwrap();
@@ -484,7 +531,7 @@ mod tests {
         let (ov, ov_n, abs, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
         let rows = build_table_rows(&schemas, &TableRowsCtx {
             overrides: &ov, overflow_names: &ov_n, selected_indices: &selected,
-            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an,
+            absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
         });
         assert_eq!(rows[0].row_cls, "");
         assert_eq!(rows[1].row_cls, "sel");
@@ -556,7 +603,7 @@ mod tests {
         let (ov, ov_n, sel, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
         let rows = build_table_rows(&schemas, &TableRowsCtx {
             overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &absorbed, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an,
+            absorbed_names: &absorbed, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
         });
         assert!(rows[0].visible,                    "parent must be visible");
         assert!(rows[1].visible,                    "absorbed child_a must remain visible");
@@ -572,7 +619,7 @@ mod tests {
         let (ov, ov_n, sel, abs, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
         let rows = build_table_rows(&schemas, &TableRowsCtx {
             overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &abs, cascaded_names: &cascaded, filter: "", show_warn_only: false, anomaly_counts: &an,
+            absorbed_names: &abs, cascaded_names: &cascaded, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
         });
         let child = rows.iter().find(|r| r.name == "child").unwrap();
         assert_eq!(child.badge_cls, "skip", "cascaded child must show a skip-styled badge");
@@ -587,7 +634,7 @@ mod tests {
         let (ov, ov_n, sel, casc, an) = (HashMap::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
         let rows = build_table_rows(&schemas, &TableRowsCtx {
             overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
-            absorbed_names: &absorbed, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an,
+            absorbed_names: &absorbed, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &an, grouped: &BTreeSet::new(), show_modified_only: false,
         });
         assert!(rows[0].visible);
         assert_ne!(rows[0].badge_lbl, "merged");
@@ -602,6 +649,7 @@ mod tests {
         let rows = build_table_rows(&schemas, &TableRowsCtx {
             overrides: &ov, overflow_names: &ov_n, selected_indices: &sel,
             absorbed_names: &abs, cascaded_names: &casc, filter: "", show_warn_only: false, anomaly_counts: &anomalies,
+            grouped: &BTreeSet::new(), show_modified_only: false,
         });
         assert_eq!(rows[0].anomaly_count, 7, "orders must carry anomaly count");
         assert_eq!(rows[1].anomaly_count, 0, "users has no anomaly");

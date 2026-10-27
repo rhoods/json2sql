@@ -200,6 +200,12 @@ pub struct Cli {
     #[arg(long, value_name = "FILE", conflicts_with = "dry_run")]
     pub suggest_groups: Option<PathBuf>,
 
+    /// Split every wide table (`Columns` or `AutoSplit`, at least 20 data columns) into 1:1 tables of the column groups
+    /// its names confirm, after the schema snapshot is saved. Off by default; a `column_groups` key in the
+    /// --schema-config section of a table wins (`column_groups = {}` keeps the table whole).
+    #[arg(long, default_value_t = false, conflicts_with = "suggest_groups")]
+    pub group_columns: bool,
+
     /// With --suggest-groups: folder of a static embedding model (`Model2Vec`, `WordPiece` tokenizer, for example
     /// `potion-base-8M`) used to suggest the two nearest groups for each column left in a table. Never downloaded.
     #[arg(long, value_name = "DIR", requires = "suggest_groups")]
@@ -317,6 +323,21 @@ mod tests {
     fn test_suggest_groups_excludes_dry_run() {
         assert!(Cli::try_parse_from([
             "json2sql", "--input", "data.json", "--suggest-groups", "groups.toml", "--dry-run",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn test_group_columns_is_off_by_default_and_parses() {
+        assert!(!Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap().group_columns);
+        assert!(Cli::try_parse_from(["json2sql", "--input", "data.json", "--group-columns"]).unwrap().group_columns);
+    }
+
+    #[test]
+    fn test_group_columns_excludes_suggest_groups() {
+        // the proposal would run on tables the strategy already split
+        assert!(Cli::try_parse_from([
+            "json2sql", "--input", "data.json", "--group-columns", "--suggest-groups", "groups.toml",
         ])
         .is_err());
     }

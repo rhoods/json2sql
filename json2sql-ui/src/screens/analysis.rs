@@ -109,7 +109,20 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
                 s.schema.column_collisions = result.column_collisions;
                 s.schema.pass1_stats = result.stats;
                 s.schema.detected_format = result.detected_format;
+                s.schema.pass1_samples = result.samples;
                 s.schema.schema_snapshot_loaded = false;
+                if s.project.group_columns {
+                    s.schema.group_columns = crate::screens::splittable_tables(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.pass1_samples);
+                    let shown = crate::screens::build_effective_schemas(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.group_columns, &s.schema.pass1_samples);
+                    let line = format!(
+                        "Column groups: {} table(s) split into {} group table(s) — schema: {} tables, {} columns",
+                        s.schema.group_columns.len(),
+                        shown.iter().map(|t| t.column_groups.len()).sum::<usize>(),
+                        shown.len(),
+                        shown.iter().map(|t| t.columns.len()).sum::<usize>(),
+                    );
+                    s.schema.pass1_progress.push_log(line);
+                }
             }
             Ok(Err(e)) => {
                 state.write().schema.pass1_progress.push_log(format!("Pass 1 error: {e}"));
@@ -121,9 +134,18 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
     });
 
     // ── Derived values ────────────────────────────────────────────────────
-    let progress  = state.read().schema.pass1_progress.clone();
-    let schemas   = state.read().schema.schemas.clone();
+    let mut progress = state.read().schema.pass1_progress.clone();
+    // the tables of the import: with the column groups ticked (#91)
+    let schemas   = {
+        let s = state.read();
+        crate::screens::build_effective_schemas(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.group_columns, &s.schema.pass1_samples)
+    };
     let done      = progress.done;
+    if done && !schemas.is_empty() {
+        // the end-of-pass counts are those of the tables shown, column groups included (#91)
+        progress.tables_count = schemas.len();
+        progress.columns_count = schemas.iter().map(|t| t.columns.len()).sum();
+    }
     let elapsed   = *elapsed_secs.read();
     let workers   = state.read().project.workers;
 

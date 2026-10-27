@@ -1,0 +1,2 @@
+[products_brand]
+strategy = "jsonb"

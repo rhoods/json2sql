@@ -36,9 +36,11 @@
 //! - fn `warn_depth` — avertit d'une profondeur de nesting excessive.
 //!
 //! Post-traitement schéma :
-//! - fn `post_process_schema` — dispatch overrides → snapshot → rapport.
+//! - fn `post_process_schema` — dispatch overrides → snapshot → groupes de colonnes → rapport.
 //! - fn `apply_schema_config` — applique le TOML de surcharges.
 //! - fn `save_schema_snapshot` — sauvegarde le snapshot si demandé.
+//! - fn `apply_group_columns` — stratégie `--group-columns` (#91) : groupes par les noms des tables larges (ou cochées dans le snapshot de l'IHM), après le snapshot ; le TOML l'emporte.
+//! - fn `toml_column_group_tables` — tables dont la section du TOML a une clé `column_groups`.
 //! - fn `emit_schema_report` — écrit le rapport de stats (stderr ou fichier).
 //!
 //! Dry-run & rapports :
@@ -119,6 +121,9 @@ pub struct PipelineConfig {
     pub skip_constraints: bool,
     /// Raise `max_wal_size` to 16 GB for the duration of Pass 2, then restore it (see `Pass2Config::tune_wal`).
     pub tune_wal: bool,
+    /// Split the wide tables into 1:1 tables of the column groups their names confirm (#91), after the snapshot is
+    /// saved; a table whose TOML section has a `column_groups` key is left to the TOML.
+    pub group_columns: bool,
 }
 
 /// Run the full json2sql import pipeline.
@@ -309,6 +314,8 @@ fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
         overflow_warnings: snap.overflow_warnings,
         skip_cascade_warnings,
         detected_format: snap.detected_format,
+        group_columns: snap.group_columns,
+        samples: snap.samples,
     })
 }
 
@@ -441,12 +448,47 @@ fn warn_depth(schemas: &[TableSchema], depth_limit: Option<usize>) {
     }
 }
 
-/// Apply schema config overrides, save snapshot, and emit stats report.
+/// Apply schema config overrides, save snapshot, split into column groups, and emit stats report.
 fn post_process_schema(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<Vec<crate::schema::config::ConfigWarning>> {
     let warnings = apply_schema_config(pass1, cfg)?;
     save_schema_snapshot(pass1, cfg)?;
+    apply_group_columns(pass1, cfg)?;
     emit_schema_report(pass1, cfg)?;
     Ok(warnings)
+}
+
+/// `--group-columns` (#91): the groups the names confirm, for every wide table (or, without the flag, the tables
+/// ticked in the UI snapshot that was loaded, D3) whose TOML section has no `column_groups` key (even empty: that is
+/// the opt-out). Runs after the snapshot is saved, so that a snapshot never holds automatic groups and a TOML given
+/// later still wins (D1). Its warnings say they come from the strategy.
+fn apply_group_columns(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<()> {
+    if !cfg.group_columns && pass1.group_columns.is_empty() {
+        return Ok(());
+    }
+    let left_to_toml = toml_column_group_tables(cfg)?;
+    let ticked = pass1.group_columns.clone();
+    let warnings = crate::schema::grouping::auto::apply_name_groups(&mut pass1.schemas, &pass1.samples, |t| {
+        (cfg.group_columns || ticked.contains(&t.name)) && !left_to_toml.contains(&t.name)
+    })?;
+    crate::schema::column_groups::reindex_stats(&pass1.schemas, &mut pass1.stats);
+    for w in warnings {
+        let message = w.to_message();
+        eprintln!("WARNING: group-columns: {}", message.strip_prefix("schema-config: ").unwrap_or(&message));
+    }
+    Ok(())
+}
+
+/// The tables whose section of the `--schema-config` TOML has a `column_groups` key.
+// shortcut: reads the small TOML a second time after apply_schema_config; pass the parsed config down if it grows.
+fn toml_column_group_tables(cfg: &PipelineConfig) -> Result<HashSet<String>> {
+    let Some(ref path) = cfg.schema_config else { return Ok(HashSet::new()) };
+    let config = crate::schema::config::SchemaConfig::from_file(path)?;
+    Ok(config
+        .tables
+        .into_iter()
+        .filter(|(_, keys)| keys.contains_key("column_groups"))
+        .map(|(table, _)| table)
+        .collect())
 }
 
 fn apply_schema_config(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<Vec<crate::schema::config::ConfigWarning>> {
@@ -471,6 +513,8 @@ fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()>
         strategy_overrides: std::collections::HashMap::new(),
         overflow_warnings: pass1.overflow_warnings.clone(),
         detected_format: pass1.detected_format.clone(),
+        group_columns: pass1.group_columns.clone(),
+        samples: pass1.samples.clone(),
     };
     crate::schema::persistence::write_snapshot(&snapshot, out_path, false)?;
     eprintln!("Schema snapshot saved to '{}'.", out_path.display());
@@ -601,6 +645,8 @@ mod tests {
             overflow_warnings: vec![],
             skip_cascade_warnings: vec![],
             detected_format: None,
+            group_columns: vec![],
+            samples: vec![],
         }
     }
 
@@ -635,6 +681,7 @@ mod tests {
             schema_report_output: None,
             skip_constraints: false,
             tune_wal: false,
+            group_columns: false,
         }
     }
 
@@ -717,6 +764,230 @@ mod tests {
             "{}",
             s.report
         );
+    }
+
+    /// The tables of the finalized schema of `cfg`.
+    fn table_names(cfg: PipelineConfig) -> Vec<String> {
+        let mut cfg = cfg;
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
+        pass1.schemas.iter().map(|s| s.name.clone()).collect()
+    }
+
+    /// `cfg_for(file)` with `--group-columns`.
+    fn grouped(file: &tempfile::NamedTempFile) -> PipelineConfig {
+        PipelineConfig { group_columns: true, ..cfg_for(file) }
+    }
+
+    fn with_toml(cfg: PipelineConfig, text: &str) -> (PipelineConfig, tempfile::NamedTempFile) {
+        let toml = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(toml.path(), text).unwrap();
+        (PipelineConfig { schema_config: Some(toml.path().to_path_buf()), ..cfg }, toml)
+    }
+
+    #[test]
+    fn group_columns_splits_the_wide_tables_by_their_names() {
+        let file = wide_jsonl(60);
+        assert_eq!(table_names(grouped(&file)), ["root", "root_kiwi", "root_zulu"]);
+    }
+
+    #[test]
+    fn without_group_columns_nothing_is_split() {
+        let file = wide_jsonl(60);
+        let mut cfg = cfg_for(&file);
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
+        assert_eq!(pass1.schemas.len(), 1);
+        assert_eq!(pass1.schemas[0].column_groups.len(), 0);
+    }
+
+    #[test]
+    fn the_column_groups_of_the_toml_win_over_the_strategy() {
+        let file = wide_jsonl(60);
+        let (cfg, _toml) = with_toml(grouped(&file), "[root.column_groups]\nmine = [\"quartz\", \"bamboo\", \"violin\"]\n");
+        assert_eq!(table_names(cfg), ["root", "root_mine"]);
+    }
+
+    #[test]
+    fn an_empty_column_groups_in_the_toml_keeps_the_table_whole() {
+        let file = wide_jsonl(60);
+        let (cfg, _toml) = with_toml(grouped(&file), "[root]\ncolumn_groups = {}\n");
+        assert_eq!(table_names(cfg), ["root"]);
+    }
+
+    #[test]
+    fn the_snapshot_is_saved_before_the_strategy() {
+        // #91 D1: a later TOML must still be able to win, so the automatic groups are never in a snapshot
+        let file = wide_jsonl(60);
+        let snapshot = tempfile::NamedTempFile::new().unwrap();
+        let cfg = PipelineConfig { schema_output: Some(snapshot.path().to_path_buf()), ..grouped(&file) };
+        assert_eq!(table_names(cfg).len(), 3);
+        let saved = crate::schema::persistence::load(snapshot.path()).unwrap();
+        assert_eq!(saved.schemas.len(), 1);
+        assert_eq!(saved.version, crate::schema::persistence::SCHEMA_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn the_statistics_of_the_moved_columns_follow_them_to_their_group_table() {
+        let file = wide_jsonl(60);
+        let mut cfg = grouped(&file);
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
+        let tables: Vec<(&str, &str)> =
+            pass1.stats.iter().map(|s| (s.table_name.as_str(), s.column_name.as_str())).collect();
+        assert!(tables.contains(&("root_kiwi", "kiwi_a")), "{tables:?}");
+        assert!(!tables.contains(&("root", "kiwi_a")), "{tables:?}");
+    }
+
+    /// Lines with the same wide object at the root and under `props`: the tables `root` and `root_props`.
+    fn two_wide_jsonl(rows: usize) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let wide = |i: usize| -> serde_json::Map<String, serde_json::Value> {
+            ('a'..='f')
+                .flat_map(|c| [format!("kiwi_{c}"), format!("zulu_{c}")])
+                .chain((0..12).map(|n| format!("filler{}", char::from(b'a' + n))))
+                .map(|name| (name, serde_json::json!(format!("v{}", i % 5))))
+                .collect()
+        };
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for i in 0..rows {
+            let mut object = wide(i);
+            object.insert("props".to_string(), serde_json::Value::Object(wide(i)));
+            writeln!(file, "{}", serde_json::Value::Object(object)).unwrap();
+        }
+        file
+    }
+
+    /// Runs `cfg` once to save its snapshot, and returns the snapshot file.
+    fn snapshot_of(cfg: PipelineConfig) -> tempfile::NamedTempFile {
+        let snapshot = tempfile::NamedTempFile::new().unwrap();
+        table_names(PipelineConfig { schema_output: Some(snapshot.path().to_path_buf()), ..cfg });
+        snapshot
+    }
+
+    /// `cfg` reading the snapshot `snapshot` instead of running Pass 1 on an input that does not exist.
+    fn from_snapshot(snapshot: &tempfile::NamedTempFile, group_columns: bool) -> PipelineConfig {
+        PipelineConfig {
+            input: Some("/nonexistent/input.json".into()),
+            schema_input: Some(snapshot.path().to_path_buf()),
+            group_columns,
+            ..minimal_pipeline_cfg(None)
+        }
+    }
+
+    fn sorted(mut names: Vec<String>) -> Vec<String> {
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_snapshot_is_split_without_reading_the_input() {
+        let file = wide_jsonl(60);
+        let snapshot = snapshot_of(cfg_for(&file));
+        assert_eq!(table_names(from_snapshot(&snapshot, true)), ["root", "root_kiwi", "root_zulu"]);
+    }
+
+    #[test]
+    fn splitting_a_snapshot_gives_the_schema_of_a_direct_run() {
+        let file = wide_jsonl(60);
+        let direct = {
+            let mut cfg = grouped(&file);
+            serde_json::to_string(&finalized_schema(&mut cfg).unwrap().2.schemas).unwrap()
+        };
+        let snapshot = snapshot_of(grouped(&file));
+        let mut cfg = from_snapshot(&snapshot, true);
+        let again = serde_json::to_string(&finalized_schema(&mut cfg).unwrap().2.schemas).unwrap();
+        assert_eq!(again, direct);
+    }
+
+    #[test]
+    fn a_snapshot_split_by_the_toml_keeps_its_groups_and_the_other_tables_are_split() {
+        let file = two_wide_jsonl(60);
+        let (cfg, _toml) =
+            with_toml(cfg_for(&file), "[root_props.column_groups]\nmine = [\"fillera\", \"fillerb\", \"fillerc\"]\n");
+        let snapshot = snapshot_of(cfg);
+        assert_eq!(
+            crate::schema::persistence::load(snapshot.path()).unwrap().version,
+            crate::schema::persistence::COLUMN_GROUPS_FORMAT_VERSION
+        );
+        assert_eq!(
+            sorted(table_names(from_snapshot(&snapshot, true))),
+            ["root", "root_kiwi", "root_props", "root_props_mine", "root_zulu"]
+        );
+    }
+
+    /// Lines of a wide root table: `nutrition_x` and `nutriscore_x` hold the same six values (the data confirm their
+    /// fusion), and twelve unrelated columns their own values.
+    fn fused_jsonl(rows: usize) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        const OTHER: [&str; 12] = [
+            "quartz", "bamboo", "violin", "ember", "glacier", "harbor", "lantern", "meadow", "oyster", "pebble",
+            "saddle", "thimble",
+        ];
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for i in 0..rows {
+            let mut row = serde_json::Map::new();
+            for p in ["nutrition", "nutriscore"] {
+                for suffix in ["fat", "sugar", "salt", "fiber"] {
+                    row.insert(format!("{p}_{suffix}"), serde_json::json!(format!("{suffix}{}", i % 6)));
+                }
+            }
+            for n in OTHER {
+                row.insert(n.to_string(), serde_json::json!(format!("{n}{}", i % 6)));
+            }
+            writeln!(file, "{}", serde_json::Value::Object(row)).unwrap();
+        }
+        file
+    }
+
+    #[test]
+    fn group_columns_applies_the_fusions_the_data_of_pass_1_confirm() {
+        // #91 phase 2: one pass over the file, and the fusion the names alone leave to confirm is applied
+        let file = fused_jsonl(60);
+        assert_eq!(table_names(grouped(&file)), ["root", "root_nutriscore_nutrition"]);
+        let snapshot = snapshot_of(cfg_for(&file));
+        assert_eq!(table_names(from_snapshot(&snapshot, true)), ["root", "root_nutriscore_nutrition"], "from the snapshot too");
+    }
+
+    #[test]
+    fn group_columns_applies_the_active_groups_suggest_groups_proposes() {
+        // parity with --suggest-groups when the sample holds the whole file
+        let file = fused_jsonl(60);
+        let s = suggest_groups(cfg_for(&file), None).unwrap();
+        let parsed: toml::Table = toml::from_str(&s.toml).unwrap();
+        let mut proposed: Vec<String> =
+            parsed["root"]["column_groups"].as_table().unwrap().keys().map(|g| format!("root_{g}")).collect();
+        proposed.sort();
+        let mut applied: Vec<String> = table_names(grouped(&file)).into_iter().filter(|t| t != "root").collect();
+        applied.sort();
+        assert_eq!(applied, proposed);
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_samples_of_pass_1_and_gives_them_back() {
+        // #91 phase 2: every snapshot carries the data signals of its wide tables
+        let file = wide_jsonl(60);
+        let snapshot = snapshot_of(cfg_for(&file));
+        let saved = crate::schema::persistence::load(snapshot.path()).unwrap();
+        assert_eq!(saved.samples.len(), 1);
+        assert_eq!((saved.samples[0].table.as_str(), saved.samples[0].sample.presence.rows()), ("root", 60));
+        let mut cfg = from_snapshot(&snapshot, false);
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
+        assert_eq!(pass1.samples.len(), 1);
+        assert_eq!(pass1.samples[0].columns, saved.samples[0].columns);
+    }
+
+    #[test]
+    fn the_tables_ticked_in_a_ui_snapshot_are_split_without_the_flag_and_stay_ticked() {
+        // #91 D3: the CLI honors the switches of the UI, like its strategy overrides
+        let file = two_wide_jsonl(60);
+        let snapshot = snapshot_of(cfg_for(&file));
+        let mut saved = crate::schema::persistence::load(snapshot.path()).unwrap();
+        saved.group_columns = vec!["root_props".to_string()];
+        crate::schema::persistence::write_snapshot(&saved, snapshot.path(), false).unwrap();
+        let resaved = tempfile::NamedTempFile::new().unwrap();
+        let cfg = PipelineConfig { schema_output: Some(resaved.path().to_path_buf()), ..from_snapshot(&snapshot, false) };
+        assert_eq!(sorted(table_names(cfg)), ["root", "root_props", "root_props_kiwi", "root_props_zulu"]);
+        let again = crate::schema::persistence::load(resaved.path()).unwrap();
+        assert_eq!(again.group_columns, ["root_props"]);
+        assert_eq!(again.schemas.len(), 2, "the groups themselves are never saved");
     }
 
     /// A model folder with the words `kiwi`, `zulu` and `quartz` as rows of two dimensions.

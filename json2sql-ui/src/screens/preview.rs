@@ -30,12 +30,12 @@ use crate::state::{AppScreen, AppState};
 pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
     use json2sql::schema::table_schema::{InferredStrategy, UserOverride};
 
-    let (schemas_orig, strategy_overrides) = {
+    let (schemas_orig, strategy_overrides, group_columns) = {
         let s = state.read();
-        (s.schema.schemas.clone(), s.schema.strategy_overrides.clone())
+        (s.schema.schemas.clone(), s.schema.strategy_overrides.clone(), s.schema.group_columns.clone())
     };
 
-    let schemas = build_effective_schemas(&schemas_orig, &strategy_overrides);
+    let schemas = build_effective_schemas(&schemas_orig, &strategy_overrides, &group_columns, &state.read().schema.pass1_samples);
 
     if schemas.is_empty() {
         return rsx! {
@@ -175,6 +175,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                                 cascaded_names: &std::collections::HashSet::new(),
                                 filter: "", show_warn_only: false,
                                 anomaly_counts: &state.read().import.pass2_progress.anomaly_counts_per_table,
+                                grouped: &group_columns, show_modified_only: false,
                             }),
                             show_checkboxes: false,
                             on_select_children: move |_| {},

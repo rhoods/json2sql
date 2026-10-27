@@ -1,0 +1,3 @@
+[products_brand]
+strategy = "flatten"
+prefix = "brand_"

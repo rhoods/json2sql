@@ -1026,6 +1026,45 @@ fn data_proposal_report() {
     }
 }
 
+// ---------------------------------------------------------------- #91 T8: candidates to join a group
+
+/// Not an assertion: the columns left out that the data tie to a confirmed group (candidates, never applied), scored
+/// on the labeled relations (`J2S_BENCH_DATA` only). Measured on the first 20 000 OFF rows (2026-10-26): 8 candidates,
+/// none on a labeled link or a separated pair; `manufacturing_places` → origins, vitamins and minerals → additives,
+/// `link` → origins (wrong). On the whole file (snapshot, 10 001 rows) 14 on the root before the 1 % row threshold,
+/// which removed `periods_after_opening_*` (15 rows). Phi misses the rare columns, so the lift is adjusted by
+/// richness; it stays a hint.
+#[test]
+fn attach_report() {
+    let Some(dir) = std::env::var_os(DATA_ENV).map(PathBuf::from) else {
+        eprintln!("[SKIP] {DATA_ENV} is not set");
+        return;
+    };
+    for ds in only_tuning(fixtures()) {
+        let file = dir.join(format!("{}.jsonl", ds.name));
+        if !file.exists() {
+            continue;
+        }
+        let signals = DataSignals::new(&sample_of(&ds, &file));
+        let proposal = proposal_with(&ds, Ok(&signals));
+        let linked: HashSet<(usize, usize)> = ds.linked.iter().flat_map(|r| r.pairs.iter().copied()).collect();
+        let separated: HashSet<(usize, usize)> = ds.separated.iter().flat_map(|r| r.pairs.iter().copied()).collect();
+        println!("== {} ({} columns left out, {} candidates)", ds.name, proposal.ungrouped.len(), proposal.attachments.len());
+        for a in &proposal.attachments {
+            let group = &proposal.groups[a.group];
+            let pairs: Vec<(usize, usize)> = group.columns.iter().map(|&m| (a.column.min(m), a.column.max(m))).collect();
+            let label = if pairs.iter().any(|p| separated.contains(p)) {
+                " [SEPARATED]"
+            } else if pairs.iter().any(|p| linked.contains(p)) {
+                " [linked]"
+            } else {
+                ""
+            };
+            println!("   {} -> {} (lift {:.2}, next {:.2}, {} rows){label}", ds.columns[a.column], group.name, a.lift, a.next, a.rows);
+        }
+    }
+}
+
 // ---------------------------------------------------------------- T2: static embeddings (local model only)
 
 /// Folder of a Model2Vec model with a WordPiece tokenizer. Unset in CI, where the model is not available.

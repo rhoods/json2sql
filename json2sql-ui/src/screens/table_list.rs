@@ -49,6 +49,7 @@ pub fn TableListPanel(
                             let bcls         = row.badge_cls;
                             let blbl         = row.badge_lbl;
                             let warn         = row.has_warn;
+                            let has_groups   = row.has_groups;
                             let has_children   = row.has_children;
                             let anomaly_count  = row.anomaly_count;
                             rsx! {
@@ -87,7 +88,12 @@ pub fn TableListPanel(
                                             style: if is_wide { "color:var(--warning);font-weight:600;" } else { "color:var(--fg-2);" },
                                             "{cnt}"
                                         }
-                                        td { span { class: "badge {bcls}", "{blbl}" } }
+                                        td {
+                                            span { class: "badge {bcls}", "{blbl}" }
+                                            if has_groups {
+                                                span { class: "badge default", style: "margin-left:4px;", title: "split into column groups", "groups" }
+                                            }
+                                        }
                                         td {
                                             if warn {
                                                 span { class: "badge warn sq", style: "height:16px;font-size:10px;", "⚠" }
@@ -112,6 +118,9 @@ pub fn TableListPanel(
                                         }
                                         td { style: "white-space:nowrap;text-align:right;",
                                             span { class: "badge {bcls}", "{blbl}" }
+                                            if has_groups {
+                                                span { class: "badge default", style: "margin-left:4px;", "groups" }
+                                            }
                                             if warn {
                                                 span { class: "badge warn", style: "margin-left:4px;", "⚠" }
                                             }

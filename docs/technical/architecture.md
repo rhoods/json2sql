@@ -43,12 +43,14 @@ Séquence de `run_pipeline()` :
 3. Affiche les avertissements (noms tronqués, collisions de colonnes, dépassement de profondeur)
 4. Applique les surcharges TOML (`--schema-config`)
 5. Ré-exclut les tables enfants absorbées après les surcharges
-6. Génère le rapport de schéma (optionnel)
-7. En mode `--dry-run` : affiche le DDL SQL et sort
-8. Sinon : se connecte à PostgreSQL, crée les tables, lance la Pass 2
-9. Affiche le résumé d'import et les anomalies
+6. Sauvegarde le snapshot (`--schema-output`), avant la stratégie de groupes : un snapshot ne contient jamais de groupes automatiques
+7. Avec `--group-columns`, ou pour les tables cochées dans un snapshot de l'IHM : découpe les tables larges en groupes de colonnes par leurs noms (`schema::grouping::auto`, #91), sauf les tables dont le TOML a une clé `column_groups`, puis ré-indexe les statistiques
+8. Génère le rapport de schéma (optionnel)
+9. En mode `--dry-run` : affiche le DDL SQL et sort
+10. Sinon : se connecte à PostgreSQL, crée les tables, lance la Pass 2
+11. Affiche le résumé d'import et les anomalies
 
-Avec `--suggest-groups`, `main.rs` appelle `pipeline::suggest_groups()` à la place : les étapes 1 à 6 (partagées via `finalized_schema()`), puis la proposition de découpage de toutes les tables larges, depuis un seul échantillon du fichier (`schema::grouping::suggest`), et, avec `--embedding-model`, les deux groupes les plus proches de chaque colonne laissée dans la table (`placement`) ; aucune base n'est touchée (#78).
+Avec `--suggest-groups` (incompatible avec `--group-columns`), `main.rs` appelle `pipeline::suggest_groups()` à la place : les étapes 1 à 8 (partagées via `finalized_schema()`), puis la proposition de découpage de toutes les tables larges, depuis un seul échantillon du fichier (`schema::grouping::suggest`), et, avec `--embedding-model`, les deux groupes les plus proches de chaque colonne laissée dans la table (`placement`) ; aucune base n'est touchée (#78).
 
 ---
 
@@ -442,7 +444,7 @@ Détection automatique de patterns `{base}_{suffixe}` dans les tables larges.
 
 Sérialisation et désérialisation du résultat Pass 1 — permet à l'IHM de découpler les deux passes.
 
-- **`SchemaSnapshot`** : struct sérialisable contenant `version`, `total_rows`, `schemas`, `truncated_names`, `column_collisions`, `stats`
+- **`SchemaSnapshot`** : struct sérialisable contenant `version`, `total_rows`, `schemas`, `truncated_names`, `column_collisions`, `stats`, et deux champs optionnels de #91 : `group_columns` (tables cochées dans l'IHM) et `samples` (présence et valeurs des tables larges dans l'échantillon du Pass 1, tables de nombres en hexadécimal). Ces champs ne changent pas la version : une version antérieure les ignore sans perte
 - **`save()`** : sérialise un résultat Pass 1 en JSON vers un fichier
 - **`load()`** : désérialise et vérifie la version (`SCHEMA_FORMAT_VERSION = 2`) ; refuse, avec un message qui demande de relancer la Pass 1, un snapshot d'avant #84 qui contient une table de jonction `ScalarArray`
 

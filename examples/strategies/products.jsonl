@@ -1,0 +1,3 @@
+{"code": "0001", "name": "Muesli", "brand": {"name": "Alpen", "country": "ch"}, "reviews": [{"stars": 4, "text": "bon"}, {"stars": 5, "text": "top"}], "tags": ["bio", "vegan"]}
+{"code": "0002", "name": "Yaourt", "brand": {"name": "Lacto", "country": "fr"}, "reviews": [{"stars": 3, "text": "moyen"}], "tags": ["frais"]}
+{"code": "0003", "name": "Pain", "brand": {"name": "Fournil", "country": "fr"}, "reviews": [], "tags": []}

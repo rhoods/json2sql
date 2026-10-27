@@ -126,6 +126,7 @@ mod tests {
             families: Vec::new(),
             data: DataStatus::Off("test".to_string()),
             placements: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 

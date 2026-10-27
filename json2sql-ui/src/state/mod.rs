@@ -34,7 +34,7 @@
 //! - fn `AppState::apply_worker_result` — applique le résultat lu depuis le fichier JSON du worker
 //! - fn `AppState::apply_progress_event` — dispatch un `ProgressEvent` vers l'état correspondant
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use urlencoding::encode;
@@ -266,6 +266,8 @@ pub struct ProjectState {
     pub skip_constraints: bool,
     /// Pass 2: raise `max_wal_size` during the import (CLI `--tune-wal`). Default false.
     pub tune_wal: bool,
+    /// Tick every table the column names can split, after Pass 1 or a snapshot load (#91, like `--group-columns`).
+    pub group_columns: bool,
 }
 
 impl Default for ProjectState {
@@ -289,6 +291,7 @@ impl Default for ProjectState {
             verbose_logs: false,
             skip_constraints: false,
             tune_wal: false,
+            group_columns: false,
         }
     }
 }
@@ -315,6 +318,11 @@ pub struct SchemaState {
     pub overflow_warnings: Vec<OverflowWarning>,
     /// User-chosen strategy overrides: `table_name` → `UserOverride`.
     pub strategy_overrides: HashMap<String, UserOverride>,
+    /// Tables the user ticked for column groups (#91): split in the effective schema only, saved in the snapshot.
+    pub group_columns: BTreeSet<String>,
+    /// Presence and values of the wide tables in the Pass 1 sample (#91, phase 2): kept for the snapshot and the
+    /// data signals of the column groups.
+    pub pass1_samples: Vec<json2sql::schema::grouping::sample::StoredSample>,
     /// Set of table indices currently selected in the Strategy panel.
     pub selected_table_indices: HashSet<usize>,
     /// Index of the last table clicked — drives center/right panels.
@@ -340,6 +348,8 @@ impl Default for SchemaState {
             schemas: Vec::new(),
             overflow_warnings: Vec::new(),
             strategy_overrides: HashMap::new(),
+            group_columns: BTreeSet::new(),
+            pass1_samples: Vec::new(),
             selected_table_indices: HashSet::from([0]),
             last_selected_idx: 0,
             truncated_names: Vec::new(),
@@ -358,6 +368,8 @@ impl SchemaState {
         self.schemas = Vec::new();
         self.overflow_warnings = Vec::new();
         self.strategy_overrides = HashMap::new();
+        self.group_columns = BTreeSet::new();
+        self.pass1_samples = Vec::new();
         self.truncated_names = Vec::new();
         self.column_collisions = Vec::new();
         self.pass1_stats = Vec::new();
@@ -423,6 +435,8 @@ impl AppState {
         self.schema.column_collisions = snapshot.column_collisions;
         self.schema.pass1_stats = snapshot.stats;
         self.schema.strategy_overrides = snapshot.strategy_overrides;
+        self.schema.group_columns = snapshot.group_columns.into_iter().collect();
+        self.schema.pass1_samples = snapshot.samples;
         self.schema.pass1_progress.rows_scanned = snapshot.total_rows;
         self.schema.pass1_progress.done = true;
         self.schema.schema_snapshot_loaded = true;
@@ -634,6 +648,29 @@ mod tests {
     }
 
     #[test]
+    fn the_tables_ticked_for_column_groups_come_from_the_snapshot_and_go_with_clear() {
+        // #91 D3: the switches are saved in the snapshot, the groups are computed again
+        use json2sql::schema::persistence::SchemaSnapshot;
+        let mut s = AppState::default();
+        s.load_snapshot(SchemaSnapshot {
+            version: 2,
+            total_rows: 0,
+            schemas: vec![],
+            truncated_names: vec![],
+            column_collisions: vec![],
+            stats: vec![],
+            strategy_overrides: HashMap::new(),
+            overflow_warnings: vec![],
+            detected_format: None,
+            group_columns: vec!["products".to_string()],
+            samples: Vec::new(),
+        });
+        assert_eq!(s.schema.group_columns, std::collections::BTreeSet::from(["products".to_string()]));
+        s.clear_snapshot();
+        assert_eq!(s.schema.group_columns.len(), 0);
+    }
+
+    #[test]
     fn import_state_is_empty_by_default() {
         let i = ImportState::default();
         assert!(!i.pass2_progress.done);
@@ -669,6 +706,8 @@ mod tests {
             strategy_overrides: HashMap::new(),
             overflow_warnings: vec![],
             detected_format: None,
+            group_columns: Vec::new(),
+            samples: Vec::new(),
         });
 
         s.clear_snapshot();
@@ -695,6 +734,8 @@ mod tests {
             stats: vec![],
             overflow_warnings: vec![],
             detected_format: None,
+            group_columns: Vec::new(),
+            samples: Vec::new(),
             strategy_overrides: {
                 let mut m = HashMap::new();
                 m.insert("t".to_string(), UserOverride::Jsonb);
@@ -729,6 +770,8 @@ mod tests {
             stats: vec![],
             overflow_warnings: vec![],
             detected_format: None,
+            group_columns: Vec::new(),
+            samples: Vec::new(),
             strategy_overrides: HashMap::new(),
         };
         let mut s = AppState::default();
