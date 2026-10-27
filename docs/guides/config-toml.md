@@ -272,18 +272,18 @@ TOML.
 
 Vues en écrivant la fiche, pas tranchées.
 
-1. **Une notion, quatre écritures** (odeurs 1 et 4 de #96, toujours vraies) : `InferredStrategy`, `UserOverride`,
+1. **Une notion, quatre écritures** (odeurs 1 et 4 de #96, toujours vraies ; #132) : `InferredStrategy`, `UserOverride`,
    `StrategyName`, et les chaînes TOML en trois copies dans `config.rs`.
-2. **`inferred_strategy` écrit puis remis à la main** (odeur 8 de #96) : `apply_wide_strategy_columns` le modifie, ses
+2. **`inferred_strategy` écrit puis remis à la main** (odeur 8 de #96 ; #129) : `apply_wide_strategy_columns` le modifie, ses
    appelants le restaurent. Les gardes qui le lisent après un override se trompent (§ 3).
-3. **Overrides réappliqués sans garde** : TOML sur un snapshot déjà passé par ce TOML, ou TOML après l'IHM sur la même
+3. **Overrides réappliqués sans garde** (#129) : TOML sur un snapshot déjà passé par ce TOML, ou TOML après l'IHM sur la même
    table. Rien ne signale qu'une table a déjà ses colonnes reconstruites.
-4. **Deux chemins d'override qui ne finissent pas pareil** : `apply_user_overrides` n'exclut pas les enfants absorbés.
-5. **Le snapshot est relu champ par champ** dans deux lecteurs, dont l'un perd déjà `overflow_warnings`.
-6. **Code sans effet** : `save` et `save_with_overrides` ne servent qu'aux tests ; `config_warnings` de l'état de
+4. **Deux chemins d'override qui ne finissent pas pareil** (#130) : `apply_user_overrides` n'exclut pas les enfants absorbés.
+5. **Le snapshot est relu champ par champ** dans deux lecteurs, dont l'un perd déjà `overflow_warnings` (#133 ; le bug lui-même relève de la carte IHM, #100).
+6. **Code sans effet** : `save` et `save_with_overrides` ne servent qu'aux tests (#133) ; `config_warnings` de l'état de
    l'IHM n'est jamais rempli, sa bannière ne s'affiche jamais ; `JsonbFlatten` et `Flatten` ne sont jamais posés
    comme `UserOverride` (odeur 6 de #96).
-7. **Docs décalées** (odeur 7 de #96, élargie) : `[table.columns]` et `ignore` dans usage.md et schema-inference.md ;
+7. **Docs décalées** (odeur 7 de #96, élargie ; #131) : `[table.columns]` et `ignore` dans usage.md et schema-inference.md ;
    clés absentes d'usage.md ; l'en-tête de `config.rs` parle d'« erreur » pour une table ou une colonne inconnue (ce
    sont des avertissements) ; la doc d'`apply_user_overrides` dit que Pivot et Jsonb modifient `inferred_strategy`,
    alors qu'ils le remettent.
