@@ -364,7 +364,7 @@ mod tests {
                 let tables: Vec<&str> = groups.iter().map(|g| g.table.as_str()).collect();
                 assert_eq!(tables, ["a_kiwi", "a_zulu"]);
                 assert_eq!(groups[0].columns.len(), 6);
-                assert!(groups[0].candidates.is_empty(), "no data signal, no candidate");
+                assert_eq!(groups[0].candidates.len(), 0, "no data signal, no candidate");
                 assert!(!groups[0].fused, "one family of names");
             }
             GroupPreview::Unavailable(why) => panic!("{why}"),

@@ -255,7 +255,7 @@ mod tests {
         group.parent_table = Some("t".to_string());
         group.child_kind = Some(ChildKind::Object);
         let schemas = vec![parent, group];
-        assert!(name_proposals(&schemas, &[], |_| true).unwrap().is_empty());
+        assert_eq!(name_proposals(&schemas, &[], |_| true).unwrap().len(), 0);
     }
 
     #[test]

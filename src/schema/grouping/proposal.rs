@@ -1212,13 +1212,13 @@ mod tests {
     fn a_column_in_less_than_one_percent_of_the_rows_is_no_candidate() {
         // 8 rows out of 2 000: too few to tell a link from noise
         let (cols, data) = lonely_with_kiwi_in(2_000, 250);
-        assert!(propose("t", cols, Ok(&data), &LexicalParams::default()).unwrap().attachments.is_empty());
+        assert_eq!(propose("t", cols, Ok(&data), &LexicalParams::default()).unwrap().attachments.len(), 0);
     }
 
     #[test]
     fn without_data_signals_there_is_no_candidate() {
         let (cols, _) = lonely_with_kiwi();
-        assert!(propose("t", cols, Err("test"), &LexicalParams::default()).unwrap().attachments.is_empty());
+        assert_eq!(propose("t", cols, Err("test"), &LexicalParams::default()).unwrap().attachments.len(), 0);
     }
 
     #[test]

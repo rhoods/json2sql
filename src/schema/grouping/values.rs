@@ -373,7 +373,7 @@ mod tests {
         let mut p = profile(3, 1, &rows);
         let before = crate::schema::grouping::numeric::rank_correlations(&p);
         p.drop_unranked();
-        assert!(p.ranked(2).is_empty() && p.ranked(0).len() == 60);
+        assert_eq!((p.ranked(2).len(), p.ranked(0).len()), (0, 60));
         let after = crate::schema::grouping::numeric::rank_correlations(&p);
         assert_eq!(format!("{before:?}"), format!("{after:?}"));
     }

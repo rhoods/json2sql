@@ -686,7 +686,7 @@ mod tests {
         let mut rows = rows_of(&jsonl(60));
         rows[5].1["props"] = json!([1, 2]);
         let samples = samples_of_rows(&schemas, rows, 60);
-        assert!(samples.is_empty(), "{:?}", samples.iter().map(|s| &s.table).collect::<Vec<_>>());
+        assert_eq!(samples.len(), 0, "{:?}", samples.iter().map(|s| &s.table).collect::<Vec<_>>());
     }
 
     #[test]

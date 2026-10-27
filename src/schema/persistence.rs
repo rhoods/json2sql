@@ -349,7 +349,7 @@ mod tests {
         assert!(!std::fs::read_to_string(tmp.path()).unwrap().contains("group_columns"));
         let old = r#"{"version":2,"total_rows":0,"schemas":[],"truncated_names":[],"column_collisions":[],"stats":[]}"#;
         std::fs::write(tmp.path(), old).unwrap();
-        assert!(load(tmp.path()).unwrap().group_columns.is_empty(), "older snapshots have no switch");
+        assert_eq!(load(tmp.path()).unwrap().group_columns.len(), 0, "older snapshots have no switch");
     }
 
     /// The sample of a table of three columns: a vocabulary, numbers with gaps (NaN in the rank sample), presence.
@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(format!("{:?}", DataSignals::new(a).rows()), format!("{:?}", DataSignals::new(b).rows()));
         write_snapshot(&empty_snapshot(), tmp.path(), false).unwrap();
         assert!(!std::fs::read_to_string(tmp.path()).unwrap().contains("samples"));
-        assert!(load(tmp.path()).unwrap().samples.is_empty());
+        assert_eq!(load(tmp.path()).unwrap().samples.len(), 0);
     }
 
     #[test]

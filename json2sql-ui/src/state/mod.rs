@@ -667,7 +667,7 @@ mod tests {
         });
         assert_eq!(s.schema.group_columns, std::collections::BTreeSet::from(["products".to_string()]));
         s.clear_snapshot();
-        assert!(s.schema.group_columns.is_empty());
+        assert_eq!(s.schema.group_columns.len(), 0);
     }
 
     #[test]

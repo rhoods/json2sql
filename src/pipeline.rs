@@ -796,7 +796,7 @@ mod tests {
         let mut cfg = cfg_for(&file);
         let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
         assert_eq!(pass1.schemas.len(), 1);
-        assert!(pass1.schemas[0].column_groups.is_empty());
+        assert_eq!(pass1.schemas[0].column_groups.len(), 0);
     }
 
     #[test]
