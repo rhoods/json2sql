@@ -84,7 +84,9 @@ symbols:
 
 Carte de `json2sql-ui`, pour savoir où intervenir et ce qui casse sans erreur de compilation. Les écrans, les
 composants et les règles de rangement sont décrits dans [docs/ui/architecture.md](../ui/architecture.md) (en partie
-décalé, § 6) ; les couleurs et les classes CSS dans [docs/ui/design-system.md](../ui/design-system.md).
+décalé, § 6) ; les couleurs et les classes CSS dans [docs/ui/design-system.md](../ui/design-system.md). Le dialogue
+avec le worker (commande d'annulation, reconnexion, fichier résultat, écran Resume) a sa propre carte, worker et IPC
+(#106) : cette fiche n'en garde que ce qui touche l'état de l'IHM.
 
 ## Rôle
 
