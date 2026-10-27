@@ -38,6 +38,10 @@ Point d'entrée unique. Chaque entrée indique **quand consulter** le document.
 
 Fiches « comment modifier » : où intervenir, pièges, tests à lancer. À relire avant de toucher la zone concernée.
 
+Format et contrôle : [guides/README.md](guides/README.md). Après un changement dans une zone, relire les fiches dont un
+fichier de `files:` a changé depuis `verified_at` (`git diff --name-only <verified_at>..HEAD -- <files>`) : mettre à jour la
+fiche ou avancer `verified_at`. `tests/guides_consistency.rs` vérifie en CI que les références des fiches existent.
+
 | Document | Consulter pour... |
 |---|---|
 | [guides/ajouter-une-strategie.md](guides/ajouter-une-strategie.md) | Ajouter une stratégie de matérialisation : tableau des stratégies existantes, flux, checklist (ce que le compilateur impose, et le reste), odeurs constatées (fiche pilote) |
