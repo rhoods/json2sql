@@ -34,6 +34,16 @@ Point d'entrée unique. Chaque entrée indique **quand consulter** le document.
 
 ---
 
+## Guides d'évolution
+
+Fiches « comment modifier » : où intervenir, pièges, tests à lancer. À relire avant de toucher la zone concernée.
+
+| Document | Consulter pour... |
+|---|---|
+| [guides/ajouter-une-strategie.md](guides/ajouter-une-strategie.md) | Ajouter une stratégie de matérialisation : tableau des stratégies existantes, flux, checklist (ce que le compilateur impose, et le reste), odeurs constatées (fiche pilote) |
+
+---
+
 ## Archives
 
 | Dossier | Contenu |
