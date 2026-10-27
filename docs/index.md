@@ -45,10 +45,13 @@ fiche ou avancer `verified_at`. `tests/guides_consistency.rs` vérifie en CI que
 | Document | Consulter pour... |
 |---|---|
 | [guides/ajouter-une-strategie.md](guides/ajouter-une-strategie.md) | Ajouter une stratégie de matérialisation : tableau des stratégies existantes, flux, checklist (ce que le compilateur impose, et le reste), odeurs constatées (fiche pilote) |
+| [guides/cli-pipeline.md](guides/cli-pipeline.md) | Modifier la CLI ou l'enchaînement d'un import (options, modes, étapes sur le schéma, rapports) : où intervenir, pièges silencieux (option non recopiée dans `main`, chaînes CLI et IHM séparées, stdout réservé aux résultats) |
+| [guides/db.md](guides/db.md) | Modifier la couche base de données (création des tables, contraintes PK/FK, réglages du serveur, connexions) : où intervenir, rendu SQL de chaque `PgType`, pièges silencieux (DDL affiché ≠ exécuté, relance sans `--drop-existing`, noms de contraintes), checklists contrainte et réglage serveur |
 | [guides/finalisation.md](guides/finalisation.md) | Modifier la finalisation du schéma (phases de `SchemaFinalizer`, fusion des tables sœurs, noms, garde des 1 600 colonnes) : où intervenir, formes de clé, pièges silencieux (tables synthétiques, dédoublonnage, colonne clé), checklists |
 | [guides/groupes-colonnes.md](guides/groupes-colonnes.md) | Modifier les groupes de colonnes (`--suggest-groups`, `column_groups`, `--group-columns`, IHM) : où intervenir, tableau des signaux de données, pièges silencieux (ordre des colonnes, signaux éteints, deux échantillons, snapshot), checklists signal, seuil et échantillon |
 | [guides/pass1.md](guides/pass1.md) | Modifier la Pass 1 (lecture du fichier, observation des types, échantillon) : où intervenir, tableau des types inférés, pièges silencieux (fusion parallèle, ordre des colonnes, nouveau type qui devient `TEXT`), checklists statistique et type inféré |
 | [guides/pass2.md](guides/pass2.md) | Modifier la Pass 2 (parcours du JSON, écriture des lignes, COPY) : où intervenir, pièges silencieux (ordre des colonnes, tables et sinks sautés, colonnes générées), tests sans base avec `CaptureSink` |
+| [guides/worker-ipc.md](guides/worker-ipc.md) | Modifier le worker de l'IHM ou son protocole (config sur stdin, socket, fichier résultat) : où intervenir, événements `ProgressEvent` et leur rôle, pièges silencieux (fin du flux à `Pass2Done`, commande d'annulation en dur, reprise), points d'extension |
 
 ---
 
