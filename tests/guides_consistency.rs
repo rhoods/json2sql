@@ -8,7 +8,8 @@
 //!   qui est le nom exact d'une définition doit figurer dans `symbols:`.
 //! - Niveau 2 : ce qui s'énumère dans le code est mentionné dans la fiche. Pilote : variantes
 //!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`),
-//!   options de la CLI et leurs valeurs dans `usage.md` (fiche `cli-pipeline.md`).
+//!   variantes d'`InferredType` (fiche `pass1.md`), options de la CLI et leurs valeurs dans `usage.md`
+//!   (fiche `cli-pipeline.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
@@ -25,6 +26,7 @@ mod code_items;
 use code_items::{collect_rs_files, extract_code_items, find_matching_brace};
 
 const STRATEGY_GUIDE: &str = "docs/guides/ajouter-une-strategie.md";
+const PASS1_GUIDE: &str = "docs/guides/pass1.md";
 
 /// En-tête YAML d'une fiche : `verified_at` et les listes `files:` / `symbols:`.
 #[derive(Debug, Default, PartialEq)]
@@ -185,13 +187,14 @@ fn cited_symbols_are_listed() {
     );
 }
 
-/// Variantes d'`InferredStrategy`, lues dans le source : identifiants en majuscule à 4 espaces
-/// d'indentation dans le corps de l'enum (les champs des variantes sont à 8).
-fn inferred_strategy_variants(root: &Path) -> Vec<String> {
-    let src = fs::read_to_string(root.join("src/schema/table_schema.rs")).unwrap();
+/// Variantes d'un enum, lues dans le source : identifiants en majuscule à 4 espaces
+/// d'indentation dans le corps de l'enum (les champs des variantes sont à 8, `Null = 0,` donne `Null`).
+fn enum_variants(root: &Path, file: &str, enum_name: &str) -> Vec<String> {
+    let src = fs::read_to_string(root.join(file)).unwrap();
+    let decl = format!("pub enum {enum_name}");
     let start = src
-        .find("pub enum InferredStrategy")
-        .expect("`pub enum InferredStrategy` introuvable dans table_schema.rs");
+        .find(&decl)
+        .unwrap_or_else(|| panic!("`{decl}` introuvable dans {file}"));
     let open = start + src[start..].find('{').unwrap();
     let close = find_matching_brace(src.as_bytes(), open).unwrap();
     src[open + 1..close]
@@ -206,20 +209,42 @@ fn inferred_strategy_variants(root: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Variantes d'un enum sans ligne `| `Variante` |` dans un tableau de la fiche.
+fn variants_missing_from_table(guide: &str, variants: &[String]) -> Vec<String> {
+    variants
+        .iter()
+        .filter(|v| !guide.lines().any(|l| l.starts_with(&format!("| `{v}` |"))))
+        .cloned()
+        .collect()
+}
+
 /// Niveau 2 : chaque variante d'`InferredStrategy` a sa ligne dans le tableau de la fiche.
 #[test]
 fn strategy_guide_lists_every_inferred_strategy() {
     let root = workspace_root();
     let guide = fs::read_to_string(root.join(STRATEGY_GUIDE)).unwrap();
-    let variants = inferred_strategy_variants(&root);
+    let variants = enum_variants(&root, "src/schema/table_schema.rs", "InferredStrategy");
     assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
-    let missing: Vec<&String> = variants
-        .iter()
-        .filter(|v| !guide.lines().any(|l| l.starts_with(&format!("| `{v}` |"))))
-        .collect();
+    let missing = variants_missing_from_table(&guide, &variants);
     assert!(
         missing.is_empty(),
         "{STRATEGY_GUIDE} : pas de ligne `| `Variante` |` dans le tableau du § 1 pour {missing:?}"
+    );
+}
+
+/// Niveau 2 : chaque variante d'`InferredType` a sa ligne dans le tableau des types de la fiche
+/// Pass 1. Lu dans le source, pas dans `InferredType::ALL` : l'assertion `const` de
+/// `type_tracker.rs` ne voit pas une variante ajoutée sans `COUNT` ni `ALL`.
+#[test]
+fn pass1_guide_lists_every_inferred_type() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join(PASS1_GUIDE)).unwrap();
+    let variants = enum_variants(&root, "src/schema/type_tracker.rs", "InferredType");
+    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    let missing = variants_missing_from_table(&guide, &variants);
+    assert!(
+        missing.is_empty(),
+        "{PASS1_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des types pour {missing:?}"
     );
 }
 
@@ -334,6 +359,13 @@ mod tests {
     fn cited_spans_skips_header_and_fenced_blocks() {
         let content = "---\nsymbols:\n  - `entete`\n---\n# `Titre`\nA `un` et `deux`.\n```bash\n`bloc`\n```\n---\nfin `trois`\n";
         assert_eq!(cited_spans(content), vec!["Titre", "un", "deux", "trois"]);
+    }
+
+    #[test]
+    fn enum_variants_reads_explicit_discriminants() {
+        let variants = enum_variants(&workspace_root(), "src/schema/type_tracker.rs", "InferredType");
+        assert_eq!(variants.first().map(String::as_str), Some("Null"));
+        assert!(variants.contains(&"Array".to_string()), "{variants:?}");
     }
 
     #[test]

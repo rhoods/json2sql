@@ -45,6 +45,7 @@ fiche ou avancer `verified_at`. `tests/guides_consistency.rs` vérifie en CI que
 | Document | Consulter pour... |
 |---|---|
 | [guides/ajouter-une-strategie.md](guides/ajouter-une-strategie.md) | Ajouter une stratégie de matérialisation : tableau des stratégies existantes, flux, checklist (ce que le compilateur impose, et le reste), odeurs constatées (fiche pilote) |
+| [guides/pass1.md](guides/pass1.md) | Modifier la Pass 1 (lecture du fichier, observation des types, échantillon) : où intervenir, tableau des types inférés, pièges silencieux (fusion parallèle, ordre des colonnes, nouveau type qui devient `TEXT`), checklists statistique et type inféré |
 | [guides/pass2.md](guides/pass2.md) | Modifier la Pass 2 (parcours du JSON, écriture des lignes, COPY) : où intervenir, pièges silencieux (ordre des colonnes, tables et sinks sautés, colonnes générées), tests sans base avec `CaptureSink` |
 | [guides/cli-pipeline.md](guides/cli-pipeline.md) | Modifier la CLI ou l'enchaînement d'un import (options, modes, étapes sur le schéma, rapports) : où intervenir, pièges silencieux (option non recopiée dans `main`, chaînes CLI et IHM séparées, stdout réservé aux résultats) |
 
