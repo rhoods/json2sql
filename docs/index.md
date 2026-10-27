@@ -45,6 +45,7 @@ fiche ou avancer `verified_at`. `tests/guides_consistency.rs` vérifie en CI que
 | Document | Consulter pour... |
 |---|---|
 | [guides/ajouter-une-strategie.md](guides/ajouter-une-strategie.md) | Ajouter une stratégie de matérialisation : tableau des stratégies existantes, flux, checklist (ce que le compilateur impose, et le reste), odeurs constatées (fiche pilote) |
+| [guides/ihm.md](guides/ihm.md) | Modifier l'IHM (état, écrans, persistance du projet, styles) : où intervenir, tableau des écrans, pièges silencieux (réglage sauvé jamais relu, état gardé d'un fichier à l'autre, sélection par index, classes CSS), checklists écran et réglage |
 | [guides/pass1.md](guides/pass1.md) | Modifier la Pass 1 (lecture du fichier, observation des types, échantillon) : où intervenir, tableau des types inférés, pièges silencieux (fusion parallèle, ordre des colonnes, nouveau type qui devient `TEXT`), checklists statistique et type inféré |
 | [guides/pass2.md](guides/pass2.md) | Modifier la Pass 2 (parcours du JSON, écriture des lignes, COPY) : où intervenir, pièges silencieux (ordre des colonnes, tables et sinks sautés, colonnes générées), tests sans base avec `CaptureSink` |
 
