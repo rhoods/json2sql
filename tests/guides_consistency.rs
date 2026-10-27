@@ -7,7 +7,8 @@
 //!   partagée dans `tests/common/code_items.rs`. Filet : un mot cité entre backticks dans le texte
 //!   qui est le nom exact d'une définition doit figurer dans `symbols:`.
 //! - Niveau 2 : ce qui s'énumère dans le code est mentionné dans la fiche. Pilote : variantes
-//!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`).
+//!   d'`InferredStrategy` et valeurs de `StrategyName::OPTIONAL` (fiche `ajouter-une-strategie.md`),
+//!   variantes de `ProgressEvent` (fiche `worker-ipc.md`).
 //!
 //! L'en-tête YAML est lu à la main (listes `- x` sous une clé) : pas de dépendance YAML pour un
 //! format aussi simple.
@@ -24,6 +25,7 @@ mod code_items;
 use code_items::{collect_rs_files, extract_code_items, find_matching_brace};
 
 const STRATEGY_GUIDE: &str = "docs/guides/ajouter-une-strategie.md";
+const WORKER_IPC_GUIDE: &str = "docs/guides/worker-ipc.md";
 
 /// En-tête YAML d'une fiche : `verified_at` et les listes `files:` / `symbols:`.
 #[derive(Debug, Default, PartialEq)]
@@ -219,6 +221,52 @@ fn strategy_guide_lists_every_inferred_strategy() {
     assert!(
         missing.is_empty(),
         "{STRATEGY_GUIDE} : pas de ligne `| `Variante` |` dans le tableau du § 1 pour {missing:?}"
+    );
+}
+
+/// Variantes d'un enum, lues dans le source : identifiants en majuscule à 4 espaces
+/// d'indentation dans le corps de l'enum (les champs des variantes sont à 8, `Null = 0,` donne `Null`).
+fn enum_variants(root: &Path, file: &str, enum_name: &str) -> Vec<String> {
+    let src = fs::read_to_string(root.join(file)).unwrap();
+    let decl = format!("pub enum {enum_name}");
+    let start = src
+        .find(&decl)
+        .unwrap_or_else(|| panic!("`{decl}` introuvable dans {file}"));
+    let open = start + src[start..].find('{').unwrap();
+    let close = find_matching_brace(src.as_bytes(), open).unwrap();
+    src[open + 1..close]
+        .lines()
+        .filter_map(|line| line.strip_prefix("    "))
+        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+        .map(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect()
+        })
+        .collect()
+}
+
+/// Variantes d'un enum sans ligne `| `Variante` |` dans un tableau de la fiche.
+fn variants_missing_from_table(guide: &str, variants: &[String]) -> Vec<String> {
+    variants
+        .iter()
+        .filter(|v| !guide.lines().any(|l| l.starts_with(&format!("| `{v}` |"))))
+        .cloned()
+        .collect()
+}
+
+/// Niveau 2 : chaque variante de `ProgressEvent` a sa ligne dans le tableau des événements de
+/// la fiche worker et IPC (passe ou non par le socket, rôle dans le protocole).
+#[test]
+fn worker_ipc_guide_lists_every_progress_event() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join(WORKER_IPC_GUIDE)).unwrap();
+    let variants = enum_variants(&root, "src/io/progress_event.rs", "ProgressEvent");
+    assert!(variants.len() > 1, "extraction des variantes cassée : {variants:?}");
+    let missing = variants_missing_from_table(&guide, &variants);
+    assert!(
+        missing.is_empty(),
+        "{WORKER_IPC_GUIDE} : pas de ligne `| `Variante` |` dans le tableau des événements pour {missing:?}"
     );
 }
 

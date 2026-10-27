@@ -46,6 +46,7 @@ fiche ou avancer `verified_at`. `tests/guides_consistency.rs` vérifie en CI que
 |---|---|
 | [guides/ajouter-une-strategie.md](guides/ajouter-une-strategie.md) | Ajouter une stratégie de matérialisation : tableau des stratégies existantes, flux, checklist (ce que le compilateur impose, et le reste), odeurs constatées (fiche pilote) |
 | [guides/pass2.md](guides/pass2.md) | Modifier la Pass 2 (parcours du JSON, écriture des lignes, COPY) : où intervenir, pièges silencieux (ordre des colonnes, tables et sinks sautés, colonnes générées), tests sans base avec `CaptureSink` |
+| [guides/worker-ipc.md](guides/worker-ipc.md) | Modifier le worker de l'IHM ou son protocole (config sur stdin, socket, fichier résultat) : où intervenir, événements `ProgressEvent` et leur rôle, pièges silencieux (fin du flux à `Pass2Done`, commande d'annulation en dur, reprise), points d'extension |
 
 ---
 
