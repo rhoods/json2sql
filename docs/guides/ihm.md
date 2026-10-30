@@ -18,6 +18,7 @@ symbols:
   - main
   - App
   - AppScreen
+  - absorbed_names
   - AppState
   - AppState::cancel
   - AppState::load_snapshot
@@ -283,8 +284,8 @@ Vues en écrivant la fiche, pas tranchées.
 3. **`SchemaState::clear` recopie `Default` champ par champ.** `AppState::load_snapshot` ne relit pas
    `overflow_warnings`, pourtant écrit dans le snapshot : les avertissements de débordement disparaissent au
    rechargement.
-4. **Deux champs jamais écrits.** `absorbed_names` et `config_warnings` de `SchemaState` sont lus et remis à zéro,
-   jamais remplis : le badge « merged » et la bannière des avertissements de config ne peuvent pas s'afficher.
+4. **Un champ jamais écrit.** `config_warnings` de `SchemaState` est lu et remis à zéro, jamais rempli : la bannière
+   des avertissements de config ne peut pas s'afficher. (`absorbed_names` est désormais calculé, #130.)
 5. **Hooks après un `return` anticipé** dans `PreviewScreen` (§ 3).
 6. **Les tests de l'IHM ne tournent pas en CI** (§ 3).
 7. **docs/ui/architecture.md décalé** : il décrit `state.rs`, `strategy_configurator.rs`, un enum `WideStrategy`,

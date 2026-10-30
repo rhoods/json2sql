@@ -290,7 +290,6 @@ Vues en écrivant la fiche, pas tranchées. Chacune peut devenir une issue de re
    override only » sur la variante de `UserOverride`).
 7. **Docs existantes déjà décalées.** `architecture.md` décrit un enum `WideStrategy` (variantes `KeyedPivot`,
    `Ignore`…) qui n'existe plus : c'est `InferredStrategy`. `schema-inference.md` (§ 12) documente
-   `strategy = "ignore"`, que le TOML rejette (`--dry-run` affiche « unknown strategy 'ignore' … ignored »). La doc
-   d'`apply_user_overrides` dit que `Pivot` et `Jsonb` modifient `inferred_strategy`, alors qu'ils le restaurent.
+   `strategy = "ignore"`, que le TOML rejette (`--dry-run` affiche « unknown strategy 'ignore' … ignored »).
 8. **Un effet de bord à compenser.** `apply_wide_strategy_columns` écrit `inferred_strategy` en plus des colonnes ;
    chaque override qui l'appelle doit sauvegarder puis restaurer la valeur à la main.

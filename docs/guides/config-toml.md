@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Config TOML, overrides de l'IHM et snapshot du schéma
-verified_at: 5dfcced
+verified_at: e067354
 files:
   - src/schema/config.rs
   - src/schema/persistence.rs
@@ -54,6 +54,8 @@ symbols:
   - apply_column_groups
   - dissolve_column_groups
   - exclude_absorbed_children
+  - recurse_children
+  - absorbed_names
   - StrategyName
   - parse_disabled_strategies
   - SchemaSnapshot
@@ -156,7 +158,8 @@ CLI : run_pipeline
   load_or_infer_schema ─┬─ Pass 1
                         └─ --schema-input : restore_from_snapshot
                               load (version, migration de strategy_overrides vers ui_override)
-                              └─ apply_user_overrides (si strategy_overrides n'est pas vide)
+                              └─ apply_user_overrides (si strategy_overrides n'est pas vide),
+                                   qui finit par exclude_absorbed_children
   post_process_schema
     ├─ apply_schema_config : SchemaConfig::from_file → apply_overrides_complete
     │     ├─ apply_overrides, table par table :
@@ -190,9 +193,11 @@ IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snap
 - **IHM et TOML sur la même table : colonnes et stratégie divergent.** `restore_from_snapshot` applique les overrides de
   l'IHM, puis `post_process_schema` le TOML. Vérifié en `--dry-run` : Jsonb (IHM) puis `pivot` (TOML) donne les
   colonnes « key » et « value JSONB », mais la stratégie effective est Jsonb, celle que suit la Pass 2.
-- **Un override de l'IHM n'exclut pas les enfants absorbés.** `apply_overrides_complete` finit par
-  `exclude_absorbed_children` ; `apply_user_overrides` ne l'appelle pas. Vérifié en `--dry-run` : Jsonb (IHM) sur la
-  racine garde la table enfant dans le DDL, alors que le même override en TOML la retire.
+- **Les deux chemins d'override finissent par `exclude_absorbed_children`** : `apply_overrides_complete` (TOML) et
+  `apply_user_overrides` (IHM). Une table enfant laissée sous un parent Pivot ou Jsonb reçoit ses données *en plus* du
+  parent : la Pass 2 descend dans tout enfant présent dans le schéma (`recurse_children`). C'était le cas de l'IHM
+  avant #130 (vérifié sur PostgreSQL, `test_ui_jsonb_on_root_does_not_duplicate_children`). L'IHM montre ces tables
+  (`absorbed_names`) : badge « merged » dans Strategy, section « Removed with parent » dans Preview.
 - **Des clés TOML ignorées sans avertissement.** Les types forcés se mettent à plat dans `[table]` (`age = "BIGINT"`,
   comme `tests/fixtures/`). La forme `[table.columns]` des deux docs donne une clé `columns` dont la valeur est une
   table : `apply_column_type_overrides` saute toute valeur qui n'est pas une chaîne. Vérifié : aucun override, aucun
@@ -278,12 +283,10 @@ Vues en écrivant la fiche, pas tranchées.
    appelants le restaurent. Les gardes qui le lisent après un override se trompent (§ 3).
 3. **Overrides réappliqués sans garde** (#129) : TOML sur un snapshot déjà passé par ce TOML, ou TOML après l'IHM sur la même
    table. Rien ne signale qu'une table a déjà ses colonnes reconstruites.
-4. **Deux chemins d'override qui ne finissent pas pareil** (#130) : `apply_user_overrides` n'exclut pas les enfants absorbés.
-5. **Le snapshot est relu champ par champ** dans deux lecteurs, dont l'un perd déjà `overflow_warnings` (#133 ; le bug lui-même relève de la carte IHM, #100).
-6. **Code sans effet** : `save` et `save_with_overrides` ne servent qu'aux tests (#133) ; `config_warnings` de l'état de
+4. **Le snapshot est relu champ par champ** dans deux lecteurs, dont l'un perd déjà `overflow_warnings` (#133 ; le bug lui-même relève de la carte IHM, #100).
+5. **Code sans effet** : `save` et `save_with_overrides` ne servent qu'aux tests (#133) ; `config_warnings` de l'état de
    l'IHM n'est jamais rempli, sa bannière ne s'affiche jamais ; `JsonbFlatten` et `Flatten` ne sont jamais posés
    comme `UserOverride` (odeur 6 de #96).
-7. **Docs décalées** (odeur 7 de #96, élargie ; #131) : `[table.columns]` et `ignore` dans usage.md et schema-inference.md ;
+6. **Docs décalées** (odeur 7 de #96, élargie ; #131) : `[table.columns]` et `ignore` dans usage.md et schema-inference.md ;
    clés absentes d'usage.md ; l'en-tête de `config.rs` parle d'« erreur » pour une table ou une colonne inconnue (ce
-   sont des avertissements) ; la doc d'`apply_user_overrides` dit que Pivot et Jsonb modifient `inferred_strategy`,
-   alors qu'ils le remettent.
+   sont des avertissements).
