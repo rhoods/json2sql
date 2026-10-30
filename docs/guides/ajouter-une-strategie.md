@@ -71,6 +71,7 @@ symbols:
   - insert_array
   - dispatch_child_routes
   - route_independent_child
+  - insert_routed_object
   - StrategyName::as_str
   - StrategyName::try_from
   - StrategyName::OPTIONAL
@@ -192,8 +193,8 @@ Le compilateur ne voit pas le reste :
 - [ ] Pass 2, table racine : `insert_object` traite à part `Jsonb` (`write_root_jsonb`), `SiblingCollapseMulti` et
   `AutoSplit` (`write_autosplit_rows`).
 - [ ] Pass 2, tableau d'objets : `insert_array` traite à part `Jsonb`.
-- [ ] Pass 2, routes : `dispatch_child_routes` et `route_independent_child`, si la stratégie fusionne des tables comme
-  `SiblingCollapse`.
+- [ ] Pass 2, routes : `insert_routed_object` (appelé par `dispatch_child_routes` et `route_independent_child`), si la
+  stratégie fusionne des tables comme `SiblingCollapse`.
 
 ### A. Détection automatique
 
