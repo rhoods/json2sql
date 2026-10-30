@@ -223,16 +223,19 @@ pub(super) fn insert_jsonb_object<S: RowSink>(
 
 /// Group JSON object keys by their base name: `base → { suffix → &Value }`.
 /// Keys with no matching suffix use an empty string as the suffix key (→ `value` column).
+/// A key goes to the longest suffix that ends it, as in Pass 1 (`fat_prepared_100g` →
+/// `_prepared_100g`, not `_100g`).
 fn group_keys_by_base<'a>(
-    obj: &'a serde_json::Map<String, Value>,
+    entries: impl IntoIterator<Item = (&'a String, &'a Value)>,
     suffix_schema: &SuffixSchema,
 ) -> BTreeMap<String, HashMap<String, &'a Value>> {
     let mut groups: BTreeMap<String, HashMap<String, &'a Value>> = BTreeMap::new();
-    for (key, val) in obj {
+    for (key, val) in entries {
         let matched_suffix = suffix_schema
             .suffix_cols
             .iter()
-            .find(|sc| key.len() > sc.suffix.len() && key.ends_with(sc.suffix.as_str()))
+            .filter(|sc| key.len() > sc.suffix.len() && key.ends_with(sc.suffix.as_str()))
+            .max_by_key(|sc| sc.suffix.len())
             .map(|sc| sc.suffix.as_str());
         match matched_suffix {
             Some(suffix) => {
@@ -289,15 +292,15 @@ fn write_structured_pivot_row<S: RowSink>(
 /// For each JSON key, we check whether it ends with a known suffix.
 /// Keys that match no suffix are treated as bare base keys (→ `value` column).
 /// All keys sharing the same base are collapsed into a single row.
-pub(super) fn insert_structured_pivot_object<S: RowSink>(
+pub(super) fn insert_structured_pivot_object<'a, S: RowSink>(
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
     schema: &TableSchema,
-    obj: &serde_json::Map<String, Value>,
+    entries: impl IntoIterator<Item = (&'a String, &'a Value)>,
     parent_id: Uuid,
     suffix_schema: &SuffixSchema,
 ) -> Result<()> {
-    let groups = group_keys_by_base(obj, suffix_schema);
+    let groups = group_keys_by_base(entries, suffix_schema);
     for (base, suffix_vals) in groups {
         write_structured_pivot_row(sinks, anomalies, schema, &base, &suffix_vals, parent_id)?;
     }
@@ -1272,6 +1275,17 @@ mod tests {
                 .collect(),
             value_type: PgType::Text,
         }
+    }
+
+    #[test]
+    fn structured_pivot_key_goes_to_its_longest_suffix() {
+        // `_100g` sorts before `_prepared_100g`: the first match would make `fat_prepared` a base.
+        let ss = make_suffix_schema(&["_100g", "_prepared_100g"]);
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"fat_100g": 1, "fat_prepared_100g": 2}"#).unwrap();
+        let groups = super::group_keys_by_base(&obj, &ss);
+        let bases: Vec<&str> = groups.keys().map(String::as_str).collect();
+        assert_eq!(bases, ["fat"]);
     }
 
     #[test]

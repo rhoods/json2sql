@@ -1,0 +1,2 @@
+{"name": "Widget", "nut": {"fat": 1, "fat_100g": 2, "fat_serving": 3, "salt": 4, "salt_100g": 5, "salt_serving": 6, "sugars": 7, "sugars_100g": 8, "sugars_serving": 9, "brand": "acme", "tags": ["x", "y"], "comp": {"k": 1}}}
+{"name": "Gadget", "nut": {"fat": 10, "fat_100g": 20, "salt": 40, "salt_100g": 50, "sugars": 70, "sugars_100g": 80, "brand": "zeta", "tags": ["z"], "comp": {"k": 2}}}

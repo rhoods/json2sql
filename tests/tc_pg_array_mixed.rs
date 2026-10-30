@@ -120,8 +120,8 @@ async fn test_pg_array_pivot_split_keeps_arrays_e2e() {
     .await;
 }
 
-/// Issue #85 — wide object with suffix keys and an array: no `StructuredPivot` (it would drop the
-/// array), the split keeps the pg-array field on the identity table.
+/// Issues #85, #163 — wide object with suffix keys and an array: the suffix grid goes to the
+/// `_pivot` companion, the pg-array field stays on the identity table.
 #[tokio::test]
 async fn test_pg_array_structured_pivot_keeps_arrays_e2e() {
     integration::with_pg_container(|client, schema, url| async move {
