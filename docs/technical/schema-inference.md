@@ -27,6 +27,8 @@ Chaque champ JSON observé dans la Pass 1 alimente un `TypeTracker` qui accumule
 | Objet `{}` | Object (→ table enfant) |
 | Tableau `[]` | Array (tableau d'objets → table enfant ; tableau de scalaires → colonne tableau) |
 
+Un tableau qui mêle objets et scalaires (`[{"a":1},"x",2]`) est un tableau d'objets : seuls ses objets ont des lignes dans la table enfant. Ses scalaires n'ont pas de colonne ; la Pass 2 enregistre une anomalie par tableau, avec le premier scalaire comme valeur (#86). Si la table enfant est en stratégie `Jsonb`, chaque scalaire y est gardé comme blob. Si le même champ vaut ailleurs un tableau de scalaires, le parent a aussi une colonne tableau qui garde ces scalaires : pas d'anomalie dans ce cas.
+
 ### Règles de résolution (`to_pg_type`)
 
 Le type retenu est le **plus large** parmi ceux observés, pas le plus fréquent. Une seule valeur chaîne suffit à faire passer la colonne en texte. Ordre de priorité :
