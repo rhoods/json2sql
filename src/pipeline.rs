@@ -47,6 +47,7 @@
 //! - fn `print_dry_run_ddl` — affiche le DDL sans connexion DB.
 //! - fn `aggregate_anomaly_stats` — agrège les anomalies par table (triées par nombre décroissant).
 //! - fn `report_pass2_results` — affiche le résumé d'import (lignes/anomalies par table).
+//! - fn `report_anomalies_by_table` — les 10 tables les plus touchées par les anomalies, et le dossier des fichiers.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -660,28 +661,35 @@ fn report_pass2_results(pass2: &crate::pass2::runner::Pass2Result, anomaly_dir: 
     eprintln!("Total anomalies:     {total_anomalies}");
 
     if total_anomalies > 0 {
-        let summaries = pass2.anomaly_collector.summaries();
-        let table_stats = aggregate_anomaly_stats(&summaries);
+        report_anomalies_by_table(pass2, anomaly_dir);
+    }
+}
 
-        eprintln!("\nAnomalies by table (top 10):");
-        for (table, anom, rows) in table_stats.iter().take(10) {
-            #[allow(clippy::cast_precision_loss)]
-            let rate = if *rows > 0 {
-                *anom as f64 / *rows as f64 * 100.0
-            } else {
-                0.0
-            };
-            eprintln!("  {table:40} {anom:>8} anomalies / {rows:>10} rows ({rate:.2}%)");
-        }
-        if table_stats.len() > 10 {
-            eprintln!(
-                "  ... and {} more tables with anomalies",
-                table_stats.len() - 10
-            );
-        }
-        if let Some(dir) = anomaly_dir {
-            eprintln!("\nAnomaly files written to: {}", dir.display());
-        }
+/// The 10 tables with the most anomalies, and where the anomaly files are.
+fn report_anomalies_by_table(
+    pass2: &crate::pass2::runner::Pass2Result,
+    anomaly_dir: Option<&Path>,
+) {
+    let summaries = pass2.anomaly_collector.summaries();
+    let table_stats = aggregate_anomaly_stats(&summaries);
+    eprintln!("\nAnomalies by table (top 10):");
+    for (table, anom, rows) in table_stats.iter().take(10) {
+        #[allow(clippy::cast_precision_loss)]
+        let rate = if *rows > 0 {
+            *anom as f64 / *rows as f64 * 100.0
+        } else {
+            0.0
+        };
+        eprintln!("  {table:40} {anom:>8} anomalies / {rows:>10} rows ({rate:.2}%)");
+    }
+    if table_stats.len() > 10 {
+        eprintln!(
+            "  ... and {} more tables with anomalies",
+            table_stats.len() - 10
+        );
+    }
+    if let Some(dir) = anomaly_dir {
+        eprintln!("\nAnomaly files written to: {}", dir.display());
     }
 }
 

@@ -13,6 +13,8 @@
 //! - fn `pg_truncate_name` — tronque un nom de table pivot synthétique à 63 octets (suffixe hash).
 //! - fn `noise_filtered_col_sets` — filtre le bruit (colonnes rares) quand tous les siblings sont data-bearing.
 //! - fn `build_jaccard_col_sets` — construit les ensembles de colonnes par sibling pour le calcul Jaccard.
+//! - fn `col_sets` — noms des colonnes de données de chaque sibling.
+//! - fn `jaccard` — similarité de Jaccard de deux ensembles de colonnes (1.0 si tous deux vides).
 //! - fn `min_jaccard_from_col_sets` — calcul brut (pairwise ou comparaison au premier élément si N > 200).
 //! - fn `pairwise_jaccard_min` — Jaccard minimal entre toutes les paires (avec tri déterministe et
 //!   fast-paths conteneurs-purs / grands groupes).
@@ -218,15 +220,7 @@ fn noise_filtered_col_sets<'a>(
         })
         .collect();
     if filtered.iter().all(std::collections::HashSet::is_empty) {
-        indices
-            .iter()
-            .map(|&i| {
-                schemas[i]
-                    .data_columns()
-                    .map(|c| c.original_name.as_str())
-                    .collect()
-            })
-            .collect()
+        col_sets(schemas, indices)
     } else {
         filtered
     }
@@ -238,17 +232,25 @@ fn build_jaccard_col_sets<'a>(
     all_data_bearing: bool,
 ) -> Vec<std::collections::HashSet<&'a str>> {
     if !all_data_bearing {
-        return indices
-            .iter()
-            .map(|&i| {
-                schemas[i]
-                    .data_columns()
-                    .map(|c| c.original_name.as_str())
-                    .collect()
-            })
-            .collect();
+        return col_sets(schemas, indices);
     }
     noise_filtered_col_sets(schemas, indices)
+}
+
+/// Data-column names of each sibling.
+fn col_sets<'a>(
+    schemas: &'a [TableSchema],
+    indices: &[usize],
+) -> Vec<std::collections::HashSet<&'a str>> {
+    indices
+        .iter()
+        .map(|&i| {
+            schemas[i]
+                .data_columns()
+                .map(|c| c.original_name.as_str())
+                .collect()
+        })
+        .collect()
 }
 
 /// Compute the minimum pairwise Jaccard similarity of data-column names across all pairs.
@@ -265,48 +267,30 @@ fn build_jaccard_col_sets<'a>(
 ///    Outliers are still detected: any sibling with 0 column overlap with sibling[0] returns 0.
 fn min_jaccard_from_col_sets(col_sets: &[std::collections::HashSet<&str>]) -> f64 {
     const PAIRWISE_LIMIT: usize = 200;
-    if col_sets.len() > PAIRWISE_LIMIT {
-        let reference = &col_sets[0];
-        let mut min_j = 1.0_f64;
-        for other in col_sets.iter().skip(1) {
-            let intersection = reference.iter().filter(|&&c| other.contains(c)).count();
-            let union = reference.len() + other.len() - intersection;
-            let j_val = if union == 0 {
-                1.0
-            } else {
-                intersection as f64 / union as f64
-            };
-            if j_val < min_j {
-                min_j = j_val;
-                if min_j == 0.0 {
-                    return 0.0;
-                }
-            }
-        }
-        return min_j;
-    }
+    let n = col_sets.len();
+    // Large group: only the first sibling is compared to the others.
+    let compared = if n > PAIRWISE_LIMIT { 1 } else { n };
     let mut min_j = 1.0_f64;
-    for i in 0..col_sets.len() {
-        for j in (i + 1)..col_sets.len() {
-            let intersection = col_sets[i]
-                .iter()
-                .filter(|&&c| col_sets[j].contains(c))
-                .count();
-            let union = col_sets[i].len() + col_sets[j].len() - intersection;
-            let j_val = if union == 0 {
-                1.0
-            } else {
-                intersection as f64 / union as f64
-            };
-            if j_val < min_j {
-                min_j = j_val;
-                if min_j == 0.0 {
-                    return 0.0;
-                }
+    for i in 0..compared {
+        for j in (i + 1)..n {
+            min_j = min_j.min(jaccard(&col_sets[i], &col_sets[j]));
+            if min_j == 0.0 {
+                return 0.0;
             }
         }
     }
     min_j
+}
+
+/// Jaccard similarity of two column sets; 1.0 when both are empty.
+fn jaccard(a: &std::collections::HashSet<&str>, b: &std::collections::HashSet<&str>) -> f64 {
+    let intersection = a.iter().filter(|&&c| b.contains(c)).count();
+    let union = a.len() + b.len() - intersection;
+    if union == 0 {
+        1.0
+    } else {
+        intersection as f64 / union as f64
+    }
 }
 
 #[must_use]

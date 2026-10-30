@@ -168,7 +168,7 @@ impl SchemaRegistry {
 }
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::disallowed_methods))]
+#[cfg_attr(test, allow(clippy::disallowed_methods, clippy::too_many_lines))]
 mod tests {
     use super::*;
     use crate::schema::cascading::scoring::{child_compatibility_score, pairwise_jaccard_min};

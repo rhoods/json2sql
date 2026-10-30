@@ -21,8 +21,16 @@
 //! - fn `assemble_mixed_collapse` — assemble le `Collapse` final pour un groupe mixte.
 //! - fn `make_subgroup` — construit un `SubgroupData` (nom, clé, colonnes union) pour un sous-groupe.
 //! - fn `pick_unique_suffix` — suffixe de table sans collision.
+//! - fn `sibling_keys` — clé JSON (dernier segment de chemin) de chaque table sœur.
+//! - fn `union_of` — union des colonnes des tables sœurs.
+//! - fn `kind_label` — « Object » ou « `ObjectArray` », pour les logs.
+//! - struct `Subgroups` — sous-groupes d'un `SiblingCollapseMulti` en construction (suffixes uniques).
+//! - fn `Subgroups::push` — ajoute un sous-groupe avec un suffixe libre.
+//! - fn `key_examples` — jusqu'à 5 clés entre guillemets, pour le log.
+//! - fn `cluster_suffix` — suffixe voulu d'un cluster (préfixe commun des clés, sinon `cluster_{i}`).
+//! - fn `jaccard_ok` — assez de tables sœurs, assez semblables pour une table pivot.
 
-use super::super::super::table_schema::{InferredStrategy, KeyShape, TableSchema};
+use super::super::super::table_schema::{ColumnSchema, InferredStrategy, KeyShape, TableSchema};
 use super::super::super::wide_strategies::{build_union_columns, classify_key_shape};
 use super::super::scoring::{
     child_compatibility_score, greedy_schema_clusters, pairwise_jaccard_min, siblings_key_prefix,
@@ -65,64 +73,88 @@ fn try_unified_fallback(
     if ctx.parent_has_data || ctx.child_indices.len() < ctx.threshold {
         return None;
     }
-    let unified_jaccard = {
-        let data_bearing: Vec<usize> = ctx
-            .child_indices
-            .iter()
-            .copied()
-            .filter(|&i| schemas[i].data_columns().next().is_some())
-            .collect();
-        if data_bearing.len() >= ctx.threshold {
-            pairwise_jaccard_min(schemas, &data_bearing)
-        } else {
-            pairwise_jaccard_min(schemas, &ctx.child_indices)
-        }
-    };
-    if unified_jaccard < ctx.min_jaccard {
+    let unified_jaccard = effective_jaccard_for_regular(schemas, ctx, &ctx.child_indices);
+    if unified_jaccard < ctx.min_jaccard
+        || child_compatibility_score(schemas, &ctx.child_indices, obj_map, arr_map)
+            < ctx.min_jaccard
+    {
         return None;
     }
-    if child_compatibility_score(schemas, &ctx.child_indices, obj_map, arr_map) < ctx.min_jaccard {
-        return None;
-    }
-    let keys: Vec<String> = ctx
-        .child_indices
-        .iter()
-        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
-        .collect();
-    let key_shape = classify_key_shape(
-        &keys
-            .iter()
-            .map(std::string::String::as_str)
-            .collect::<Vec<_>>(),
-    );
-    let union_cols = build_union_columns(
-        &ctx.child_indices
-            .iter()
-            .map(|&i| &schemas[i])
-            .collect::<Vec<_>>(),
-    );
-    let kind_label = if ctx.array_children {
-        "ObjectArray"
-    } else {
-        "Object"
-    };
+    let keys = sibling_keys(schemas, &ctx.child_indices);
+    let (label, n) = (kind_label(ctx.array_children), ctx.child_indices.len());
+    let parent = &ctx.parent_name;
     Some(Collapse {
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
         log_msg: format!(
-            "  Unified-fallback SiblingCollapse {}: {} ({} tables → 1, Jaccard {:.2})",
-            kind_label,
-            ctx.parent_name,
-            ctx.child_indices.len(),
-            unified_jaccard
+            "  Unified-fallback SiblingCollapse {label}: {parent} ({n} tables → 1, Jaccard {unified_jaccard:.2})"
         ),
         kind: CollapseKind::Single {
             key_col_name: "key".to_string(),
-            key_shape,
-            union_cols,
+            key_shape: classify_key_shape(&keys),
+            union_cols: union_of(schemas, &ctx.child_indices),
         },
         absorbed_indices: ctx.child_indices.clone(),
     })
+}
+
+/// Last path segment (the JSON key) of each sibling table.
+fn sibling_keys(schemas: &[TableSchema], indices: &[usize]) -> Vec<String> {
+    indices
+        .iter()
+        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
+        .collect()
+}
+
+/// Union of the columns of the sibling tables.
+fn union_of(schemas: &[TableSchema], indices: &[usize]) -> Vec<ColumnSchema> {
+    build_union_columns(&indices.iter().map(|&i| &schemas[i]).collect::<Vec<_>>())
+}
+
+/// `Object` or `ObjectArray`, for the log lines.
+const fn kind_label(array_children: bool) -> &'static str {
+    if array_children {
+        "ObjectArray"
+    } else {
+        "Object"
+    }
+}
+
+/// Subgroups of a `SiblingCollapseMulti` being built: each one gets a table suffix unique
+/// among the schemas and the subgroups already added.
+#[derive(Default)]
+struct Subgroups {
+    groups: Vec<SubgroupData>,
+    all_absorbed: Vec<usize>,
+    used_suffixes: std::collections::HashSet<String>,
+}
+
+impl Subgroups {
+    fn push(
+        &mut self,
+        schemas: &[TableSchema],
+        parent_name: &str,
+        desired: &str,
+        indices: &[usize],
+        is_numeric: bool,
+    ) {
+        let suffix = pick_unique_suffix(parent_name, desired, schemas, &self.used_suffixes);
+        self.used_suffixes.insert(suffix.clone());
+        self.all_absorbed.extend_from_slice(indices);
+        let group = make_subgroup(schemas, parent_name, indices, is_numeric, &suffix);
+        self.groups.push(group);
+    }
+}
+
+/// Desired suffix of the `i`-th cluster: `{prefix}_key` from the keys' common prefix, else
+/// `cluster_{i}`.
+fn cluster_suffix(schemas: &[TableSchema], cluster: &[usize], i: usize) -> String {
+    let prefix = siblings_key_prefix(schemas, cluster);
+    if prefix.is_empty() {
+        format!("cluster_{i}")
+    } else {
+        format!("{prefix}_key")
+    }
 }
 
 /// Returns a suffix not colliding with existing `{parent}_{suffix}` schemas nor with
@@ -174,46 +206,24 @@ fn try_cluster_fallback(
     if (ctx.parent_has_data || has_sig) && !is_autosplit {
         return None;
     }
-    let valid_clusters: Vec<Vec<usize>> =
-        greedy_schema_clusters(schemas, regular, ctx.min_jaccard, ctx.threshold)
-            .into_iter()
-            .filter(|c| pairwise_jaccard_min(schemas, c) >= ctx.min_jaccard)
-            .collect();
+    let valid_clusters = build_non_num_clusters(schemas, regular, ctx);
     if valid_clusters.len() < 2 {
         return None;
     }
-    let mut groups: Vec<SubgroupData> = Vec::new();
-    let mut all_absorbed = Vec::new();
-    let mut used_suffixes: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for cluster in &valid_clusters {
-        let prefix = siblings_key_prefix(schemas, cluster);
-        let desired = if prefix.is_empty() {
-            format!("cluster_{}", groups.len())
-        } else {
-            format!("{prefix}_key")
-        };
-        let suffix = pick_unique_suffix(&ctx.parent_name, &desired, schemas, &used_suffixes);
-        used_suffixes.insert(suffix.clone());
-        all_absorbed.extend_from_slice(cluster);
-        groups.push(make_subgroup(
-            schemas,
-            &ctx.parent_name,
-            cluster,
-            false,
-            &suffix,
-        ));
+    let mut sub = Subgroups::default();
+    for (i, cluster) in valid_clusters.iter().enumerate() {
+        let desired = cluster_suffix(schemas, cluster, i);
+        sub.push(schemas, &ctx.parent_name, &desired, cluster, false);
     }
+    let (parent, n, clusters) = (&ctx.parent_name, regular.len(), sub.groups.len());
     Some(Collapse {
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
         log_msg: format!(
-            "  Schema-cluster SiblingCollapseMulti: {} ({} tables → {} clusters)",
-            ctx.parent_name,
-            regular.len(),
-            groups.len()
+            "  Schema-cluster SiblingCollapseMulti: {parent} ({n} tables → {clusters} clusters)"
         ),
-        kind: CollapseKind::Multi { groups },
-        absorbed_indices: all_absorbed,
+        kind: CollapseKind::Multi { groups: sub.groups },
+        absorbed_indices: sub.all_absorbed,
     })
 }
 
@@ -254,42 +264,33 @@ fn detect_mixed_collapse(
     obj_map: &std::collections::HashMap<String, Vec<usize>>,
     arr_map: &std::collections::HashMap<String, Vec<usize>>,
 ) -> Option<Collapse> {
-    let non_num_regular = filter_routing_tables(
-        schemas,
-        &ctx.non_numeric_idx,
-        obj_map,
-        arr_map,
-        ctx.threshold,
-    );
-    let num_ok = ctx.numeric_idx.len() >= ctx.threshold
-        && pairwise_jaccard_min(schemas, &ctx.numeric_idx) >= ctx.min_jaccard;
-    let non_ok = non_num_regular.len() >= ctx.threshold
-        && pairwise_jaccard_min(schemas, &non_num_regular) >= ctx.min_jaccard;
+    let idx = &ctx.non_numeric_idx;
+    let regular = filter_routing_tables(schemas, idx, obj_map, arr_map, ctx.threshold);
+    let num_ok = jaccard_ok(schemas, &ctx.numeric_idx, ctx);
+    let non_ok = jaccard_ok(schemas, &regular, ctx);
     if !num_ok && !non_ok {
         return try_unified_fallback(schemas, ctx, obj_map, arr_map);
     }
-    let num_ok = num_ok
-        && child_compatibility_score(schemas, &ctx.numeric_idx, obj_map, arr_map)
-            >= ctx.min_jaccard;
-    let non_ok = non_ok
-        && child_compatibility_score(schemas, &non_num_regular, obj_map, arr_map)
-            >= ctx.min_jaccard;
-    let non_num_clusters = if !non_ok && !non_num_regular.is_empty() {
-        build_non_num_clusters(schemas, &non_num_regular, ctx)
+    let compatible = |indices: &[usize]| {
+        child_compatibility_score(schemas, indices, obj_map, arr_map) >= ctx.min_jaccard
+    };
+    let num_ok = num_ok && compatible(&ctx.numeric_idx);
+    let non_ok = non_ok && compatible(&regular);
+    let clusters = if !non_ok && !regular.is_empty() {
+        build_non_num_clusters(schemas, &regular, ctx)
     } else {
         Vec::new()
     };
-    if !num_ok && !non_ok && non_num_clusters.is_empty() {
+    if !num_ok && !non_ok && clusters.is_empty() {
         return None;
     }
-    Some(assemble_mixed_collapse(
-        schemas,
-        ctx,
-        num_ok,
-        non_ok,
-        &non_num_regular,
-        &non_num_clusters,
-    ))
+    let collapse = assemble_mixed_collapse(schemas, ctx, num_ok, non_ok, &regular, &clusters);
+    Some(collapse)
+}
+
+/// Enough siblings, all similar enough (pairwise Jaccard) to share one pivot table.
+fn jaccard_ok(schemas: &[TableSchema], indices: &[usize], ctx: &SiblingDetectCtx) -> bool {
+    indices.len() >= ctx.threshold && pairwise_jaccard_min(schemas, indices) >= ctx.min_jaccard
 }
 
 /// Assemble a `SiblingCollapseMulti` collapse from pre-classified numeric/non-numeric groups.
@@ -315,7 +316,6 @@ fn detect_mixed_collapse(
 /// -- p_num already exists, new pivot gets a distinct name:
 /// CREATE TABLE p_num_2 (j2s_id uuid, j2s_p_id uuid, key_id text, val text);
 /// ```
-#[allow(clippy::too_many_lines)] // 31/30 after extracting push_subgroup; further splitting would be cosmetic only
 fn assemble_mixed_collapse(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
@@ -324,53 +324,28 @@ fn assemble_mixed_collapse(
     non_num_regular: &[usize],
     non_num_clusters: &[Vec<usize>],
 ) -> Collapse {
-    let mut groups: Vec<SubgroupData> = Vec::new();
-    let mut all_absorbed: Vec<usize> = Vec::new();
-    let mut used_suffixes: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut push_subgroup = |desired: &str, indices: &[usize], is_numeric: bool| {
-        let suffix = pick_unique_suffix(&ctx.parent_name, desired, schemas, &used_suffixes);
-        used_suffixes.insert(suffix.clone());
-        all_absorbed.extend_from_slice(indices);
-        groups.push(make_subgroup(
-            schemas,
-            &ctx.parent_name,
-            indices,
-            is_numeric,
-            &suffix,
-        ));
-    };
+    let parent = &ctx.parent_name;
+    let mut sub = Subgroups::default();
     if num_ok {
-        push_subgroup("num", &ctx.numeric_idx, true);
+        sub.push(schemas, parent, "num", &ctx.numeric_idx, true);
     }
     if non_ok {
-        push_subgroup("key", non_num_regular, false);
+        sub.push(schemas, parent, "key", non_num_regular, false);
     }
     for (i, cluster) in non_num_clusters.iter().enumerate() {
-        let prefix = siblings_key_prefix(schemas, cluster);
-        let desired = if prefix.is_empty() {
-            format!("cluster_{i}")
-        } else {
-            format!("{prefix}_key")
-        };
-        push_subgroup(&desired, cluster, false);
+        let desired = cluster_suffix(schemas, cluster, i);
+        sub.push(schemas, parent, &desired, cluster, false);
     }
-    let kind_label = if ctx.array_children {
-        "ObjectArray"
-    } else {
-        "Object"
-    };
+    let label = kind_label(ctx.array_children);
+    let (n, pivots) = (ctx.child_indices.len(), sub.groups.len());
     Collapse {
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
         log_msg: format!(
-            "  SiblingCollapseMulti {} tables detected: {} ({} tables → {} pivot tables)",
-            kind_label,
-            ctx.parent_name,
-            ctx.child_indices.len(),
-            groups.len(),
+            "  SiblingCollapseMulti {label} tables detected: {parent} ({n} tables → {pivots} pivot tables)"
         ),
-        kind: CollapseKind::Multi { groups },
-        absorbed_indices: all_absorbed,
+        kind: CollapseKind::Multi { groups: sub.groups },
+        absorbed_indices: sub.all_absorbed,
     }
 }
 
@@ -387,17 +362,7 @@ fn filter_significant_siblings(
     if all_pure {
         return ctx.child_indices.clone();
     }
-    ctx.child_indices
-        .iter()
-        .copied()
-        .filter(|&i| {
-            let name = &schemas[i].name;
-            let is_pure = schemas[i].data_columns().next().is_none();
-            let child_count = obj_map.get(name).map_or(0, std::vec::Vec::len)
-                + arr_map.get(name).map_or(0, std::vec::Vec::len);
-            !(is_pure && child_count >= ctx.threshold)
-        })
-        .collect()
+    filter_routing_tables(schemas, &ctx.child_indices, obj_map, arr_map, ctx.threshold)
 }
 
 fn effective_jaccard_for_regular(
@@ -498,51 +463,26 @@ fn detect_homogeneous_collapse(
 
 /// Build a classic `SiblingCollapse` collapse: the pure-container parent absorbs all `regular`
 /// siblings into a single keyed pivot table.
-#[allow(clippy::too_many_lines)] // inline Collapse construction with log assembly
 fn build_classic_keyed_pivot_collapse(
     schemas: &[TableSchema],
     ctx: &SiblingDetectCtx,
     regular: Vec<usize>,
 ) -> Collapse {
-    let keys: Vec<String> = regular
-        .iter()
-        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
-        .collect();
-    let key_shape = classify_key_shape(
-        &keys
-            .iter()
-            .map(std::string::String::as_str)
-            .collect::<Vec<_>>(),
-    );
+    let keys = sibling_keys(schemas, &regular);
+    let key_shape = classify_key_shape(&keys);
     let key_col_name = match &key_shape {
         KeyShape::Numeric => "key_id".to_string(),
         KeyShape::IsoLang => "lang_code".to_string(),
         _ => "key".to_string(),
     };
-    let children: Vec<&TableSchema> = regular.iter().map(|&i| &schemas[i]).collect();
-    let union_cols = build_union_columns(&children);
-    let key_examples = keys
-        .iter()
-        .take(5)
-        .map(std::string::String::as_str)
-        .collect::<Vec<_>>()
-        .join("\", \"");
-    let more = if keys.len() > 5 {
-        format!("\" (+{} more)", keys.len() - 5)
-    } else {
-        "\"".to_string()
-    };
-    let kind_label = if ctx.array_children {
-        "ObjectArray"
-    } else {
-        "Object"
-    };
+    let union_cols = union_of(schemas, &regular);
+    let examples = key_examples(&keys);
     Collapse {
         parent_idx: ctx.parent_idx,
         array_children: ctx.array_children,
         log_msg: format!(
-            "  Sibling {} tables detected: {} ({} tables → 1)\n  Keys: \"{}{}\n  Jaccard min: {:.2} → strategy: SiblingCollapse (col: {} {})",
-            kind_label, ctx.parent_name, regular.len(), key_examples, more,
+            "  Sibling {} tables detected: {} ({} tables → 1)\n  Keys: {}\n  Jaccard min: {:.2} → strategy: SiblingCollapse (col: {} {})",
+            kind_label(ctx.array_children), ctx.parent_name, regular.len(), examples,
             ctx.min_jaccard, key_col_name, key_shape,
         ),
         kind: CollapseKind::Single {
@@ -554,6 +494,16 @@ fn build_classic_keyed_pivot_collapse(
     }
 }
 
+/// Up to 5 keys, quoted, for the log: `"a", "b" (+3 more)`.
+fn key_examples(keys: &[String]) -> String {
+    let shown = keys.iter().take(5).map(String::as_str).collect::<Vec<_>>();
+    let shown = shown.join("\", \"");
+    match keys.len().saturating_sub(5) {
+        0 => format!("\"{shown}\""),
+        more => format!("\"{shown}\" (+{more} more)"),
+    }
+}
+
 pub(super) fn make_subgroup(
     schemas: &[TableSchema],
     parent_name: &str,
@@ -562,31 +512,21 @@ pub(super) fn make_subgroup(
     suffix: &str,
 ) -> SubgroupData {
     let pivot_name = format!("{parent_name}_{suffix}");
-    let sub_keys: Vec<String> = indices
-        .iter()
-        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
-        .collect();
-    let shape = classify_key_shape(
-        &sub_keys
-            .iter()
-            .map(std::string::String::as_str)
-            .collect::<Vec<_>>(),
-    );
+    let sub_keys = sibling_keys(schemas, indices);
+    let shape = classify_key_shape(&sub_keys);
     let key_col = if key_is_numeric {
-        "key_id".to_string()
+        "key_id"
+    } else if shape == KeyShape::IsoLang {
+        "lang_code"
     } else {
-        match shape {
-            KeyShape::IsoLang => "lang_code".to_string(),
-            _ => "key".to_string(),
-        }
+        "key"
     };
-    let children: Vec<&TableSchema> = indices.iter().map(|&i| &schemas[i]).collect();
-    let union_cols = build_union_columns(&children);
+    let union_cols = union_of(schemas, indices);
     let absorbed = indices.iter().map(|&i| schemas[i].name.clone()).collect();
     SubgroupData {
         pivot_table_name: pivot_name,
         key_is_numeric,
-        key_col_name: key_col,
+        key_col_name: key_col.to_string(),
         key_shape: shape,
         union_cols,
         absorbed_names: absorbed,
@@ -655,13 +595,10 @@ pub(super) fn collect_sibling_collapses(
 ) -> Vec<Collapse> {
     let mut collapses: Vec<Collapse> = Vec::new();
     for (parent_name, child_indices, array_children) in work {
-        if child_indices.len() < threshold {
-            continue;
-        }
         let Some(&parent_idx) = name_to_idx.get(parent_name.as_str()) else {
             continue;
         };
-        if should_skip_parent(schemas, parent_idx) {
+        if child_indices.len() < threshold || should_skip_parent(schemas, parent_idx) {
             continue;
         }
         let Some((ctx, is_mixed)) = build_sibling_ctx(
@@ -675,14 +612,12 @@ pub(super) fn collect_sibling_collapses(
         ) else {
             continue;
         };
-        let collapse = if is_mixed {
-            detect_mixed_collapse(schemas, &ctx, obj_map, arr_map)
+        let detect = if is_mixed {
+            detect_mixed_collapse
         } else {
-            detect_homogeneous_collapse(schemas, &ctx, obj_map, arr_map)
+            detect_homogeneous_collapse
         };
-        if let Some(c) = collapse {
-            collapses.push(c);
-        }
+        collapses.extend(detect(schemas, &ctx, obj_map, arr_map));
     }
     collapses
 }

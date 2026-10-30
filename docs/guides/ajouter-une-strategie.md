@@ -68,10 +68,10 @@ symbols:
   - write_autosplit_rows
   - recurse_children
   - insert_child_object
-  - dispatch_child_object
   - insert_array
   - dispatch_child_routes
   - route_independent_child
+  - insert_routed_object
   - StrategyName::as_str
   - StrategyName::try_from
   - StrategyName::OPTIONAL
@@ -146,7 +146,7 @@ Groupes de colonnes, seulement si TableSchema::takes_column_groups :
    CLI  apply_group_columns, après la sauvegarde du snapshot ; une clé column_groups du TOML l'emporte
    IHM  build_effective_schemas, pour les tables cochées
 Pass 2 : insert_object → recurse_children → insert_child_object
-         (enfant d'un objet JSONB : dispatch_child_object ; tableau d'objets : insert_array)
+         (enfant d'un objet JSONB : le même recurse_children ; tableau d'objets : insert_array)
 ```
 
 ## 3. Invariants et pièges
@@ -177,8 +177,7 @@ Ajoute la variante à `InferredStrategy`, puis lance `cargo check --workspace --
 `match` sans cas par défaut à compléter (état au commit `verified_at`) :
 
 - `apply_wide_strategy_columns` : forme des colonnes de la table ;
-- `insert_child_object` : Pass 2, enfant d'un objet ordinaire ;
-- `dispatch_child_object` : Pass 2, enfant d'un objet JSONB ;
+- `insert_child_object` : Pass 2, enfant d'un objet (ordinaire ou JSONB) ;
 - `strategy_label`, `strategy_badge` : libellé et badge dans l'IHM.
 
 Les erreurs de l'IHM n'apparaissent qu'une fois la lib corrigée : une erreur dans `json2sql` empêche de compiler
@@ -194,8 +193,8 @@ Le compilateur ne voit pas le reste :
 - [ ] Pass 2, table racine : `insert_object` traite à part `Jsonb` (`write_root_jsonb`), `SiblingCollapseMulti` et
   `AutoSplit` (`write_autosplit_rows`).
 - [ ] Pass 2, tableau d'objets : `insert_array` traite à part `Jsonb`.
-- [ ] Pass 2, routes : `dispatch_child_routes` et `route_independent_child`, si la stratégie fusionne des tables comme
-  `SiblingCollapse`.
+- [ ] Pass 2, routes : `insert_routed_object` (appelé par `dispatch_child_routes` et `route_independent_child`), si la
+  stratégie fusionne des tables comme `SiblingCollapse`.
 
 ### A. Détection automatique
 
@@ -277,9 +276,8 @@ Vues en écrivant la fiche, pas tranchées. Chacune peut devenir une issue de re
    plus les chaînes TOML. Une stratégie que l'utilisateur peut demander existe deux fois, reliée par
    `InferredStrategy::from`. Leurs rôles diffèrent (résultat, choix, interrupteur) ; reste à voir si la duplication est
    nécessaire.
-2. **Deux répartiteurs presque identiques en Pass 2.** `insert_child_object` et `dispatch_child_object` traitent les mêmes
-   cas et appellent les mêmes fonctions ; seul le passage du contexte diffère. Une nouvelle stratégie s'y ajoute deux
-   fois.
+2. **Deux répartiteurs presque identiques en Pass 2.** Résolu (#98) : l'enfant d'un objet JSONB passe aussi par
+   `recurse_children` et `insert_child_object` ; une nouvelle stratégie ne s'ajoute plus qu'à un `match`.
 3. **Des décisions en `matches!`, invisibles au compilateur.** `InferredStrategy::absorbs_children`,
    `TableSchema::takes_column_groups`, `apply_user_overrides` et la mention de `StrategyScreen` classent les
    stratégies par listes : une nouvelle variante y est rangée « non » sans avertissement.

@@ -214,6 +214,7 @@ fn run_sibling_wave(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_lines)]
 mod tests {
     use super::super::super::table_schema::{ColumnSchema, TableSchema};
     use super::super::super::type_tracker::PgType;

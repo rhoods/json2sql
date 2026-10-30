@@ -5,11 +5,8 @@
 //! - fn `effective_worker_threshold` — splits the flush threshold across workers.
 //! - fn `validate_run_params` — validates input parameters (e.g. parallel > 0).
 //! - fn `validate_watermarks` — validates RAM high/low watermarks and the flush threshold.
-//! - fn `try_set_synchronous_commit_off` — disables `synchronous_commit` (best-effort).
 
 use std::path::PathBuf;
-
-use tokio_postgres::Client;
 
 use crate::error::{J2sError, Result};
 
@@ -95,25 +92,6 @@ pub(super) fn validate_watermarks(
         ));
     }
     Ok(())
-}
-
-/// Attempt to disable synchronous commit for faster bulk-load. Non-fatal if the server
-/// denies the privilege (RDS, Supabase, restricted PG) — any other error is propagated.
-pub(super) async fn try_set_synchronous_commit_off(conn: &Client) -> Result<()> {
-    match conn.execute("SET synchronous_commit = off", &[]).await {
-        Ok(_) => Ok(()),
-        Err(e)
-            if e.as_db_error().is_some_and(|db| {
-                db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE
-            }) =>
-        {
-            eprintln!(
-                "WARNING: SET synchronous_commit = off not permitted — continuing without it"
-            );
-            Ok(())
-        }
-        Err(e) => Err(J2sError::Db(e)),
-    }
 }
 
 #[cfg(test)]

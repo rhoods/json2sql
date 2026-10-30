@@ -39,6 +39,7 @@
 //! - fn `ungrouped_columns` — colonnes qu'aucun groupe confirmé ne prend, dans l'ordre des colonnes.
 //! - fn `data_status` — état des signaux de données à reporter : allumés avec leur échantillon, ou éteints avec la raison.
 //! - fn `avoid_taken_names` — renomme les groupes dont la table existerait déjà (`_cols`, `_cols_2`…), et les fusions qui les remplacent.
+//! - fn `free_group_name` — premier nom libre du mot d'un groupe, hors noms des autres groupes de la table.
 //! - fn `families_of` — colonnes d'un groupe réparties par premier mot de radical.
 //! - fn `cross_pairs` — paires de colonnes de familles différentes.
 //! - fn `all_pairs` — toutes les paires de colonnes d'une liste.
@@ -560,20 +561,7 @@ pub fn avoid_taken_names(proposal: &mut TableProposal, taken: &mut HashSet<Strin
     let siblings: Vec<String> = proposal.groups.iter().map(|g| g.name.clone()).collect();
     for (at, group) in proposal.groups.iter_mut().enumerate() {
         let base = group.name.clone();
-        // the next names of its word, past those of the other groups of the table: no `_cols_cols`
-        let root = root_word(&base);
-        let mut n = 1;
-        while taken.contains(&group_table_name(&proposal.table, &group.name)) {
-            group.name = nth_name(root, n);
-            n += 1;
-            if siblings
-                .iter()
-                .enumerate()
-                .any(|(other, name)| other != at && *name == group.name)
-            {
-                group.name.clone_from(&base);
-            }
-        }
+        group.name = free_group_name(&proposal.table, &base, at, &siblings, taken);
         taken.insert(group_table_name(&proposal.table, &group.name));
         if group.name != base {
             renamed.insert(base, group.name.clone());
@@ -660,6 +648,32 @@ fn unique_name(used: &mut HashSet<String>, wanted: &str) -> String {
 }
 
 /// The word a group name was made from: the name without its `_cols` or `_cols_<n>` suffix of [`nth_name`].
+/// The first name of `base`'s word whose group table is not `taken`, past the names of the
+/// table's other groups (`siblings` but the one `at`): no `_cols_cols`.
+fn free_group_name(
+    table: &str,
+    base: &str,
+    at: usize,
+    siblings: &[String],
+    taken: &HashSet<String>,
+) -> String {
+    let root = root_word(base);
+    let mut name = base.to_string();
+    let mut n = 1;
+    while taken.contains(&group_table_name(table, &name)) {
+        name = nth_name(root, n);
+        n += 1;
+        if siblings
+            .iter()
+            .enumerate()
+            .any(|(other, sibling)| other != at && *sibling == name)
+        {
+            name = base.to_string();
+        }
+    }
+    name
+}
+
 fn root_word(name: &str) -> &str {
     let unnumbered = name
         .rsplit_once('_')
@@ -707,7 +721,14 @@ fn family_notes(names: &NameStems, originals: &[&str]) -> Vec<FamilyNote> {
 }
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::disallowed_methods, clippy::cast_precision_loss))]
+#[cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_methods,
+        clippy::cast_precision_loss,
+        clippy::too_many_lines
+    )
+)]
 mod tests {
     use serde_json::{json, Value};
 

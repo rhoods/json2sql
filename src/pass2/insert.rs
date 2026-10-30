@@ -21,12 +21,12 @@
 //! - fn `write_row_of` — écrit la ligne d'une table pour un objet : colonnes générées puis colonnes de données.
 //! - fn `write_group_rows` — écrit les lignes des tables de groupes de colonnes d'une table (une par groupe qui a au moins une valeur).
 //! - fn `column_value` — valeur JSON d'une colonne de données dans l'objet de sa table (via le champ d'origine si elle vient d'un `Flatten`).
+//! - fn `write_wide_row` — écrit une ligne EAV (clé, valeur) de la table wide compagnon.
 //! - fn `write_autosplit_rows` — écrit les paires clé/valeur de fréquence moyenne en lignes EAV
 //!   dans la table wide compagnon (stratégie `AutoSplit`).
 //! - fn `push_data_col` — résout et coerce la valeur d'une colonne de données (flatten, JSONB, coercition).
 //! - fn `push_generated_col_insert` — écrit une colonne générée (`j2s_id`, `j2s_parent_id`, `j2s_order`).
 //! - fn `push_jsonb_col` — sérialise une valeur JSON brute en colonne JSONB.
-//! - fn `push_wide_value` — coerce une valeur pour la colonne `value` de la table EAV wide.
 
 use std::collections::HashMap;
 
@@ -37,7 +37,6 @@ use crate::anomaly::collector::AnomalyCollect;
 use crate::db::copy_sink::RowBuilder;
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};
 use crate::error::Result;
-use crate::pass2::coercer::{coerce, CoerceResult};
 use crate::pass2::sink::RowSink;
 use crate::schema::grouping::sample::is_present;
 use crate::schema::table_schema::{InferredStrategy, TableSchema};
@@ -46,7 +45,7 @@ use crate::schema::PATH_SEP;
 use super::traversal::{
     insert_array, insert_jsonb_object, insert_normalize_dynamic_keys, insert_pivot_object,
     insert_sibling_collapse_multi, insert_sibling_collapse_object, insert_structured_pivot_object,
-    route_multi_collapse_children,
+    push_coerced, push_coerced_as, push_text, route_multi_collapse_children, write_row,
 };
 
 /// Mutable context for the recursive insert pass.
@@ -75,7 +74,6 @@ fn column_value<'a>(
     )
 }
 
-#[allow(clippy::too_many_lines)] // sequential phases of a single responsibility: resolve → fast-path → guard → coerce
 fn push_data_col<A: AnomalyCollect>(
     builder: &mut RowBuilder,
     anomalies: &mut A,
@@ -101,40 +99,7 @@ fn push_data_col<A: AnomalyCollect>(
         return Ok(());
     }
 
-    match coerce(json_val, &col.pg_type) {
-        CoerceResult::Ok(s) => builder.push_value(&s),
-        CoerceResult::Null => builder.push_null(),
-        CoerceResult::OkWithAnomaly {
-            value,
-            actual_value,
-            actual_type,
-        } => {
-            builder.push_value(&value);
-            anomalies.record(
-                &schema.name,
-                &col.name,
-                &row_id.to_string(),
-                &col.pg_type.as_sql(),
-                &actual_value,
-                actual_type,
-            )?;
-        }
-        CoerceResult::Anomaly {
-            actual_value,
-            actual_type,
-        } => {
-            anomalies.record(
-                &schema.name,
-                &col.name,
-                &row_id.to_string(),
-                &col.pg_type.as_sql(),
-                &actual_value,
-                actual_type,
-            )?;
-            builder.push_null();
-        }
-    }
-    Ok(())
+    push_coerced(builder, anomalies, &schema.name, col, row_id, json_val)
 }
 
 pub fn insert_object<S: RowSink, A: AnomalyCollect>(
@@ -192,11 +157,7 @@ fn write_row_of<S: RowSink, A: AnomalyCollect>(
         }
         push_data_col(&mut builder, ctx.anomalies, schema, col, obj, row_id)?;
     }
-    ctx.anomalies.inc_total(&schema.name);
-    if let Some(sink) = ctx.sinks.get_mut(&schema.name) {
-        sink.write_row(&builder.finish())?;
-    }
-    Ok(())
+    write_row(ctx.sinks, ctx.anomalies, &schema.name, builder)
 }
 
 /// Write the rows of the column groups split off `schema` (#78): one row per group table that has at least one
@@ -269,42 +230,15 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
     obj: &serde_json::Map<String, Value>,
     row_id: Uuid,
 ) -> Result<()> {
-    let parent_path_key = schema.path.join(&PATH_SEP.to_string());
     let mut builder = RowBuilder::new();
     builder.push_uuid(row_id); // j2s_id (no j2s_parent_id for root)
-    let json_str = serde_json::to_string(obj).unwrap_or_default();
-    match escape_copy_text(&json_str) {
-        Some(escaped) => builder.push_value(&escaped),
-        None => builder.push_null(), // null byte in JSON — treat as NULL
-    }
-    ctx.anomalies.inc_total(&schema.name);
-    if let Some(sink) = ctx.sinks.get_mut(&schema.name) {
-        sink.write_row(&builder.finish())?;
-    }
-    for (field, value) in obj {
-        let child_key = format!("{parent_path_key}{PATH_SEP}{field}");
-        match value {
-            Value::Object(nested) => {
-                if let Some(child_schema) = path_map.get(&child_key) {
-                    insert_child_object(path_map, ctx, child_schema, nested, value, row_id)?;
-                }
-            }
-            Value::Array(arr) => {
-                if let Some(child_schema) = path_map.get(&child_key) {
-                    insert_array(
-                        path_map,
-                        ctx.sinks,
-                        ctx.anomalies,
-                        child_schema,
-                        arr,
-                        row_id,
-                    )?;
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+                               // A null byte in the JSON makes the blob NULL.
+    push_text(
+        &mut builder,
+        &serde_json::to_string(obj).unwrap_or_default(),
+    );
+    write_row(ctx.sinks, ctx.anomalies, &schema.name, builder)?;
+    recurse_children(path_map, ctx, schema, obj, row_id)
 }
 
 /// Dispatch a child Object value to the appropriate insertion function based on its `InferredStrategy`.
@@ -397,55 +331,40 @@ fn insert_child_object<S: RowSink, A: AnomalyCollect>(
     Ok(())
 }
 
-/// Write medium-frequency key-value pairs as EAV rows in the `AutoSplit` companion wide table.
-/// Stable keys were already written as schema columns; rare keys are skipped entirely.
-fn push_wide_value<A: AnomalyCollect>(
-    wb: &mut RowBuilder,
-    anomalies: &mut A,
+/// Write one EAV row (`j2s_id`, parent, key, value) of the `AutoSplit` companion wide table
+/// under `row_id`. Without a known value type the value is `NULL`.
+fn write_wide_row<S: RowSink, A: AnomalyCollect>(
+    ctx: &mut InsertCtx<'_, S, A>,
     wide_table_name: &str,
+    value_type: Option<&crate::schema::type_tracker::PgType>,
+    row_id: Uuid,
+    key: &str,
     value: &Value,
-    wide_id: Uuid,
-    wide_value_type: Option<&crate::schema::type_tracker::PgType>,
 ) -> Result<()> {
-    match wide_value_type {
-        Some(pg_type) => match coerce(value, pg_type) {
-            CoerceResult::Ok(s) => wb.push_value(&s),
-            CoerceResult::Null => wb.push_null(),
-            CoerceResult::OkWithAnomaly {
+    let wide_id = Uuid::now_v7();
+    let mut wb = RowBuilder::new();
+    wb.push_uuid(wide_id);
+    wb.push_uuid(row_id);
+    push_text(&mut wb, key);
+    match value_type {
+        Some(pg_type) => {
+            push_coerced_as(
+                &mut wb,
+                ctx.anomalies,
+                wide_table_name,
+                "value",
+                pg_type,
+                wide_id,
                 value,
-                actual_value,
-                actual_type,
-            } => {
-                wb.push_value(&value);
-                anomalies.record(
-                    wide_table_name,
-                    "value",
-                    &wide_id.to_string(),
-                    &pg_type.as_sql(),
-                    &actual_value,
-                    actual_type,
-                )?;
-            }
-            CoerceResult::Anomaly {
-                actual_value,
-                actual_type,
-            } => {
-                anomalies.record(
-                    wide_table_name,
-                    "value",
-                    &wide_id.to_string(),
-                    &pg_type.as_sql(),
-                    &actual_value,
-                    actual_type,
-                )?;
-                wb.push_null();
-            }
-        },
+            )?;
+        }
         None => wb.push_null(),
     }
-    Ok(())
+    write_row(ctx.sinks, ctx.anomalies, wide_table_name, wb)
 }
 
+/// Write medium-frequency key-value pairs as EAV rows in the `AutoSplit` companion wide table.
+/// Stable keys were already written as schema columns; rare keys are skipped entirely.
 fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
@@ -472,32 +391,20 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
         {
             continue;
         }
-        let wide_id = Uuid::now_v7();
-        let mut wb = RowBuilder::new();
-        wb.push_uuid(wide_id);
-        wb.push_uuid(row_id);
-        match escape_copy_text(field) {
-            Some(escaped) => wb.push_value(&escaped),
-            None => wb.push_null(),
-        }
-        push_wide_value(
-            &mut wb,
-            ctx.anomalies,
+        write_wide_row(
+            ctx,
             wide_table_name,
-            value,
-            wide_id,
             wide_value_type.as_ref(),
+            row_id,
+            field,
+            value,
         )?;
-        ctx.anomalies.inc_total(wide_table_name);
-        if let Some(sink) = ctx.sinks.get_mut(wide_table_name.as_str()) {
-            sink.write_row(&wb.finish())?;
-        }
     }
     Ok(())
 }
 
 /// Recurse into child fields of `obj`, routing each to the appropriate insertion function.
-fn recurse_children<S: RowSink, A: AnomalyCollect>(
+pub(super) fn recurse_children<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
     schema: &TableSchema,
@@ -532,7 +439,7 @@ fn recurse_children<S: RowSink, A: AnomalyCollect>(
 }
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::disallowed_methods))]
+#[cfg_attr(test, allow(clippy::disallowed_methods, clippy::too_many_lines))]
 mod tests {
     use super::{insert_object, InsertCtx};
     use crate::anomaly::collector::AnomalyCollect;

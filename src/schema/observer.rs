@@ -15,6 +15,7 @@
 //! - fn `SchemaObserver::new` — crée l'observateur (seuil texte).
 //! - fn `SchemaObserver::observe_root` — observe un objet racine via une pile explicite (pas de
 //!   récursion, évite tout stack overflow sur imbrication profonde).
+//! - fn `SchemaObserver::entry_mut` — entrée d'une table déjà rencontrée pendant le parcours.
 //! - fn `SchemaObserver::observe_array_field` — route un champ tableau (objets → table enfant,
 //!   scalaires → colonne PG array).
 //! - fn `SchemaObserver::merge` — fusionne un observateur d'un autre worker (Pass 1 parallèle).
@@ -145,16 +146,19 @@ impl SchemaObserver {
                     }
                     scalar => {
                         let threshold = self.text_threshold;
-                        self.tables
-                            .get_mut(&path_key)
-                            .expect(
-                                "invariant: path_key was popped from stack, must exist in tables",
-                            )
+                        self.entry_mut(&path_key)
                             .observe_field(field, scalar, threshold);
                     }
                 }
             }
         }
+    }
+
+    /// The entry of a table already on the walk (its key was popped from the stack).
+    fn entry_mut(&mut self, path_key: &str) -> &mut TableEntry {
+        self.tables
+            .get_mut(path_key)
+            .expect("invariant: path_key was popped from stack, must exist in tables")
     }
 
     fn observe_array_field<'s>(
@@ -168,29 +172,13 @@ impl SchemaObserver {
         let first_is_object = arr.iter().any(|v| matches!(v, Value::Object(_)));
         if first_is_object {
             self.ensure_table_key(child_key, path_key, Some(ChildKind::ObjectArray));
-            let mut objs: Vec<&serde_json::Map<String, Value>> = arr
-                .iter()
-                .filter_map(|v| {
-                    if let Value::Object(o) = v {
-                        Some(o)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if let Some(last) = objs.pop() {
-                for obj in objs {
-                    stack.push((child_key.to_string(), obj));
-                }
-                stack.push((child_key.to_string(), last));
+            for obj in arr.iter().filter_map(Value::as_object) {
+                stack.push((child_key.to_string(), obj));
             }
         } else {
             let threshold = self.text_threshold;
-            let entry = self
-                .tables
-                .get_mut(path_key)
-                .expect("invariant: path_key was popped from stack, must exist in tables");
-            let tracker = entry
+            let tracker = self
+                .entry_mut(path_key)
                 .array_columns
                 .entry(field.to_string())
                 .or_insert_with(|| TypeTracker::new(threshold));

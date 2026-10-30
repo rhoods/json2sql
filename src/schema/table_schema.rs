@@ -39,6 +39,7 @@
 //!   vers la stratégie inférée équivalente.
 //! - struct `ColumnSchema` — une colonne dans un schéma de table finalisé.
 //! - fn `ColumnSchema::generated` — construit une colonne générée (`j2s_id`, `j2s_order`...).
+//! - fn `ColumnSchema::data` — construit une colonne de données (non générée) nommée d'après sa clé JSON.
 //! - fn `ColumnSchema::parent_fk` — construit la colonne FK vers le parent (`j2s_{parent}_id`).
 //! - enum `ChildKind` — nature de la relation enfant (Object/`ObjectArray`).
 //! - struct `TableSchema` — schéma de table pleinement résolu, prêt pour le DDL et le chargement.
@@ -510,6 +511,19 @@ impl ColumnSchema {
             pg_type,
             not_null: true,
             is_generated: true,
+            is_parent_fk: false,
+        }
+    }
+
+    /// Create a data column (not generated), named after its JSON key.
+    #[must_use]
+    pub fn data(name: &str, pg_type: PgType, not_null: bool) -> Self {
+        Self {
+            name: name.to_string(),
+            original_name: name.to_string(),
+            pg_type,
+            not_null,
+            is_generated: false,
             is_parent_fk: false,
         }
     }

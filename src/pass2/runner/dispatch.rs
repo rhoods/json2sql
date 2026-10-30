@@ -8,6 +8,7 @@
 //! - fn `emit_completion_events` — sends the end-of-run events.
 //! - fn `log_constraint_warnings` — logs unapplied FK constraint warnings.
 //! - fn `update_row_progress` — periodic progress bar update.
+//! - fn `log_dispatch` — verbose log of the dispatch progress every 10 000 records.
 //! - fn `dispatch_loop` — dispatches the JSON stream to workers.
 
 use std::collections::HashMap;
@@ -198,6 +199,14 @@ fn update_row_progress(
 /// Dispatch raw JSON bytes from `reader` round-robin to workers.
 /// Each payload carries the current wrapper key (None for non-wrapper formats).
 /// Returns `(rows_processed, worker_died)`.
+/// In verbose mode, log the dispatch progress every 10 000 records.
+fn log_dispatch(verbose: bool, rows_processed: u64, bytes_read: u64) {
+    if verbose && rows_processed.is_multiple_of(10_000) {
+        let mb = bytes_read / 1024 / 1024;
+        eprintln!("[DISPATCH] {rows_processed} records, {mb} MB scanned");
+    }
+}
+
 pub(super) async fn dispatch_loop(
     reader: &mut JsonReader,
     senders: &[tokio::sync::mpsc::Sender<(Option<String>, Vec<u8>)>],
@@ -213,9 +222,8 @@ pub(super) async fn dispatch_loop(
     let mut worker_died = false;
     if limit != Some(0) {
         'dispatch: while let Some(item) = reader.next_raw() {
-            let bytes = item?;
             let key = reader.current_key().map(str::to_string);
-            if senders[robin].send((key, bytes)).await.is_err() {
+            if senders[robin].send((key, item?)).await.is_err() {
                 worker_died = true;
                 break 'dispatch;
             }
@@ -231,13 +239,7 @@ pub(super) async fn dispatch_loop(
                 reader.bytes_read(),
                 total_bytes,
             );
-            if verbose && rows_processed.is_multiple_of(10_000) {
-                eprintln!(
-                    "[DISPATCH] {} records, {} MB scanned",
-                    rows_processed,
-                    reader.bytes_read() / 1024 / 1024
-                );
-            }
+            log_dispatch(verbose, rows_processed, reader.bytes_read());
         }
     }
     Ok((rows_processed, worker_died))

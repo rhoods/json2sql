@@ -3,6 +3,8 @@
 //! - struct `SchemaFinalizer` — transforme les observations brutes en `TableSchema` finalisés.
 //! - fn `SchemaFinalizer::new` — construit le finaliseur avec ses seuils.
 //! - fn `SchemaFinalizer::run` — orchestre les 4 phases (base → cascade → wide strategies → guard).
+//! - fn `parents_of_object_children` — tables qui ont au moins un enfant objet.
+//! - fn `dedup_and_sort` — après la cascade : retire les noms en double, rétablit l'ordre profondeur puis nom.
 
 use indexmap::IndexMap;
 use std::collections::HashSet;
@@ -79,22 +81,11 @@ impl SchemaFinalizer {
         naming: &mut NamingRegistry,
     ) -> (Vec<TableSchema>, Vec<ColumnCollision>, Vec<OverflowWarning>) {
         // Pre-register all table names so that table_name_lookup() (read-only) works in parallel.
-        let dot_keys: Vec<String> = tables.keys().cloned().collect();
-        for key in &dot_keys {
+        for key in tables.keys() {
             naming.table_name_from_dot_key(key);
         }
 
-        // Pre-compute set of path_keys that have at least one Object/ObjectArray child.
-        let tables_with_object_children: std::collections::HashSet<String> = tables
-            .values()
-            .filter(|e| {
-                matches!(
-                    e.child_kind,
-                    Some(ChildKind::Object | ChildKind::ObjectArray)
-                )
-            })
-            .map(|e| e.parent_key.clone())
-            .collect();
+        let tables_with_object_children = parents_of_object_children(tables);
 
         let config = build_finalizer_config(self, text_threshold);
 
@@ -111,16 +102,7 @@ impl SchemaFinalizer {
             finalize_cascading(&mut schemas, self.sibling_threshold, self.sibling_jaccard);
         }
 
-        // Post-cascade dedup: cascading can produce synthetic table names that collide
-        // with already-registered names. Keeps the first (pre-cascade) occurrence.
-        {
-            let mut seen = std::collections::HashSet::new();
-            schemas.retain(|s| seen.insert(s.name.clone()));
-        }
-
-        // Re-sort after cascade: finalize_cascading appends synthetic tables without
-        // maintaining topological (depth-then-name) order.
-        schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
+        dedup_and_sort(&mut schemas);
 
         // Phase 3 — per-table: apply wide-table strategies (Pivot, Jsonb, StructuredPivot, AutoSplit)
         // to remaining tables after fusion is complete.
@@ -142,4 +124,29 @@ impl SchemaFinalizer {
 
         (schemas, all_collisions, overflow_warnings)
     }
+}
+
+/// Path keys of the tables that have at least one Object/ObjectArray child.
+fn parents_of_object_children(
+    tables: &IndexMap<String, TableEntry>,
+) -> std::collections::HashSet<String> {
+    tables
+        .values()
+        .filter(|e| {
+            matches!(
+                e.child_kind,
+                Some(ChildKind::Object | ChildKind::ObjectArray)
+            )
+        })
+        .map(|e| e.parent_key.clone())
+        .collect()
+}
+
+/// After the cascade: drop the synthetic tables whose name collides with an already-registered
+/// one (the first, pre-cascade occurrence is kept), then restore the depth-then-name order
+/// that `finalize_cascading` does not maintain.
+fn dedup_and_sort(schemas: &mut Vec<TableSchema>) {
+    let mut seen = std::collections::HashSet::new();
+    schemas.retain(|s| seen.insert(s.name.clone()));
+    schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
 }

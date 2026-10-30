@@ -42,12 +42,15 @@ symbols:
   - write_autosplit_rows
   - recurse_children
   - insert_child_object
-  - dispatch_child_object
   - insert_array
   - insert_pivot_object
   - push_generated_col_insert
   - push_data_col
   - push_coerced
+  - push_coerced_as
+  - write_row
+  - insert_jsonb_object
+  - insert_routed_object
   - coerce
   - CoerceResult
   - AnomalyCollect
@@ -84,13 +87,13 @@ rien sur le schéma : elle suit `schemas` (une liste de `TableSchema` finalisés
 
 | Changement | Où | Le compilateur aide ? |
 |---|---|---|
-| Nouvelle stratégie, ou routage d'une stratégie | `insert_child_object`, `dispatch_child_object`, puis la fiche [ajouter-une-strategie.md](ajouter-une-strategie.md) | oui pour ces deux `match`, non pour le reste |
+| Nouvelle stratégie, ou routage d'une stratégie | `insert_child_object`, puis la fiche [ajouter-une-strategie.md](ajouter-une-strategie.md) | oui pour ce `match`, non pour le reste |
 | Nouveau type PostgreSQL | `coerce` (un `match` sans cas par défaut sur `PgType`) | oui |
 | Nouvelle colonne générée (`j2s_…`) | `push_generated_col_insert`, et chaque écriture de ligne codée en dur (§ 3) | **non** |
 | Nouvelle forme de ligne (une table écrite autrement) | une fonction `insert_*` dans `traversal.rs`, appelée depuis le répartiteur | non |
 | Nouveau paramètre du run | `Pass2Config`, `validate_run_params` si besoin ; il se remplit dans `run_pass2` (CLI) et `WorkerConfig::into_pass2_config` (IHM) | oui : `Pass2Config` est construit en littéral partout, tests compris |
 | Ordonnancement des COPY, mémoire | `run_flusher`, `next_flush_candidate` ; lire d'abord architecture.md | non |
-| Nouvelle anomalie de valeur | `CoerceResult` et son traitement dans `push_coerced` | en partie |
+| Nouvelle anomalie de valeur | `CoerceResult` et son traitement dans `push_coerced_as` (le seul, appelé aussi via `push_coerced`) | en partie |
 
 ## 2. Flux
 
@@ -124,7 +127,8 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
 - **Une table sans schéma est sautée en silence.** `recurse_children` cherche le chemin du champ dans `path_map` ;
   absent, l'objet ou le tableau est ignoré. C'est voulu (table absorbée, `Skip`), mais c'est aussi ce que donne un
   chemin mal construit : des données perdues, sans anomalie.
-- **Un sink absent est sauté en silence.** Chaque écriture fait `if let Some(sink) = sinks.get_mut(…)`. Les sinks et
+- **Un sink absent est sauté en silence.** Chaque écriture passe par `write_row`, qui compte la ligne puis fait
+  `if let Some(sink) = sinks.get_mut(…)`. Les sinks et
   `path_map` viennent de la même liste `schemas` : une table ajoutée ailleurs que dans cette liste n'est jamais écrite.
 - **Une colonne générée inconnue vaut `NULL`.** `push_generated_col_insert` reconnaît `j2s_id`, `j2s_order` et la
   clé parente (`is_parent_fk`) ; tout autre nom tombe dans `_ => push_null()`. Une colonne `NOT NULL` le signale au
@@ -183,7 +187,8 @@ Vues en écrivant la fiche, pas tranchées.
    et par chaque `insert_*` (les valeurs). Un `RowBuilder` qui remplirait les valeurs par nom de colonne supprimerait
    le piège de l'ordre.
 2. **Deux styles de contexte.** `insert.rs` passe un `InsertCtx`, `traversal.rs` passe `sinks` et `anomalies`
-   séparément. `insert_array` reçoit les deux morceaux et reconstruit un `InsertCtx` pour appeler `insert_object`.
+   séparément. `insert_array`, `insert_jsonb_object` et `insert_routed_object` reçoivent les deux morceaux et
+   reconstruisent un `InsertCtx` pour appeler `insert_object` ou `recurse_children`.
 3. **Les pertes silencieuses** (chemin absent de `path_map`, sink absent, élément non objet dans un tableau d'objets)
    ne laissent aucune trace. Un compteur, ou une anomalie, distinguerait « absorbé exprès » de « perdu ».
 4. **architecture.md décalé sur `traversal.rs`** : il cite `insert_keyed_pivot_object`, `insert_multi_keyed_pivot`

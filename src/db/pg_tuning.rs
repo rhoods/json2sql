@@ -24,6 +24,7 @@
 //! - fn `restore_pending_autovacuum` — réactive l'autovacuum laissé coupé par un import interrompu.
 //! - fn `restore_pending` — applique tous les retours arrière laissés par un import interrompu.
 //! - fn `current_max_wal_size` — valeur actuelle (MB) et si elle vient de `postgresql.auto.conf`.
+//! - fn `skip_tune_wal` — `--tune-wal` inapplicable : dit pourquoi et continue sans.
 //! - fn `raise_max_wal_size` — relève `max_wal_size` (best-effort), renvoie le retour arrière.
 //! - fn `record_then_raise` — écrit le marqueur puis relève `max_wal_size`.
 //! - fn `restore_max_wal_size` — applique le retour arrière en fin d'import (best-effort).
@@ -274,6 +275,15 @@ async fn current_max_wal_size(client: &Client) -> Result<(i64, bool), tokio_post
 /// Raises `max_wal_size` to `TUNED_MAX_WAL_SIZE_MB` server-wide. Best-effort: returns `None`
 /// (with a warning) when the role lacks the privilege, when the restore cannot be recorded first,
 /// or when the value is already high enough.
+/// `--tune-wal` cannot be applied: say why, and go on without it.
+fn skip_tune_wal(progress_tx: Option<&ProgressTx>, why: &str) -> Option<WalRestore> {
+    log(
+        progress_tx,
+        format!("WARNING: --tune-wal: {why} — continuing without it"),
+    );
+    None
+}
+
 pub async fn raise_max_wal_size(
     client: &Client,
     progress_tx: Option<&ProgressTx>,
@@ -282,22 +292,14 @@ pub async fn raise_max_wal_size(
     restore_pending_wal(client, progress_tx).await;
     let (prev_mb, from_auto_conf) = match current_max_wal_size(client).await {
         Ok(v) => v,
-        Err(e) => {
-            log(
-                progress_tx,
-                format!(
-                    "WARNING: --tune-wal: cannot read max_wal_size ({e}) — continuing without it"
-                ),
-            );
-            return None;
-        }
+        Err(e) => return skip_tune_wal(progress_tx, &format!("cannot read max_wal_size ({e})")),
     };
     if prev_mb >= TUNED_MAX_WAL_SIZE_MB {
         return None;
     }
     let Some(key) = server_key(client).await else {
-        log(progress_tx, "WARNING: --tune-wal: cannot identify the server (data_directory) — continuing without it".to_string());
-        return None;
+        let why = "cannot identify the server (data_directory)";
+        return skip_tune_wal(progress_tx, why);
     };
     let restore = WalRestore {
         sql: wal_restore_sql(prev_mb, from_auto_conf),

@@ -39,9 +39,11 @@ symbols:
   - add_constraints
   - add_pk
   - validate_fk
+  - drop_unvalidated_fk
   - to_fk_warning
   - open_constraints_conn
   - try_configure_constraints_conn
+  - try_set_synchronous_commit_off
   - pk_mem_mb
   - calc_maintenance_work_mem_mb
   - table_sizes
@@ -98,7 +100,7 @@ un `kill -9`.
 | Définition d'une colonne (type, `NOT NULL`) | `build_col_defs`, commun à tous les `CREATE TABLE` | non |
 | Nom d'une contrainte, nouvelle contrainte | écrit en dur dans cinq fonctions (§ 4) | **non** |
 | Ordre ou parallélisme de la phase des contraintes, mémoire des PK | `add_constraints`, `pk_mem_mb`, `calc_maintenance_work_mem_mb` ; lire d'abord architecture.md | non |
-| Réglage de session des connexions de contraintes | `try_configure_constraints_conn` (le `VACUUM` règle sa propre connexion dans `vacuum_analyze_tables`, le chargement les siennes, voir pass2.md) | non |
+| Réglage de session des connexions de contraintes | `try_configure_constraints_conn` (le `VACUUM` règle sa propre connexion dans `vacuum_analyze_tables`, le chargement les siennes, voir pass2.md ; `try_set_synchronous_commit_off` sert aux deux) | non |
 | Réglage temporaire du serveur (comme `max_wal_size`) | `pg_tuning.rs`, sur le modèle de `record_then_raise` (§ 4) | non |
 | Conseil au démarrage (réglage serveur peu adapté) | `tuning_hints` ou `wal_level_hint`, fonctions pures testées sans base | non |
 | Connexion (TLS, délai d'attente) | quatre endroits ouvrent une connexion (§ 3) | non |
@@ -198,7 +200,7 @@ un test unitaire dans `ddl.rs`, comme ceux qui existent.
 la colonne parente (repli sur `j2s_parent_id`), sont écrits en dur. À faire à la main :
 
 - [ ] `generate_add_pk_sql`, `generate_add_fk_sql`, `generate_validate_fk_sql` ;
-- [ ] la suppression de la FK non validée dans `validate_fk` ;
+- [ ] la suppression de la FK non validée dans `drop_unvalidated_fk` ;
 - [ ] l'aperçu `generate_ddl_preview`, le dry-run `generate_create_table` et `print_dry_run_ddl` ;
 - [ ] pour une nouvelle contrainte : sa phase dans `add_constraints`, son compte dans le total de progression,
   fatale ou en `ConstraintWarning` ;
