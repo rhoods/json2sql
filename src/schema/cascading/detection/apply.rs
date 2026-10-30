@@ -8,6 +8,9 @@
 //! - fn `apply_single_collapse` — transforme le parent en table pivot unique.
 //! - fn `apply_multi_collapse` — crée les tables pivot synthétiques (une par sous-groupe).
 //! - fn `build_multi_group_entry` — construit l'entrée de schéma d'un sous-groupe pivot.
+//! - fn `key_column` — colonne d'une table pivot qui reçoit la clé JSON.
+//! - fn `co_sibling_groups` — groupes de tables sœurs (même clé JSON) pour la vague suivante.
+//! - fn `subgroup_sibling_schema` — `SiblingSchema` de la table pivot d'un sous-groupe.
 //! - fn `make_pivot_preamble` — colonnes générées communes (`j2s_id`, FK, order).
 
 use super::super::super::table_schema::{
@@ -42,31 +45,56 @@ fn apply_single_collapse(
             .columns
             .push(ColumnSchema::generated("j2s_order", PgType::BigInt));
     }
-    parent.columns.push(ColumnSchema {
-        name: key_col_name.clone(),
-        original_name: key_col_name.clone(),
+    parent.columns.push(key_column(key_col_name));
+    parent.columns.extend(union_cols.iter().cloned());
+    parent.inferred_strategy = InferredStrategy::SiblingCollapse(sibling_schema);
+    let parent_name = schemas[collapse.parent_idx].name.clone();
+    let absorbed = &collapse.absorbed_indices;
+    co_sibling_groups(schemas, absorbed, obj_map, arr_map, &parent_name)
+}
+
+/// The column of a keyed-pivot table that receives the JSON key.
+fn key_column(name: &str) -> ColumnSchema {
+    ColumnSchema {
+        name: name.to_string(),
+        original_name: name.to_string(),
         pg_type: PgType::Text,
         not_null: true,
         is_generated: false,
         is_parent_fk: false,
-    });
-    for col in union_cols {
-        parent.columns.push(col.clone());
     }
-    parent.inferred_strategy = InferredStrategy::SiblingCollapse(sibling_schema);
-    let synthetic_parent_name = schemas[collapse.parent_idx].name.clone();
-    cascade::collect_children_by_key(schemas, &collapse.absorbed_indices, obj_map, arr_map)
+}
+
+/// Groups of at least two tables sharing a JSON key under the `absorbed` tables: they become
+/// siblings of `parent_name` (the pivot table) for the next cascade wave.
+fn co_sibling_groups(
+    schemas: &[TableSchema],
+    absorbed: &[usize],
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+    parent_name: &str,
+) -> Vec<CoSiblingGroup> {
+    cascade::collect_children_by_key(schemas, absorbed, obj_map, arr_map)
         .into_iter()
         .filter(|(_, siblings, _)| siblings.len() >= 2)
         .map(
             |(json_key, sibling_indices, array_children)| CoSiblingGroup {
-                synthetic_parent_name: synthetic_parent_name.clone(),
+                synthetic_parent_name: parent_name.to_string(),
                 json_key,
                 sibling_indices,
                 array_children,
             },
         )
         .collect()
+}
+
+/// The `SiblingSchema` of a subgroup's pivot table.
+fn subgroup_sibling_schema(g: &SubgroupData, array_children: bool) -> SiblingSchema {
+    SiblingSchema {
+        key_col_name: g.key_col_name.clone(),
+        key_shape: g.key_shape.clone(),
+        array_children,
+    }
 }
 
 struct ParentCtx<'a> {
@@ -104,24 +132,10 @@ fn build_multi_group_entry(
     arr_map: &std::collections::HashMap<String, Vec<usize>>,
 ) -> (TableSchema, Vec<CoSiblingGroup>) {
     let mut cols = make_pivot_preamble(parent.name, parent.array_children);
-    cols.push(ColumnSchema {
-        name: g.key_col_name.clone(),
-        original_name: g.key_col_name.clone(),
-        pg_type: PgType::Text,
-        not_null: true,
-        is_generated: false,
-        is_parent_fk: false,
-    });
-    for col in &g.union_cols {
-        cols.push(col.clone());
-    }
+    cols.push(key_column(&g.key_col_name));
+    cols.extend(g.union_cols.iter().cloned());
     let mut path = parent.path.to_vec();
     path.push(g.path_segment.clone());
-    let sibling_schema = SiblingSchema {
-        key_col_name: g.key_col_name.clone(),
-        key_shape: g.key_shape.clone(),
-        array_children: parent.array_children,
-    };
     let pivot_name = g.pivot_table_name.clone();
     let absorbed_idx: Vec<usize> = g
         .absorbed_names
@@ -130,24 +144,13 @@ fn build_multi_group_entry(
         .collect();
     // Sum absorbed tables' row_count as an approximation for classify_tables.
     let source_row_count: u64 = absorbed_idx.iter().map(|&i| schemas[i].row_count).sum();
-    let mut co_siblings: Vec<CoSiblingGroup> = Vec::new();
-    for (json_key, siblings, arr) in
-        cascade::collect_children_by_key(schemas, &absorbed_idx, obj_map, arr_map)
-    {
-        if siblings.len() >= 2 {
-            co_siblings.push(CoSiblingGroup {
-                synthetic_parent_name: pivot_name.clone(),
-                json_key,
-                sibling_indices: siblings,
-                array_children: arr,
-            });
-        }
-    }
+    let co_siblings = co_sibling_groups(schemas, &absorbed_idx, obj_map, arr_map, &pivot_name);
     let mut schema = TableSchema::new(pivot_name, path, parent.depth + 1);
     schema.parent_table = Some(parent.name.to_string());
     schema.columns = cols;
     schema.child_kind = Some(ChildKind::Object);
-    schema.inferred_strategy = InferredStrategy::SiblingCollapse(sibling_schema);
+    schema.inferred_strategy =
+        InferredStrategy::SiblingCollapse(subgroup_sibling_schema(g, parent.array_children));
     schema.row_count = source_row_count;
     (schema, co_siblings)
 }
@@ -167,11 +170,7 @@ pub(super) fn apply_multi_collapse(
         .map(|g| crate::schema::table_schema::SiblingGroup {
             pivot_table: g.pivot_table_name.clone(),
             key_is_numeric: g.key_is_numeric,
-            sibling_schema: SiblingSchema {
-                key_col_name: g.key_col_name.clone(),
-                key_shape: g.key_shape.clone(),
-                array_children: collapse.array_children,
-            },
+            sibling_schema: subgroup_sibling_schema(g, collapse.array_children),
             absorbed_names: g.absorbed_names.clone(),
             path_segment: g.path_segment.clone(),
             absorbed_path_segments: g.absorbed_path_segments.clone(),
@@ -185,15 +184,11 @@ pub(super) fn apply_multi_collapse(
         depth: schemas[collapse.parent_idx].depth,
         array_children: collapse.array_children,
     };
-    let mut new_schemas: Vec<TableSchema> = Vec::new();
-    let mut co_siblings: Vec<CoSiblingGroup> = Vec::new();
-    for g in groups {
-        let (schema, new_co) =
-            build_multi_group_entry(g, &parent_ctx, schemas, name_to_idx, obj_map, arr_map);
-        new_schemas.push(schema);
-        co_siblings.extend(new_co);
-    }
-    (new_schemas, co_siblings)
+    let (new_schemas, co_siblings): (Vec<TableSchema>, Vec<Vec<CoSiblingGroup>>) = groups
+        .iter()
+        .map(|g| build_multi_group_entry(g, &parent_ctx, schemas, name_to_idx, obj_map, arr_map))
+        .unzip();
+    (new_schemas, co_siblings.into_iter().flatten().collect())
 }
 
 pub(super) fn apply_collapses(

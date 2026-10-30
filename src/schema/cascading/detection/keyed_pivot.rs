@@ -6,7 +6,7 @@
 //! - fn `run_keyed_pivot_children_wave` — détecte et traite ces orphelins.
 //! - fn `collect_keyed_pivot_work_items` — collecte les items de travail keyed-pivot.
 //! - fn `process_keyed_pivot_work_item` — traite un item de travail keyed-pivot.
-//! - fn `resolve_pivot_key_info` — résout la clé/forme du sous-pivot.
+//! - fn `resolve_pivot_key_info` — résout la clé/forme, les colonnes et le nom du sous-pivot.
 //! - fn `build_sub_pivot_columns` — construit les colonnes union du sous-pivot.
 //! - fn `build_sub_pivot_schema` — construit le schéma du sous-pivot.
 //! - fn `collect_pivot_co_siblings` — reparente les enfants absorbés.
@@ -34,7 +34,7 @@ fn resolve_pivot_key_info(
     schemas: &[TableSchema],
     child_indices: &[usize],
     parent_name: &str,
-) -> (String, KeyShape, Vec<ColumnSchema>, String) {
+) -> (SiblingSchema, Vec<ColumnSchema>, String) {
     let keys: Vec<String> = child_indices
         .iter()
         .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
@@ -54,7 +54,14 @@ fn resolve_pivot_key_info(
     let union_cols = build_union_columns(&children_refs);
     let suffix = unique_cluster_suffix(parent_name, "key", schemas);
     let sub_pivot_name = format!("{parent_name}_{suffix}");
-    (key_col_name, key_shape, union_cols, sub_pivot_name)
+    let fk_col = format!("j2s_{parent_name}_id");
+    let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
+    let sibling_schema = SiblingSchema {
+        key_col_name,
+        key_shape,
+        array_children: false,
+    };
+    (sibling_schema, cols, sub_pivot_name)
 }
 
 fn build_sub_pivot_schema(
@@ -84,45 +91,31 @@ fn process_keyed_pivot_work_item(
     obj_map: &std::collections::HashMap<String, Vec<usize>>,
     arr_map: &std::collections::HashMap<String, Vec<usize>>,
 ) -> Option<(TableSchema, Vec<CoSiblingGroup>)> {
-    let jaccard = pairwise_jaccard_min(schemas, child_indices);
-    if jaccard < min_jaccard {
+    if pairwise_jaccard_min(schemas, child_indices) < min_jaccard {
         return None;
     }
-    let parent_name = schemas[parent_idx].name.clone();
-    let parent_depth = schemas[parent_idx].depth;
-    let mut sub_path = schemas[parent_idx].path.clone();
-    sub_path.push("key".to_string());
-    let (key_col_name, key_shape, union_cols, sub_pivot_name) =
+    let parent = &schemas[parent_idx];
+    let (parent_name, parent_depth) = (parent.name.clone(), parent.depth);
+    let sub_path = [parent.path.as_slice(), &["key".to_string()]].concat();
+    let (sibling_schema, cols, pivot_name) =
         resolve_pivot_key_info(schemas, child_indices, &parent_name);
-    let fk_col = format!("j2s_{parent_name}_id");
-    let sibling_schema = SiblingSchema {
-        key_col_name: key_col_name.clone(),
-        key_shape,
-        array_children: false,
-    };
-    let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
-    let co_sibs =
-        collect_pivot_co_siblings(schemas, child_indices, &sub_pivot_name, obj_map, arr_map);
-    reparent_and_update_routes(schemas, parent_idx, child_indices, &sub_pivot_name);
+    let co_sibs = collect_pivot_co_siblings(schemas, child_indices, &pivot_name, obj_map, arr_map);
+    reparent_and_update_routes(schemas, parent_idx, child_indices, &pivot_name);
     let source_row_count: u64 = child_indices.iter().map(|&i| schemas[i].row_count).sum();
+    let n = child_indices.len();
     eprintln!(
-        "  SiblingCollapse post-pass: {} ({} orphan tables → sub-pivot {})",
-        parent_name,
-        child_indices.len(),
-        sub_pivot_name
+        "  SiblingCollapse post-pass: {parent_name} ({n} orphan tables → sub-pivot {pivot_name})"
     );
-    Some((
-        build_sub_pivot_schema(
-            sub_pivot_name,
-            parent_name,
-            sub_path,
-            parent_depth,
-            cols,
-            sibling_schema,
-            source_row_count,
-        ),
-        co_sibs,
-    ))
+    let schema = build_sub_pivot_schema(
+        pivot_name,
+        parent_name,
+        sub_path,
+        parent_depth,
+        cols,
+        sibling_schema,
+        source_row_count,
+    );
+    Some((schema, co_sibs))
 }
 
 /// parent's `child_routes` to point to the sub-pivot.  Their own children are returned as
