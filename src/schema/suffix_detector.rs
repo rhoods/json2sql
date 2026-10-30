@@ -10,12 +10,13 @@
 //! - fn `scalar_keys` — clés scalaires d'une table : ni objet, ni tableau, ni colonne PG array.
 //! - fn `assign_keys` — attribue chaque clé au suffixe le plus long qui la termine.
 //! - fn `detect_suffix_schema` — détecte automatiquement la grille bases × suffixes et ses clés.
+//! - fn `grid_keys` — clés nues et clés de la grille d'une attribution.
 //! - fn `retained_assignment` — attribution des clés aux suffixes qui gardent assez de bases.
 //! - fn `build_suffix_cols_and_value_type` — construit les `SuffixColumn` + type de la colonne `value` de base.
 //! - fn `widest_type` — type le plus large des clés observées (`TEXT` s'il n'y en a pas).
 //! - fn `suffix_col_name` — nom de colonne d'un suffixe (`norm_value` pour `value`).
-//! - fn `build_suffix_column` — construit une `SuffixColumn` (variante explicite, TOML `suffix_columns`).
-//! - fn `build_suffix_schema_from_list` — variante explicite (TOML `suffix_columns`), pas de détection automatique.
+//! - fn `declared_suffixes` — les `suffix_columns` d'une config TOML, avec leur `_` de tête.
+//! - fn `build_suffix_schema_from_list` — variante explicite (TOML `suffix_columns`) : suffixes déclarés et clés de la grille.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -92,17 +93,7 @@ pub fn detect_suffix_schema(
     if assigned.is_empty() {
         return None;
     }
-    let bases: HashSet<&str> = assigned
-        .iter()
-        .flat_map(|(s, ks)| ks.iter().map(move |k| &k[..k.len() - s.len()]))
-        .collect();
-    let bare: Vec<&str> = keys.iter().copied().filter(|k| bases.contains(k)).collect();
-    let grid: HashSet<String> = assigned
-        .values()
-        .flatten()
-        .chain(&bare)
-        .map(|k| (*k).to_string())
-        .collect();
+    let (bare, grid) = grid_keys(&keys, &assigned);
     if (grid.len() as f64 / keys.len() as f64) < coverage_threshold {
         return None;
     }
@@ -113,6 +104,26 @@ pub fn detect_suffix_schema(
         value_type,
     };
     Some((schema, grid))
+}
+
+/// Bare keys of the grid (keys that are a base of an assigned key) and every key of the grid:
+/// the assigned keys plus the bare ones.
+fn grid_keys<'a>(
+    keys: &[&'a str],
+    assigned: &BTreeMap<String, Vec<&'a str>>,
+) -> (Vec<&'a str>, HashSet<String>) {
+    let bases: HashSet<&str> = assigned
+        .iter()
+        .flat_map(|(s, ks)| ks.iter().map(move |k| &k[..k.len() - s.len()]))
+        .collect();
+    let bare: Vec<&str> = keys.iter().copied().filter(|k| bases.contains(k)).collect();
+    let grid = assigned
+        .values()
+        .flatten()
+        .chain(&bare)
+        .map(|k| (*k).to_string())
+        .collect();
+    (bare, grid)
 }
 
 /// Assignment of the keys to the suffixes that keep `MIN_BASES` bases and `coverage_threshold`
@@ -198,59 +209,54 @@ fn suffix_col_name(suffix: &str) -> String {
     }
 }
 
-/// Build a `SuffixSchema` from an explicit list of suffix strings.
-fn build_suffix_column(raw_suffix: &str, columns: &IndexMap<String, TypeTracker>) -> SuffixColumn {
-    let suffix = if raw_suffix.starts_with('_') {
-        raw_suffix.to_string()
-    } else {
-        format!("_{raw_suffix}")
-    };
-    let pg_type = widest_type(
-        columns
-            .iter()
-            .filter(|(key, _)| key.ends_with(suffix.as_str()))
-            .map(|(_, tracker)| tracker),
-    );
-    let col_name = suffix_col_name(&suffix);
-    SuffixColumn {
-        suffix,
-        col_name,
-        pg_type,
-    }
+/// The `suffix_columns` of a TOML config as suffixes: a leading `_` is added when missing.
+#[must_use]
+pub fn declared_suffixes(suffix_list: &[String]) -> Vec<String> {
+    suffix_list
+        .iter()
+        .map(|s| {
+            if s.starts_with('_') {
+                s.clone()
+            } else {
+                format!("_{s}")
+            }
+        })
+        .collect()
 }
 
-/// Used when the user declares `suffix_columns` in the TOML config.
+/// Used when the user declares `suffix_columns` in the TOML config: the declared suffixes (a
+/// leading `_` is added when missing), in their order, with the keys of the grid. `columns` are
+/// the table's scalar columns; keys go to their longest suffix, as in the detection, and only
+/// the bare keys of the grid type `value` (#163).
 #[must_use]
 pub fn build_suffix_schema_from_list(
     suffix_list: &[String],
     columns: &IndexMap<String, TypeTracker>,
-) -> SuffixSchema {
-    let suffix_cols = suffix_list
+) -> (SuffixSchema, HashSet<String>) {
+    let suffixes = declared_suffixes(suffix_list);
+    let keys: Vec<&str> = columns.keys().map(String::as_str).collect();
+    let assigned = assign_keys(&keys, &suffixes);
+    let (bare, grid) = grid_keys(&keys, &assigned);
+    let suffix_cols = suffixes
         .iter()
-        .map(|suffix| build_suffix_column(suffix, columns))
-        .collect();
-
-    // Base value type from bare keys (keys not ending with any declared suffix)
-    let suffix_strs: HashSet<&str> = suffix_list
-        .iter()
-        .map(std::string::String::as_str)
-        .collect();
-    let value_type = columns
-        .iter()
-        .filter(|(key, _)| !suffix_strs.iter().any(|s| key.ends_with(*s)))
-        .fold(None::<PgType>, |acc, (_, tracker)| {
-            let t = tracker.to_pg_type();
-            Some(match acc {
-                None => t,
-                Some(a) => widen_pg_types(a, &t),
-            })
+        .map(|suffix| SuffixColumn {
+            suffix: suffix.clone(),
+            col_name: suffix_col_name(suffix),
+            pg_type: widest_type(
+                assigned
+                    .get(suffix)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|k| columns.get(*k)),
+            ),
         })
-        .unwrap_or(PgType::Text);
-
-    SuffixSchema {
+        .collect();
+    let value_type = widest_type(bare.iter().filter_map(|k| columns.get(*k)));
+    let schema = SuffixSchema {
         suffix_cols,
         value_type,
-    }
+    };
+    (schema, grid)
 }
 
 // ---------------------------------------------------------------------------

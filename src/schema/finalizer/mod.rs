@@ -22,6 +22,7 @@ pub use orchestrator::SchemaFinalizer;
 mod base;
 
 mod wide_strategy;
+pub use wide_strategy::apply_structured_pivot_split;
 
 mod guard;
 pub use guard::apply_column_limit_guard;

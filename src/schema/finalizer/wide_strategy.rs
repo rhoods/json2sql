@@ -207,9 +207,14 @@ fn apply_non_autosplit_strategy(
         let n = suffix_schema.suffix_cols.len();
         let strategy = format!("StructuredPivot ({n} suffixes, split identité/compagnon)");
         stats.log(&schema.name, &strategy);
-        let split =
-            apply_structured_pivot_split(schema, suffix_schema, grid_keys, config, existing_names);
-        return Some(split);
+        let thresholds = (config.stable_threshold, config.rare_threshold);
+        return Some(apply_structured_pivot_split(
+            schema,
+            suffix_schema,
+            grid_keys,
+            thresholds,
+            existing_names,
+        ));
     }
 
     let strategy = if config.disable_pivot {
@@ -231,11 +236,13 @@ fn apply_non_autosplit_strategy(
 /// row per base) and return it. `schema` keeps its name and every other column (scalars outside
 /// the grid, PG arrays) and becomes the identity table: `AutoSplit` with the grid keys as
 /// `medium_keys`, so its real children are still written through `recurse_children` (#163).
-fn apply_structured_pivot_split(
+/// Shared by the detection (Phase 3) and the TOML `suffix_columns` override; `thresholds` are the
+/// (stable, rare) thresholds recorded on the `AutoSplit` strategy.
+pub fn apply_structured_pivot_split(
     schema: &mut TableSchema,
     suffix_schema: SuffixSchema,
     grid_keys: std::collections::HashSet<String>,
-    config: &FinalizerConfig,
+    thresholds: (f64, f64),
     existing_names: &std::collections::HashSet<String>,
 ) -> TableSchema {
     schema
@@ -252,8 +259,8 @@ fn apply_structured_pivot_split(
     let companion =
         structured_pivot_companion(schema, companion_name.clone(), suffix_schema, has_bare_keys);
     schema.inferred_strategy = InferredStrategy::AutoSplit {
-        stable_threshold: config.stable_threshold,
-        rare_threshold: config.rare_threshold,
+        stable_threshold: thresholds.0,
+        rare_threshold: thresholds.1,
         medium_keys: grid_keys,
         wide_table_name: companion_name,
     };
@@ -286,7 +293,7 @@ fn apply_pivot_split(
     build_wide_pivot_schema(schema, wide_name, value_type, all_keys, config)
 }
 
-/// Companion name for `apply_pivot_split`: `{base}_pivot`, falling back to `{base}_pivot_eav`
+/// Companion name for `apply_pivot_split` and `apply_structured_pivot_split`: `{base}_pivot`, falling back to `{base}_pivot_eav`
 /// on self-collision (schema already named `..._pivot`) and to an incremental `_pivot_2`,
 /// `_pivot_3`, ... on collision with any other already-known table name.
 fn unique_pivot_name(
