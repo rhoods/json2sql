@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Config TOML, overrides de l'IHM et snapshot du schéma
-verified_at: 8e10677
+verified_at: aab585c
 files:
   - src/schema/config.rs
   - src/schema/persistence.rs
@@ -28,6 +28,7 @@ symbols:
   - apply_overrides_complete
   - apply_strategy_override
   - apply_suffix_columns_override
+  - suffix_columns_already_applied
   - apply_column_type_overrides
   - apply_group_overrides
   - apply_keyed_pivot_merge
@@ -197,8 +198,9 @@ IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snap
   comme dans `effective_strategy`). Côté IHM, `kept_toml_rebuild` : sur des colonnes déjà reconstruites par le TOML,
   Pivot et Columns sont refusés (avertissement sur stderr seulement : l'IHM ne l'affiche pas), Jsonb reconstruit.
   Vérifié en `--dry-run` sur les quatre enchaînements. **Limites** : `structured_pivot` / `suffix_columns` et
-  `flatten` ne posent pas `toml_override`. Rejouer `suffix_columns` sur un snapshot donne `InvalidOverride` à chaque
-  relance, et un `pivot` posé ensuite sur cette table la reconstruit encore. Rejouer `flatten` semble sans effet
+  `flatten` ne posent pas `toml_override`. Rejouer les mêmes `suffix_columns` sur un snapshot ne change rien
+  (`suffix_columns_already_applied`, #163) ; d'autres suffixes donnent `InvalidOverride`. Un `pivot` posé ensuite sur
+  la table d'identité n'a pas été revérifié depuis #163. Rejouer `flatten` semble sans effet
   (colonnes dédoublonnées par nom), non testé.
 - **Les deux chemins d'override finissent par `exclude_absorbed_children`** : `apply_overrides_complete` (TOML) et
   `apply_user_overrides` (IHM). Une table enfant laissée sous un parent Pivot ou Jsonb reçoit ses données *en plus* du

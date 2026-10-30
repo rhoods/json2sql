@@ -319,7 +319,7 @@ Exemples de schémas SQL avec et sans chaque stratégie : [strategies.md](strate
 | `columns` | Une colonne par champ JSON (défaut) |
 | `jsonb` | L'objet entier en une colonne JSONB |
 | `pivot` | EAV générique `(parent_id, key, value)` |
-| `structured_pivot` | EAV structuré `(parent_id, base, val_suffixe1, ...)` |
+| `structured_pivot` | Les clés à suffixes dans une table `{table}_pivot` : `(parent_id, name, value, suffixe1, ...)` ; les autres colonnes restent |
 | `ignore` | La clé est supprimée (ni schéma, ni données) |
 
 ### Exemple réel — OpenFoodFacts

@@ -137,11 +137,13 @@ CREATE TABLE products_brand (
 ## `structured_pivot` : des clés à suffixes en lignes typées
 
 Pour des clés qui combinent un nom et un suffixe répété (`calories`, `calories_100g`, `calories_serving`, `fat`,
-`fat_100g`…).
+`fat_100g`…). Ces clés forment une grille : des noms (`calories`, `fat`, `salt`) croisés avec des suffixes (`_100g`,
+`_serving`).
 
 ```json
 {"name": "Widget", "nutrients": {"calories": 100, "calories_100g": 200, "calories_serving": 150,
-                                 "fat": 5, "fat_100g": 10, "fat_serving": 8}}
+                                 "fat": 5, "fat_100g": 10, "fat_serving": 8,
+                                 "salt": 1, "salt_100g": 2, "salt_serving": 3}}
 ```
 
 ```bash
@@ -149,39 +151,39 @@ json2sql --input tests/fixtures/structured_pivot.jsonl --table products --dry-ru
 json2sql --input tests/fixtures/structured_pivot.jsonl --table products --wide-column-threshold 4 --dry-run  # avec
 ```
 
-Sans (l'objet a moins de colonnes que le seuil des tables larges) :
+Sans (l'objet a moins de colonnes que le seuil des tables larges) : une colonne par clé dans `products_nutrients`.
+
+Avec : la grille part dans une table `products_nutrients_pivot`, avec une ligne par nom et une colonne par suffixe.
+`products_nutrients` garde son nom et tout ce qui n'est pas dans la grille.
 
 ```sql
 CREATE TABLE products_nutrients (
     j2s_id UUID NOT NULL,
-    j2s_products_id UUID NOT NULL,
-    calories INTEGER,
-    calories_100g INTEGER,
-    calories_serving INTEGER,
-    fat INTEGER,
-    fat_100g INTEGER,
-    fat_serving INTEGER
+    j2s_products_id UUID NOT NULL
+    -- ici, les autres clés de l'objet : textes, tableaux… ; ses objets restent des tables filles
 );
-```
 
-Avec : une ligne par nom, une colonne par suffixe.
-
-```sql
-CREATE TABLE products_nutrients (
+CREATE TABLE products_nutrients_pivot (
     j2s_id UUID NOT NULL,
-    j2s_products_id UUID NOT NULL,
-    name TEXT,         -- 'calories', 'fat'
+    j2s_products_nutrients_id UUID NOT NULL,
+    name TEXT,         -- 'calories', 'fat', 'salt'
     value INTEGER,     -- la clé sans suffixe : "calories": 100
-    c_100g INTEGER,    -- "calories_100g": 200
+    _100g INTEGER,     -- "calories_100g": 200
     serving INTEGER    -- "calories_serving": 150
 );
 ```
 
-Si l'objet contient aussi un tableau, la stratégie n'est pas appliquée : un avertissement le dit, et l'objet passe en
-`pivot` ou en `jsonb`, qui gardent le tableau.
+- La colonne d'un suffixe porte le nom du suffixe. Un suffixe qui commence par un chiffre garde son `_` (`_100g`),
+  car un nom de colonne ne peut pas commencer par un chiffre. `_value` devient `norm_value` et `_name` devient
+  `norm_name`, pour ne pas se confondre avec les colonnes `value` et `name`.
+- `value` n'existe que si l'objet a des clés sans suffixe (`calories` seul).
+- Une clé va au suffixe le plus long qui la termine : `fat_prepared_100g` va dans `prepared_100g`, pas dans `_100g`.
+- La grille n'est retenue que si chaque suffixe revient avec au moins trois noms, et si elle couvre au moins 30 % des
+  clés de l'objet. Deux clés comme `en:celery_seed` et `en:mustard_seed` ne suffisent pas à créer un suffixe `_seed`.
 
 Les suffixes peuvent aussi être donnés dans le TOML : `strategy = "structured_pivot"` et
-`suffix_columns = ["_100g", "_serving"]`. Ce choix forcé écarte les tableaux de l'objet, avec un avertissement.
+`suffix_columns = ["_100g", "_serving"]`. Le découpage est le même : seules les clés de la grille partent dans la
+table `_pivot`.
 
 ---
 

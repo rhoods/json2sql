@@ -16,6 +16,8 @@
 //!   stratégie (Pivot/Jsonb/`StructuredPivot` appliqués ici ; les autres le sont ailleurs).
 //! - fn `apply_pivot_columns` — colonnes `(key, value)` avec type élargi.
 //! - fn `apply_structured_pivot_columns` — colonnes `(name, value, <suffixes>)`.
+//! - fn `structured_pivot_companion` — compagnon `_pivot` structuré d'une table d'identité (#163).
+//! - fn `push_structured_pivot_columns` — colonnes `name`, `value` (si demandée) et une par suffixe.
 //! - fn `array_column_names` — noms des colonnes PG array d'une table, séparés par des virgules.
 //! - fn `warn_dropped_arrays` — avertit des colonnes PG array qu'écarte `StructuredPivot` (#85).
 //! - fn `widen_union_type` — `widen_pg_types` où un côté pg-array l'emporte (`Array(widen(elem, scalaire))`, #61).
@@ -154,26 +156,52 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: InferredS
 pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: SuffixSchema) {
     warn_dropped_arrays(schema);
     schema.columns.retain(|c| c.is_generated);
-    schema.columns.push(ColumnSchema {
-        name: "name".to_string(),
-        original_name: "name".to_string(),
-        pg_type: PgType::Text,
-        not_null: true,
-        is_generated: false,
-        is_parent_fk: false,
-    });
-    schema.columns.push(ColumnSchema {
-        name: "value".to_string(),
-        original_name: "value".to_string(),
-        pg_type: suffix_schema.value_type.clone(),
-        not_null: false,
-        is_generated: false,
-        is_parent_fk: false,
-    });
+    push_structured_pivot_columns(&mut schema.columns, &suffix_schema, true);
+    schema.inferred_strategy = InferredStrategy::StructuredPivot(suffix_schema);
+}
+
+/// Companion `name` of the identity table `parent`: an object child holding one row per base
+/// of the suffix grid — (`j2s_id`, FK to `parent`, name, [value], <`suffix_col`>...). `value`
+/// only exists when the grid has bare keys (#93).
+#[must_use]
+pub fn structured_pivot_companion(
+    parent: &TableSchema,
+    name: String,
+    suffix_schema: SuffixSchema,
+    with_value: bool,
+) -> TableSchema {
+    let mut companion = TableSchema::new(name.clone(), vec![name], parent.depth + 1);
+    companion.parent_table = Some(parent.name.clone());
+    companion.child_kind = Some(ChildKind::Object);
+    companion
+        .columns
+        .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+    companion
+        .columns
+        .push(ColumnSchema::parent_fk(&parent.name));
+    push_structured_pivot_columns(&mut companion.columns, &suffix_schema, with_value);
+    companion.inferred_strategy = InferredStrategy::StructuredPivot(suffix_schema);
+    companion
+}
+
+/// `name TEXT NOT NULL`, then `value` when `with_value`, then one column per suffix whose
+/// `original_name` is the suffix itself, so Pass 2 can look it up.
+fn push_structured_pivot_columns(
+    columns: &mut Vec<ColumnSchema>,
+    suffix_schema: &SuffixSchema,
+    with_value: bool,
+) {
+    columns.push(ColumnSchema::data("name", PgType::Text, true));
+    if with_value {
+        columns.push(ColumnSchema::data(
+            "value",
+            suffix_schema.value_type.clone(),
+            false,
+        ));
+    }
     for sc in &suffix_schema.suffix_cols {
-        schema.columns.push(ColumnSchema {
+        columns.push(ColumnSchema {
             name: sc.col_name.clone(),
-            // original_name = the suffix string so pass2 can look it up
             original_name: sc.suffix.clone(),
             pg_type: sc.pg_type.clone(),
             not_null: false,
@@ -181,7 +209,6 @@ pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: S
             is_parent_fk: false,
         });
     }
-    schema.inferred_strategy = InferredStrategy::StructuredPivot(suffix_schema);
 }
 
 /// Comma-separated names of the PG array data columns of `schema`, empty when it has none.
