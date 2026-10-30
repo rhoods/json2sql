@@ -179,3 +179,79 @@ async fn test_orphan_row_fk_warning_drops_constraint() {
     })
     .await;
 }
+
+/// #146 — a second import without `--drop-existing` appends its rows, keeps the PKs of the first one
+/// instead of failing on a second PRIMARY KEY (42P16), and ends with the child FK validated.
+#[tokio::test]
+async fn test_second_import_keeps_pks_and_restores_fk() {
+    integration::with_pg_container(|client, schema, url| async move {
+        for run in 1..=2 {
+            let cfg = PipelineConfig { parallel: 4, ..base_config(url.clone(), schema.clone()) };
+            let result = run_pipeline(cfg).await;
+            assert!(result.is_ok(), "import {run} failed: {result:?}");
+        }
+        assert_eq!(integration::row_count(&client, &schema, "orders").await, 6);
+        assert_eq!(integration::row_count(&client, &schema, "orders_items").await, 10);
+
+        let count = |filter: &'static str| {
+            let (client, schema) = (&client, &schema);
+            async move {
+                client.query_one(
+                    &format!("SELECT count(*) FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace \
+                              WHERE n.nspname = $1 AND {filter}"),
+                    &[schema],
+                ).await.expect("query constraints").get::<_, i64>(0)
+            }
+        };
+        assert_eq!(count("c.contype = 'p'").await, 2, "one PK per table");
+        assert_eq!(count("c.contype = 'f' AND c.convalidated").await, 1, "the child FK is back, validated");
+    })
+    .await;
+}
+
+/// #146 — a second load whose buffers flush before the final drain (small threshold, many objects)
+/// writes children before their parent: the FK of the first import must not be in place meanwhile
+/// (it rejected them: 23503), and must be back afterwards.
+#[tokio::test]
+async fn test_second_import_flushes_parents_before_children() {
+    integration::with_pg_container(|client, schema, url| async move {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("orders.jsonl");
+        let lines: String = (0..20_000)
+            .map(|i| format!("{{\"id\": {i}, \"items\": [{{\"sku\": \"A{i}\"}}, {{\"sku\": \"B{i}\"}}, {{\"sku\": \"C{i}\"}}]}}\n"))
+            .collect();
+        std::fs::write(&path, lines).expect("write fixture");
+        let first = PipelineConfig { input: Some(path.clone()), ..base_config(url.clone(), schema.clone()) };
+        run_pipeline(first).await.expect("first import");
+
+        let p1 = json2sql::pass1::runner::run(
+            &path,
+            &json2sql::pass1::runner::Pass1Config { root_table: "orders".to_string(), registry: Default::default(), num_workers: None },
+            None,
+        ).expect("pass 1");
+        let cfg = json2sql::pass2::Pass2Config {
+            root_table: "orders".to_string(),
+            pg_schema: schema.clone(),
+            parallel: 4,
+            anomaly_dir: None,
+            limit: None,
+            mem_flush_threshold_bytes: Some(4096),
+            ram_high_watermark: None,
+            ram_low_watermark: None,
+            verbose: false,
+            hint_format: None,
+            skip_constraints: false,
+            tune_wal: false,
+        };
+        let second = json2sql::pass2::runner::run(&path, &p1.schemas, &client, &url, &cfg, None).await;
+        assert!(second.is_ok(), "second import failed: {:?}", second.err());
+        assert_eq!(integration::row_count(&client, &schema, "orders_items").await, 120_000);
+        let fks: i64 = client.query_one(
+            "SELECT count(*) FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace \
+             WHERE n.nspname = $1 AND c.contype = 'f' AND c.convalidated",
+            &[&schema],
+        ).await.expect("query FKs").get(0);
+        assert_eq!(fks, 1, "the child FK is back, validated");
+    })
+    .await;
+}

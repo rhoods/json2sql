@@ -1146,7 +1146,8 @@ async fn test_parallel_streaming_matches_sequential() {
 
 // ---------------------------------------------------------------------------
 // Guard: si des tables racines sont non-vides avant l'import, Pass 2 doit
-// émettre un Pass2Log WARNING et continuer normalement (les données sont appendées).
+// émettre un Pass2Log WARNING et continuer normalement (les données sont appendées),
+// contraintes comprises : la PK du premier import est gardée (#146).
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_warn_on_nonempty_root_table_before_import() {
@@ -1189,7 +1190,7 @@ async fn test_warn_on_nonempty_root_table_before_import() {
                 ram_low_watermark: None,
                 verbose: false,
                 hint_format: None,
-                skip_constraints: true, // constraints already added by first import
+                skip_constraints: false,
                 tune_wal: false,
             },
             Some(ptx),

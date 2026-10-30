@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Base de données, création des tables, contraintes, réglages du serveur et connexions
-verified_at: 5dfcced
+verified_at: 527afa3
 files:
   - src/db/connection.rs
   - src/db/ddl.rs
@@ -40,6 +40,8 @@ symbols:
   - add_pk
   - validate_fk
   - drop_unvalidated_fk
+  - drop_parent_fks
+  - existing_pks
   - to_fk_warning
   - open_constraints_conn
   - try_configure_constraints_conn
@@ -135,10 +137,11 @@ run_interruptible
   ├─ raise_max_wal_size    : si --tune-wal (marqueur écrit avant le ALTER SYSTEM)
   ├─ record_autovacuum_restore, puis set_tables_autovacuum(false)
   ├─ load_and_constrain
+  │    ├─ drop_parent_fks      : FK enfant → parent d'un import précédent retirées (sauf --no-constraints)
   │    ├─ chargement COPY (pass2.md)
   │    ├─ vacuum_analyze_tables : la plus grosse table d'abord, sans freinage
   │    └─ add_constraints (sauf --no-constraints)
-  │         1. PK, plus grosses tables d'abord, au plus 4 connexions, mémoire prise dans un budget commun
+  │         1. PK manquantes (existing_pks), plus grosses tables d'abord, au plus 4 connexions, mémoire prise dans un budget commun
   │         2. FK ajoutées NOT VALID, une connexion, instantané
   │         3. VALIDATE de chaque FK, en parallèle
   ├─ put_back_autovacuum   : toujours, même en erreur
@@ -155,11 +158,14 @@ Les deux points d'entrée (CLI et worker de l'IHM) créent les tables chacun de 
   `print_dry_run_ddl`, avec la PK dans le `CREATE` et sans `fillfactor = 100`, et une FK sans `NOT VALID` recopiée
   dans `pipeline.rs`), et `generate_ddl_preview` (l'aperçu de l'IHM, PK et FK dans le `CREATE`). Une modification
   du DDL exécuté ne se voit ni dans le dry-run ni dans l'aperçu tant qu'on ne les modifie pas aussi.
-- **Relancer un import sans `--drop-existing` échoue après le chargement.** Les tables existantes sont gardées
-  (`IF NOT EXISTS`) avec leurs PK et FK ; les lignes sont ajoutées et validées, puis `add_pk` tente une seconde PK :
-  `multiple primary keys for table … are not allowed` (code 42P16), erreur fatale. Les données sont alors en double
-  et l'import est en échec (essayé sur PostgreSQL 16 : deux runs de la CLI sur le même fichier).
-  `preflight_warn_nonempty` prévient seulement que des tables racines ne sont pas vides.
+- **Relancer un import sans `--drop-existing` ajoute les lignes et garde les PK.** Les tables existantes sont
+  gardées (`IF NOT EXISTS`). Avant le chargement, `drop_parent_fks` retire les FK enfant → parent : laissées en
+  place, elles refuseraient un enfant écrit avant son parent (23503), et le chargement repasse en une transaction
+  par connexion. Après le chargement, `add_constraints` saute les tables qui ont déjà une PK (`existing_pks` : la
+  reconstruire trierait toute la table), puis repose les FK : le `VALIDATE` relit toute la table enfant, anciennes
+  lignes comprises. Si le chargement échoue entre les deux, les tables restent sans FK jusqu'au prochain import.
+  Avec `--no-constraints`, rien n'est retiré : des FK déjà posées peuvent alors refuser le chargement. PK et FK
+  sont trouvées par type dans `pg_constraint`, pas par nom. (#146)
 - **Une table existante garde ses anciennes colonnes.** Avec `IF NOT EXISTS`, un schéma qui a changé n'est pas
   appliqué : le `COPY` liste ses colonnes, donc une colonne absente le fait échouer, une colonne en trop reste `NULL`.
 - **`DROP … CASCADE` emporte aussi les objets de l'utilisateur** qui dépendent des tables (vues, FK d'autres tables).
@@ -248,5 +254,3 @@ Vues en écrivant la fiche, pas tranchées ; chacune a son issue.
    l'autovacuum revient « avec un `ANALYZE` avant les contraintes » (il revient après, le `VACUUM (ANALYZE)` est
    lancé à part) et que `PrimaryKey` est « toujours fatal » (la variante n'est jamais créée) ; modules.md parle
    d'« ordre topologique » et n'a pas de ligne pour `pg_tuning.rs`. (#151)
-6. **Relance sans `--drop-existing`** : échec fatal après un chargement validé, données en double (§ 3). Plutôt un
-   bug : poser les contraintes seulement si elles n'existent pas, ou refuser la relance avant de charger. (#146)
