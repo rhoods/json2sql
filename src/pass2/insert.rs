@@ -45,7 +45,8 @@ use crate::schema::PATH_SEP;
 use super::traversal::{
     insert_array, insert_jsonb_object, insert_normalize_dynamic_keys, insert_pivot_object,
     insert_sibling_collapse_multi, insert_sibling_collapse_object, insert_structured_pivot_object,
-    push_coerced, push_coerced_as, push_text, route_multi_collapse_children, write_row,
+    keeps_scalars_in_array_column, push_coerced, push_coerced_as, push_text,
+    route_multi_collapse_children, write_row,
 };
 
 /// Mutable context for the recursive insert pass.
@@ -429,6 +430,7 @@ pub(super) fn recurse_children<S: RowSink, A: AnomalyCollect>(
                         child_schema,
                         arr,
                         row_id,
+                        keeps_scalars_in_array_column(schema, field),
                     )?;
                 }
             }
