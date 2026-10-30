@@ -51,7 +51,7 @@
 //!
 //! Tableaux :
 //! - fn `keeps_scalars_in_array_column` — le parent garde-t-il les scalaires du champ dans une colonne tableau.
-//! - fn `record_dropped_scalar` — anomalie pour les scalaires d'un tableau d'objets, sans table où aller (#86).
+//! - fn `record_dropped_scalar` — anomalie pour une valeur non objet là où un objet est attendu, sans table où aller (#86, #162).
 //! - fn `insert_array` — tableau d'objets : une ligne par élément (`ObjectArray`) ; scalaires → anomalie,
 //!   ou blob en `Jsonb`.
 
@@ -482,6 +482,9 @@ pub(super) fn insert_sibling_collapse_object<S: RowSink>(
     }
     for (key, value) in obj {
         let Value::Object(child_obj) = value else {
+            if !value.is_null() {
+                record_dropped_scalar(anomalies, &schema.name, key, parent_id, value)?;
+            }
             continue;
         };
         let row = SiblingCollapseRowInput {
@@ -543,6 +546,9 @@ pub(super) fn insert_normalize_dynamic_keys<S: RowSink>(
 ) -> Result<()> {
     for (key, value) in obj {
         let Value::Object(child_obj) = value else {
+            if !value.is_null() {
+                record_dropped_scalar(anomalies, &schema.name, key, parent_id, value)?;
+            }
             continue;
         };
         let row = SiblingCollapseRowInput {
@@ -731,8 +737,9 @@ pub(super) fn keeps_scalars_in_array_column(parent: &TableSchema, field: &str) -
         .is_some_and(|c| matches!(c.pg_type, PgType::Array(_)))
 }
 
-/// One anomaly per array whose scalar elements have no table to go to, with the first of them
-/// as the value (#86): an `ObjectArray` table only has columns for object fields.
+/// One anomaly for a non-object value where an object is expected: the scalars of an
+/// `ObjectArray` (first one as the value, #86), or a scalar under a `SiblingCollapse` /
+/// `NormalizeDynamicKeys` key (#162). These tables only have columns for object fields.
 fn record_dropped_scalar(
     anomalies: &mut impl AnomalyCollect,
     table: &str,
@@ -1407,13 +1414,13 @@ mod tests {
     }
 
     #[test]
-    fn sibling_collapse_non_object_value_silently_skipped_zero_rows() {
+    fn sibling_collapse_scalar_value_records_anomaly() {
         let (schema, ss) = make_sibling_collapse_schema("items", "root", "key", &["a"]);
         let mut sinks = make_sinks(&["items"]);
         let mut anomalies = CountingAnomaly::default();
         let path_map = HashMap::new();
         let obj: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(r#"{"k": "scalar_not_object"}"#).unwrap();
+            serde_json::from_str(r#"{"fr": {"a": "1"}, "de": "inconnu", "it": null}"#).unwrap();
 
         super::insert_sibling_collapse_object(
             &path_map,
@@ -1426,12 +1433,38 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(sinks["items"].0.len(), 1, "seul l'objet a une ligne");
         assert_eq!(
-            sinks["items"].0.len(),
-            0,
-            "scalar value → silently skipped, zero rows"
+            anomalies.records,
+            vec![("items".to_string(), "de".to_string())],
+            "le scalaire laisse une anomalie, null n'en laisse pas (#162)"
         );
-        assert_eq!(anomalies.totals.get("items").copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn normalize_dynamic_keys_scalar_value_records_anomaly() {
+        let (schema, _) = make_sibling_collapse_schema("items", "root", "key", &["a"]);
+        let mut sinks = make_sinks(&["items"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"fr": {"a": "1"}, "de": "inconnu", "it": null}"#).unwrap();
+
+        super::insert_normalize_dynamic_keys(
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            dummy_parent_id(),
+            "key",
+        )
+        .unwrap();
+
+        assert_eq!(sinks["items"].0.len(), 1, "seul l'objet a une ligne");
+        assert_eq!(
+            anomalies.records,
+            vec![("items".to_string(), "de".to_string())],
+            "le scalaire laisse une anomalie, null n'en laisse pas (#162)"
+        );
     }
 
     #[test]
