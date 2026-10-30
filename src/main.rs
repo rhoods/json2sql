@@ -7,6 +7,7 @@
 //! - fn `main` — parse la CLI, dispatch vers `inspect`, la proposition de groupes ou le pipeline d'import complet.
 //! - fn `run_suggest_groups` — écrit le TOML `column_groups` des tables larges et affiche le rapport.
 //! - fn `run_inspect` — exécute Pass 1 seule (sans stratégies ni overrides) et affiche un résumé.
+//! - fn `write_schema_tree` — écrit chaque table avec son parent et ses colonnes de données.
 //! - fn `write_inspect_outputs` — écrit le schéma inféré (stdout ou fichier) et le résumé d'anomalies.
 //! - fn `write_sample_file` — écrit les objets JSON échantillonnés en NDJSON.
 #![forbid(unsafe_code)]
@@ -161,6 +162,25 @@ fn run_inspect(
     write_inspect_outputs(&result, output, sample_output)
 }
 
+/// Each table with its parent and its data columns (name, SQL type).
+fn write_schema_tree(
+    out: &mut dyn std::io::Write,
+    schemas: &[schema::table_schema::TableSchema],
+) -> std::io::Result<()> {
+    for schema in schemas {
+        let data_cols: Vec<_> = schema.data_columns().collect();
+        writeln!(out, "┌─ {} ({} columns)", schema.name, data_cols.len())?;
+        if let Some(parent) = &schema.parent_table {
+            writeln!(out, "│  parent: {parent}")?;
+        }
+        for col in &data_cols {
+            writeln!(out, "│  {:30} {}", col.name, col.pg_type.as_sql())?;
+        }
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
 fn write_inspect_outputs(
     result: &pass1::runner::InspectResult,
     output: Option<&std::path::Path>,
@@ -173,24 +193,7 @@ fn write_inspect_outputs(
         )),
         None => Box::new(std::io::stdout()),
     };
-    for schema in &result.schemas {
-        let data_cols: Vec<_> = schema.data_columns().collect();
-        writeln!(
-            schema_out,
-            "┌─ {} ({} columns)",
-            schema.name,
-            data_cols.len()
-        )
-        .map_err(error::J2sError::Io)?;
-        if let Some(ref parent) = schema.parent_table {
-            writeln!(schema_out, "│  parent: {parent}").map_err(error::J2sError::Io)?;
-        }
-        for col in &data_cols {
-            writeln!(schema_out, "│  {:30} {}", col.name, col.pg_type.as_sql())
-                .map_err(error::J2sError::Io)?;
-        }
-        writeln!(schema_out).map_err(error::J2sError::Io)?;
-    }
+    write_schema_tree(&mut schema_out, &result.schemas).map_err(error::J2sError::Io)?;
     if let Some(p) = output {
         eprintln!("Schema written → {}", p.display());
     }

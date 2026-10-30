@@ -20,6 +20,7 @@
 //! - fn `fmt_skip_ws_comma` — saute espaces et virgules, retourne le prochain autre octet.
 //! - fn `fmt_read_string` — lit une chaîne JSON jusqu'au `"` fermant.
 //! - fn `fmt_skip_value` — saute une valeur JSON complète selon son premier octet.
+//! - fn `check_closer` — erreur si le crochet fermant trouvé n'est pas celui attendu.
 //! - fn `fmt_skip_container` — saute jusqu'au `}`/`]` correspondant, par blocs `fill_buf`/`consume`.
 //! - fn `fmt_skip_string_rest` — saute le reste d'une chaîne JSON (`"` ouvrant déjà consommé).
 //! - fn `fmt_skip_primitive_rest` — saute un scalaire (nombre/bool/null) jusqu'au délimiteur.
@@ -217,13 +218,10 @@ fn scan_chunk_into(
     escape_next: &mut bool,
 ) -> (usize, Option<u8>) {
     for (i, &b) in chunk.iter().enumerate() {
+        buf.push(b);
         if *escape_next {
             *escape_next = false;
-            buf.push(b);
-            continue;
-        }
-        if *in_string {
-            buf.push(b);
+        } else if *in_string {
             match b {
                 b'\\' => *escape_next = true,
                 b'"' => *in_string = false,
@@ -231,28 +229,31 @@ fn scan_chunk_into(
             }
         } else {
             match b {
-                b'"' => {
-                    *in_string = true;
-                    buf.push(b);
-                }
-                b'{' | b'[' => {
-                    *depth += 1;
-                    buf.push(b);
-                }
+                b'"' => *in_string = true,
+                b'{' | b'[' => *depth += 1,
                 b'}' | b']' => {
                     *depth -= 1;
-                    buf.push(b);
                     if *depth == 0 {
                         return (i + 1, Some(b));
                     }
                 }
-                _ => {
-                    buf.push(b);
-                }
+                _ => {}
             }
         }
     }
     (chunk.len(), None)
+}
+
+/// The bracket `found` that closed a container opened for `closer`: an error if they differ.
+fn check_closer(closer: u8, found: u8) -> Result<()> {
+    if found == closer {
+        Ok(())
+    } else {
+        Err(J2sError::InvalidInput(format!(
+            "Mismatched bracket: expected '{}', got '{}'",
+            closer as char, found as char
+        )))
+    }
 }
 
 /// Skip until the matching `closer` (`}` or `]`), opening brace already consumed.
@@ -281,14 +282,7 @@ fn fmt_skip_container(reader: &mut impl BufRead, closer: u8) -> Result<()> {
         }; // buf borrow ends before consume
         reader.consume(n);
         if let Some(b) = found {
-            return if b == closer {
-                Ok(())
-            } else {
-                Err(J2sError::InvalidInput(format!(
-                    "Mismatched bracket: expected '{}', got '{}'",
-                    closer as char, b as char
-                )))
-            };
+            return check_closer(closer, b);
         }
     }
 }
@@ -621,14 +615,7 @@ impl ByteScanner {
             self.reader.consume(n);
             self.bytes_read += n as u64;
             if let Some(b) = found {
-                return if b == closer {
-                    Ok(())
-                } else {
-                    Err(J2sError::InvalidInput(format!(
-                        "Mismatched bracket: expected '{}', got '{}'",
-                        closer as char, b as char
-                    )))
-                };
+                return check_closer(closer, b);
             }
         }
     }

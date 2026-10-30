@@ -34,9 +34,12 @@
 //! - fn `table_sizes` — lignes (`reltuples`) et octets de chaque table, lus dans le catalogue.
 //! - fn `largest_first` — tables triées de la plus grosse à la plus petite (taille catalogue).
 //! - fn `pk_mem_mb` — mémoire d'une construction de PK : ce que son tri demande, dans le budget commun.
+//! - fn `is_insufficient_privilege` — refus faute de privilège (réglage ignoré).
+//! - fn `try_set_synchronous_commit_off` — coupe `synchronous_commit` (best-effort, aussi pour le chargement).
 //! - fn `try_configure_constraints_conn` — configure `maintenance_work_mem`/`wal_compression`/index en série/`synchronous_commit` (best-effort).
 //! - fn `open_constraints_conn` — ouvre une connexion dédiée aux contraintes et la configure.
 //! - fn `add_pk` — pose la PK d'une table (fatal si échec).
+//! - fn `drop_unvalidated_fk` — retire la FK d'une table dont la validation a échoué (best-effort).
 //! - fn `validate_fk` — valide la FK d'une table ; si échec, warning + DROP de la contrainte.
 //! - fn `set_tables_autovacuum` — coupe / rétablit l'autovacuum de toutes les tables en parallèle (chargement Pass 2).
 //! - fn `vacuum_analyze_tables` — `VACUUM (ANALYZE)` non bridé de toutes les tables en parallèle, avant les PK.
@@ -307,6 +310,30 @@ fn largest_first<'a>(
     by_size
 }
 
+/// `e` is a refusal for lack of privilege (non-superuser, managed PG): the setting is skipped.
+fn is_insufficient_privilege(e: &tokio_postgres::Error) -> bool {
+    e.as_db_error()
+        .is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+}
+
+/// Attempt to disable synchronous commit for faster bulk-load. Non-fatal if the server
+/// denies the privilege (RDS, Supabase, restricted PG) — any other error is propagated.
+///
+/// # Errors
+/// The server refused the setting for another reason than privileges.
+pub async fn try_set_synchronous_commit_off(conn: &Client) -> Result<()> {
+    match conn.execute("SET synchronous_commit = off", &[]).await {
+        Ok(_) => Ok(()),
+        Err(e) if is_insufficient_privilege(&e) => {
+            eprintln!(
+                "WARNING: SET synchronous_commit = off not permitted — continuing without it"
+            );
+            Ok(())
+        }
+        Err(e) => Err(J2sError::Db(e)),
+    }
+}
+
 /// Configure a fresh constraints connection: set `maintenance_work_mem`, `wal_compression = lz4`,
 /// serial index builds (all non-fatal) and `synchronous_commit = off` (non-fatal on
 /// `INSUFFICIENT_PRIVILEGE`, fatal otherwise).
@@ -327,10 +354,7 @@ async fn try_configure_constraints_conn(
     // like --tune-wal: silently skipped without the privilege; other failures (PG < 15, server
     // built without lz4) are reported.
     if let Err(e) = client.execute("SET wal_compression = lz4", &[]).await {
-        if !e
-            .as_db_error()
-            .is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
-        {
+        if !is_insufficient_privilege(&e) {
             eprintln!("WARNING: SET wal_compression = lz4 failed — {e}");
         }
     }
@@ -345,20 +369,7 @@ async fn try_configure_constraints_conn(
     {
         eprintln!("WARNING: SET max_parallel_maintenance_workers = 0 failed — {e}");
     }
-    match client.execute("SET synchronous_commit = off", &[]).await {
-        Ok(_) => Ok(()),
-        Err(e)
-            if e.as_db_error().is_some_and(|db| {
-                db.code() == &tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE
-            }) =>
-        {
-            eprintln!(
-                "WARNING: SET synchronous_commit = off not permitted — continuing without it"
-            );
-            Ok(())
-        }
-        Err(e) => Err(J2sError::Db(e)),
-    }
+    try_set_synchronous_commit_off(client).await
 }
 
 /// Opens a dedicated constraints connection configured with `maintenance_work_mem_mb`.
@@ -400,6 +411,22 @@ async fn add_pk(
     Ok(())
 }
 
+/// Drop the FK of `schema` that failed validation (best-effort: a failure is only logged).
+async fn drop_unvalidated_fk(client: &Client, schema: &TableSchema, pg_schema: &str) {
+    let drop_sql = format!(
+        "ALTER TABLE {}.{} DROP CONSTRAINT IF EXISTS {}",
+        quote_ident(pg_schema),
+        quote_ident(&schema.name),
+        quote_ident(&format!("fk_{}_parent", schema.name)),
+    );
+    if let Err(drop_e) = cancel_on_drop(client, client.execute(drop_sql.as_str(), &[])).await {
+        eprintln!(
+            "WARNING: could not drop unvalidated FK on {} — {drop_e}",
+            schema.name
+        );
+    }
+}
+
 /// Validates one table's `NOT VALID` parent FK on its own connection. On failure the constraint is
 /// dropped and a warning returned, so violating data ends up without FK, as before #68.
 async fn validate_fk(
@@ -419,20 +446,7 @@ async fn validate_fk(
     let warning = match cancel_on_drop(&client, client.execute(sql.as_str(), &[])).await {
         Ok(_) => None,
         Err(e) => {
-            let drop_sql = format!(
-                "ALTER TABLE {}.{} DROP CONSTRAINT IF EXISTS {}",
-                quote_ident(pg_schema),
-                quote_ident(&schema.name),
-                quote_ident(&format!("fk_{}_parent", schema.name)),
-            );
-            if let Err(drop_e) =
-                cancel_on_drop(&client, client.execute(drop_sql.as_str(), &[])).await
-            {
-                eprintln!(
-                    "WARNING: could not drop unvalidated FK on {} — {drop_e}",
-                    schema.name
-                );
-            }
+            drop_unvalidated_fk(&client, schema, pg_schema).await;
             Some(to_fk_warning(&e, &schema.name))
         }
     };

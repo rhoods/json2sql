@@ -12,6 +12,7 @@
 //!
 //! Fonctions :
 //! - fn `emit_root_wrapper_warning` — log si format wrapper détecté.
+//! - fn `send_log` — envoie une ligne de log à l'IHM, s'il y en a une.
 //! - struct `Pass1Config` — tous les paramètres contrôlant un run de Pass 1.
 //! - struct `Pass1Result` — résultat de Pass 1 (schémas, stats, warnings, format détecté).
 //!
@@ -65,9 +66,14 @@ fn emit_root_wrapper_warning(format: &JsonFormat, progress_tx: Option<&ProgressT
             keys.join(", ")
         );
         eprintln!("{msg}");
-        if let Some(tx) = progress_tx {
-            let _ = tx.send(ProgressEvent::Pass1Log(msg));
-        }
+        send_log(progress_tx, msg);
+    }
+}
+
+/// Send a log line to the UI, when there is one.
+fn send_log(progress_tx: Option<&ProgressTx>, msg: String) {
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(ProgressEvent::Pass1Log(msg));
     }
 }
 
@@ -116,17 +122,11 @@ pub fn run(
 ) -> Result<Pass1Result> {
     let total_bytes = file_size(path)?;
     // Terminal progress bar: used only in CLI mode (when no IHM channel provided).
-    let progress = if progress_tx.is_none() {
-        Some(ProgressTracker::new(total_bytes, "Pass 1"))
-    } else {
-        None
-    };
+    let progress = progress_tx
+        .is_none()
+        .then(|| ProgressTracker::new(total_bytes, "Pass 1"));
     let mut registry = SchemaRegistry::new(config.registry.clone());
-    if let Some(ref tx) = progress_tx {
-        let _ = tx.send(ProgressEvent::Pass1Log(
-            "Detecting JSON format…".to_string(),
-        ));
-    }
+    send_log(progress_tx.as_ref(), "Detecting JSON format…".to_string());
     let (mut reader, format) = JsonReader::open(path)?;
     emit_root_wrapper_warning(&format, progress_tx.as_ref());
     let mut sampler = RowSampler::new(total_bytes);
@@ -203,25 +203,21 @@ fn scan_json_rows(
     let mut total_rows = 0u64;
     while let Some(item) = reader.next() {
         let value = item?;
-        match value {
-            Value::Object(ref obj) => {
-                let root = reader.current_key().unwrap_or(&config.root_table);
-                registry.observe_root(root, obj);
-                total_rows += 1;
-                let end = reader.bytes_read();
-                if sampler.wants(end) {
-                    sampler.keep(
-                        end,
-                        reader.current_key().map(str::to_string),
-                        serde_json::to_vec(&value).unwrap_or_default(),
-                    );
-                }
-            }
-            other => {
-                return Err(crate::error::J2sError::InvalidInput(format!(
-                    "Expected JSON object at root level, found: {other}"
-                )));
-            }
+        let Value::Object(ref obj) = value else {
+            return Err(crate::error::J2sError::InvalidInput(format!(
+                "Expected JSON object at root level, found: {value}"
+            )));
+        };
+        let root = reader.current_key().unwrap_or(&config.root_table);
+        registry.observe_root(root, obj);
+        total_rows += 1;
+        let end = reader.bytes_read();
+        if sampler.wants(end) {
+            sampler.keep(
+                end,
+                reader.current_key().map(str::to_string),
+                serde_json::to_vec(&value).unwrap_or_default(),
+            );
         }
         report_progress(
             progress,
@@ -408,11 +404,10 @@ pub fn run_parallel(
     let num_workers = config.num_workers.unwrap_or(1).max(1);
     let total_bytes = file_size(path)?;
 
-    let progress = if progress_tx.is_none() {
-        Some(ProgressTracker::new(total_bytes, "Pass 1 (parallel)"))
-    } else {
-        None
-    };
+    let progress = progress_tx
+        .is_none()
+        .then(|| ProgressTracker::new(total_bytes, "Pass 1 (parallel)"));
+    let ptx = progress_tx.as_ref();
 
     // Bounded MPMC channel — capacity: 4 slots per worker gives the reader a small lead.
     // At typical JSON object sizes (~1–100 KB), peak buffer ≈ num_workers × 4 × object_size.
@@ -420,14 +415,8 @@ pub fn run_parallel(
     let worker_handles = spawn_worker_threads(rx, config, num_workers);
 
     let mut sampler = RowSampler::new(total_bytes);
-    let (total_rows, reader_err, format) = read_and_dispatch(
-        path,
-        tx,
-        progress.as_ref(),
-        progress_tx.as_ref(),
-        total_bytes,
-        &mut sampler,
-    )?;
+    let (total_rows, reader_err, format) =
+        read_and_dispatch(path, tx, progress.as_ref(), ptx, total_bytes, &mut sampler)?;
 
     let (merged, worker_err) = join_and_merge_workers(worker_handles, config);
 
@@ -436,24 +425,16 @@ pub fn run_parallel(
     }
 
     // Reader errors take priority: an I/O failure is the most actionable signal.
-    if let Some(e) = reader_err {
-        return Err(e);
-    }
-    if let Some(e) = worker_err {
+    if let Some(e) = reader_err.or(worker_err) {
         return Err(e);
     }
 
-    flush_final_progress(progress_tx.as_ref(), total_rows, total_bytes, total_bytes);
+    flush_final_progress(ptx, total_rows, total_bytes, total_bytes);
     eprintln!(
         "Pass 1 complete (parallel, {num_workers} workers): {total_rows} rows, building schema..."
     );
-    Ok(build_pass1_result(
-        merged,
-        total_rows,
-        format,
-        progress_tx.as_ref(),
-        sampler.into_rows(),
-    ))
+    let result = build_pass1_result(merged, total_rows, format, ptx, sampler.into_rows());
+    Ok(result)
 }
 
 /// Spawn `num_workers` threads, each consuming JSON object bytes from `rx` and building
@@ -516,11 +497,7 @@ fn read_and_dispatch(
     sampler: &mut RowSampler,
 ) -> Result<(u64, Option<crate::error::J2sError>, JsonFormat)> {
     const PROGRESS_INTERVAL: u64 = 1_000;
-    if let Some(tx_prog) = progress_tx {
-        let _ = tx_prog.send(ProgressEvent::Pass1Log(
-            "Detecting JSON format…".to_string(),
-        ));
-    }
+    send_log(progress_tx, "Detecting JSON format…".to_string());
     let (mut reader, format) = JsonReader::open(path)?;
     emit_root_wrapper_warning(&format, progress_tx);
     let mut total_rows = 0u64;
@@ -596,13 +573,8 @@ fn join_and_merge_workers(
             }
         }
     }
-    let worker_err = if worker_errors.is_empty() {
-        None
-    } else {
-        Some(crate::error::J2sError::InvalidInput(
-            worker_errors.join(" | "),
-        ))
-    };
+    let worker_err = (!worker_errors.is_empty())
+        .then(|| crate::error::J2sError::InvalidInput(worker_errors.join(" | ")));
     (merged, worker_err)
 }
 

@@ -28,8 +28,6 @@ use crate::db::error::pg_err;
 use crate::error::{J2sError, Result};
 use crate::io::progress_event::{ProgressEvent, ProgressTx};
 
-use super::config;
-
 /// How `next_flush_candidate` picks tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FlushMode {
@@ -135,7 +133,7 @@ fn format_copy_done_log(table_id: &str, elapsed_ms: u128) -> String {
 async fn open_pool(pg_url: &str, size: usize, freeze: bool) -> Result<Vec<(usize, Client)>> {
     futures_util::future::try_join_all((0..size).map(|id| async move {
         let conn = crate::db::connection::connect(pg_url).await?;
-        config::try_set_synchronous_commit_off(&conn).await?;
+        crate::db::ddl::try_set_synchronous_commit_off(&conn).await?;
         if freeze {
             // The transaction idles between COPYs: no idle-in-transaction timeout. READ COMMITTED
             // explicitly: a repeatable-read default keeps a snapshot, and COPY FREEZE is refused.
