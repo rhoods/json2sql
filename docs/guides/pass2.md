@@ -195,8 +195,7 @@ Vues en écrivant la fiche, pas tranchées.
 2. **Deux styles de contexte.** `insert.rs` passe un `InsertCtx`, `traversal.rs` passe `sinks` et `anomalies`
    séparément. `insert_array`, `insert_jsonb_object` et `insert_routed_object` reçoivent les deux morceaux et
    reconstruisent un `InsertCtx` pour appeler `insert_object` ou `recurse_children`.
-3. **Les pertes silencieuses** (chemin absent de `path_map`, sink absent, valeur scalaire à la place d'un objet dans
-   `insert_sibling_collapse_object` ou `insert_normalize_dynamic_keys`) ne laissent aucune trace. Un compteur, ou une anomalie, distinguerait « absorbé exprès » de « perdu ».
+3. **Les pertes silencieuses** (chemin absent de `path_map`, sink absent) ne laissent aucune trace. Un compteur, ou une anomalie, distinguerait « absorbé exprès » de « perdu ».
 4. **architecture.md décalé sur `traversal.rs`** : il cite `insert_keyed_pivot_object`, `insert_multi_keyed_pivot`
    et un enum `WideStrategy`, qui n'existent plus (aujourd'hui `insert_sibling_collapse_object`,
    `insert_sibling_collapse_multi` et `InferredStrategy`).
