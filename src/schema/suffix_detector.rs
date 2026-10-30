@@ -478,4 +478,17 @@ mod tests {
             "should have 'norm_value'"
         );
     }
+
+    /// Cas `OpenFoodFacts` : une chaîne rare dans une colonne de suffixe ne passe plus la colonne
+    /// pivot en `TEXT`.
+    #[test]
+    fn test_widest_type_ignores_rare_string() {
+        let mut rare = TypeTracker::new(256);
+        for i in 0..10_000 {
+            rare.observe(&serde_json::json!(f64::from(i) + 0.5));
+        }
+        rare.observe(&serde_json::json!("10000000000000000000"));
+        let trackers = [make_float_tracker(), rare];
+        assert_eq!(widest_type(trackers.iter()), PgType::DoublePrecision);
+    }
 }
