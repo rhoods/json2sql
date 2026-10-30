@@ -6,8 +6,10 @@
 //! - fn `stable_ratio` — part des colonnes scalaires présentes dans assez de lignes.
 //! - fn `apply_wide_strategy` — décide Columns/`StructuredPivot`/Pivot/Jsonb/`AutoSplit` selon le
 //!   ratio de colonnes stables.
-//! - fn `apply_non_autosplit_strategy` — branche `StructuredPivot`, Jsonb, ou le split
-//!   identité/compagnon (Pivot).
+//! - fn `apply_non_autosplit_strategy` — split identité/compagnon structuré (`StructuredPivot`),
+//!   Jsonb, ou split identité/compagnon (Pivot).
+//! - fn `apply_structured_pivot_split` — la grille de suffixes part dans un compagnon `_pivot`
+//!   structuré ; le reste (scalaires hors grille, tableaux, enfants) reste sur l'identité (#163).
 //! - fn `apply_pivot_split` — split identité/compagnon à rétention zéro (toutes les clés
 //!   migrent vers le compagnon `_pivot`), déclenché quand `apply_non_autosplit_strategy`
 //!   choisirait Pivot — que la table soit `Object`- ou `ObjectArray`-parent.
@@ -33,10 +35,11 @@ use super::super::naming::NamingRegistry;
 use super::super::observer::TableEntry;
 use super::super::strategies::StrategyName;
 use super::super::suffix_detector::detect_suffix_schema;
+use super::super::table_schema::SuffixSchema;
 use super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
 use super::super::type_tracker::{widen_pg_types, PgType};
 use super::super::wide_strategies::{
-    apply_structured_pivot_columns, apply_wide_strategy_columns, suggest_wide_strategy,
+    apply_wide_strategy_columns, structured_pivot_companion, suggest_wide_strategy,
 };
 use super::base::is_scalar_column;
 use super::SchemaFinalizer;
@@ -89,15 +92,11 @@ pub(super) fn apply_wide_table_strategies(
     schemas.extend(extra_schemas);
 }
 
-pub(super) fn build_finalizer_config(
-    finalizer: &SchemaFinalizer,
-    text_threshold: u32,
-) -> FinalizerConfig {
+pub(super) fn build_finalizer_config(finalizer: &SchemaFinalizer) -> FinalizerConfig {
     FinalizerConfig {
         wide_column_threshold: finalizer.wide_column_threshold,
         stable_threshold: finalizer.stable_threshold,
         rare_threshold: finalizer.rare_threshold,
-        text_threshold,
         disable_pivot: finalizer.disabled_strategies.contains(&StrategyName::Pivot),
         disable_structured_pivot: finalizer
             .disabled_strategies
@@ -109,7 +108,6 @@ pub(super) struct FinalizerConfig {
     wide_column_threshold: usize,
     stable_threshold: f64,
     rare_threshold: f64,
-    text_threshold: u32,
     disable_pivot: bool,
     disable_structured_pivot: bool,
 }
@@ -200,16 +198,23 @@ fn apply_non_autosplit_strategy(
     stats: &WideStats,
     existing_names: &std::collections::HashSet<String>,
 ) -> Option<TableSchema> {
-    let suffix_schema = if config.disable_structured_pivot {
+    let grid = if config.disable_structured_pivot {
         None
     } else {
-        detect_suffix_schema(&entry.columns, SUFFIX_MIN_COVERAGE, config.text_threshold)
+        detect_suffix_schema(entry, SUFFIX_MIN_COVERAGE)
     };
-    if let Some(suffix_schema) = suffix_schema {
+    if let Some((suffix_schema, grid_keys)) = grid {
         let n = suffix_schema.suffix_cols.len();
-        stats.log(&schema.name, &format!("StructuredPivot ({n} suffixes)"));
-        apply_structured_pivot_columns(schema, suffix_schema);
-        return None;
+        let strategy = format!("StructuredPivot ({n} suffixes, split identité/compagnon)");
+        stats.log(&schema.name, &strategy);
+        let thresholds = (config.stable_threshold, config.rare_threshold);
+        return Some(apply_structured_pivot_split(
+            schema,
+            suffix_schema,
+            grid_keys,
+            thresholds,
+            existing_names,
+        ));
     }
 
     let strategy = if config.disable_pivot {
@@ -225,6 +230,41 @@ fn apply_non_autosplit_strategy(
     stats.log(&schema.name, &format!("{strategy:?}"));
     apply_wide_strategy_columns(schema, strategy);
     None
+}
+
+/// Move the keys of the suffix grid of `schema` to a structured companion `_pivot` table (one
+/// row per base) and return it. `schema` keeps its name and every other column (scalars outside
+/// the grid, PG arrays) and becomes the identity table: `AutoSplit` with the grid keys as
+/// `medium_keys`, so its real children are still written through `recurse_children` (#163).
+/// Shared by the detection (Phase 3) and the TOML `suffix_columns` override; `thresholds` are the
+/// (stable, rare) thresholds recorded on the `AutoSplit` strategy.
+pub fn apply_structured_pivot_split(
+    schema: &mut TableSchema,
+    suffix_schema: SuffixSchema,
+    grid_keys: std::collections::HashSet<String>,
+    thresholds: (f64, f64),
+    existing_names: &std::collections::HashSet<String>,
+) -> TableSchema {
+    schema
+        .columns
+        .retain(|c| c.is_generated || !grid_keys.contains(&c.original_name));
+    let companion_name = unique_pivot_name(&schema.name, existing_names);
+    // A key ending with no suffix is a bare base: it fills `value`.
+    let has_bare_keys = grid_keys.iter().any(|k| {
+        !suffix_schema
+            .suffix_cols
+            .iter()
+            .any(|sc| k.len() > sc.suffix.len() && k.ends_with(sc.suffix.as_str()))
+    });
+    let companion =
+        structured_pivot_companion(schema, companion_name.clone(), suffix_schema, has_bare_keys);
+    schema.inferred_strategy = InferredStrategy::AutoSplit {
+        stable_threshold: thresholds.0,
+        rare_threshold: thresholds.1,
+        medium_keys: grid_keys,
+        wide_table_name: companion_name,
+    };
+    companion
 }
 
 /// Split a table that would otherwise be flat-Pivoted into an identity table (zero data
@@ -253,7 +293,7 @@ fn apply_pivot_split(
     build_wide_pivot_schema(schema, wide_name, value_type, all_keys, config)
 }
 
-/// Companion name for `apply_pivot_split`: `{base}_pivot`, falling back to `{base}_pivot_eav`
+/// Companion name for `apply_pivot_split` and `apply_structured_pivot_split`: `{base}_pivot`, falling back to `{base}_pivot_eav`
 /// on self-collision (schema already named `..._pivot`) and to an incremental `_pivot_2`,
 /// `_pivot_3`, ... on collision with any other already-known table name.
 fn unique_pivot_name(
@@ -464,7 +504,6 @@ mod tests {
             wide_column_threshold: 2,
             stable_threshold: 0.1,
             rare_threshold: 0.001,
-            text_threshold: 256,
             disable_pivot: false,
             disable_structured_pivot: false,
         }

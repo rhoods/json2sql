@@ -418,10 +418,10 @@ async fn test_null_patterns() {
 // Fixture : 3 produits avec `nutrients` contenant des clés à suffixes communs
 // (_100g, _serving). Après apply_structured_pivot_columns :
 //   - products_nutrients a : name TEXT, value INT, per_100g INT, per_serving INT
-//   - Widget  → 2 lignes (calories, fat) — per_serving rempli pour les deux
+//   - Widget  → 3 lignes (calories, fat, salt) — per_serving rempli pour les trois
 //   - Gadget  → 2 lignes (calories, fat) — per_serving NULL
 //   - Doohickey → 1 ligne (calories seulement)
-//   Total : 5 lignes
+//   Total : 6 lignes
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_structured_pivot_strategy() {
@@ -512,13 +512,13 @@ async fn test_structured_pivot_strategy() {
         .await
         .unwrap();
 
-        // Widget:2 + Gadget:2 + Doohickey:1 = 5 lignes
+        // Widget:3 + Gadget:2 + Doohickey:1 = 6 lignes
         assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
-        assert_eq!(*p2.rows_per_table.get("products_nutrients").unwrap(), 5);
+        assert_eq!(*p2.rows_per_table.get("products_nutrients").unwrap(), 6);
         assert_eq!(common::row_count(&client, &schema, "products").await, 3);
         assert_eq!(
             common::row_count(&client, &schema, "products_nutrients").await,
-            5
+            6
         );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
@@ -1530,9 +1530,92 @@ fn test_disable_pivot_gives_jsonb_integration() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #163 — StructuredPivot détecté automatiquement : la grille part dans le compagnon
+// products_nut_pivot (une ligne par base), la table fille objet `comp`, le tableau `tags` et le
+// scalaire `brand` restent avec products_nut. Widget → 3 lignes de pivot, Gadget → 3 (serving NULL).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_structured_pivot_split_keeps_children_arrays_and_other_scalars() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("structured_pivot_split.jsonl");
+        let config = pass1::runner::Pass1Config {
+            registry: RegistryConfig {
+                wide_column_threshold: 3,
+                ..Default::default()
+            },
+            ..common::pass1_config("products")
+        };
+        let p1 = pass1::runner::run(&path, &config, None).unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("products", &schema),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+        for (table, rows) in [
+            ("products", 2),
+            ("products_nut", 2),
+            ("products_nut_pivot", 6),
+            ("products_nut_comp", 2),
+        ] {
+            assert_eq!(common::row_count(&client, &schema, table).await, rows, "{table}");
+        }
+        assert_eq!(common::array_elements(&client, &schema, "products_nut", "tags").await, 3);
+
+        let widget = |select: &str, from_nut: &str| {
+            format!(
+                "SELECT {select} FROM \"{schema}\".\"products\" p \
+                 JOIN \"{schema}\".\"products_nut\" n ON n.j2s_products_id = p.j2s_id \
+                 {from_nut} WHERE p.name = 'Widget'"
+            )
+        };
+        let fat = client
+            .query_one(
+                &widget(
+                    "v.value, v._100g, v.serving",
+                    &format!(
+                        "JOIN \"{schema}\".\"products_nut_pivot\" v \
+                         ON v.j2s_products_nut_id = n.j2s_id AND v.name = 'fat'"
+                    ),
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (fat.get::<_, Option<i32>>(0), fat.get::<_, Option<i32>>(1), fat.get::<_, Option<i32>>(2)),
+            (Some(1), Some(2), Some(3))
+        );
+        let comp = client
+            .query_one(
+                &widget(
+                    "n.brand, c.k",
+                    &format!(
+                        "JOIN \"{schema}\".\"products_nut_comp\" c ON c.j2s_products_nut_id = n.j2s_id"
+                    ),
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(comp.get::<_, Option<String>>(0).as_deref(), Some("acme"));
+        assert_eq!(comp.get::<_, Option<i32>>(1), Some(1));
+    })
+    .await;
+}
+
 // disable structured_pivot → suffix detection skippée → fallback suggest_wide_strategy.
-// Fixture : nutrients avec 6 colonnes numériques à pattern _100g/_serving.
-// wide_column_threshold=4 : 6 colonnes > 4 → wide detection active.
+// Fixture : nutrients avec 9 colonnes numériques à pattern _100g/_serving (3 bases).
+// wide_column_threshold=4 : 9 colonnes > 4 → wide detection active.
 // Activé : StructuredPivot. Désactivé : Pivot (all-numeric fallback).
 #[test]
 fn test_disable_structured_pivot_gives_pivot_integration() {

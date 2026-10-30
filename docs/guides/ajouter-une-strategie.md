@@ -1,7 +1,7 @@
 ---
 type: recette
 sujet: Ajouter une stratégie de matérialisation
-verified_at: 37ac338
+verified_at: aab585c
 files:
   - src/schema/table_schema.rs
   - src/schema/strategies.rs
@@ -82,6 +82,9 @@ symbols:
   - StrategyScreen
   - SetupScreen
   - apply_jsonb_flatten
+  - apply_pivot_split
+  - apply_structured_pivot_split
+  - is_pg_array
 ---
 
 # Ajouter une stratégie
@@ -202,6 +205,9 @@ Le compilateur ne voit pas le reste :
   (`apply_wide_strategy` et `apply_non_autosplit_strategy` dans `finalizer/wide_strategy.rs`).
 - [ ] Construire les colonnes : un cas dans le `match` d'`apply_wide_strategy_columns`, ou une fonction `apply_*` dédiée dans
   `wide_strategies.rs`.
+- [ ] Si la stratégie remplace les colonnes de données : garder les colonnes PG array et les vraies tables filles sur
+  une table d'identité, en ne déplaçant que les colonnes concernées dans un compagnon (comme `apply_pivot_split` et
+  `apply_structured_pivot_split`). Sinon les tableaux et les tables filles disparaissent sans message (#48, #85, #163).
 - [ ] Décrire l'heuristique dans `schema-inference.md`.
 
 ### B. Choix de l'utilisateur
@@ -290,7 +296,6 @@ Vues en écrivant la fiche, pas tranchées. Chacune peut devenir une issue de re
    override only » sur la variante de `UserOverride`).
 7. **Docs existantes déjà décalées.** `architecture.md` décrit un enum `WideStrategy` (variantes `KeyedPivot`,
    `Ignore`…) qui n'existe plus : c'est `InferredStrategy`. `schema-inference.md` (§ 12) documente
-   `strategy = "ignore"`, que le TOML rejette (`--dry-run` affiche « unknown strategy 'ignore' … ignored »). La doc
-   d'`apply_user_overrides` dit que `Pivot` et `Jsonb` modifient `inferred_strategy`, alors qu'ils le restaurent.
+   `strategy = "ignore"`, que le TOML rejette (`--dry-run` affiche « unknown strategy 'ignore' … ignored »).
 8. **Un effet de bord à compenser.** `apply_wide_strategy_columns` écrit `inferred_strategy` en plus des colonnes ;
    chaque override qui l'appelle doit sauvegarder puis restaurer la valeur à la main.

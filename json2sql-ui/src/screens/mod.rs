@@ -21,8 +21,8 @@ pub mod table_list;
 
 mod common;
 pub use common::{
-    build_effective_schemas, build_table_rows, display_schemas, group_preview, pick_file,
-    pick_folder, pick_save_file, progress_pct, skip_cascade_names, splittable_tables,
+    absorbed_names, build_effective_schemas, build_table_rows, display_schemas, group_preview,
+    pick_file, pick_folder, pick_save_file, progress_pct, skip_cascade_names, splittable_tables,
     strategy_badge, strategy_label, use_elapsed_timer, user_override_badge, GroupPreview,
     PickResult, PreviewGroup, ProgressBar, TableRowViewModel, TableRowsCtx,
 };

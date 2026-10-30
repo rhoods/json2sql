@@ -23,7 +23,9 @@
 //! - fn `column_value` — valeur JSON d'une colonne de données dans l'objet de sa table (via le champ d'origine si elle vient d'un `Flatten`).
 //! - fn `write_wide_row` — écrit une ligne EAV (clé, valeur) de la table wide compagnon.
 //! - fn `write_autosplit_rows` — écrit les paires clé/valeur de fréquence moyenne en lignes EAV
-//!   dans la table wide compagnon (stratégie `AutoSplit`).
+//!   dans la table wide compagnon (stratégie `AutoSplit`), ou la grille de suffixes en lignes par
+//!   base quand le compagnon est un `StructuredPivot` (#163).
+//! - fn `write_eav_rows` — une ligne EAV (clé, valeur) par clé moyenne du compagnon `AutoSplit`.
 //! - fn `push_data_col` — résout et coerce la valeur d'une colonne de données (flatten, JSONB, coercition).
 //! - fn `push_generated_col_insert` — écrit une colonne générée (`j2s_id`, `j2s_parent_id`, `j2s_order`).
 //! - fn `push_jsonb_col` — sérialise une valeur JSON brute en colonne JSONB.
@@ -45,7 +47,8 @@ use crate::schema::PATH_SEP;
 use super::traversal::{
     insert_array, insert_jsonb_object, insert_normalize_dynamic_keys, insert_pivot_object,
     insert_sibling_collapse_multi, insert_sibling_collapse_object, insert_structured_pivot_object,
-    push_coerced, push_coerced_as, push_text, route_multi_collapse_children, write_row,
+    keeps_scalars_in_array_column, push_coerced, push_coerced_as, push_text,
+    route_multi_collapse_children, write_row,
 };
 
 /// Mutable context for the recursive insert pass.
@@ -363,8 +366,10 @@ fn write_wide_row<S: RowSink, A: AnomalyCollect>(
     write_row(ctx.sinks, ctx.anomalies, wide_table_name, wb)
 }
 
-/// Write medium-frequency key-value pairs as EAV rows in the `AutoSplit` companion wide table.
-/// Stable keys were already written as schema columns; rare keys are skipped entirely.
+/// Write medium-frequency key-value pairs as EAV rows in the `AutoSplit` companion wide table,
+/// or as one row per base when the companion is a `StructuredPivot` (#163). Stable keys were
+/// already written as schema columns; rare keys are skipped entirely, and so are objects and
+/// arrays, which are not companion values (#69).
 fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
@@ -381,20 +386,41 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     else {
         return Ok(());
     };
-    let wide_value_type = path_map
-        .get(wide_table_name.as_str())
+    let medium = obj.iter().filter(|(k, v)| {
+        medium_keys.contains(k.as_str()) && !matches!(v, Value::Object(_) | Value::Array(_))
+    });
+    let companion = path_map.get(wide_table_name.as_str());
+    if let Some(companion) = companion {
+        if let InferredStrategy::StructuredPivot(ss) = &*companion.effective_strategy() {
+            return insert_structured_pivot_object(
+                ctx.sinks,
+                ctx.anomalies,
+                companion,
+                medium,
+                row_id,
+                ss,
+            );
+        }
+    }
+    write_eav_rows(ctx, companion, wide_table_name, medium, row_id)
+}
+
+/// One EAV row (`key`, `value`) per medium key of the `AutoSplit` companion `wide_table_name`.
+fn write_eav_rows<'a, S: RowSink, A: AnomalyCollect>(
+    ctx: &mut InsertCtx<'_, S, A>,
+    companion: Option<&TableSchema>,
+    wide_table_name: &str,
+    medium: impl Iterator<Item = (&'a String, &'a Value)>,
+    row_id: Uuid,
+) -> Result<()> {
+    let value_type = companion
         .and_then(|ws| ws.find_by_original("value"))
         .map(|c| c.pg_type.clone());
-    for (field, value) in obj {
-        if !medium_keys.contains(field.as_str())
-            || matches!(value, Value::Object(_) | Value::Array(_))
-        {
-            continue;
-        }
+    for (field, value) in medium {
         write_wide_row(
             ctx,
             wide_table_name,
-            wide_value_type.as_ref(),
+            value_type.as_ref(),
             row_id,
             field,
             value,
@@ -429,6 +455,7 @@ pub(super) fn recurse_children<S: RowSink, A: AnomalyCollect>(
                         child_schema,
                         arr,
                         row_id,
+                        keeps_scalars_in_array_column(schema, field),
                     )?;
                 }
             }
@@ -580,6 +607,67 @@ mod tests {
             (1, 1),
             "a group row counts as a row written"
         );
+    }
+
+    /// `t` (`brand` TEXT) whose suffix grid `fat`, `fat_100g`, `fat_prepared_100g`, `salt_100g`
+    /// goes to the structured companion `t_pivot` (#163).
+    fn structured_split_table() -> HashMap<String, TableSchema> {
+        use crate::schema::table_schema::{SuffixColumn, SuffixSchema};
+        let mut parent = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        parent
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        parent.columns.push(column("brand", "brand", PgType::Text));
+        let suffix_col = |suffix: &str, col_name: &str| SuffixColumn {
+            suffix: suffix.to_string(),
+            col_name: col_name.to_string(),
+            pg_type: PgType::Integer,
+        };
+        let suffix_schema = SuffixSchema {
+            suffix_cols: vec![
+                suffix_col("_100g", "_100g"),
+                suffix_col("_prepared_100g", "prepared_100g"),
+            ],
+            value_type: PgType::Integer,
+        };
+        let companion = crate::schema::wide_strategies::structured_pivot_companion(
+            &parent,
+            "t_pivot".to_string(),
+            suffix_schema,
+            true,
+        );
+        parent.inferred_strategy = InferredStrategy::AutoSplit {
+            stable_threshold: 0.1,
+            rare_threshold: 0.001,
+            medium_keys: ["fat", "fat_100g", "fat_prepared_100g", "salt_100g"]
+                .map(str::to_string)
+                .into(),
+            wide_table_name: "t_pivot".to_string(),
+        };
+        HashMap::from([
+            ("t".to_string(), parent),
+            ("t_pivot".to_string(), companion),
+        ])
+    }
+
+    #[test]
+    fn a_structured_companion_gets_one_row_per_base_of_the_grid() {
+        let mut recorder = Recorder::default();
+        let rows = write(
+            &structured_split_table(),
+            r#"{"brand": "acme", "fat": 1, "fat_100g": 2, "fat_prepared_100g": 3,
+                "salt_100g": {"x": 1}, "other": 5}"#,
+            &mut recorder,
+        );
+        let id = ID.to_string();
+        assert_eq!(rows["t"], [[id.clone(), "acme".to_string()]]);
+        // salt_100g holds an object: not a grid value, no row and no anomaly (#69).
+        let pivot: Vec<&[String]> = rows["t_pivot"].iter().map(|r| &r[1..]).collect();
+        assert_eq!(
+            pivot,
+            [[id, "fat".into(), "1".into(), "2".into(), "3".into()]]
+        );
+        assert!(recorder.anomalies.is_empty(), "{:?}", recorder.anomalies);
     }
 
     #[test]
