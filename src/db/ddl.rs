@@ -32,6 +32,7 @@
 //! Contraintes post-chargement :
 //! - fn `calc_maintenance_work_mem_mb` — calcule `maintenance_work_mem` depuis la RAM disponible.
 //! - fn `table_sizes` — lignes (`reltuples`) et octets de chaque table, lus dans le catalogue.
+//! - fn `existing_pks` — tables qui ont déjà une PK (relance sans `--drop-existing`), lues dans le catalogue.
 //! - fn `largest_first` — tables triées de la plus grosse à la plus petite (taille catalogue).
 //! - fn `pk_mem_mb` — mémoire d'une construction de PK : ce que son tri demande, dans le budget commun.
 //! - fn `is_insufficient_privilege` — refus faute de privilège (réglage ignoré).
@@ -39,11 +40,12 @@
 //! - fn `try_configure_constraints_conn` — configure `maintenance_work_mem`/`wal_compression`/index en série/`synchronous_commit` (best-effort).
 //! - fn `open_constraints_conn` — ouvre une connexion dédiée aux contraintes et la configure.
 //! - fn `add_pk` — pose la PK d'une table (fatal si échec).
+//! - fn `drop_parent_fks` — retire avant le chargement les FK vers le parent laissées par un import précédent.
 //! - fn `drop_unvalidated_fk` — retire la FK d'une table dont la validation a échoué (best-effort).
 //! - fn `validate_fk` — valide la FK d'une table ; si échec, warning + DROP de la contrainte.
 //! - fn `set_tables_autovacuum` — coupe / rétablit l'autovacuum de toutes les tables en parallèle (chargement Pass 2).
 //! - fn `vacuum_analyze_tables` — `VACUUM (ANALYZE)` non bridé de toutes les tables en parallèle, avant les PK.
-//! - fn `add_constraints` — toutes les PK, puis FK `NOT VALID`, puis `VALIDATE` en parallèle ; PK fatale / FK en warning.
+//! - fn `add_constraints` — les PK manquantes, puis FK `NOT VALID`, puis `VALIDATE` en parallèle ; PK fatale / FK en warning.
 //! - fn `constraint_progress` — émet un événement de progression.
 //! - fn `to_fk_warning` — convertit une erreur `PostgreSQL` en `ConstraintWarning`.
 
@@ -300,6 +302,20 @@ async fn table_sizes(client: &Client, pg_schema: &str) -> Result<HashMap<String,
         .collect())
 }
 
+/// Tables of `pg_schema` that already have a PK: a rerun without `--drop-existing` keeps it, as
+/// rebuilding it would re-sort the whole table (#146). By constraint type, not by name (#147).
+async fn existing_pks(client: &Client, pg_schema: &str) -> Result<Vec<String>> {
+    let rows = client
+        .query(
+            "SELECT c.relname::text FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND k.contype = 'p'",
+            &[&pg_schema],
+        )
+        .await
+        .map_err(|e| pg_err("existing primary keys", &e))?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
 /// `schemas` largest first by catalog size, so a late giant does not stall the end of a phase.
 fn largest_first<'a>(
     schemas: &'a [TableSchema],
@@ -411,6 +427,44 @@ async fn add_pk(
     Ok(())
 }
 
+/// Before a load into existing tables (rerun without `--drop-existing`, #146): drops every FK from a
+/// child table to its parent. Kept, it would reject a child row flushed before its parent row; without
+/// it the load also runs as one transaction per connection (`freeze_load_allowed`). `add_constraints`
+/// puts the FKs back after the load. Found by catalog, not by name (#147). Returns how many were dropped.
+///
+/// # Errors
+/// The catalog lookup or a `DROP CONSTRAINT` failed.
+pub async fn drop_parent_fks(
+    client: &Client,
+    schemas: &[TableSchema],
+    pg_schema: &str,
+) -> Result<usize> {
+    let pairs: Vec<String> = schemas
+        .iter()
+        .filter_map(|s| Some(format!("{}\u{1f}{}", s.name, s.parent_table.as_ref()?)))
+        .collect();
+    let drops: Vec<String> = client
+        .query(
+            "SELECT format('ALTER TABLE %I.%I DROP CONSTRAINT %I', n.nspname, c.relname, k.conname) \
+         FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid \
+         JOIN pg_class p ON p.oid = k.confrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND k.contype = 'f' AND c.relname || chr(31) || p.relname = ANY($2)",
+            &[&pg_schema, &pairs],
+        )
+        .await
+        .map_err(|e| pg_err("existing foreign keys", &e))?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    if !drops.is_empty() {
+        client
+            .batch_execute(&drops.join(";\n"))
+            .await
+            .map_err(|e| pg_err("DROP FOREIGN KEY", &e))?;
+    }
+    Ok(drops.len())
+}
+
 /// Drop the FK of `schema` that failed validation (best-effort: a failure is only logged).
 async fn drop_unvalidated_fk(client: &Client, schema: &TableSchema, pg_schema: &str) {
     let drop_sql = format!(
@@ -461,7 +515,10 @@ async fn validate_fk(
 
 /// Add PRIMARY KEY + FOREIGN KEY constraints after data has been loaded (#68).
 ///
-/// 1. Every PK, largest tables first, `parallel.min(4)` connections. Each build gets the
+/// A PK already there (rerun without `--drop-existing`) is kept: PostgreSQL indexed the new rows
+/// during the load (#146). The FKs of such a rerun were dropped before the load (`drop_parent_fks`).
+///
+/// 1. Every missing PK, largest tables first, `parallel.min(4)` connections. Each build gets the
 ///    `maintenance_work_mem` its sort needs (catalog row count, exact after the import's `VACUUM`)
 ///    out of a shared budget of half the available RAM, so big sorts stay in memory.
 /// 2. Every FK added `NOT VALID` on one connection: no scan, so the self-conflicting
@@ -487,8 +544,6 @@ pub async fn add_constraints(
         return Ok(Vec::new());
     }
 
-    let fk_count = schemas.iter().filter(|s| s.parent_table.is_some()).count();
-    let total = schemas.len() + fk_count;
     let done = AtomicUsize::new(0);
 
     emit(
@@ -511,6 +566,17 @@ pub async fn add_constraints(
     let client = open_constraints_conn(db_url, fk_mem_mb).await?;
     let sizes = table_sizes(&client, pg_schema).await?;
     let by_size = largest_first(schemas, &sizes);
+    let pks = existing_pks(&client, pg_schema).await?;
+    let pk_todo: Vec<&TableSchema> = by_size
+        .iter()
+        .copied()
+        .filter(|s| !pks.contains(&s.name))
+        .collect();
+    let fk_count = schemas.iter().filter(|s| s.parent_table.is_some()).count();
+    let total = pk_todo.len() + fk_count;
+    if !pks.is_empty() {
+        eprintln!("[CONSTRAINTS] {} PK already present, kept", pks.len());
+    }
 
     // Phase 1 — PK. Dynamic queue; first error aborts. Each build holds its memory (in MB permits)
     // while it runs. shortcut: the semaphore is FIFO, so a big build waiting for memory holds back
@@ -519,7 +585,7 @@ pub async fn add_constraints(
     let pk_memory = tokio::sync::Semaphore::new(
         usize::try_from(pk_budget_mb).unwrap_or(tokio::sync::Semaphore::MAX_PERMITS),
     );
-    futures_util::stream::iter(by_size.iter().map(|s| {
+    futures_util::stream::iter(pk_todo.iter().map(|s| {
         let mem_mb = pk_mem_mb(
             sizes.get(&s.name).map_or(0, |&(rows, _)| rows),
             pk_budget_mb,

@@ -320,6 +320,17 @@ async fn load_and_constrain(
         dispatch::spawn_anomaly_writer(config.anomaly_dir.clone());
     dispatch::preflight_warn_nonempty(schemas, client, &config.pg_schema, progress_tx.as_ref())
         .await;
+    if !config.skip_constraints {
+        let dropped = crate::db::ddl::drop_parent_fks(client, schemas, &config.pg_schema).await?;
+        if dropped > 0 {
+            crate::db::pg_tuning::log(
+                progress_tx.as_ref(),
+                format!(
+                    "{dropped} existing foreign key(s) dropped for the load, added back after it."
+                ),
+            );
+        }
+    }
     // Child tables loaded with COPY FREEZE when no FK can trip over the load transactions (#68), the
     // root too under wal_level = minimal (#77).
     let freeze = dispatch::freeze_load_allowed(schemas, client, &config.pg_schema).await;
