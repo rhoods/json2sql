@@ -11,6 +11,8 @@
 //! - fn `filter_by_coverage` — ne garde que les suffixes couvrant assez de bases (seuil).
 //! - fn `detect_suffix_schema` — détecte automatiquement la structure de suffixes (algorithme en 5 étapes).
 //! - fn `build_suffix_cols_and_value_type` — construit les `SuffixColumn` + type de la colonne `value` de base.
+//! - fn `widest_type` — type le plus large des clés observées (`TEXT` s'il n'y en a pas).
+//! - fn `suffix_col_name` — nom de colonne d'un suffixe (`norm_value` pour `value`).
 //! - fn `build_suffix_column` — construit une `SuffixColumn` (variante explicite, TOML `suffix_columns`).
 //! - fn `build_suffix_schema_from_list` — variante explicite (TOML `suffix_columns`), pas de détection automatique.
 
@@ -92,9 +94,6 @@ pub fn detect_suffix_schema(
         .into_iter()
         .filter(|(_, bases)| bases.len() >= MIN_BASES)
         .collect();
-    if candidates.is_empty() {
-        return None;
-    }
     let base_set = collect_base_set(&candidates);
     if base_set.is_empty() {
         return None;
@@ -127,35 +126,26 @@ fn build_suffix_cols_and_value_type(
 ) -> (Vec<SuffixColumn>, PgType) {
     let mut suffix_cols = Vec::new();
     for (suffix, bases) in retained {
-        let pg_type = bases
+        let trackers = bases
             .iter()
-            .filter_map(|base| columns.get(format!("{base}{suffix}").as_str()))
-            .fold(None::<PgType>, |acc, tracker| {
-                let t = tracker.to_pg_type();
-                Some(match acc {
-                    None => t,
-                    Some(a) => widen_pg_types(a, &t),
-                })
-            })
-            .unwrap_or(PgType::Text);
-        let stripped = suffix.trim_start_matches('_');
-        let col_name = {
-            let s = sanitize_identifier(stripped);
-            if s == "value" {
-                "norm_value".to_string()
-            } else {
-                s
-            }
-        };
+            .filter_map(|base| columns.get(format!("{base}{suffix}").as_str()));
         suffix_cols.push(SuffixColumn {
             suffix: suffix.clone(),
-            col_name,
-            pg_type,
+            col_name: suffix_col_name(suffix),
+            pg_type: widest_type(trackers),
         });
     }
-    let value_type = base_set
-        .iter()
-        .filter_map(|base| columns.get(base.as_str()))
+    let value_type = widest_type(
+        base_set
+            .iter()
+            .filter_map(|base| columns.get(base.as_str())),
+    );
+    (suffix_cols, value_type)
+}
+
+/// Widest type of the observed keys (`TEXT` when there is none).
+fn widest_type<'a>(trackers: impl Iterator<Item = &'a TypeTracker>) -> PgType {
+    trackers
         .fold(None::<PgType>, |acc, tracker| {
             let t = tracker.to_pg_type();
             Some(match acc {
@@ -163,8 +153,18 @@ fn build_suffix_cols_and_value_type(
                 Some(a) => widen_pg_types(a, &t),
             })
         })
-        .unwrap_or(PgType::Text);
-    (suffix_cols, value_type)
+        .unwrap_or(PgType::Text)
+}
+
+/// Column name of a suffix: the suffix without its leading `_`, as an identifier; `norm_value`
+/// for a `value` suffix, which would clash with the base `value` column.
+fn suffix_col_name(suffix: &str) -> String {
+    let s = sanitize_identifier(suffix.trim_start_matches('_'));
+    if s == "value" {
+        "norm_value".to_string()
+    } else {
+        s
+    }
 }
 
 /// Build a `SuffixSchema` from an explicit list of suffix strings.
@@ -174,24 +174,13 @@ fn build_suffix_column(raw_suffix: &str, columns: &IndexMap<String, TypeTracker>
     } else {
         format!("_{raw_suffix}")
     };
-    let pg_type = columns
-        .iter()
-        .filter(|(key, _)| key.ends_with(suffix.as_str()))
-        .fold(None::<PgType>, |acc, (_, tracker)| {
-            let t = tracker.to_pg_type();
-            Some(match acc {
-                None => t,
-                Some(a) => widen_pg_types(a, &t),
-            })
-        })
-        .unwrap_or(PgType::Text);
-    let stripped = suffix.trim_start_matches('_');
-    let s = sanitize_identifier(stripped);
-    let col_name = if s == "value" {
-        "norm_value".to_string()
-    } else {
-        s
-    };
+    let pg_type = widest_type(
+        columns
+            .iter()
+            .filter(|(key, _)| key.ends_with(suffix.as_str()))
+            .map(|(_, tracker)| tracker),
+    );
+    let col_name = suffix_col_name(&suffix);
     SuffixColumn {
         suffix,
         col_name,

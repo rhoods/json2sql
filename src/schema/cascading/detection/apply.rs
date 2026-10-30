@@ -55,14 +55,7 @@ fn apply_single_collapse(
 
 /// The column of a keyed-pivot table that receives the JSON key.
 fn key_column(name: &str) -> ColumnSchema {
-    ColumnSchema {
-        name: name.to_string(),
-        original_name: name.to_string(),
-        pg_type: PgType::Text,
-        not_null: true,
-        is_generated: false,
-        is_parent_fk: false,
-    }
+    ColumnSchema::data(name, PgType::Text, true)
 }
 
 /// Groups of at least two tables sharing a JSON key under the `absorbed` tables: they become

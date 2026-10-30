@@ -218,17 +218,19 @@ pub fn build_union_columns(children: &[&TableSchema]) -> Vec<ColumnSchema> {
 
 /// Classify the shape of sibling keys to produce a semantic column name.
 #[must_use]
-pub fn classify_key_shape(keys: &[&str]) -> KeyShape {
+pub fn classify_key_shape<K: AsRef<str>>(keys: &[K]) -> KeyShape {
     let total = keys.len();
     if total == 0 {
         return KeyShape::Slug;
     }
     let numeric = keys
         .iter()
+        .map(AsRef::as_ref)
         .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()))
         .count();
     let isolang = keys
         .iter()
+        .map(AsRef::as_ref)
         .filter(|k| (k.len() == 2 || k.len() == 3) && k.chars().all(|c| c.is_ascii_alphabetic()))
         .count();
 
@@ -306,12 +308,7 @@ pub fn apply_normalize_dynamic_keys(
         .iter()
         .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
         .collect();
-    let key_shape = classify_key_shape(
-        &keys
-            .iter()
-            .map(std::string::String::as_str)
-            .collect::<Vec<_>>(),
-    );
+    let key_shape = classify_key_shape(&keys);
     rebuild_normalize_columns(&mut schemas[target_idx], union_cols, &id_column);
     eprintln!(
         "  NormalizeDynamicKeys: {} ({} child tables → 1, id_col: {} [{}])",
@@ -401,28 +398,21 @@ pub fn apply_flatten(
     exclude_absorbed_children(schemas);
 
     // Add flattened columns + flatten_sources to parent
-    if let Some(parent) = schemas.iter_mut().find(|s| s.name == parent_name) {
-        for col in &new_cols {
-            if !parent.columns.iter().any(|c| c.name == col.name) {
-                parent
-                    .flatten_sources
-                    .insert(col.name.clone(), field_name.clone());
-                parent.columns.push(col.clone());
-            }
-        }
-        eprintln!(
-            "  Flatten: {}.{} → {} columns inlined into {} (prefix: {:?})",
-            parent_name,
-            field_name,
-            new_cols.len(),
-            parent_name,
-            prefix,
-        );
-    } else {
+    let Some(parent) = schemas.iter_mut().find(|s| s.name == parent_name) else {
         return Err(J2sError::Schema(format!(
             "apply_flatten: parent table '{parent_name}' not found for '{child_table_name}'"
         )));
+    };
+    for col in &new_cols {
+        if !parent.columns.iter().any(|c| c.name == col.name) {
+            parent
+                .flatten_sources
+                .insert(col.name.clone(), field_name.clone());
+            parent.columns.push(col.clone());
+        }
     }
+    let n = new_cols.len();
+    eprintln!("  Flatten: {parent_name}.{field_name} → {n} columns inlined into {parent_name} (prefix: {prefix:?})");
 
     // Remove the flattened child table from the schema
     schemas.retain(|s| !matches!(s.inferred_strategy, InferredStrategy::Flatten { .. }));

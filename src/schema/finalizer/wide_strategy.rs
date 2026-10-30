@@ -1,6 +1,9 @@
 //! Phase 3 — décision de la stratégie wide-table, par table.
 //!
 //! - fn `apply_wide_table_strategies` — applique la stratégie choisie à chaque table éligible.
+//! - struct `WideStats` — mesures d'une table wide (lignes, colonnes scalaires, ratio stable).
+//! - fn `WideStats::log` — journalise la stratégie choisie pour la table.
+//! - fn `stable_ratio` — part des colonnes scalaires présentes dans assez de lignes.
 //! - fn `apply_wide_strategy` — décide Columns/`StructuredPivot`/Pivot/Jsonb/`AutoSplit` selon le
 //!   ratio de colonnes stables.
 //! - fn `apply_non_autosplit_strategy` — branche `StructuredPivot`, Jsonb, ou le split
@@ -11,6 +14,7 @@
 //! - fn `unique_pivot_name` — nom du compagnon `_pivot`, unique contre toutes les tables déjà
 //!   connues (fallback `_pivot_eav` sur auto-collision, `_pivot_2`/`_pivot_3`/... sur collision
 //!   externe).
+//! - fn `autosplit_wide_name` — nom du compagnon `_wide` (repli `_eav`).
 //! - fn `apply_autosplit_strategy` — construit la table EAV compagnon `_wide` (racine + vrai
 //!   enfant `Object` — partition par fréquence, inchangé).
 //! - fn `build_wide_pivot_schema` — construit la table EAV compagnon (réutilisée par
@@ -110,6 +114,40 @@ pub(super) struct FinalizerConfig {
     disable_structured_pivot: bool,
 }
 
+/// What `apply_wide_strategy` measured on a wide table, for the strategy branches.
+struct WideStats {
+    /// Rows of the table, at least 1.
+    row_count: f64,
+    scalar_col_count: usize,
+    ratio_stable: f64,
+}
+
+impl WideStats {
+    /// Log the strategy chosen for the table.
+    fn log(&self, table: &str, strategy: &str) {
+        let (n, pct) = (self.scalar_col_count, self.ratio_stable * 100.0);
+        eprintln!(
+            "  Wide table detected: {table} ({n} columns, {pct:.0}% stable) → strategy: {strategy}"
+        );
+    }
+}
+
+/// Share of the scalar columns present in at least `stable_threshold` of the rows.
+fn stable_ratio(
+    entry: &TableEntry,
+    row_count: f64,
+    stable_threshold: f64,
+    scalar_cols: usize,
+) -> f64 {
+    let stable_count = entry
+        .columns
+        .iter()
+        .filter(|(field, t)| is_scalar_column(entry, field, t))
+        .filter(|(_, t)| t.total_count as f64 / row_count >= stable_threshold)
+        .count();
+    stable_count as f64 / scalar_cols as f64
+}
+
 /// Apply a wide-table strategy to `schema` if its scalar column count exceeds the threshold.
 ///
 /// Eligible for Object and `ObjectArray` children.
@@ -134,46 +172,22 @@ fn apply_wide_strategy(
     }
 
     let row_count = entry.row_count.max(1) as f64;
-    let stable_count = entry
-        .columns
-        .iter()
-        .filter(|(field, t)| is_scalar_column(entry, field, t))
-        .filter(|(_, t)| t.total_count as f64 / row_count >= config.stable_threshold)
-        .count();
-    let ratio_stable = stable_count as f64 / scalar_col_count as f64;
-
-    let is_root = entry.parent_key.is_empty();
-    let has_object_children = tables_with_object_children.contains(&entry.path_key);
-
-    if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && entry.row_count >= 10 {
-        eprintln!(
-            "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: Columns \
-            (high stable ratio — legitimate schema, not key explosion)",
-            schema.name,
-            scalar_col_count,
-            ratio_stable * 100.0
-        );
-        return None;
-    }
-    if is_root && has_object_children {
-        return Some(apply_autosplit_strategy(
-            schema,
-            entry,
-            config,
-            row_count,
-            scalar_col_count,
-            ratio_stable,
-        ));
-    }
-
-    apply_non_autosplit_strategy(
-        schema,
-        entry,
-        config,
+    let ratio_stable = stable_ratio(entry, row_count, config.stable_threshold, scalar_col_count);
+    let stats = WideStats {
+        row_count,
         scalar_col_count,
         ratio_stable,
-        existing_names,
-    )
+    };
+
+    if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && entry.row_count >= 10 {
+        let strategy = "Columns (high stable ratio — legitimate schema, not key explosion)";
+        stats.log(&schema.name, strategy);
+        return None;
+    }
+    if entry.parent_key.is_empty() && tables_with_object_children.contains(&entry.path_key) {
+        return Some(apply_autosplit_strategy(schema, entry, config, &stats));
+    }
+    apply_non_autosplit_strategy(schema, entry, config, &stats, existing_names)
 }
 
 /// Chooses `StructuredPivot`, Jsonb, or the identity/companion split (Pivot) for a table that
@@ -183,8 +197,7 @@ fn apply_non_autosplit_strategy(
     schema: &mut TableSchema,
     entry: &TableEntry,
     config: &FinalizerConfig,
-    scalar_col_count: usize,
-    ratio_stable: f64,
+    stats: &WideStats,
     existing_names: &std::collections::HashSet<String>,
 ) -> Option<TableSchema> {
     let suffix_schema = if config.disable_structured_pivot {
@@ -193,10 +206,8 @@ fn apply_non_autosplit_strategy(
         detect_suffix_schema(&entry.columns, SUFFIX_MIN_COVERAGE, config.text_threshold)
     };
     if let Some(suffix_schema) = suffix_schema {
-        eprintln!(
-            "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: StructuredPivot ({} suffixes)",
-            schema.name, scalar_col_count, ratio_stable * 100.0, suffix_schema.suffix_cols.len()
-        );
+        let n = suffix_schema.suffix_cols.len();
+        stats.log(&schema.name, &format!("StructuredPivot ({n} suffixes)"));
         apply_structured_pivot_columns(schema, suffix_schema);
         return None;
     }
@@ -207,23 +218,11 @@ fn apply_non_autosplit_strategy(
         suggest_wide_strategy(entry)
     };
     if strategy == InferredStrategy::Pivot {
-        eprintln!(
-            "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: Pivot \
-            (split identité/compagnon)",
-            schema.name,
-            scalar_col_count,
-            ratio_stable * 100.0
-        );
+        stats.log(&schema.name, "Pivot (split identité/compagnon)");
         return Some(apply_pivot_split(schema, entry, config, existing_names));
     }
 
-    eprintln!(
-        "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: {:?}",
-        schema.name,
-        scalar_col_count,
-        ratio_stable * 100.0,
-        strategy
-    );
+    stats.log(&schema.name, &format!("{strategy:?}"));
     apply_wide_strategy_columns(schema, strategy);
     None
 }
@@ -356,20 +355,26 @@ fn warn_rare_keys(
     );
 }
 
+/// Name of the `AutoSplit` companion: `{base}_wide`, without doubling an existing `_wide`
+/// suffix, and `{base}_eav` when that would be the table's own name.
+fn autosplit_wide_name(schema_name: &str) -> String {
+    let base_name = schema_name.strip_suffix("_wide").unwrap_or(schema_name);
+    let wide_candidate = format!("{base_name}_wide");
+    if wide_candidate == schema_name {
+        format!("{base_name}_eav")
+    } else {
+        wide_candidate
+    }
+}
+
 fn apply_autosplit_strategy(
     schema: &mut TableSchema,
     entry: &TableEntry,
     config: &FinalizerConfig,
-    row_count: f64,
-    scalar_col_count: usize,
-    ratio_stable: f64,
+    stats: &WideStats,
 ) -> TableSchema {
-    let medium_keys = collect_medium_keys(
-        entry,
-        row_count,
-        config.rare_threshold,
-        config.stable_threshold,
-    );
+    let (row_count, stable) = (stats.row_count, config.stable_threshold);
+    let medium_keys = collect_medium_keys(entry, row_count, config.rare_threshold, stable);
     // pg-array columns are kept unconditionally: their tracker counts elements, not occurrences,
     // and the scalar EAV companion cannot hold them (issue #48).
     schema.columns.retain(|c| {
@@ -378,31 +383,19 @@ fn apply_autosplit_strategy(
             || entry
                 .columns
                 .get(&c.original_name)
-                .is_some_and(|t| t.total_count as f64 / row_count >= config.stable_threshold)
+                .is_some_and(|t| t.total_count as f64 / row_count >= stable)
     });
     // Scalars only, like `scalar_col_count`: the kept pg-array columns would otherwise hide rare keys.
     let stable_col_count = schema.data_columns().filter(|c| !is_pg_array(c)).count();
-    let rare_count = scalar_col_count
+    let rare_count = stats
+        .scalar_col_count
         .saturating_sub(stable_col_count)
         .saturating_sub(medium_keys.len());
-    // Strip any existing `_wide` suffix to avoid `foo_wide_wide`; fall back to `_eav` on collision.
-    let base_name = schema.name.strip_suffix("_wide").unwrap_or(&schema.name);
-    let wide_candidate = format!("{base_name}_wide");
-    let wide_name = if wide_candidate == schema.name {
-        format!("{base_name}_eav")
-    } else {
-        wide_candidate
-    };
-    eprintln!(
-        "  Wide table detected: {} ({} columns, {:.0}% stable) → strategy: AutoSplit \
-        ({} stable cols, {} medium → {}, {} rare dropped)",
-        schema.name,
-        scalar_col_count,
-        ratio_stable * 100.0,
-        stable_col_count,
-        medium_keys.len(),
-        wide_name,
-        rare_count,
+    let wide_name = autosplit_wide_name(&schema.name);
+    let medium = medium_keys.len();
+    stats.log(
+        &schema.name,
+        &format!("AutoSplit ({stable_col_count} stable cols, {medium} medium → {wide_name}, {rare_count} rare dropped)"),
     );
     warn_rare_keys(
         entry,
@@ -432,22 +425,12 @@ fn build_wide_pivot_schema(
     wide_schema
         .columns
         .push(ColumnSchema::parent_fk(&schema.name));
-    wide_schema.columns.push(ColumnSchema {
-        name: "key".to_string(),
-        original_name: "key".to_string(),
-        pg_type: PgType::Text,
-        not_null: true,
-        is_generated: false,
-        is_parent_fk: false,
-    });
-    wide_schema.columns.push(ColumnSchema {
-        name: "value".to_string(),
-        original_name: "value".to_string(),
-        pg_type: value_type,
-        not_null: false,
-        is_generated: false,
-        is_parent_fk: false,
-    });
+    wide_schema
+        .columns
+        .push(ColumnSchema::data("key", PgType::Text, true));
+    wide_schema
+        .columns
+        .push(ColumnSchema::data("value", value_type, false));
     wide_schema.inferred_strategy = InferredStrategy::Pivot;
     schema.inferred_strategy = InferredStrategy::AutoSplit {
         stable_threshold: config.stable_threshold,

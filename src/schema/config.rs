@@ -21,7 +21,10 @@
 //! - fn `apply_strategy_override` — applique la clé `strategy` (`pivot`/`jsonb`/`columns`/`structured_pivot`/
 //!   `normalize_dynamic_keys`/`flatten`).
 //! - fn `apply_suffix_columns_override` — applique `suffix_columns` (`StructuredPivot` explicite).
+//! - fn `require_columns_strategy` — refuse un override qui suppose une table encore en `Columns`.
+//! - fn `type_map_of` — `TypeTracker` factices tirés des types des colonnes d'un schéma figé.
 //! - fn `apply_column_type_overrides` — applique les overrides de type par colonne.
+//! - fn `override_column_type` — change le type d'une colonne, ou dit pourquoi c'est impossible.
 //! - fn `apply_group_overrides` — applique les groupes de fusion (`[group.*]`, stratégie `keyed_pivot`).
 //! - fn `build_merged_keyed_pivot_schema` — construit le schéma fusionné (colonnes union + clé `key_id`).
 //! - fn `apply_keyed_pivot_merge` — fusionne N tables membres en une seule `SiblingCollapse`.
@@ -38,6 +41,7 @@
 //! - fn `compute_skip_cascade` — ensemble complet des tables à retirer pour `Skip` + un
 //!   `SkipCascadeWarning` par racine ayant réellement cascadé (`pub` : requête pure réutilisable
 //!   par l'IHM pour afficher la cascade avant application).
+//! - fn `skip_cascade_warning` — avertissement d'une table `Skip` : les vrais enfants emportés avec elle.
 //! - fn `prime_tracker_from_pg_type` — reconstruit un `TypeTracker` représentatif depuis un `PgType`
 //!   déjà résolu (pour réutiliser `build_suffix_schema_from_list` après finalisation).
 //! - fn `parse_pg_type` — parse une chaîne de type SQL (avec alias) en `PgType`.
@@ -408,16 +412,8 @@ fn apply_strategy_override(
             schema.set_toml_override(Some(UserOverride::Jsonb));
         }
         "columns" => {
-            if !matches!(schema.inferred_strategy, InferredStrategy::Columns) {
-                return vec![ConfigWarning::InvalidOverride {
-                    table: table_name.to_string(),
-                    from_strategy: format!("{:?}", schema.inferred_strategy)
-                        .split('(')
-                        .next()
-                        .unwrap_or("Unknown")
-                        .to_string(),
-                    to_strategy: "columns".to_string(),
-                }];
+            if let Some(warning) = require_columns_strategy(schema, table_name, "columns") {
+                return vec![warning];
             }
             eprintln!("  Override strategy: {table_name} → Columns (no-op, already inferred)");
             schema.set_toml_override(Some(UserOverride::Columns));
@@ -475,48 +471,54 @@ fn apply_suffix_columns_override(
     };
     let suffix_list: Vec<String> = arr
         .iter()
-        .filter_map(|v| {
-            if let toml::Value::String(s) = v {
-                Some(s.clone())
-            } else {
-                None
-            }
-        })
+        .filter_map(|v| v.as_str().map(str::to_string))
         .collect();
     if suffix_list.is_empty() {
         return vec![];
     }
 
-    // Same compatibility guard as the "columns" branch of apply_strategy_override: once a
-    // table is no longer Columns (SiblingCollapse/AutoSplit/Pivot via cascade/wide-table
-    // detection), its column names are gone and suffix_columns can't be reconstructed
-    // safely — reject rather than silently overwrite (#31).
-    if !matches!(schema.inferred_strategy, InferredStrategy::Columns) {
-        return vec![ConfigWarning::InvalidOverride {
-            table: table_name.to_string(),
-            from_strategy: format!("{:?}", schema.inferred_strategy)
-                .split('(')
-                .next()
-                .unwrap_or("Unknown")
-                .to_string(),
-            to_strategy: "structured_pivot".to_string(),
-        }];
+    if let Some(warning) = require_columns_strategy(schema, table_name, "structured_pivot") {
+        return vec![warning];
     }
+    let suffix_schema = build_suffix_schema_from_list(&suffix_list, &type_map_of(schema));
+    eprintln!("  Override strategy: {table_name} → StructuredPivot (suffixes: {suffix_list:?})");
+    apply_structured_pivot_columns(schema, suffix_schema);
+    vec![]
+}
 
-    // At config-apply time the schema is already finalized (columns are resolved).
-    // Build a dummy TypeTracker map from existing column types so
-    // build_suffix_schema_from_list can widen types correctly.
-    let mut type_map: indexmap::IndexMap<String, crate::schema::type_tracker::TypeTracker> =
-        indexmap::IndexMap::new();
+/// Same compatibility guard for the `columns` strategy and `suffix_columns`: once a table is
+/// no longer Columns (SiblingCollapse/AutoSplit/Pivot via cascade/wide-table detection), its
+/// column names are gone and the override can't be applied safely — reject rather than
+/// silently overwrite (#31).
+fn require_columns_strategy(
+    schema: &TableSchema,
+    table_name: &str,
+    to_strategy: &str,
+) -> Option<ConfigWarning> {
+    if matches!(schema.inferred_strategy, InferredStrategy::Columns) {
+        return None;
+    }
+    let from = format!("{:?}", schema.inferred_strategy);
+    Some(ConfigWarning::InvalidOverride {
+        table: table_name.to_string(),
+        from_strategy: from.split('(').next().unwrap_or("Unknown").to_string(),
+        to_strategy: to_strategy.to_string(),
+    })
+}
+
+/// At config-apply time the schema is already finalized (columns are resolved): a dummy
+/// `TypeTracker` per data column, primed from its type, lets `build_suffix_schema_from_list`
+/// widen types correctly.
+fn type_map_of(
+    schema: &TableSchema,
+) -> indexmap::IndexMap<String, crate::schema::type_tracker::TypeTracker> {
+    let mut type_map = indexmap::IndexMap::new();
     for col in schema.data_columns() {
         let mut tracker = crate::schema::type_tracker::TypeTracker::new(256);
         prime_tracker_from_pg_type(&mut tracker, &col.pg_type);
         type_map.insert(col.original_name.clone(), tracker);
     }
-    let suffix_schema = build_suffix_schema_from_list(&suffix_list, &type_map);
-    eprintln!("  Override strategy: {table_name} → StructuredPivot (suffixes: {suffix_list:?})");
-    apply_structured_pivot_columns(schema, suffix_schema);
-    vec![]
+    type_map
 }
 
 fn apply_column_type_overrides(
@@ -535,39 +537,42 @@ fn apply_column_type_overrides(
         let toml::Value::String(type_str) = value else {
             continue;
         };
-        match schema.columns.iter_mut().find(|c| &c.name == col_name) {
-            None => warnings.push(ConfigWarning::UnknownColumn {
-                table: table_name.to_string(),
-                column: col_name.clone(),
-            }),
-            // checked first: any type override would turn the array into a scalar column (#84)
-            Some(col) if matches!(col.pg_type, PgType::Array(_)) => {
-                warnings.push(ConfigWarning::ArrayColumnOverride {
-                    table: table_name.to_string(),
-                    column: col_name.clone(),
-                    type_str: type_str.clone(),
-                });
-            }
-            Some(col) => match parse_pg_type(type_str) {
-                None => warnings.push(ConfigWarning::UnknownType {
-                    table: table_name.to_string(),
-                    column: col_name.clone(),
-                    type_str: type_str.clone(),
-                }),
-                Some(pg_type) => {
-                    eprintln!(
-                        "  Override: {}.{} {} → {}",
-                        table_name,
-                        col_name,
-                        col.pg_type.as_sql(),
-                        pg_type.as_sql()
-                    );
-                    col.pg_type = pg_type;
-                }
-            },
-        }
+        warnings.extend(override_column_type(schema, table_name, col_name, type_str));
     }
     warnings
+}
+
+/// Set the type of column `col_name` to `type_str`, or say why it can't be.
+fn override_column_type(
+    schema: &mut TableSchema,
+    table_name: &str,
+    col_name: &str,
+    type_str: &str,
+) -> Option<ConfigWarning> {
+    let (table, column) = (table_name.to_string(), col_name.to_string());
+    let Some(col) = schema.columns.iter_mut().find(|c| c.name == col_name) else {
+        return Some(ConfigWarning::UnknownColumn { table, column });
+    };
+    let type_str = type_str.to_string();
+    // checked first: any type override would turn the array into a scalar column (#84)
+    if matches!(col.pg_type, PgType::Array(_)) {
+        return Some(ConfigWarning::ArrayColumnOverride {
+            table,
+            column,
+            type_str,
+        });
+    }
+    let Some(pg_type) = parse_pg_type(&type_str) else {
+        return Some(ConfigWarning::UnknownType {
+            table,
+            column,
+            type_str,
+        });
+    };
+    let (from, to) = (col.pg_type.as_sql(), pg_type.as_sql());
+    eprintln!("  Override: {table_name}.{col_name} {from} → {to}");
+    col.pg_type = pg_type;
+    None
 }
 
 /// Appliquer les groupes de fusion définis dans la config.
@@ -822,28 +827,37 @@ pub fn compute_skip_cascade(
 
     let mut warnings: Vec<SkipCascadeWarning> = direct_skip_roots
         .iter()
-        .filter_map(|root| {
-            let mut own_seed = HashSet::from([root.clone()]);
-            if let Some(wide_name) = wide_companion.get(root) {
-                own_seed.insert(wide_name.clone());
-            }
-            let mut cascaded: Vec<String> = close_over_real_children(schemas, own_seed)
-                .into_iter()
-                .filter(|name| name != root && !direct_skip_roots.contains(name))
-                .collect();
-            if cascaded.is_empty() {
-                return None;
-            }
-            cascaded.sort();
-            Some(SkipCascadeWarning {
-                removed_table: root.clone(),
-                cascaded_children: cascaded,
-            })
-        })
+        .filter_map(|root| skip_cascade_warning(schemas, root, &wide_companion, &direct_skip_roots))
         .collect();
     warnings.sort_by(|a, b| a.removed_table.cmp(&b.removed_table));
 
     (removed, warnings)
+}
+
+/// The warning for one Skip-ed table `root`: the real children it takes down with it (through
+/// its wide companion too), other directly Skip-ed tables left out. `None` when there are none.
+fn skip_cascade_warning(
+    schemas: &[TableSchema],
+    root: &String,
+    wide_companion: &HashMap<String, String>,
+    direct_skip_roots: &HashSet<String>,
+) -> Option<SkipCascadeWarning> {
+    let mut own_seed = HashSet::from([root.clone()]);
+    if let Some(wide_name) = wide_companion.get(root) {
+        own_seed.insert(wide_name.clone());
+    }
+    let mut cascaded: Vec<String> = close_over_real_children(schemas, own_seed)
+        .into_iter()
+        .filter(|name| name != root && !direct_skip_roots.contains(name))
+        .collect();
+    if cascaded.is_empty() {
+        return None;
+    }
+    cascaded.sort();
+    Some(SkipCascadeWarning {
+        removed_table: root.clone(),
+        cascaded_children: cascaded,
+    })
 }
 
 /// Prime a `TypeTracker` with a representative observation so `to_pg_type()` returns
@@ -884,27 +898,14 @@ fn parse_pg_type(s: &str) -> Option<PgType> {
         "DATE" => Some(PgType::Date),
         "TIMESTAMP" | "TIMESTAMP WITHOUT TIME ZONE" => Some(PgType::Timestamp),
         "TEXT" => Some(PgType::Text),
-        other => {
-            // VARCHAR(N)
-            if let Some(inner) = other
-                .strip_prefix("VARCHAR(")
-                .and_then(|s| s.strip_suffix(')'))
-            {
-                if let Ok(n) = inner.trim().parse::<u32>() {
-                    return Some(PgType::VarChar(n));
-                }
-            }
-            // CHARACTER VARYING(N)
-            if let Some(inner) = other
-                .strip_prefix("CHARACTER VARYING(")
-                .and_then(|s| s.strip_suffix(')'))
-            {
-                if let Ok(n) = inner.trim().parse::<u32>() {
-                    return Some(PgType::VarChar(n));
-                }
-            }
-            None
-        }
+        // VARCHAR(N), CHARACTER VARYING(N)
+        other => ["VARCHAR(", "CHARACTER VARYING("]
+            .iter()
+            .find_map(|prefix| {
+                let inner = other.strip_prefix(prefix)?.strip_suffix(')')?;
+                inner.trim().parse::<u32>().ok()
+            })
+            .map(PgType::VarChar),
     }
 }
 

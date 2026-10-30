@@ -22,7 +22,6 @@
 //! - fn `make_subgroup` — construit un `SubgroupData` (nom, clé, colonnes union) pour un sous-groupe.
 //! - fn `pick_unique_suffix` — suffixe de table sans collision.
 //! - fn `sibling_keys` — clé JSON (dernier segment de chemin) de chaque table sœur.
-//! - fn `key_shape_of` — forme des clés (numérique, code langue…).
 //! - fn `union_of` — union des colonnes des tables sœurs.
 //! - fn `kind_label` — « Object » ou « `ObjectArray` », pour les logs.
 //! - struct `Subgroups` — sous-groupes d'un `SiblingCollapseMulti` en construction (suffixes uniques).
@@ -92,7 +91,7 @@ fn try_unified_fallback(
         ),
         kind: CollapseKind::Single {
             key_col_name: "key".to_string(),
-            key_shape: key_shape_of(&keys),
+            key_shape: classify_key_shape(&keys),
             union_cols: union_of(schemas, &ctx.child_indices),
         },
         absorbed_indices: ctx.child_indices.clone(),
@@ -105,10 +104,6 @@ fn sibling_keys(schemas: &[TableSchema], indices: &[usize]) -> Vec<String> {
         .iter()
         .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
         .collect()
-}
-
-fn key_shape_of(keys: &[String]) -> KeyShape {
-    classify_key_shape(&keys.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 /// Union of the columns of the sibling tables.
@@ -474,7 +469,7 @@ fn build_classic_keyed_pivot_collapse(
     regular: Vec<usize>,
 ) -> Collapse {
     let keys = sibling_keys(schemas, &regular);
-    let key_shape = key_shape_of(&keys);
+    let key_shape = classify_key_shape(&keys);
     let key_col_name = match &key_shape {
         KeyShape::Numeric => "key_id".to_string(),
         KeyShape::IsoLang => "lang_code".to_string(),
@@ -518,7 +513,7 @@ pub(super) fn make_subgroup(
 ) -> SubgroupData {
     let pivot_name = format!("{parent_name}_{suffix}");
     let sub_keys = sibling_keys(schemas, indices);
-    let shape = key_shape_of(&sub_keys);
+    let shape = classify_key_shape(&sub_keys);
     let key_col = if key_is_numeric {
         "key_id"
     } else if shape == KeyShape::IsoLang {

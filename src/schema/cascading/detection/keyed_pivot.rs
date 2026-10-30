@@ -39,12 +39,7 @@ fn resolve_pivot_key_info(
         .iter()
         .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
         .collect();
-    let key_shape = classify_key_shape(
-        &keys
-            .iter()
-            .map(std::string::String::as_str)
-            .collect::<Vec<_>>(),
-    );
+    let key_shape = classify_key_shape(&keys);
     let key_col_name = match &key_shape {
         KeyShape::Numeric => "key_id".to_string(),
         KeyShape::IsoLang => "lang_code".to_string(),
