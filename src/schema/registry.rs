@@ -1673,9 +1673,10 @@ mod tests {
         });
         reg_normal.observe_root("products", make_root(&obj));
         let schemas_normal = reg_normal.finalize();
+        // The grid goes to the `_pivot` companion of products_nutrients (#163).
         let nutrients_normal = schemas_normal
             .iter()
-            .find(|s| s.name == "products_nutrients")
+            .find(|s| s.name == "products_nutrients_pivot")
             .unwrap();
         assert!(
             matches!(
@@ -1695,17 +1696,11 @@ mod tests {
         });
         reg_disabled.observe_root("products", make_root(&obj));
         let schemas_disabled = reg_disabled.finalize();
-        let nutrients_disabled = schemas_disabled
-            .iter()
-            .find(|s| s.name == "products_nutrients")
-            .unwrap();
         assert!(
-            !matches!(
-                nutrients_disabled.inferred_strategy,
-                InferredStrategy::StructuredPivot(_)
-            ),
-            "structured_pivot disabled → no StructuredPivot, got: {:?}",
-            nutrients_disabled.inferred_strategy
+            !schemas_disabled
+                .iter()
+                .any(|s| matches!(s.inferred_strategy, InferredStrategy::StructuredPivot(_))),
+            "structured_pivot disabled → no StructuredPivot table"
         );
     }
 
@@ -1842,25 +1837,45 @@ mod tests {
         let find = |name: &str| schemas.iter().find(|s| s.name == name);
 
         let nut = find("root_nut").expect("identity table keeps the original name");
-        let InferredStrategy::AutoSplit { medium_keys, wide_table_name, .. } = &nut.inferred_strategy
+        let InferredStrategy::AutoSplit {
+            medium_keys,
+            wide_table_name,
+            ..
+        } = &nut.inferred_strategy
         else {
-            panic!("identity must be AutoSplit, got {:?}", nut.inferred_strategy);
+            panic!(
+                "identity must be AutoSplit, got {:?}",
+                nut.inferred_strategy
+            );
         };
         assert_eq!(wide_table_name, "root_nut_pivot");
         let mut grid: Vec<&str> = medium_keys.iter().map(String::as_str).collect();
         grid.sort_unstable();
         assert_eq!(
             grid,
-            ["a", "a_100g", "a_serving", "b", "b_100g", "b_serving", "c", "c_100g", "c_serving"]
+            [
+                "a",
+                "a_100g",
+                "a_serving",
+                "b",
+                "b_100g",
+                "b_serving",
+                "c",
+                "c_100g",
+                "c_serving"
+            ]
         );
-        assert_eq!(data_col_names(nut), ["tags", "brand"]);
+        assert_eq!(data_col_names(nut), ["brand", "tags"]);
         assert_single_array_col(nut, "tags");
 
         let comp = find("root_nut_comp").expect("object child must survive (#163)");
         assert_eq!(comp.parent_table.as_deref(), Some("root_nut"));
 
         let pivot = find("root_nut_pivot").expect("companion");
-        assert!(matches!(pivot.inferred_strategy, InferredStrategy::StructuredPivot(_)));
+        assert!(matches!(
+            pivot.inferred_strategy,
+            InferredStrategy::StructuredPivot(_)
+        ));
         assert_eq!(pivot.parent_table.as_deref(), Some("root_nut"));
         assert_eq!(data_col_names(pivot), ["name", "value", "_100g", "serving"]);
     }
@@ -1892,7 +1907,10 @@ mod tests {
                                "c_100g": 3, "c_unit": "g", "comp": {"k": 1}}});
         reg.observe_root("root", make_root(&v));
         let mut schemas = reg.finalize();
-        assert!(schemas.iter().any(|s| s.name == "root_nut_pivot"), "companion");
+        assert!(
+            schemas.iter().any(|s| s.name == "root_nut_pivot"),
+            "companion"
+        );
         let overrides = std::collections::HashMap::from([(
             "root_nut".to_string(),
             crate::schema::table_schema::UserOverride::Skip,

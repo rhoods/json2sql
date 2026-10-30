@@ -181,14 +181,20 @@ fn widest_type<'a>(trackers: impl Iterator<Item = &'a TypeTracker>) -> PgType {
         .unwrap_or(PgType::Text)
 }
 
-/// Column name of a suffix: the suffix without its leading `_`, as an identifier; `norm_value`
-/// for a `value` suffix, which would clash with the base `value` column.
+/// Column name of a suffix: the suffix without its leading `_`, as an identifier. A suffix that
+/// starts with a digit keeps its `_` (`_100g`, not the opaque `c_100g`). `value` and `name`
+/// would clash with the pivot's own columns: `norm_value`, `norm_name`.
 fn suffix_col_name(suffix: &str) -> String {
-    let s = sanitize_identifier(suffix.trim_start_matches('_'));
-    if s == "value" {
-        "norm_value".to_string()
-    } else {
-        s
+    let bare = suffix.trim_start_matches('_');
+    let s = sanitize_identifier(bare);
+    match s.as_str() {
+        "value" => "norm_value".to_string(),
+        "name" => "norm_name".to_string(),
+        _ if bare.starts_with(|c: char| c.is_ascii_digit()) => {
+            // sanitize_identifier prefixed `c_` to the digit.
+            format!("_{}", s.strip_prefix("c_").unwrap_or(&s))
+        }
+        _ => s,
     }
 }
 
