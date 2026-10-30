@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Pass 2, parcours du JSON et insertion dans PostgreSQL
-verified_at: 0eeb6d6
+verified_at: d84fee2
 files:
   - src/pass2/
   - src/db/copy_sink.rs
@@ -68,6 +68,8 @@ symbols:
   - PgType
   - insert_sibling_collapse_object
   - insert_sibling_collapse_multi
+  - insert_sibling_collapse_array_of_objects
+  - insert_normalize_dynamic_keys
 ---
 
 # Pass 2 : parcours et insertion
@@ -109,7 +111,7 @@ run_pipeline (worker, IHM) ─┴─► run_interruptible
       │          ├─ write_group_rows, write_autosplit_rows
       │          └─ recurse_children : pour chaque champ objet / tableau
       │               ├─ objet  → insert_child_object (répartit selon effective_strategy)
-      │               └─ tableau → insert_array (un insert_object par élément objet)
+      │               └─ tableau → insert_array (un insert_object par élément objet, scalaires → anomalie)
       ├─ run_flusher : COPY FROM STDIN par lots, parents avant enfants au drain final
       └─ COMMIT, VACUUM (ANALYZE), contraintes (PK puis FK)
 ```
@@ -134,8 +136,12 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   clé parente (`is_parent_fk`) ; tout autre nom tombe dans `_ => push_null()`. Une colonne `NOT NULL` le signale au
   `COPY` ; sinon, rien. Les colonnes générées se construisent avec `ColumnSchema::generated` et
   `ColumnSchema::parent_fk`.
-- **Un tableau ne garde que ses éléments objets.** `insert_array` ignore les éléments scalaires d'un tableau d'objets,
-  sans anomalie. Un tableau de scalaires n'y passe pas : c'est une colonne tableau, convertie par `coerce`.
+- **Un tableau d'objets n'a pas de colonne pour ses scalaires.** `insert_array` (et
+  `insert_sibling_collapse_array_of_objects`) écrit une ligne par élément objet. Les éléments scalaires donnent **une
+  anomalie par tableau** (#86), avec le premier comme valeur, sauf en stratégie `Jsonb`, où chacun devient un blob.
+  Exception : si le parent a une colonne tableau pour ce champ (le champ vaut ailleurs un tableau de scalaires),
+  c'est elle qui garde les scalaires, et il n'y a pas d'anomalie. Un tableau de scalaires seul n'y passe pas : c'est
+  une colonne tableau, convertie par `coerce`.
 - **Une valeur qui ne se convertit pas devient `NULL` et une anomalie** (`CoerceResult`), jamais une erreur : le
   `COPY` ne doit pas échouer sur une donnée. Une erreur de `COPY` est donc un bug de schéma ou d'écriture, pas de
   donnée. Chaque ligne compte aussi dans le total de sa table (`inc_total`), dénominateur du taux d'anomalies.
@@ -189,8 +195,8 @@ Vues en écrivant la fiche, pas tranchées.
 2. **Deux styles de contexte.** `insert.rs` passe un `InsertCtx`, `traversal.rs` passe `sinks` et `anomalies`
    séparément. `insert_array`, `insert_jsonb_object` et `insert_routed_object` reçoivent les deux morceaux et
    reconstruisent un `InsertCtx` pour appeler `insert_object` ou `recurse_children`.
-3. **Les pertes silencieuses** (chemin absent de `path_map`, sink absent, élément non objet dans un tableau d'objets)
-   ne laissent aucune trace. Un compteur, ou une anomalie, distinguerait « absorbé exprès » de « perdu ».
+3. **Les pertes silencieuses** (chemin absent de `path_map`, sink absent, valeur scalaire à la place d'un objet dans
+   `insert_sibling_collapse_object` ou `insert_normalize_dynamic_keys`) ne laissent aucune trace. Un compteur, ou une anomalie, distinguerait « absorbé exprès » de « perdu ».
 4. **architecture.md décalé sur `traversal.rs`** : il cite `insert_keyed_pivot_object`, `insert_multi_keyed_pivot`
    et un enum `WideStrategy`, qui n'existent plus (aujourd'hui `insert_sibling_collapse_object`,
    `insert_sibling_collapse_multi` et `InferredStrategy`).

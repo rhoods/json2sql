@@ -419,7 +419,7 @@ fn format_float(f: f64) -> Option<String> {
     }
 }
 
-const fn json_type_name(v: &Value) -> &'static str {
+pub(super) const fn json_type_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
         Value::Bool(_) => "boolean",

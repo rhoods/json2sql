@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Pass 1, lecture du fichier, observation des types et échantillon
-verified_at: 37ac338
+verified_at: d84fee2
 files:
   - src/pass1/
   - src/io/reader.rs
@@ -191,7 +191,7 @@ Le worker de l'IHM (`json2sql-worker`) ne fait jamais de Pass 1 : il reçoit les
   le thread de lecture va jusqu'au bout du fichier avant de rendre l'erreur d'un worker. Exception : un tableau JSON
   coupé entre deux éléments est lu comme une fin normale (#37).
 - **Ce que l'observateur ne voit pas** : un tableau vide (pareil qu'un champ absent) ; les scalaires d'un tableau qui
-  contient aussi des objets (ignorés, sans anomalie).
+  contient aussi des objets (aucun type observé, pas de colonne : la Pass 2 en fait une anomalie, #86).
 - **La Pass 1 ne s'annule pas.** Dans l'IHM, l'annulation fait `abort()` sur une tâche `spawn_blocking`, sans effet
   une fois lancée : la lecture va jusqu'au bout du fichier.
 
