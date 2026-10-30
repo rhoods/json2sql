@@ -532,7 +532,7 @@ fn recurse_children<S: RowSink, A: AnomalyCollect>(
 }
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::disallowed_methods))]
+#[cfg_attr(test, allow(clippy::disallowed_methods, clippy::too_many_lines))]
 mod tests {
     use super::{insert_object, InsertCtx};
     use crate::anomaly::collector::AnomalyCollect;

@@ -1114,7 +1114,7 @@ impl Iterator for JsonReader {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::disallowed_methods))]
+#[cfg_attr(test, allow(clippy::disallowed_methods, clippy::too_many_lines))]
 mod tests {
     use super::*;
     use std::io::Write;

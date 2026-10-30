@@ -223,6 +223,7 @@ pub fn skip_cascade_names(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_lines)]
 mod tests {
     use super::*;
     use json2sql::schema::table_schema::InferredStrategy;

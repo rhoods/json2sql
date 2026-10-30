@@ -57,7 +57,7 @@ pub fn suggest_wide_strategy(entry: &TableEntry) -> InferredStrategy {
         }
         match tracker.to_pg_type() {
             PgType::Text | PgType::VarChar(_) | PgType::Array(_) | PgType::Jsonb => {
-                has_string = true
+                has_string = true;
             }
             PgType::Integer | PgType::BigInt | PgType::DoublePrecision => has_numeric = true,
             PgType::Boolean => has_boolean = true,

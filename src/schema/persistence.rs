@@ -202,7 +202,7 @@ pub fn load(path: &Path) -> Result<SchemaSnapshot> {
 }
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::disallowed_methods))]
+#[cfg_attr(test, allow(clippy::disallowed_methods, clippy::too_many_lines))]
 mod tests {
     use super::*;
     use crate::io::reader::JsonFormat;

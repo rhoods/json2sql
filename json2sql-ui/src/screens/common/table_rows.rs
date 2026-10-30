@@ -274,7 +274,7 @@ pub fn compute_last_child(order: &[usize], schemas: &[TableSchema]) -> Vec<bool>
 }
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::disallowed_methods))]
+#[cfg_attr(test, allow(clippy::disallowed_methods, clippy::too_many_lines))]
 mod tests {
     use super::*;
     use json2sql::schema::table_schema::TableSchema;

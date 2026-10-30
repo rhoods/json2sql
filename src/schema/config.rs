@@ -546,7 +546,7 @@ fn apply_column_type_overrides(
                     table: table_name.to_string(),
                     column: col_name.clone(),
                     type_str: type_str.clone(),
-                })
+                });
             }
             Some(col) => match parse_pg_type(type_str) {
                 None => warnings.push(ConfigWarning::UnknownType {
@@ -913,7 +913,7 @@ fn parse_pg_type(s: &str) -> Option<PgType> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::disallowed_methods))]
+#[cfg_attr(test, allow(clippy::disallowed_methods, clippy::too_many_lines))]
 mod tests {
     use super::*;
 

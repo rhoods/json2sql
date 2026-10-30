@@ -707,7 +707,14 @@ fn family_notes(names: &NameStems, originals: &[&str]) -> Vec<FamilyNote> {
 }
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::disallowed_methods, clippy::cast_precision_loss))]
+#[cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_methods,
+        clippy::cast_precision_loss,
+        clippy::too_many_lines
+    )
+)]
 mod tests {
     use serde_json::{json, Value};
 

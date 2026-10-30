@@ -198,7 +198,7 @@ fn dispatch_child_object<S: RowSink>(
     let eff = child_schema.effective_strategy();
     match &*eff {
         InferredStrategy::Pivot => {
-            insert_pivot_object(sinks, anomalies, child_schema, nested, child_id)?
+            insert_pivot_object(sinks, anomalies, child_schema, nested, child_id)?;
         }
         InferredStrategy::Jsonb => insert_jsonb_object(
             path_map,
@@ -471,7 +471,7 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
                 }
             }
             Value::Array(arr) => {
-                insert_array(path_map, sinks, anomalies, child_schema, arr, row_id)?
+                insert_array(path_map, sinks, anomalies, child_schema, arr, row_id)?;
             }
             _ => {}
         }
@@ -913,7 +913,7 @@ pub(super) fn insert_array<S: RowSink>(
 
 #[cfg(test)]
 #[allow(dead_code)]
-#[cfg_attr(test, allow(clippy::disallowed_methods))]
+#[cfg_attr(test, allow(clippy::disallowed_methods, clippy::too_many_lines))]
 mod tests {
     use std::collections::HashMap;
 
