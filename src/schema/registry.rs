@@ -129,7 +129,8 @@ impl SchemaRegistry {
             self.disabled_strategies.clone(),
             apply_pg_guard,
         );
-        let (schemas, collisions, overflow) = finalizer.run(&self.observer.tables, &mut self.naming);
+        let (schemas, collisions, overflow) =
+            finalizer.run(&self.observer.tables, &mut self.naming);
         self.column_collisions = collisions;
         (schemas, overflow)
     }
@@ -1655,11 +1656,12 @@ mod tests {
 
     #[test]
     fn test_disable_structured_pivot_falls_through_to_pivot_or_jsonb() {
-        // nutrients has 6 cols with suffix patterns _100g / _serving → StructuredPivot normally
+        // nutrients has 9 cols with suffix patterns _100g / _serving over 3 bases → StructuredPivot normally
         let obj = json!({
             "nutrients": {
                 "calories": 100, "calories_100g": 200, "calories_serving": 150,
-                "fat": 5, "fat_100g": 10, "fat_serving": 8
+                "fat": 5, "fat_100g": 10, "fat_serving": 8,
+                "salt": 1, "salt_100g": 2, "salt_serving": 3
             }
         });
 

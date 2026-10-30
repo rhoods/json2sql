@@ -2,21 +2,22 @@
 #![allow(clippy::cast_precision_loss)]
 //!
 //! Given keys like `energy`, `energy_100g`, `energy_unit`, identifies common suffixes
-//! (`_100g`, `_unit`) by frequency across distinct base prefixes, then groups keys by
-//! base to produce a [`SuffixSchema`] that drives the structured pivot table layout.
+//! (`_100g`, `_unit`) shared by enough distinct bases, then assigns every scalar key to one
+//! base to produce a [`SuffixSchema`] and the keys of the grid (#163).
 //!
 //! Fonctions :
 //! - fn `build_suffix_to_bases` — énumère les découpages (base, suffixe) candidats sur `_`.
-//! - fn `collect_base_set` — union de toutes les bases des candidats.
-//! - fn `filter_by_coverage` — ne garde que les suffixes couvrant assez de bases (seuil).
-//! - fn `detect_suffix_schema` — détecte automatiquement la structure de suffixes (algorithme en 5 étapes).
+//! - fn `scalar_keys` — clés scalaires d'une table : ni objet, ni tableau, ni colonne PG array.
+//! - fn `assign_keys` — attribue chaque clé au suffixe le plus long qui la termine.
+//! - fn `detect_suffix_schema` — détecte automatiquement la grille bases × suffixes et ses clés.
+//! - fn `retained_assignment` — attribution des clés aux suffixes qui gardent assez de bases.
 //! - fn `build_suffix_cols_and_value_type` — construit les `SuffixColumn` + type de la colonne `value` de base.
 //! - fn `widest_type` — type le plus large des clés observées (`TEXT` s'il n'y en a pas).
 //! - fn `suffix_col_name` — nom de colonne d'un suffixe (`norm_value` pour `value`).
 //! - fn `build_suffix_column` — construit une `SuffixColumn` (variante explicite, TOML `suffix_columns`).
 //! - fn `build_suffix_schema_from_list` — variante explicite (TOML `suffix_columns`), pas de détection automatique.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use indexmap::IndexMap;
 
@@ -25,28 +26,15 @@ use crate::schema::observer::TableEntry;
 use crate::schema::table_schema::{SuffixColumn, SuffixSchema};
 use crate::schema::type_tracker::{widen_pg_types, PgType, TypeTracker};
 
-/// Minimum number of distinct bases a suffix must appear with to be a candidate.
-const MIN_BASES: usize = 2;
+/// Minimum number of distinct bases a suffix must appear with: two let a pair of dynamic keys
+/// (`en:celery_seed`, `en:mustard_seed`) invent a `_seed` suffix (#163).
+const MIN_BASES: usize = 3;
 
-/// Detect suffix structure in a wide table's columns.
-///
-/// Algorithm:
-/// 1. For every key, enumerate all possible (base, suffix) splits on `_`.
-/// 2. A suffix is candidate if it appears with >= `MIN_BASES` distinct bases.
-/// 3. Determine the base set = all strings that appear as a base in any candidate decomposition.
-/// 4. Compute coverage per suffix = |bases with this suffix| / |total base set|.
-/// 5. Retain suffixes with coverage >= `coverage_threshold`.
-///
-// Phase 1: build suffix → set_of_bases map, splitting only at `_` positions.
+/// Every (base, suffix) split of the keys on `_`, as suffix → set of bases.
 fn build_suffix_to_bases(all_keys: &[&str]) -> HashMap<String, HashSet<String>> {
     let mut suffix_to_bases: HashMap<String, HashSet<String>> = HashMap::new();
     for &key in all_keys {
-        let positions: Vec<usize> = key
-            .char_indices()
-            .filter(|(_, c)| *c == '_')
-            .map(|(i, _)| i)
-            .collect();
-        for &pos in &positions {
+        for (pos, _) in key.char_indices().filter(|(_, c)| *c == '_') {
             let base = &key[..pos];
             let suffix = &key[pos..]; // includes the leading `_`
             if !base.is_empty() && suffix.len() > 1 {
@@ -60,91 +48,123 @@ fn build_suffix_to_bases(all_keys: &[&str]) -> HashMap<String, HashSet<String>> 
     suffix_to_bases
 }
 
-fn collect_base_set(candidates: &[(String, HashSet<String>)]) -> HashSet<String> {
-    candidates
+/// Keys of the table that hold scalars: objects and arrays are child tables or PG array columns,
+/// never part of a grid.
+fn scalar_keys(entry: &TableEntry) -> Vec<&str> {
+    entry
+        .columns
         .iter()
-        .flat_map(|(_, bases)| bases.iter().cloned())
-        .collect()
-}
-
-fn filter_by_coverage(
-    candidates: Vec<(String, HashSet<String>)>,
-    base_set: &HashSet<String>,
-    coverage_threshold: f64,
-) -> Vec<(String, HashSet<String>)> {
-    let total_bases = base_set.len();
-    candidates
-        .into_iter()
-        .filter(|(_, bases)| {
-            let covered = bases.iter().filter(|b| base_set.contains(*b)).count();
-            covered as f64 / total_bases as f64 >= coverage_threshold
+        .filter(|(k, t)| {
+            !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k)
         })
+        .map(|(k, _)| k.as_str())
         .collect()
 }
 
-/// Returns `None` if no structural pattern is found above threshold.
+/// Suffix → keys ending with it, each key under the longest suffix that ends it with a non-empty
+/// base (`fat_prepared_100g` goes to `_prepared_100g`, not `_100g`). Pass 2 matches the same way.
+fn assign_keys<'a>(keys: &[&'a str], suffixes: &[String]) -> BTreeMap<String, Vec<&'a str>> {
+    let mut assigned: BTreeMap<String, Vec<&'a str>> = BTreeMap::new();
+    for &key in keys {
+        let longest = suffixes
+            .iter()
+            .filter(|s| key.len() > s.len() && key.ends_with(s.as_str()))
+            .max_by_key(|s| s.len());
+        if let Some(suffix) = longest {
+            assigned.entry(suffix.clone()).or_default().push(key);
+        }
+    }
+    assigned
+}
+
+/// The grid of a wide table: suffixes shared by at least `MIN_BASES` bases and by at least
+/// `coverage_threshold` of all the bases, with the keys it covers (suffixed keys and bare bases).
+/// The grid must also cover `coverage_threshold` of the table's scalar columns.
+///
+/// Returns `None` if no grid is found above threshold.
 #[must_use]
 pub fn detect_suffix_schema(
     entry: &TableEntry,
     coverage_threshold: f64,
 ) -> Option<(SuffixSchema, HashSet<String>)> {
-    let columns = &entry.columns;
-    let all_keys: Vec<&str> = columns.keys().map(std::string::String::as_str).collect();
-    let key_set: HashSet<&str> = all_keys.iter().copied().collect();
-    let candidates: Vec<(String, HashSet<String>)> = build_suffix_to_bases(&all_keys)
-        .into_iter()
-        .filter(|(_, bases)| bases.len() >= MIN_BASES)
+    let keys = scalar_keys(entry);
+    let assigned = retained_assignment(&keys, coverage_threshold);
+    if assigned.is_empty() {
+        return None;
+    }
+    let bases: HashSet<&str> = assigned
+        .iter()
+        .flat_map(|(s, ks)| ks.iter().map(move |k| &k[..k.len() - s.len()]))
         .collect();
-    let base_set = collect_base_set(&candidates);
-    if base_set.is_empty() {
+    let bare: Vec<&str> = keys.iter().copied().filter(|k| bases.contains(k)).collect();
+    let grid: HashSet<String> = assigned
+        .values()
+        .flatten()
+        .chain(&bare)
+        .map(|k| (*k).to_string())
+        .collect();
+    if (grid.len() as f64 / keys.len() as f64) < coverage_threshold {
         return None;
     }
-    let mut retained = filter_by_coverage(candidates, &base_set, coverage_threshold);
-    if retained.is_empty() {
-        return None;
-    }
-    retained.sort_by(|a, b| a.0.cmp(&b.0));
-    let total_accounted: usize = retained.iter().map(|(_, bases)| bases.len()).sum::<usize>()
-        + base_set
-            .iter()
-            .filter(|b| key_set.contains(b.as_str()))
-            .count();
-    if total_accounted < 2 {
-        return None;
-    }
-    let (suffix_cols, value_type) = build_suffix_cols_and_value_type(&retained, &base_set, columns);
-    let keys = columns.keys().cloned().collect();
-    Some((
-        SuffixSchema {
-            suffix_cols,
-            value_type,
-        },
-        keys,
-    ))
+    let (suffix_cols, value_type) =
+        build_suffix_cols_and_value_type(&assigned, &bare, &entry.columns);
+    let schema = SuffixSchema {
+        suffix_cols,
+        value_type,
+    };
+    Some((schema, grid))
 }
 
-/// Build `SuffixColumn` entries and the base `value` column type from retained suffix groups.
+/// Assignment of the keys to the suffixes that keep `MIN_BASES` bases and `coverage_threshold`
+/// of all the bases. Assigning keys to their longest suffix can leave a shorter one with too few
+/// bases: it is dropped and the keys are assigned again, until nothing changes (the set of
+/// suffixes only shrinks).
+fn retained_assignment<'a>(
+    keys: &[&'a str],
+    coverage_threshold: f64,
+) -> BTreeMap<String, Vec<&'a str>> {
+    let mut suffixes: Vec<String> = build_suffix_to_bases(keys)
+        .into_iter()
+        .filter(|(_, bases)| bases.len() >= MIN_BASES)
+        .map(|(suffix, _)| suffix)
+        .collect();
+    loop {
+        let assigned = assign_keys(keys, &suffixes);
+        let all_bases: HashSet<&str> = assigned
+            .iter()
+            .flat_map(|(s, ks)| ks.iter().map(move |k| &k[..k.len() - s.len()]))
+            .collect();
+        let kept: Vec<String> = assigned
+            .iter()
+            .filter(|(_, ks)| {
+                ks.len() >= MIN_BASES
+                    && ks.len() as f64 / all_bases.len() as f64 >= coverage_threshold
+            })
+            .map(|(s, _)| s.clone())
+            .collect();
+        if kept.len() == suffixes.len() {
+            return assigned;
+        }
+        suffixes = kept;
+    }
+}
+
+/// Build `SuffixColumn` entries (in suffix order) and the base `value` column type, each typed
+/// from the keys assigned to it.
 fn build_suffix_cols_and_value_type(
-    retained: &[(String, HashSet<String>)],
-    base_set: &HashSet<String>,
+    assigned: &BTreeMap<String, Vec<&str>>,
+    bare: &[&str],
     columns: &IndexMap<String, TypeTracker>,
 ) -> (Vec<SuffixColumn>, PgType) {
-    let mut suffix_cols = Vec::new();
-    for (suffix, bases) in retained {
-        let trackers = bases
-            .iter()
-            .filter_map(|base| columns.get(format!("{base}{suffix}").as_str()));
-        suffix_cols.push(SuffixColumn {
+    let suffix_cols = assigned
+        .iter()
+        .map(|(suffix, keys)| SuffixColumn {
             suffix: suffix.clone(),
             col_name: suffix_col_name(suffix),
-            pg_type: widest_type(trackers),
-        });
-    }
-    let value_type = widest_type(
-        base_set
-            .iter()
-            .filter_map(|base| columns.get(base.as_str())),
-    );
+            pg_type: widest_type(keys.iter().filter_map(|k| columns.get(*k))),
+        })
+        .collect();
+    let value_type = widest_type(bare.iter().filter_map(|k| columns.get(*k)));
     (suffix_cols, value_type)
 }
 
@@ -267,8 +287,9 @@ mod tests {
 
     #[test]
     fn two_suffixed_keys_among_thirty_unrelated_ones_are_not_a_grid() {
-        let mut cols: IndexMap<String, TypeTracker> =
-            (0..30).map(|i| (format!("key{i}"), make_text_tracker())).collect();
+        let mut cols: IndexMap<String, TypeTracker> = (0..30)
+            .map(|i| (format!("key{i}"), make_text_tracker()))
+            .collect();
         cols.insert("a_t".to_string(), make_float_tracker());
         cols.insert("b_t".to_string(), make_float_tracker());
         assert!(detect_suffix_schema(&entry_of(cols), 0.3).is_none());
@@ -297,7 +318,11 @@ mod tests {
         }
         let (schema, keys) = detect_suffix_schema(&entry_of(cols), 0.3).expect("grid");
         let type_of = |suffix: &str| {
-            schema.suffix_cols.iter().find(|c| c.suffix == suffix).map(|c| c.pg_type.clone())
+            schema
+                .suffix_cols
+                .iter()
+                .find(|c| c.suffix == suffix)
+                .map(|c| c.pg_type.clone())
         };
         // `fat_prepared_100g` (text) counted under `_100g` would widen it to text.
         assert_eq!(type_of("_100g"), Some(PgType::DoublePrecision));
@@ -314,9 +339,15 @@ mod tests {
         cols.insert("d_100g".to_string(), make_float_tracker());
         let mut entry = entry_of(cols);
         // A field seen both as a scalar and as an array is a PG array column (#86).
-        entry.array_columns.insert("d_100g".to_string(), make_float_tracker());
+        entry
+            .array_columns
+            .insert("d_100g".to_string(), make_float_tracker());
         let (schema, keys) = detect_suffix_schema(&entry, 0.3).expect("grid");
-        let suffixes: Vec<&str> = schema.suffix_cols.iter().map(|c| c.suffix.as_str()).collect();
+        let suffixes: Vec<&str> = schema
+            .suffix_cols
+            .iter()
+            .map(|c| c.suffix.as_str())
+            .collect();
         assert_eq!(suffixes, ["_100g"]);
         let mut keys: Vec<String> = keys.into_iter().collect();
         keys.sort();
@@ -335,47 +366,6 @@ mod tests {
         let mut t = TypeTracker::new(256);
         t.observe(&serde_json::Value::String("g".to_string()));
         t
-    }
-
-    #[test]
-    fn test_filter_by_coverage_keeps_high_coverage() {
-        let base_set: HashSet<String> = ["a", "b", "c"]
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect();
-        let candidates = vec![
-            (
-                "_unit".to_string(),
-                HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()]),
-            ),
-            ("_rare".to_string(), HashSet::from(["a".to_string()])),
-        ];
-        let retained = filter_by_coverage(candidates, &base_set, 0.5);
-        let names: Vec<&str> = retained.iter().map(|(s, _)| s.as_str()).collect();
-        assert!(
-            names.contains(&"_unit"),
-            "_unit covers 3/3 = 100% — must be retained"
-        );
-        assert!(
-            !names.contains(&"_rare"),
-            "_rare covers 1/3 = 33% — must be filtered out"
-        );
-    }
-
-    #[test]
-    fn test_collect_base_set_unions_all_bases() {
-        let candidates = vec![
-            (
-                "_a".to_string(),
-                HashSet::from(["x".to_string(), "y".to_string()]),
-            ),
-            (
-                "_b".to_string(),
-                HashSet::from(["y".to_string(), "z".to_string()]),
-            ),
-        ];
-        let base_set = collect_base_set(&candidates);
-        assert_eq!(base_set.len(), 3, "x, y, z must all be in the base set");
     }
 
     #[test]

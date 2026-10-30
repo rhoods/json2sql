@@ -418,10 +418,10 @@ async fn test_null_patterns() {
 // Fixture : 3 produits avec `nutrients` contenant des clés à suffixes communs
 // (_100g, _serving). Après apply_structured_pivot_columns :
 //   - products_nutrients a : name TEXT, value INT, per_100g INT, per_serving INT
-//   - Widget  → 2 lignes (calories, fat) — per_serving rempli pour les deux
+//   - Widget  → 3 lignes (calories, fat, salt) — per_serving rempli pour les trois
 //   - Gadget  → 2 lignes (calories, fat) — per_serving NULL
 //   - Doohickey → 1 ligne (calories seulement)
-//   Total : 5 lignes
+//   Total : 6 lignes
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_structured_pivot_strategy() {
@@ -512,13 +512,13 @@ async fn test_structured_pivot_strategy() {
         .await
         .unwrap();
 
-        // Widget:2 + Gadget:2 + Doohickey:1 = 5 lignes
+        // Widget:3 + Gadget:2 + Doohickey:1 = 6 lignes
         assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
-        assert_eq!(*p2.rows_per_table.get("products_nutrients").unwrap(), 5);
+        assert_eq!(*p2.rows_per_table.get("products_nutrients").unwrap(), 6);
         assert_eq!(common::row_count(&client, &schema, "products").await, 3);
         assert_eq!(
             common::row_count(&client, &schema, "products_nutrients").await,
-            5
+            6
         );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
@@ -1531,8 +1531,8 @@ fn test_disable_pivot_gives_jsonb_integration() {
 }
 
 // disable structured_pivot → suffix detection skippée → fallback suggest_wide_strategy.
-// Fixture : nutrients avec 6 colonnes numériques à pattern _100g/_serving.
-// wide_column_threshold=4 : 6 colonnes > 4 → wide detection active.
+// Fixture : nutrients avec 9 colonnes numériques à pattern _100g/_serving (3 bases).
+// wide_column_threshold=4 : 9 colonnes > 4 → wide detection active.
 // Activé : StructuredPivot. Désactivé : Pivot (all-numeric fallback).
 #[test]
 fn test_disable_structured_pivot_gives_pivot_integration() {
