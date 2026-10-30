@@ -33,7 +33,8 @@
 //! - struct `SkipCascadeWarning` — table retirée par `Skip` ayant entraîné de vrais enfants en cascade.
 //! - fn `apply_user_overrides` — applique les overrides IHM (`Pivot`/`Jsonb`/`Skip`) après chargement
 //!   d'un snapshot ; `Skip` retire aussi la table `_wide` compagnon d'un `AutoSplit` et tout vrai
-//!   enfant cascadant depuis l'un ou l'autre, à toute profondeur.
+//!   enfant cascadant depuis l'un ou l'autre, à toute profondeur ; retire enfin les tables enfants
+//!   absorbées (`exclude_absorbed_children`), comme le chemin TOML (#130).
 //! - fn `apply_single_user_override` — dispatch `Pivot`/`Jsonb`/`Columns` pour une seule table.
 //! - fn `wide_companions_of_skipped` — compagnons `_wide` des tables `AutoSplit` skip-ées.
 //! - fn `close_over_real_children` — fermeture transitive d'un ensemble de tables sur leurs
@@ -706,7 +707,9 @@ pub struct SkipCascadeWarning {
 /// Called by the CLI after loading a snapshot that includes `strategy_overrides`.
 /// `Skip` removes the table — and if it had `AutoSplit`, also removes the companion
 /// `_wide` table, along with any real children cascading transitively from either
-/// (see [`SkipCascadeWarning`]). `Pivot` and `Jsonb` mutate `inferred_strategy` in place.
+/// (see [`SkipCascadeWarning`]). `Pivot` and `Jsonb` rebuild the columns and set `ui_override`
+/// (`inferred_strategy` is left as it was); the child tables they absorb are then removed, as the
+/// TOML path does in [`apply_overrides_complete`] (#130).
 pub fn apply_user_overrides(
     schemas: &mut Vec<TableSchema>,
     overrides: &HashMap<String, UserOverride>,
@@ -722,6 +725,7 @@ pub fn apply_user_overrides(
 
     let (removed, warnings) = compute_skip_cascade(schemas, overrides);
     schemas.retain(|s| !removed.contains(&s.name));
+    crate::schema::finalizer::exclude_absorbed_children(schemas);
     prune_missing_groups(schemas);
     warnings
 }
@@ -2387,6 +2391,30 @@ mod tests {
             ],
             "warnings must be sorted by removed_table regardless of HashMap/schemas insertion order"
         );
+    }
+
+    /// #130: like the TOML path, an IHM Jsonb/Pivot parent absorbs its children, at any depth.
+    #[test]
+    fn apply_user_overrides_jsonb_or_pivot_excludes_absorbed_children() {
+        for ov in [UserOverride::Jsonb, UserOverride::Pivot] {
+            let root = simple_table("root");
+            let mut addr = simple_table("root_addr");
+            addr.parent_table = Some("root".to_string());
+            let mut geo = simple_table("root_addr_geo");
+            geo.parent_table = Some("root_addr".to_string());
+            let other = simple_table("other");
+            let mut schemas = vec![root, addr, geo, other];
+            let overrides = HashMap::from([("root".to_string(), ov.clone())]);
+
+            apply_user_overrides(&mut schemas, &overrides);
+
+            let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+            assert_eq!(
+                names,
+                vec!["root", "other"],
+                "{ov:?}: absorbed children must go"
+            );
+        }
     }
 
     #[test]

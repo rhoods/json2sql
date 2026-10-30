@@ -26,8 +26,8 @@ pub use progress::{progress_pct, ProgressBar};
 
 mod overrides;
 pub use overrides::{
-    build_effective_schemas, display_schemas, group_preview, skip_cascade_names, splittable_tables,
-    GroupPreview, PreviewGroup,
+    absorbed_names, build_effective_schemas, display_schemas, group_preview, skip_cascade_names,
+    splittable_tables, GroupPreview, PreviewGroup,
 };
 
 mod table_rows;

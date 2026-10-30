@@ -338,8 +338,6 @@ pub struct SchemaState {
     pub pass1_stats: Vec<ColumnStats>,
     /// True when schemas were loaded from a saved snapshot rather than a live Pass 1 run.
     pub schema_snapshot_loaded: bool,
-    /// Tables absorbed by a manual sibling merge — hidden from the table list.
-    pub absorbed_names: HashSet<String>,
     /// Warnings from TOML config overrides (unknown table, column, type, strategy).
     pub config_warnings: Vec<ConfigWarning>,
     /// JSON format detected during Pass 1, or loaded from snapshot. Used to skip
@@ -362,7 +360,6 @@ impl Default for SchemaState {
             column_collisions: Vec::new(),
             pass1_stats: Vec::new(),
             schema_snapshot_loaded: false,
-            absorbed_names: HashSet::new(),
             config_warnings: Vec::new(),
             detected_format: None,
         }
@@ -383,7 +380,6 @@ impl SchemaState {
         self.selected_table_indices = HashSet::from([0]);
         self.last_selected_idx = 0;
         self.schema_snapshot_loaded = false;
-        self.absorbed_names = HashSet::new();
         self.config_warnings = Vec::new();
         self.detected_format = None;
     }

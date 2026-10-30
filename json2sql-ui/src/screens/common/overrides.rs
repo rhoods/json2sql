@@ -11,6 +11,8 @@
 //! - fn `not_splittable` — raison pour laquelle une table du schéma effectif ne peut pas être découpée, s'il y en a une.
 //! - fn `skip_cascade_names` — noms des vrais enfants retirés par cascade d'un `Skip` (#47),
 //!   pour affichage (badges, récapitulatif) sans muter les schémas.
+//! - fn `absorbed_names` — noms des tables enfants absorbées par un parent Pivot/Jsonb (#130) :
+//!   absentes du schéma effectif sans être retirées par un `Skip`.
 use json2sql::schema::grouping::auto::{apply_name_groups, name_proposals};
 use json2sql::schema::grouping::proposal::{Status, TableProposal};
 use json2sql::schema::grouping::sample::StoredSample;
@@ -188,7 +190,7 @@ pub fn group_preview(
 /// `Columns` or `AutoSplit`, too few data columns, already split or a group table.
 fn not_splittable(effective: &[TableSchema], table: &str) -> Option<String> {
     let Some(target) = effective.iter().find(|s| s.name == table) else {
-        return Some("the table is skipped: it is not imported".to_string());
+        return Some("the table is not imported: skipped, or absorbed by its parent".to_string());
     };
     if !target.takes_column_groups() {
         let strategy = format!("{:?}", *target.effective_strategy());
@@ -224,6 +226,21 @@ pub fn skip_cascade_names(
     warnings
         .into_iter()
         .flat_map(|w| w.cascaded_children)
+        .collect()
+}
+
+/// Names of the child tables that an override of their parent (`Pivot`, `Jsonb`) absorbs (#130): gone from the
+/// effective schema without a `Skip` removing them. A pure query, like [`skip_cascade_names`].
+pub fn absorbed_names(
+    schemas: &[TableSchema],
+    strategy_overrides: &HashMap<String, UserOverride>,
+) -> HashSet<String> {
+    let effective = build_effective_schemas(schemas, strategy_overrides, &BTreeSet::new(), &[]);
+    let (skipped, _) = json2sql::schema::config::compute_skip_cascade(schemas, strategy_overrides);
+    schemas
+        .iter()
+        .filter(|t| !skipped.contains(&t.name) && !effective.iter().any(|e| e.name == t.name))
+        .map(|t| t.name.clone())
         .collect()
 }
 
@@ -517,5 +534,24 @@ mod tests {
             names.is_empty(),
             "a plain Skip with no real children cascades nothing"
         );
+    }
+
+    /// #130: the children of a Jsonb parent are absorbed; those of a Skip-ed table are not (they are cascaded).
+    #[test]
+    fn absorbed_names_lists_children_of_a_jsonb_parent_only() {
+        let schemas = vec![
+            make_table("a", None),
+            make_table("a_child", Some("a")),
+            make_table("b", None),
+            make_table("b_child", Some("b")),
+        ];
+        let overrides = HashMap::from([
+            ("a".to_string(), UserOverride::Jsonb),
+            ("b".to_string(), UserOverride::Skip),
+        ]);
+
+        let names = absorbed_names(&schemas, &overrides);
+
+        assert_eq!(names, HashSet::from(["a_child".to_string()]));
     }
 }

@@ -126,7 +126,8 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
         .copied()
         .filter(|&i| i < schemas.len())
         .collect();
-    let absorbed_names = state.read().schema.absorbed_names.clone();
+    // Children absorbed by a Pivot/Jsonb parent: not imported, badged "merged" (#130).
+    let absorbed_names = crate::screens::absorbed_names(&originals, &overrides_snap);
 
     let overflow_names: std::collections::HashSet<String> = overflow_warnings
         .iter()
