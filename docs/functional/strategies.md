@@ -177,8 +177,11 @@ CREATE TABLE products_nutrients (
 );
 ```
 
+Si l'objet contient aussi un tableau, la stratégie n'est pas appliquée : un avertissement le dit, et l'objet passe en
+`pivot` ou en `jsonb`, qui gardent le tableau.
+
 Les suffixes peuvent aussi être donnés dans le TOML : `strategy = "structured_pivot"` et
-`suffix_columns = ["_100g", "_serving"]`.
+`suffix_columns = ["_100g", "_serving"]`. Ce choix forcé écarte les tableaux de l'objet, avec un avertissement.
 
 ---
 

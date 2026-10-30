@@ -16,6 +16,8 @@
 //!   stratégie (Pivot/Jsonb/`StructuredPivot` appliqués ici ; les autres le sont ailleurs).
 //! - fn `apply_pivot_columns` — colonnes `(key, value)` avec type élargi.
 //! - fn `apply_structured_pivot_columns` — colonnes `(name, value, <suffixes>)`.
+//! - fn `array_column_names` — noms des colonnes PG array d'une table, séparés par des virgules.
+//! - fn `warn_dropped_arrays` — avertit des colonnes PG array qu'écarte `StructuredPivot` (#85).
 //! - fn `widen_union_type` — `widen_pg_types` où un côté pg-array l'emporte (`Array(widen(elem, scalaire))`, #61).
 //! - fn `build_union_columns` — union des colonnes de données de plusieurs tables enfants (types élargis).
 //! - fn `classify_key_shape` — classe un ensemble de clés (Numeric/`IsoLang`/Mixed/Slug).
@@ -150,6 +152,7 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: InferredS
 /// Restructure a wide table's columns for `StructuredPivot`:
 /// (`j2s_id`, `j2s_parent_id`, name TEXT, value <type>, <`suffix_col`>...)
 pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: SuffixSchema) {
+    warn_dropped_arrays(schema);
     schema.columns.retain(|c| c.is_generated);
     schema.columns.push(ColumnSchema {
         name: "name".to_string(),
@@ -179,6 +182,29 @@ pub fn apply_structured_pivot_columns(schema: &mut TableSchema, suffix_schema: S
         });
     }
     schema.inferred_strategy = InferredStrategy::StructuredPivot(suffix_schema);
+}
+
+/// Comma-separated names of the PG array data columns of `schema`, empty when it has none.
+#[must_use]
+pub fn array_column_names(schema: &TableSchema) -> String {
+    let names: Vec<&str> = schema
+        .data_columns()
+        .filter(|c| matches!(c.pg_type, PgType::Array(_)))
+        .map(|c| c.original_name.as_str())
+        .collect();
+    names.join(", ")
+}
+
+/// `StructuredPivot` rows have no place for array columns: name them on stderr so the drop is
+/// never silent. Only a forced `suffix_columns` override gets here with arrays (#85).
+fn warn_dropped_arrays(schema: &TableSchema) {
+    let arrays = array_column_names(schema);
+    if !arrays.is_empty() {
+        eprintln!(
+            "  WARNING: StructuredPivot on '{}' drops its array column(s) {arrays}: they are NOT imported",
+            schema.name
+        );
+    }
 }
 
 /// Like `widen_pg_types`, but a pg-array side wins: sibling tables mixing a scalar and an

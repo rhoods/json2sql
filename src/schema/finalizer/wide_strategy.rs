@@ -8,6 +8,8 @@
 //!   ratio de colonnes stables.
 //! - fn `apply_non_autosplit_strategy` — branche `StructuredPivot`, Jsonb, ou le split
 //!   identité/compagnon (Pivot).
+//! - fn `steps_aside_for_arrays` — écarte `StructuredPivot` (avec avertissement) d'une table qui a
+//!   une colonne PG array (#85).
 //! - fn `apply_pivot_split` — split identité/compagnon à rétention zéro (toutes les clés
 //!   migrent vers le compagnon `_pivot`), déclenché quand `apply_non_autosplit_strategy`
 //!   choisirait Pivot — que la table soit `Object`- ou `ObjectArray`-parent.
@@ -36,7 +38,8 @@ use super::super::suffix_detector::detect_suffix_schema;
 use super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
 use super::super::type_tracker::{widen_pg_types, PgType};
 use super::super::wide_strategies::{
-    apply_structured_pivot_columns, apply_wide_strategy_columns, suggest_wide_strategy,
+    apply_structured_pivot_columns, apply_wide_strategy_columns, array_column_names,
+    suggest_wide_strategy,
 };
 use super::base::is_scalar_column;
 use super::SchemaFinalizer;
@@ -205,6 +208,7 @@ fn apply_non_autosplit_strategy(
     } else {
         detect_suffix_schema(&entry.columns, SUFFIX_MIN_COVERAGE, config.text_threshold)
     };
+    let suffix_schema = suffix_schema.filter(|_| !steps_aside_for_arrays(schema));
     if let Some(suffix_schema) = suffix_schema {
         let n = suffix_schema.suffix_cols.len();
         stats.log(&schema.name, &format!("StructuredPivot ({n} suffixes)"));
@@ -225,6 +229,19 @@ fn apply_non_autosplit_strategy(
     stats.log(&schema.name, &format!("{strategy:?}"));
     apply_wide_strategy_columns(schema, strategy);
     None
+}
+
+/// `StructuredPivot` rows have no place for array columns: rather than drop them, the table
+/// falls back to Pivot/Jsonb, which keep them, with a warning (#85).
+fn steps_aside_for_arrays(schema: &TableSchema) -> bool {
+    let arrays = array_column_names(schema);
+    if !arrays.is_empty() {
+        eprintln!(
+            "  WARNING: '{}' has array column(s) {arrays}: StructuredPivot not applied, falling back to keep them",
+            schema.name
+        );
+    }
+    !arrays.is_empty()
 }
 
 /// Split a table that would otherwise be flat-Pivoted into an identity table (zero data

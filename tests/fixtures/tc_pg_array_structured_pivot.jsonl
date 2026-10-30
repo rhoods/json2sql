@@ -1,0 +1,2 @@
+{"id": 1, "nutrients": {"a_100g": 1, "a_serving": 2, "b_100g": 3, "b_serving": 4, "c_100g": 5, "c_serving": 6, "tags": ["x", "y"]}}
+{"id": 2, "nutrients": {"a_100g": 7, "a_serving": 8, "b_100g": 9, "b_serving": 1, "c_100g": 2, "c_serving": 3, "tags": ["z"]}}

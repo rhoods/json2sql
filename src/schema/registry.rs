@@ -1820,6 +1820,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pg_array_structured_pivot_keeps_array_columns() {
+        // issue #85 — suffix-shaped wide object + array: StructuredPivot would drop `tags`, so the
+        // table falls back to the identity/companion split, which keeps it on the identity table.
+        let mut reg = pg_array_reg(3);
+        for v in [
+            json!({"nutrients": {"a_100g": 1, "a_serving": 2, "b_100g": 3, "b_serving": 4, "c_100g": 5, "c_serving": 6, "tags": ["x", "y"]}}),
+            json!({"nutrients": {"a_100g": 7, "a_serving": 8, "b_100g": 9, "b_serving": 1, "c_100g": 2, "c_serving": 3, "tags": ["z"]}}),
+        ] {
+            reg.observe_root("item", make_root(&v));
+        }
+        let schemas = reg.finalize();
+        let nutrients = schemas.iter().find(|s| s.name == "item_nutrients").unwrap();
+        assert!(
+            !matches!(
+                nutrients.inferred_strategy,
+                InferredStrategy::StructuredPivot(_)
+            ),
+            "a table with array columns must not take StructuredPivot"
+        );
+        assert_single_array_col(nutrients, "tags");
+    }
+
     // ── issue #84 : la décision « table large » ne juge que les colonnes scalaires ──
     // Thresholds 10 (IHM) and 15 (CLI), 40 rows (below 10 rows the "high stable ratio → Columns"
     // branch is skipped). Column names have no `_`, so no StructuredPivot suffix is ever detected.

@@ -120,6 +120,24 @@ async fn test_pg_array_pivot_split_keeps_arrays_e2e() {
     .await;
 }
 
+/// Issue #85 — wide object with suffix keys and an array: no `StructuredPivot` (it would drop the
+/// array), the split keeps the pg-array field on the identity table.
+#[tokio::test]
+async fn test_pg_array_structured_pivot_keeps_arrays_e2e() {
+    integration::with_pg_container(|client, schema, url| async move {
+        let result = run_pipeline(base_config(url, schema.clone(), "tc_pg_array_structured_pivot.jsonl", 3)).await;
+        assert!(result.is_ok(), "pg_array_structured_pivot pipeline failed: {result:?}");
+
+        let sql = format!(
+            "SELECT array_to_string(n.\"tags\", ',') FROM \"{schema}\".\"products_nutrients\" n \
+             JOIN \"{schema}\".\"products\" p ON n.\"j2s_products_id\" = p.\"j2s_id\" ORDER BY p.\"id\""
+        );
+        let tags: Vec<String> = client.query(&sql, &[]).await.unwrap().iter().map(|r| r.get(0)).collect();
+        assert_eq!(tags, vec!["x,y", "z"]);
+    })
+    .await;
+}
+
 /// Issue #61 — `SiblingCollapse` where a field is scalar in some siblings and a pg array in
 /// another: the union column stays an array (scalars wrapped as `{x}`) instead of TEXT + NULLs.
 #[tokio::test]

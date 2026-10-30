@@ -112,7 +112,7 @@ Les colonnes tableau ne sont ni médiums ni rares : elles restent dans la table 
 
 Pour les tables larges non-racines dont les colonnes suivent un pattern `{base}_{suffixe}` (ex. `calcium_100g`, `calcium_unit`, `calcium_serving`), un pivot structuré est auto-détecté.
 
-> ⚠️ **Limite connue.** Une table qui prend cette stratégie ne conserve pas ses colonnes tableau : elles disparaissent du schéma et des données. Sur OpenFoodFacts complet (70 Go), `nutriscore_2023_data` en était victime avant #84 (37 colonnes dont 2 tableaux, 3 tables filles perdues) ; elle y échappe désormais parce que les colonnes tableau ne comptent plus dans le ratio de stabilité (51 % au lieu de 49 %, seuil à 50 %). La décision reste fragile : #85.
+Une ligne de pivot structuré n'a pas de place pour une colonne tableau. Une table qui a une colonne PG array ne prend donc pas cette stratégie : un `WARNING` nomme ses colonnes tableau et la table retombe sur le split Pivot (§ 8, l'identité garde les tableaux) ou sur `Jsonb` (le tableau reste dans le blob) (#85). Seul l'override TOML ci-dessous force la stratégie malgré tout : un `WARNING` nomme alors les colonnes tableau, qui ne sont pas importées.
 
 ### Algorithme
 
