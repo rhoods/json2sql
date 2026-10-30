@@ -1818,10 +1818,56 @@ mod tests {
         );
     }
 
+    /// Data column names of `schema`, in order.
+    fn data_col_names(schema: &crate::schema::table_schema::TableSchema) -> Vec<&str> {
+        schema.data_columns().map(|c| c.name.as_str()).collect()
+    }
+
     #[test]
-    fn pg_array_structured_pivot_keeps_array_columns() {
-        // issue #85 — suffix-shaped wide object + array: StructuredPivot would drop `tags`, so the
-        // table falls back to the identity/companion split, which keeps it on the identity table.
+    fn structured_pivot_moves_only_the_grid_to_a_companion() {
+        // issue #163 — the grid goes to `root_nut_pivot`; the object child `comp`, the array
+        // `tags` and the scalar `brand` stay with `root_nut`, which keeps its name.
+        let mut reg = pg_array_reg(3);
+        for v in [
+            json!({"nut": {"a": 1, "a_100g": 1, "a_serving": 2, "b": 2, "b_100g": 3, "b_serving": 4,
+                           "c": 3, "c_100g": 5, "c_serving": 6, "comp": {"k": 1, "l": 2},
+                           "tags": ["x", "y"], "brand": "acme"}}),
+            json!({"nut": {"a": 4, "a_100g": 7, "a_serving": 8, "b": 5, "b_100g": 9, "b_serving": 1,
+                           "c": 6, "c_100g": 2, "c_serving": 3, "comp": {"k": 3, "l": 4},
+                           "tags": ["z"], "brand": "zeta"}}),
+        ] {
+            reg.observe_root("root", make_root(&v));
+        }
+        let schemas = reg.finalize();
+        let find = |name: &str| schemas.iter().find(|s| s.name == name);
+
+        let nut = find("root_nut").expect("identity table keeps the original name");
+        let InferredStrategy::AutoSplit { medium_keys, wide_table_name, .. } = &nut.inferred_strategy
+        else {
+            panic!("identity must be AutoSplit, got {:?}", nut.inferred_strategy);
+        };
+        assert_eq!(wide_table_name, "root_nut_pivot");
+        let mut grid: Vec<&str> = medium_keys.iter().map(String::as_str).collect();
+        grid.sort_unstable();
+        assert_eq!(
+            grid,
+            ["a", "a_100g", "a_serving", "b", "b_100g", "b_serving", "c", "c_100g", "c_serving"]
+        );
+        assert_eq!(data_col_names(nut), ["tags", "brand"]);
+        assert_single_array_col(nut, "tags");
+
+        let comp = find("root_nut_comp").expect("object child must survive (#163)");
+        assert_eq!(comp.parent_table.as_deref(), Some("root_nut"));
+
+        let pivot = find("root_nut_pivot").expect("companion");
+        assert!(matches!(pivot.inferred_strategy, InferredStrategy::StructuredPivot(_)));
+        assert_eq!(pivot.parent_table.as_deref(), Some("root_nut"));
+        assert_eq!(data_col_names(pivot), ["name", "value", "_100g", "serving"]);
+    }
+
+    #[test]
+    fn structured_pivot_companion_has_no_value_column_without_bare_keys() {
+        // issue #85 — the array stays on the identity table; no bare `a`/`b`/`c` key → no `value`.
         let mut reg = pg_array_reg(3);
         for v in [
             json!({"nutrients": {"a_100g": 1, "a_serving": 2, "b_100g": 3, "b_serving": 4, "c_100g": 5, "c_serving": 6, "tags": ["x", "y"]}}),
@@ -1831,14 +1877,29 @@ mod tests {
         }
         let schemas = reg.finalize();
         let nutrients = schemas.iter().find(|s| s.name == "item_nutrients").unwrap();
-        assert!(
-            !matches!(
-                nutrients.inferred_strategy,
-                InferredStrategy::StructuredPivot(_)
-            ),
-            "a table with array columns must not take StructuredPivot"
-        );
         assert_single_array_col(nutrients, "tags");
+        let pivot = schemas
+            .iter()
+            .find(|s| s.name == "item_nutrients_pivot")
+            .expect("companion");
+        assert_eq!(data_col_names(pivot), ["name", "_100g", "serving"]);
+    }
+
+    #[test]
+    fn skipping_a_structured_pivot_identity_removes_its_companion_and_children() {
+        let mut reg = pg_array_reg(3);
+        let v = json!({"nut": {"a_100g": 1, "a_unit": "g", "b_100g": 2, "b_unit": "g",
+                               "c_100g": 3, "c_unit": "g", "comp": {"k": 1}}});
+        reg.observe_root("root", make_root(&v));
+        let mut schemas = reg.finalize();
+        assert!(schemas.iter().any(|s| s.name == "root_nut_pivot"), "companion");
+        let overrides = std::collections::HashMap::from([(
+            "root_nut".to_string(),
+            crate::schema::table_schema::UserOverride::Skip,
+        )]);
+        crate::schema::config::apply_user_overrides(&mut schemas, &overrides);
+        let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["root"]);
     }
 
     // ── issue #84 : la décision « table large » ne juge que les colonnes scalaires ──

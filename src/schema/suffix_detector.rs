@@ -286,6 +286,17 @@ mod tests {
     }
 
     #[test]
+    fn suffix_columns_are_named_after_the_json_suffix() {
+        // `100g` can't start an unquoted identifier: keep the `_` rather than the opaque `c_100g`.
+        assert_eq!(suffix_col_name("_100g"), "_100g");
+        assert_eq!(suffix_col_name("_100"), "_100");
+        assert_eq!(suffix_col_name("_unit"), "unit");
+        // Reserved by the pivot's own `name` / `value` columns.
+        assert_eq!(suffix_col_name("_value"), "norm_value");
+        assert_eq!(suffix_col_name("_name"), "norm_name");
+    }
+
+    #[test]
     fn two_suffixed_keys_among_thirty_unrelated_ones_are_not_a_grid() {
         let mut cols: IndexMap<String, TypeTracker> = (0..30)
             .map(|i| (format!("key{i}"), make_text_tracker()))
