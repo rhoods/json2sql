@@ -28,6 +28,8 @@
 //! - fn `apply_group_overrides` — applique les groupes de fusion (`[group.*]`, stratégie `keyed_pivot`).
 //! - fn `build_merged_keyed_pivot_schema` — construit le schéma fusionné (colonnes union + clé `key_id`).
 //! - fn `apply_keyed_pivot_merge` — fusionne N tables membres en une seule `SiblingCollapse`.
+//! - fn `already_overridden` — une table qui a déjà un override (IHM, ou TOML gardé par le snapshot) ignore
+//!   `strategy`/`suffix_columns` : sans bruit si c'est le même, avec `AlreadyOverridden` sinon (#129).
 //! - fn `rebuilds_columns` — vrai si les overrides d'une table reconstruisent ou déplacent ses colonnes (`pivot`, `jsonb`, `normalize_dynamic_keys`, `flatten`, `suffix_columns`).
 //! - fn `apply_overrides_complete` — enchaîne overrides + groupes de fusion + groupes de colonnes + `exclude_absorbed_children`.
 //! - struct `SkipCascadeWarning` — table retirée par `Skip` ayant entraîné de vrais enfants en cascade.
@@ -36,6 +38,8 @@
 //!   enfant cascadant depuis l'un ou l'autre, à toute profondeur ; retire enfin les tables enfants
 //!   absorbées (`exclude_absorbed_children`), comme le chemin TOML (#130).
 //! - fn `apply_single_user_override` — dispatch `Pivot`/`Jsonb`/`Columns` pour une seule table.
+//! - fn `kept_toml_rebuild` — garde l'override TOML d'un run précédent qui a déjà reconstruit les colonnes,
+//!   contre un `Pivot`/`Columns` de l'IHM (#129).
 //! - fn `wide_companions_of_skipped` — compagnons `_wide` des tables `AutoSplit` skip-ées.
 //! - fn `close_over_real_children` — fermeture transitive d'un ensemble de tables sur leurs
 //!   vrais enfants (`parent_table`), en une passe (schémas triés topologiquement).
@@ -202,6 +206,13 @@ pub enum ConfigWarning {
         group: String,
         name: String,
     },
+    /// The table already has an override (`by`, from the IHM or an earlier run of the TOML) that rebuilt its
+    /// columns: the TOML key `ignored` would rebuild them again from the result (#129), it is ignored.
+    AlreadyOverridden {
+        table: String,
+        by: String,
+        ignored: String,
+    },
     /// The table's effective strategy is not `Columns` or `AutoSplit` (#78): its groups are ignored.
     ColumnGroupParentStrategy {
         table: String,
@@ -249,6 +260,8 @@ impl ConfigWarning {
                 format!("schema-config: group '{group}' of '{table}' has {found} column(s), at least {minimum} are needed, group ignored"),
             Self::ColumnGroupNameTaken { table, group, name } =>
                 format!("schema-config: group '{group}' of '{table}' would be the table '{name}', which already exists, group ignored"),
+            Self::AlreadyOverridden { table, by, ignored } =>
+                format!("schema-config: table '{table}' already has the {by} override, its columns are rebuilt — ignoring {ignored}"),
             Self::ColumnGroupParentStrategy { table, strategy } =>
                 format!("schema-config: table '{table}' is {strategy}: only Columns and AutoSplit tables can be split, its column groups are ignored"),
             Self::ColumnGroupEmptiesParent { table } =>
@@ -281,11 +294,23 @@ pub fn apply_overrides(
     let mut deferred_flatten: Vec<DeferredFlatten> = Vec::new();
 
     for (table_name, col_overrides) in &config.tables {
-        if rebuilds_columns(col_overrides) {
+        let already = schemas
+            .iter()
+            .find(|s| &s.name == table_name)
+            .and_then(|s| already_overridden(s, table_name, col_overrides));
+        if already.is_none() && rebuilds_columns(col_overrides) {
             dissolve_column_groups(schemas, table_name);
         }
         match schemas.iter_mut().find(|s| &s.name == table_name) {
             None => warnings.push(ConfigWarning::UnknownTable(table_name.clone())),
+            Some(schema) if already.is_some() => {
+                warnings.extend(already.into_iter().flatten());
+                warnings.extend(apply_column_type_overrides(
+                    schema,
+                    table_name,
+                    col_overrides,
+                ));
+            }
             Some(schema) => {
                 // suffix_columns always wins over a conflicting `strategy` key (see #31):
                 // it's the more specific override and already does the real column work
@@ -339,6 +364,48 @@ pub fn apply_overrides(
         apply_flatten(schemas, &op.table_name, &op.prefix, op.max_depth)?;
     }
     Ok(warnings)
+}
+
+/// #129: the table already has an override, the IHM's first (as in `effective_strategy`), then one of an earlier run
+/// of the TOML that the snapshot kept; its columns are rebuilt, and a second override would rebuild them from the
+/// result. `Some` skips the `strategy` and `suffix_columns` keys: silently when they ask for the same override (a
+/// snapshot loaded with the TOML that wrote it), with a warning otherwise. `None` lets them apply.
+fn already_overridden(
+    schema: &TableSchema,
+    table_name: &str,
+    col_overrides: &HashMap<String, toml::Value>,
+) -> Option<Vec<ConfigWarning>> {
+    let (by, prev) = match (schema.ui_override(), schema.toml_override()) {
+        (Some(ov), _) => ("IHM", ov),
+        (None, Some(ov)) => ("TOML", ov),
+        (None, None) => return None,
+    };
+    let suffix_columns = has_nonempty_suffix_columns(col_overrides);
+    let strategy = toml_str(col_overrides, "strategy").map(|s| s.to_lowercase());
+    if !suffix_columns && strategy.is_none() {
+        return None;
+    }
+    // shortcut: one more copy of the TOML strategy names, until #132 parses them into an enum once.
+    let same = !suffix_columns
+        && matches!(
+            (prev, strategy.as_deref()),
+            (UserOverride::Pivot, Some("pivot"))
+                | (UserOverride::Jsonb, Some("jsonb"))
+                | (UserOverride::Columns, Some("columns"))
+                | (
+                    UserOverride::NormalizeDynamicKeys { .. },
+                    Some("normalize_dynamic_keys")
+                )
+        );
+    let warning = (!same).then(|| ConfigWarning::AlreadyOverridden {
+        table: table_name.to_string(),
+        by: format!("{by} {prev:?}"),
+        ignored: strategy.map_or_else(
+            || "suffix_columns".to_string(),
+            |s| format!("strategy = '{s}'"),
+        ),
+    });
+    Some(warning.into_iter().collect())
 }
 
 /// True when the overrides of a table rebuild its columns or take them to another table (`pivot`, `jsonb`,
@@ -734,6 +801,9 @@ pub fn apply_user_overrides(
 /// `apply_user_overrides`. `Skip` and the remaining variants are no-ops here — `Skip` is
 /// handled separately by [`compute_skip_cascade`].
 fn apply_single_user_override(s: &mut TableSchema, ov: &UserOverride) {
+    if kept_toml_rebuild(s, ov) {
+        return;
+    }
     match ov {
         UserOverride::Pivot | UserOverride::Jsonb => {
             let strategy = if matches!(ov, UserOverride::Pivot) {
@@ -759,6 +829,34 @@ fn apply_single_user_override(s: &mut TableSchema, ov: &UserOverride) {
         | UserOverride::Flatten { .. }
         | UserOverride::NormalizeDynamicKeys { .. } => {}
     }
+}
+
+/// #129: true when a TOML override of an earlier run (kept by the snapshot) already rebuilt the columns of `s`, and
+/// `ov` is then fully handled here.
+fn kept_toml_rebuild(s: &mut TableSchema, ov: &UserOverride) -> bool {
+    // The same override keeps the columns; Jsonb rebuilds them right from any columns; Pivot or Columns would read
+    // key/value or data as the table's own columns, so the TOML one stays (`load` may have set `ui_override`: cleared).
+    let rebuilt_by_toml = s.toml_override().filter(|t| {
+        matches!(
+            t,
+            UserOverride::Pivot | UserOverride::Jsonb | UserOverride::NormalizeDynamicKeys { .. }
+        )
+    });
+    if let Some(toml) = rebuilt_by_toml.cloned() {
+        if &toml == ov {
+            s.set_ui_override(Some(ov.clone()));
+            return true;
+        }
+        if matches!(ov, UserOverride::Pivot | UserOverride::Columns) {
+            eprintln!(
+                "WARNING: '{}': the TOML {toml:?} override already rebuilt its columns, the IHM {ov:?} override is ignored",
+                s.name
+            );
+            s.set_ui_override(None);
+            return true;
+        }
+    }
+    false
 }
 
 /// Companion `_wide` table for each `AutoSplit` table being skipped, keyed by the Skip root
@@ -2391,6 +2489,137 @@ mod tests {
             ],
             "warnings must be sorted by removed_table regardless of HashMap/schemas insertion order"
         );
+    }
+
+    // --- #129: an override is applied once; a second one never rebuilds the rebuilt columns ---
+
+    /// `addr`: two VARCHAR(2) data columns, so a first Pivot gives `value VARCHAR(2)`.
+    fn addr_table() -> TableSchema {
+        let mut t = simple_table("addr");
+        for name in ["city", "zip"] {
+            t.columns.push(ColumnSchema {
+                name: name.to_string(),
+                original_name: name.to_string(),
+                pg_type: PgType::VarChar(2),
+                not_null: false,
+                is_generated: false,
+                is_parent_fk: false,
+            });
+        }
+        t
+    }
+
+    fn toml_config(table: &str, keys: HashMap<String, toml::Value>) -> SchemaConfig {
+        SchemaConfig {
+            tables: HashMap::from([(table.to_string(), keys)]),
+            group: HashMap::new(),
+        }
+    }
+
+    /// What a snapshot does to the schema between two runs: a JSON round trip.
+    fn snapshot_round_trip(schemas: &[TableSchema]) -> Vec<TableSchema> {
+        serde_json::from_str(&serde_json::to_string(schemas).unwrap()).unwrap()
+    }
+
+    fn data_columns_of(t: &TableSchema) -> Vec<(String, PgType)> {
+        t.data_columns()
+            .map(|c| (c.name.clone(), c.pg_type.clone()))
+            .collect()
+    }
+
+    fn is_already_overridden(w: &[ConfigWarning]) -> bool {
+        matches!(w, [ConfigWarning::AlreadyOverridden { table, .. }] if table == "addr")
+    }
+
+    #[test]
+    fn toml_pivot_reapplied_on_snapshot_is_a_no_op() {
+        let config = toml_config("addr", toml_strategy("pivot"));
+        let mut schemas = vec![addr_table()];
+        apply_overrides(&mut schemas, &config).unwrap();
+        let first = data_columns_of(&schemas[0]);
+        assert_eq!(first[1], ("value".to_string(), PgType::VarChar(2)));
+
+        let mut schemas = snapshot_round_trip(&schemas);
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+
+        assert!(warnings.is_empty(), "same TOML again: {warnings:?}");
+        assert_eq!(data_columns_of(&schemas[0]), first);
+        assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn toml_suffix_columns_on_toml_pivoted_table_warns() {
+        let mut schemas = vec![addr_table()];
+        apply_overrides(&mut schemas, &toml_config("addr", toml_strategy("pivot"))).unwrap();
+        let pivoted = data_columns_of(&schemas[0]);
+
+        let mut schemas = snapshot_round_trip(&schemas);
+        let warnings = apply_overrides(
+            &mut schemas,
+            &toml_config("addr", suffix_columns_only("_x")),
+        )
+        .unwrap();
+
+        assert!(is_already_overridden(&warnings), "{warnings:?}");
+        assert_eq!(data_columns_of(&schemas[0]), pivoted);
+        assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn toml_pivot_after_ui_jsonb_warns_and_keeps_jsonb() {
+        let mut schemas = vec![addr_table()];
+        apply_user_overrides(
+            &mut schemas,
+            &HashMap::from([("addr".to_string(), UserOverride::Jsonb)]),
+        );
+
+        let warnings =
+            apply_overrides(&mut schemas, &toml_config("addr", toml_strategy("pivot"))).unwrap();
+
+        assert!(is_already_overridden(&warnings), "{warnings:?}");
+        assert_eq!(
+            data_columns_of(&schemas[0]),
+            vec![("data".to_string(), PgType::Jsonb)]
+        );
+        assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Jsonb);
+    }
+
+    /// A CLI snapshot written after a TOML `pivot`, then loaded with an IHM choice for the same table: `load` has
+    /// already copied that choice into `ui_override`.
+    fn toml_pivoted_then_ui(ov: UserOverride) -> TableSchema {
+        let mut schemas = vec![addr_table()];
+        apply_overrides(&mut schemas, &toml_config("addr", toml_strategy("pivot"))).unwrap();
+        let mut schemas = snapshot_round_trip(&schemas);
+        schemas[0].set_ui_override(Some(ov.clone()));
+        apply_user_overrides(&mut schemas, &HashMap::from([("addr".to_string(), ov)]));
+        schemas.remove(0)
+    }
+
+    #[test]
+    fn ui_columns_on_toml_pivoted_table_is_refused() {
+        let t = toml_pivoted_then_ui(UserOverride::Columns);
+        assert_eq!(t.ui_override(), None);
+        assert_eq!(*t.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn ui_pivot_on_toml_pivoted_table_keeps_columns() {
+        let t = toml_pivoted_then_ui(UserOverride::Pivot);
+        assert_eq!(
+            data_columns_of(&t)[1],
+            ("value".to_string(), PgType::VarChar(2))
+        );
+        assert_eq!(*t.effective_strategy(), InferredStrategy::Pivot);
+    }
+
+    #[test]
+    fn ui_jsonb_on_toml_pivoted_table_rebuilds() {
+        let t = toml_pivoted_then_ui(UserOverride::Jsonb);
+        assert_eq!(
+            data_columns_of(&t),
+            vec![("data".to_string(), PgType::Jsonb)]
+        );
+        assert_eq!(*t.effective_strategy(), InferredStrategy::Jsonb);
     }
 
     /// #130: like the TOML path, an IHM Jsonb/Pivot parent absorbs its children, at any depth.
