@@ -7,11 +7,12 @@
 //! - enum `GroupPreview` — aperçu des groupes de colonnes d'une table : tables de groupe et leurs colonnes, ou raison de leur absence.
 //! - struct `PreviewGroup` — une table de groupe d'un aperçu : nom, colonnes et colonnes candidates à confirmer.
 //! - fn `group_preview` — aperçu des groupes de colonnes d'une table, sur le schéma effectif, avec les noms qu'aura l'import.
+//! - fn `confirmed_groups` — groupes confirmés de la proposition d'une table, avec le nom de leur table.
 //! - fn `not_splittable` — raison pour laquelle une table du schéma effectif ne peut pas être découpée, s'il y en a une.
 //! - fn `skip_cascade_names` — noms des vrais enfants retirés par cascade d'un `Skip` (#47),
 //!   pour affichage (badges, récapitulatif) sans muter les schémas.
 use json2sql::schema::grouping::auto::{apply_name_groups, name_proposals};
-use json2sql::schema::grouping::proposal::Status;
+use json2sql::schema::grouping::proposal::{Status, TableProposal};
 use json2sql::schema::grouping::sample::StoredSample;
 use json2sql::schema::grouping::suggest::MIN_TABLE_COLUMNS;
 use json2sql::schema::naming::group_table_name;
@@ -121,6 +122,30 @@ pub enum GroupPreview {
 
 /// The column groups `table` would get, on the schema the overrides give. The tables already in `group_columns` take
 /// part, so that the names shown are those of the import even when two group names would collide.
+/// The confirmed groups of a table's proposal, with the names their tables will have.
+fn confirmed_groups(p: &TableProposal, table: &str) -> Vec<PreviewGroup> {
+    p.groups
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.status == Status::Confirmed)
+        .map(|(at, g)| PreviewGroup {
+            table: group_table_name(table, &g.name),
+            columns: g
+                .columns
+                .iter()
+                .map(|&c| p.columns[c].name.clone())
+                .collect(),
+            candidates: p
+                .attachments
+                .iter()
+                .filter(|a| a.group == at)
+                .map(|a| p.columns[a.column].name.clone())
+                .collect(),
+            fused: g.families > 1,
+        })
+        .collect()
+}
+
 pub fn group_preview(
     schemas: &[TableSchema],
     strategy_overrides: &HashMap<String, UserOverride>,
@@ -141,27 +166,7 @@ pub fn group_preview(
     let groups: Vec<PreviewGroup> = proposals
         .iter()
         .filter(|p| p.table == table)
-        .flat_map(|p| {
-            p.groups
-                .iter()
-                .enumerate()
-                .filter(|(_, g)| g.status == Status::Confirmed)
-                .map(move |(at, g)| PreviewGroup {
-                    table: group_table_name(table, &g.name),
-                    columns: g
-                        .columns
-                        .iter()
-                        .map(|&c| p.columns[c].name.clone())
-                        .collect(),
-                    candidates: p
-                        .attachments
-                        .iter()
-                        .filter(|a| a.group == at)
-                        .map(|a| p.columns[a.column].name.clone())
-                        .collect(),
-                    fused: g.families > 1,
-                })
-        })
+        .flat_map(|p| confirmed_groups(p, table))
         .collect();
     let moved: usize = groups.iter().map(|g| g.columns.len()).sum();
     let data_columns = effective

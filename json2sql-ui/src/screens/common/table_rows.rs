@@ -6,7 +6,11 @@
 //! - struct `TableRowsCtx` — contexte d'entrée partagé pour construire les lignes (overrides, filtres, sélection)
 //! - struct `RowFlags` — indicateurs internes (routing/absorbed/warn/badge) calculés pour une table
 //! - fn `RowFlags::compute` — calcule les indicateurs d'une table à partir du contexte
+//! - fn `RowFlags::badge` — classe et libellé du badge (catégorie de ligne, override, sinon stratégie)
 //! - fn `build_row` — construit le view-model d'une ligne à partir d'une table et de sa position
+//! - fn `connector` — connecteur d'arbre avant le nom (└─ pour le dernier enfant)
+//! - fn `row_class` — classe CSS de la ligne (sélectionnée, ou grisée)
+//! - fn `is_visible` — la ligne passe les filtres (avertissements, modifiées, nom)
 //! - fn `build_table_rows` — construit le view-model de toutes les lignes (ordre, filtre, visibilité)
 //! - fn `tree_display_order` — ordre d'affichage DFS (racines triées, enfants groupés, orphelins en fin)
 //! - fn `compute_last_child` — pour chaque position, vrai si dernier enfant de son parent (connecteur └─/├─)
@@ -74,6 +78,7 @@ struct RowFlags {
     is_routing: bool,
     is_absorbed: bool,
     is_cascaded_skip: bool,
+    is_overflow: bool,
     has_warn: bool,
     badge_cls: &'static str,
     badge_lbl: &'static str,
@@ -91,27 +96,39 @@ impl RowFlags {
         let is_routing = !user_overrode
             && matches!(*effective, InferredStrategy::SiblingCollapseMulti(_))
             && table.columns.iter().all(|c| c.is_generated);
-        let has_warn = is_overflow || is_routing;
-        let (badge_cls, badge_lbl) = if is_absorbed {
-            ("muted", "merged")
-        } else if is_cascaded_skip {
-            ("skip", "skip ↳")
-        } else if is_routing {
-            ("muted", "ROUTE")
-        } else if is_overflow {
-            ("warn", "JSONB ⚠")
-        } else if let Some(ov) = ctx.overrides.get(&table.name) {
-            user_override_badge(ov)
-        } else {
-            strategy_badge(&effective)
-        };
-        Self {
+        let mut flags = Self {
             is_routing,
             is_absorbed,
             is_cascaded_skip,
-            has_warn,
-            badge_cls,
-            badge_lbl,
+            is_overflow,
+            has_warn: is_overflow || is_routing,
+            badge_cls: "",
+            badge_lbl: "",
+        };
+        (flags.badge_cls, flags.badge_lbl) =
+            flags.badge(ctx.overrides.get(&table.name), &effective);
+        flags
+    }
+
+    /// Badge class and label: the row categories first, then the user's override, then the
+    /// effective strategy.
+    const fn badge(
+        &self,
+        user_override: Option<&UserOverride>,
+        effective: &InferredStrategy,
+    ) -> (&'static str, &'static str) {
+        if self.is_absorbed {
+            ("muted", "merged")
+        } else if self.is_cascaded_skip {
+            ("skip", "skip ↳")
+        } else if self.is_routing {
+            ("muted", "ROUTE")
+        } else if self.is_overflow {
+            ("warn", "JSONB ⚠")
+        } else if let Some(ov) = user_override {
+            user_override_badge(ov)
+        } else {
+            strategy_badge(effective)
         }
     }
 }
@@ -128,23 +145,62 @@ fn build_row(
     let table = &schemas[i];
     let flags = RowFlags::compute(table, ctx);
     let col_count = table.columns.len();
-    let is_wide = col_count > crate::state::PASS1_WIDE_COLUMN_THRESHOLD;
-    let connector: &'static str = if table.depth == 0 {
+    let is_selected = ctx.selected_indices.contains(&i);
+    let has_groups = ctx.grouped.contains(&table.name);
+    let visible = is_visible(table, schemas, ctx, &flags, filter_lc, has_groups);
+    TableRowViewModel {
+        index: i,
+        name: table.name.clone(),
+        badge_cls: flags.badge_cls,
+        badge_lbl: flags.badge_lbl,
+        col_count,
+        is_wide: col_count > crate::state::PASS1_WIDE_COLUMN_THRESHOLD,
+        depth: table.depth,
+        connector: connector(table.depth, is_last[pos]),
+        indent_px: table.depth * 12,
+        is_selected,
+        is_routing: flags.is_routing,
+        has_warn: flags.has_warn,
+        row_cls: row_class(is_selected, &flags),
+        visible,
+        has_children: parent_names.contains(table.name.as_str()),
+        anomaly_count: ctx.anomaly_counts.get(&table.name).copied().unwrap_or(0),
+        has_groups,
+    }
+}
+
+/// Tree connector before the name: none for a root, `└─` for the last child of its parent.
+const fn connector(depth: usize, is_last: bool) -> &'static str {
+    if depth == 0 {
         ""
-    } else if is_last[pos] {
+    } else if is_last {
         "└─ "
     } else {
         "├─ "
-    };
-    let is_selected = ctx.selected_indices.contains(&i);
-    let row_cls: &'static str = if is_selected {
+    }
+}
+
+/// `sel` for a selected row, `muted` for a routing, merged or cascaded-skip table.
+const fn row_class(is_selected: bool, flags: &RowFlags) -> &'static str {
+    if is_selected {
         "sel"
     } else if flags.is_routing || flags.is_absorbed || flags.is_cascaded_skip {
         "muted"
     } else {
         ""
-    };
-    let has_groups = ctx.grouped.contains(&table.name);
+    }
+}
+
+/// The row passes the filters: warnings only, modified only (an override, ticked column
+/// groups, or a group table of those), and the name filter.
+fn is_visible(
+    table: &TableSchema,
+    schemas: &[TableSchema],
+    ctx: &TableRowsCtx<'_>,
+    flags: &RowFlags,
+    filter_lc: &str,
+    has_groups: bool,
+) -> bool {
     let is_group_table = table
         .parent_table
         .as_ref()
@@ -153,28 +209,9 @@ fn build_row(
             .iter()
             .any(|s| s.column_groups.contains(&table.name));
     let modified = ctx.overrides.contains_key(&table.name) || has_groups || is_group_table;
-    let visible = (!ctx.show_warn_only || flags.has_warn)
+    (!ctx.show_warn_only || flags.has_warn)
         && (!ctx.show_modified_only || modified)
-        && (filter_lc.is_empty() || table.name.to_lowercase().contains(filter_lc));
-    TableRowViewModel {
-        index: i,
-        name: table.name.clone(),
-        badge_cls: flags.badge_cls,
-        badge_lbl: flags.badge_lbl,
-        col_count,
-        is_wide,
-        depth: table.depth,
-        connector,
-        indent_px: table.depth * 12,
-        is_selected,
-        is_routing: flags.is_routing,
-        has_warn: flags.has_warn,
-        row_cls,
-        visible,
-        has_children: parent_names.contains(table.name.as_str()),
-        anomaly_count: ctx.anomaly_counts.get(&table.name).copied().unwrap_or(0),
-        has_groups,
-    }
+        && (filter_lc.is_empty() || table.name.to_lowercase().contains(filter_lc))
 }
 
 /// Build the view-model for every table row.

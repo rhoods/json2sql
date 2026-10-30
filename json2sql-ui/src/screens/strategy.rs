@@ -38,6 +38,15 @@ pub struct JaccardDisplay {
     pub union_count: usize,
 }
 
+impl JaccardDisplay {
+    /// Fewer than 2 tables selected: nothing to compare.
+    const NO_PAIR: Self = Self {
+        score: 1.0,
+        common: 0,
+        union_count: 0,
+    };
+}
+
 /// Compute Jaccard display info for the given selection.
 /// Returns defaults (score=1.0, empty counts) when fewer than 2 tables are selected.
 pub fn compute_jaccard_display(schemas: &[TableSchema], indices: &[usize]) -> JaccardDisplay {
@@ -50,41 +59,30 @@ pub fn compute_jaccard_display(schemas: &[TableSchema], indices: &[usize]) -> Ja
         .copied()
         .filter(|&i| i < schemas.len())
         .collect();
-    let indices = indices.as_slice();
-
     if indices.len() < 2 {
-        return JaccardDisplay {
-            score: 1.0,
-            common: 0,
-            union_count: 0,
-        };
+        return JaccardDisplay::NO_PAIR;
     }
 
-    let tables: Vec<&TableSchema> = indices.iter().filter_map(|&i| schemas.get(i)).collect();
-
     // Column name sets (data columns only).
-    let col_sets: Vec<HS<&str>> = tables
+    let col_sets: Vec<HS<&str>> = indices
         .iter()
-        .map(|t| t.data_columns().map(|c| c.original_name.as_str()).collect())
+        .map(|&i| {
+            schemas[i]
+                .data_columns()
+                .map(|c| c.original_name.as_str())
+                .collect()
+        })
         .collect();
-
     let union_cols: HS<&str> = col_sets.iter().flatten().copied().collect();
-    let union_count = union_cols.len();
-    let common = if col_sets.is_empty() {
-        0
-    } else {
-        union_cols
-            .iter()
-            .filter(|&&c| col_sets.iter().all(|s| s.contains(c)))
-            .count()
-    };
-
-    let score = pairwise_jaccard_min(schemas, indices);
-
+    // at least 2 tables here, so `col_sets` is never empty
+    let common = union_cols
+        .iter()
+        .filter(|&&c| col_sets.iter().all(|s| s.contains(c)))
+        .count();
     JaccardDisplay {
-        score,
+        score: pairwise_jaccard_min(schemas, &indices),
         common,
-        union_count,
+        union_count: union_cols.len(),
     }
 }
 
