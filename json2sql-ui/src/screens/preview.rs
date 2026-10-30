@@ -19,7 +19,8 @@ use json2sql::db::ddl::generate_ddl_preview;
 
 use crate::screens::table_list::TableListPanel;
 use crate::screens::{
-    build_effective_schemas, build_table_rows, strategy_badge, user_override_badge, TableRowsCtx,
+    absorbed_names, build_effective_schemas, build_table_rows, strategy_badge, user_override_badge,
+    TableRowsCtx,
 };
 use crate::state::{AppScreen, AppState};
 
@@ -107,20 +108,31 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
 
     // Real children removed by cascade from a Skip elsewhere — never chosen by the user
     // directly, so they never surface in `diffs` above. Surfaced separately here so the
-    // user sees, before importing, everything a Skip took down with it (#47).
+    // user sees, before importing, everything a Skip took down with it (#47). Same for the
+    // children a Pivot/Jsonb parent absorbs (#130).
     let (_removed, cascade_warnings) =
         json2sql::schema::config::compute_skip_cascade(&schemas_orig, &strategy_overrides);
+    let mut absorbed: Vec<String> = absorbed_names(&schemas_orig, &strategy_overrides)
+        .into_iter()
+        .collect();
+    absorbed.sort();
     let cascade_diffs: Vec<DiffEntry> = cascade_warnings
         .iter()
         .flat_map(|w| w.cascaded_children.iter())
-        .filter_map(|child| {
+        .map(|child| (child, "skip", "skip (cascade)"))
+        .chain(
+            absorbed
+                .iter()
+                .map(|child| (child, "muted", "absorbed by parent")),
+        )
+        .filter_map(|(child, to_cls, to_lbl)| {
             let orig = schemas_orig.iter().find(|s| &s.name == child)?;
             let (_from_cls, from_lbl) = strategy_badge(&orig.inferred_strategy);
             Some(DiffEntry {
                 table_name: child.clone(),
                 from_lbl,
-                to_cls: "skip",
-                to_lbl: "skip (cascade)",
+                to_cls,
+                to_lbl,
             })
         })
         .collect();
@@ -158,7 +170,7 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                         span { class: "badge acc sq", "{diffs.len()} overrides" }
                     }
                     if !cascade_diffs.is_empty() {
-                        span { class: "badge skip sq", "{cascade_diffs.len()} cascaded" }
+                        span { class: "badge skip sq", "{cascade_diffs.len()} removed with parent" }
                     }
                 }
             }
@@ -192,7 +204,8 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                                 overrides: &strategy_overrides,
                                 overflow_names: &std::collections::HashSet::new(),
                                 selected_indices: &std::collections::HashSet::from([idx]),
-                                absorbed_names: &state.read().schema.absorbed_names,
+                                // Absorbed children are absent from `schemas` too: listed in the summary.
+                                absorbed_names: &std::collections::HashSet::new(),
                                 // Cascaded real children are already absent from `schemas`
                                 // (the effective, reduced list) — nothing left to badge here.
                                 cascaded_names: &std::collections::HashSet::new(),
@@ -308,15 +321,16 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                             }
                         }
 
-                        // Cascaded-by-Skip section — real children removed as a side effect
-                        // of a Skip elsewhere, never chosen by the user directly (#47).
+                        // Removed-with-parent section — real children removed as a side effect
+                        // of a Skip (#47) or absorbed by a Pivot/Jsonb parent (#130), never chosen
+                        // by the user directly.
                         if !cascade_diffs.is_empty() {
                             div { style: "padding:14px 16px;border-top:1px solid var(--bd);",
                                 div { style: "font-size:var(--fs-xs);font-weight:600;color:var(--fg-3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;",
-                                    "Cascaded by Skip"
+                                    "Removed with parent"
                                 }
                                 p { style: "font-size:var(--fs-xs);color:var(--fg-4);margin:0 0 10px;",
-                                    "Removed because their parent table was skipped — not chosen individually."
+                                    "Removed because their parent table was skipped, or absorbed into its Pivot/JSONB columns — not chosen individually."
                                 }
                                 for diff in &cascade_diffs {
                                     div {

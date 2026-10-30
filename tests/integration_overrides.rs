@@ -248,3 +248,55 @@ async fn test_override_strategy_pivot_flat_path_unchanged() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// [issue #130] Override Jsonb de l'IHM (snapshot rechargé) sur la racine : la table
+// enfant people_address est absorbée par le blob JSONB du parent. Sans
+// exclude_absorbed_children, la Pass 2 l'écrivait AUSSI dans people_address (doublon).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_ui_jsonb_on_root_does_not_duplicate_children() {
+    use json2sql::schema::config::apply_user_overrides;
+    use json2sql::schema::table_schema::UserOverride;
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("users.jsonl");
+        let mut p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
+        let overrides =
+            std::collections::HashMap::from([("people".to_string(), UserOverride::Jsonb)]);
+        apply_user_overrides(&mut p1.schemas, &overrides);
+
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("people", &schema),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let address_rows: Option<i64> = if p1.schemas.iter().any(|s| s.name == "people_address") {
+            Some(common::row_count(&client, &schema, "people_address").await)
+        } else {
+            None
+        };
+        assert_eq!(
+            address_rows, None,
+            "people_address must not exist: its data is already in people.data"
+        );
+        let with_address: i64 = client
+            .query_one(
+                &format!("SELECT count(*) FROM \"{schema}\".\"people\" WHERE data ? 'address'"),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(with_address, 3, "every people.data blob keeps its address");
+    })
+    .await;
+}
