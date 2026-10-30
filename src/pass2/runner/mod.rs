@@ -16,6 +16,7 @@
 //! - fn `build_copy_sql_map` — construit les requêtes COPY par table.
 //! - fn `build_freeze_targets` — cibles `COPY FREEZE` : tables enfants, et racine en `wal_level = minimal` (nom qualifié + requête).
 //! - fn `run` — `run_interruptible` sans interruption.
+//! - fn `tune_server` — prépare le serveur : reprise d'un import tué, avertissements, `max_wal_size` (`--tune-wal`).
 //! - fn `run_interruptible` — pipeline complet, interruptible : réglages PG (autovacuum, `--tune-wal`) autour de `load_and_constrain`, remis en place dans tous les cas.
 //! - fn `put_back_autovacuum` — réactive l'autovacuum après les contraintes (ou un échec) et efface son entrée du marqueur.
 //! - fn `load_and_constrain` — dispatch → workers → flusher (`COPY FREEZE` si possible) → COMMIT → `VACUUM (ANALYZE)` → contraintes.
@@ -169,6 +170,24 @@ pub async fn run(
 /// dropped, flusher included, so its transactions roll back and free their locks at once. A
 /// statement `PostgreSQL` still runs is cancelled server side, except the load COMMITs: once started,
 /// they all finish first. The server settings are then put back before returning `Err`.
+/// Prepare the server for the load: undo what an earlier, killed import left on it (even
+/// without `--tune-wal` now), warn about its settings, and raise `max_wal_size` with
+/// `--tune-wal`. Returns what puts `max_wal_size` back.
+async fn tune_server(
+    client: &Client,
+    pg_url: &str,
+    tune_wal: bool,
+    ptx: Option<&ProgressTx>,
+) -> Option<crate::db::pg_tuning::WalRestore> {
+    crate::db::pg_tuning::restore_pending(client, pg_url, ptx).await;
+    crate::db::pg_tuning::warn_pg_tuning(client, tune_wal, ptx).await;
+    if tune_wal {
+        crate::db::pg_tuning::raise_max_wal_size(client, ptx).await
+    } else {
+        None
+    }
+}
+
 pub async fn run_interruptible(
     path: &Path,
     schemas: &[TableSchema],
@@ -181,14 +200,7 @@ pub async fn run_interruptible(
     config::validate_run_params(config.parallel)?;
     let parallel = config.parallel.max(1);
     let ptx = progress_tx.as_ref();
-    // Undo what an earlier, killed import left on this server, even without --tune-wal now.
-    crate::db::pg_tuning::restore_pending(client, pg_url, ptx).await;
-    crate::db::pg_tuning::warn_pg_tuning(client, config.tune_wal, ptx).await;
-    let wal_restore = if config.tune_wal {
-        crate::db::pg_tuning::raise_max_wal_size(client, ptx).await
-    } else {
-        None
-    };
+    let wal_restore = tune_server(client, pg_url, config.tune_wal, ptx).await;
 
     // Recorded before switching autovacuum off: a killed import is undone by the next one.
     let autovacuum_restore =
@@ -196,9 +208,8 @@ pub async fn run_interruptible(
     // Held by `load_and_constrain` during the load COMMITs: an interrupt lets them all finish, as
     // committing some connections and rolling back the others would leave a partial load.
     let commits = tokio::sync::Mutex::new(());
-    let result = match set_tables_autovacuum(pg_url, schemas, &config.pg_schema, false, parallel)
-        .await
-    {
+    let off = set_tables_autovacuum(pg_url, schemas, &config.pg_schema, false, parallel).await;
+    let result = match off {
         Ok(()) => tokio::select! {
             r = load_and_constrain(path, schemas, client, pg_url, config, progress_tx.clone(), &commits) => r,
             () = async { interrupt.await; drop(commits.lock().await); } => Err(J2sError::InvalidInput("Pass 2 interrupted".to_string())),

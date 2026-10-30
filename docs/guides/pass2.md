@@ -42,7 +42,6 @@ symbols:
   - write_autosplit_rows
   - recurse_children
   - insert_child_object
-  - dispatch_child_object
   - insert_array
   - insert_pivot_object
   - push_generated_col_insert
@@ -84,7 +83,7 @@ rien sur le schéma : elle suit `schemas` (une liste de `TableSchema` finalisés
 
 | Changement | Où | Le compilateur aide ? |
 |---|---|---|
-| Nouvelle stratégie, ou routage d'une stratégie | `insert_child_object`, `dispatch_child_object`, puis la fiche [ajouter-une-strategie.md](ajouter-une-strategie.md) | oui pour ces deux `match`, non pour le reste |
+| Nouvelle stratégie, ou routage d'une stratégie | `insert_child_object`, puis la fiche [ajouter-une-strategie.md](ajouter-une-strategie.md) | oui pour ce `match`, non pour le reste |
 | Nouveau type PostgreSQL | `coerce` (un `match` sans cas par défaut sur `PgType`) | oui |
 | Nouvelle colonne générée (`j2s_…`) | `push_generated_col_insert`, et chaque écriture de ligne codée en dur (§ 3) | **non** |
 | Nouvelle forme de ligne (une table écrite autrement) | une fonction `insert_*` dans `traversal.rs`, appelée depuis le répartiteur | non |
