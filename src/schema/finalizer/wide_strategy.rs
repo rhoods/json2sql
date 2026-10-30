@@ -92,15 +92,11 @@ pub(super) fn apply_wide_table_strategies(
     schemas.extend(extra_schemas);
 }
 
-pub(super) fn build_finalizer_config(
-    finalizer: &SchemaFinalizer,
-    text_threshold: u32,
-) -> FinalizerConfig {
+pub(super) fn build_finalizer_config(finalizer: &SchemaFinalizer) -> FinalizerConfig {
     FinalizerConfig {
         wide_column_threshold: finalizer.wide_column_threshold,
         stable_threshold: finalizer.stable_threshold,
         rare_threshold: finalizer.rare_threshold,
-        text_threshold,
         disable_pivot: finalizer.disabled_strategies.contains(&StrategyName::Pivot),
         disable_structured_pivot: finalizer
             .disabled_strategies
@@ -112,7 +108,6 @@ pub(super) struct FinalizerConfig {
     wide_column_threshold: usize,
     stable_threshold: f64,
     rare_threshold: f64,
-    text_threshold: u32,
     disable_pivot: bool,
     disable_structured_pivot: bool,
 }
@@ -206,7 +201,7 @@ fn apply_non_autosplit_strategy(
     let suffix_schema = if config.disable_structured_pivot {
         None
     } else {
-        detect_suffix_schema(&entry.columns, SUFFIX_MIN_COVERAGE, config.text_threshold)
+        detect_suffix_schema(entry, SUFFIX_MIN_COVERAGE).map(|(schema, _)| schema)
     };
     let suffix_schema = suffix_schema.filter(|_| !steps_aside_for_arrays(schema));
     if let Some(suffix_schema) = suffix_schema {
@@ -481,7 +476,6 @@ mod tests {
             wide_column_threshold: 2,
             stable_threshold: 0.1,
             rare_threshold: 0.001,
-            text_threshold: 256,
             disable_pivot: false,
             disable_structured_pivot: false,
         }

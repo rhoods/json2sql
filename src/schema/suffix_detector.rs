@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 
 use crate::schema::naming::sanitize_identifier;
+use crate::schema::observer::TableEntry;
 use crate::schema::table_schema::{SuffixColumn, SuffixSchema};
 use crate::schema::type_tracker::{widen_pg_types, PgType, TypeTracker};
 
@@ -84,10 +85,10 @@ fn filter_by_coverage(
 /// Returns `None` if no structural pattern is found above threshold.
 #[must_use]
 pub fn detect_suffix_schema(
-    columns: &IndexMap<String, TypeTracker>,
+    entry: &TableEntry,
     coverage_threshold: f64,
-    _text_threshold: u32,
-) -> Option<SuffixSchema> {
+) -> Option<(SuffixSchema, HashSet<String>)> {
+    let columns = &entry.columns;
     let all_keys: Vec<&str> = columns.keys().map(std::string::String::as_str).collect();
     let key_set: HashSet<&str> = all_keys.iter().copied().collect();
     let candidates: Vec<(String, HashSet<String>)> = build_suffix_to_bases(&all_keys)
@@ -112,10 +113,14 @@ pub fn detect_suffix_schema(
         return None;
     }
     let (suffix_cols, value_type) = build_suffix_cols_and_value_type(&retained, &base_set, columns);
-    Some(SuffixSchema {
-        suffix_cols,
-        value_type,
-    })
+    let keys = columns.keys().cloned().collect();
+    Some((
+        SuffixSchema {
+            suffix_cols,
+            value_type,
+        },
+        keys,
+    ))
 }
 
 /// Build `SuffixColumn` entries and the base `value` column type from retained suffix groups.
@@ -231,6 +236,93 @@ pub fn build_suffix_schema_from_list(
 mod tests {
     use super::*;
 
+    fn make_object_tracker() -> TypeTracker {
+        let mut t = TypeTracker::new(256);
+        t.observe(&serde_json::json!({"k": 1}));
+        t
+    }
+
+    fn entry_of(columns: IndexMap<String, TypeTracker>) -> TableEntry {
+        TableEntry {
+            path_key: "t".to_string(),
+            path: vec!["t".to_string()],
+            parent_key: String::new(),
+            columns,
+            child_kind: None,
+            array_columns: IndexMap::new(),
+            row_count: 1,
+        }
+    }
+
+    /// `{base}{suffix}` float columns for every base and suffix ("" = the bare key).
+    fn grid(bases: &[&str], suffixes: &[&str]) -> IndexMap<String, TypeTracker> {
+        let mut cols = IndexMap::new();
+        for base in bases {
+            for suffix in suffixes {
+                cols.insert(format!("{base}{suffix}"), make_float_tracker());
+            }
+        }
+        cols
+    }
+
+    #[test]
+    fn two_suffixed_keys_among_thirty_unrelated_ones_are_not_a_grid() {
+        let mut cols: IndexMap<String, TypeTracker> =
+            (0..30).map(|i| (format!("key{i}"), make_text_tracker())).collect();
+        cols.insert("a_t".to_string(), make_float_tracker());
+        cols.insert("b_t".to_string(), make_float_tracker());
+        assert!(detect_suffix_schema(&entry_of(cols), 0.3).is_none());
+    }
+
+    #[test]
+    fn a_suffix_needs_three_bases() {
+        // `en:celery_seed` + `en:mustard_seed` (OFF) made a `_seed` suffix out of two dynamic keys.
+        let cols = grid(&["fat", "salt"], &["", "_100g"]);
+        assert!(detect_suffix_schema(&entry_of(cols), 0.3).is_none());
+    }
+
+    #[test]
+    fn coverage_counts_the_scalar_columns_of_the_table() {
+        // Three `_t` keys out of 23 columns: the grid covers 13 % of the table, not 100 % of its bases.
+        let mut cols = grid(&["a", "b", "c"], &["_t"]);
+        cols.extend((0..20).map(|i| (format!("key{i}"), make_text_tracker())));
+        assert!(detect_suffix_schema(&entry_of(cols), 0.3).is_none());
+    }
+
+    #[test]
+    fn a_key_goes_to_the_longest_suffix() {
+        let mut cols = grid(&["fat", "salt", "sugars"], &["", "_100g"]);
+        for base in ["fat", "salt", "sugars"] {
+            cols.insert(format!("{base}_prepared_100g"), make_text_tracker());
+        }
+        let (schema, keys) = detect_suffix_schema(&entry_of(cols), 0.3).expect("grid");
+        let type_of = |suffix: &str| {
+            schema.suffix_cols.iter().find(|c| c.suffix == suffix).map(|c| c.pg_type.clone())
+        };
+        // `fat_prepared_100g` (text) counted under `_100g` would widen it to text.
+        assert_eq!(type_of("_100g"), Some(PgType::DoublePrecision));
+        assert!(type_of("_prepared_100g").is_some());
+        assert_eq!(keys.len(), 9);
+    }
+
+    #[test]
+    fn objects_and_arrays_are_not_part_of_the_grid() {
+        let mut cols = grid(&["a", "b", "c"], &["", "_100g"]);
+        for base in ["p", "q", "r"] {
+            cols.insert(format!("{base}_nutrients"), make_object_tracker());
+        }
+        cols.insert("d_100g".to_string(), make_float_tracker());
+        let mut entry = entry_of(cols);
+        // A field seen both as a scalar and as an array is a PG array column (#86).
+        entry.array_columns.insert("d_100g".to_string(), make_float_tracker());
+        let (schema, keys) = detect_suffix_schema(&entry, 0.3).expect("grid");
+        let suffixes: Vec<&str> = schema.suffix_cols.iter().map(|c| c.suffix.as_str()).collect();
+        assert_eq!(suffixes, ["_100g"]);
+        let mut keys: Vec<String> = keys.into_iter().collect();
+        keys.sort();
+        assert_eq!(keys, ["a", "a_100g", "b", "b_100g", "c", "c_100g"]);
+    }
+
     fn make_float_tracker() -> TypeTracker {
         let mut t = TypeTracker::new(256);
         t.observe(&serde_json::Value::Number(
@@ -302,10 +394,10 @@ mod tests {
         cols.insert("iron_unit".to_string(), make_text_tracker());
         cols.insert("sodium_unit".to_string(), make_text_tracker());
 
-        let result = detect_suffix_schema(&cols, 0.3, 256);
+        let result = detect_suffix_schema(&entry_of(cols), 0.3);
         assert!(result.is_some(), "should detect suffix structure");
 
-        let schema = result.unwrap();
+        let (schema, _) = result.unwrap();
         let suffixes: Vec<&str> = schema
             .suffix_cols
             .iter()
@@ -323,7 +415,7 @@ mod tests {
         cols.insert("bar".to_string(), make_float_tracker());
         cols.insert("baz".to_string(), make_float_tracker());
 
-        let result = detect_suffix_schema(&cols, 0.3, 256);
+        let result = detect_suffix_schema(&entry_of(cols), 0.3);
         assert!(
             result.is_none(),
             "flat keys should not be detected as structured"
@@ -333,14 +425,14 @@ mod tests {
     #[test]
     fn test_value_suffix_renamed_to_norm_value() {
         let mut cols: IndexMap<String, TypeTracker> = IndexMap::new();
-        cols.insert("calcium".to_string(), make_float_tracker());
-        cols.insert("iron".to_string(), make_float_tracker());
-        cols.insert("calcium_value".to_string(), make_float_tracker());
-        cols.insert("iron_value".to_string(), make_float_tracker());
+        for base in ["calcium", "iron", "zinc"] {
+            cols.insert(base.to_string(), make_float_tracker());
+            cols.insert(format!("{base}_value"), make_float_tracker());
+        }
 
-        let result = detect_suffix_schema(&cols, 0.3, 256);
+        let result = detect_suffix_schema(&entry_of(cols), 0.3);
         assert!(result.is_some());
-        let schema = result.unwrap();
+        let (schema, _) = result.unwrap();
         let col_names: Vec<&str> = schema
             .suffix_cols
             .iter()

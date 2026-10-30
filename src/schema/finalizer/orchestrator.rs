@@ -77,7 +77,6 @@ impl SchemaFinalizer {
     pub(crate) fn run(
         &self,
         tables: &IndexMap<String, TableEntry>,
-        text_threshold: u32,
         naming: &mut NamingRegistry,
     ) -> (Vec<TableSchema>, Vec<ColumnCollision>, Vec<OverflowWarning>) {
         // Pre-register all table names so that table_name_lookup() (read-only) works in parallel.
@@ -87,7 +86,7 @@ impl SchemaFinalizer {
 
         let tables_with_object_children = parents_of_object_children(tables);
 
-        let config = build_finalizer_config(self, text_threshold);
+        let config = build_finalizer_config(self);
 
         // Phase 1 — per-table: schema construction WITHOUT wide-table strategies yet.
         // Each table is processed independently and in parallel. Defers InferredStrategy
