@@ -2374,7 +2374,10 @@ mod tests {
             schemas.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
             ["items", "items_pivot"]
         );
-        assert!(schemas[0].column_groups.is_empty(), "groups dissolved first");
+        assert!(
+            schemas[0].column_groups.is_empty(),
+            "groups dissolved first"
+        );
         assert_eq!(
             type_of(&schemas[0], "x1"),
             PgType::Text,

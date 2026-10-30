@@ -179,9 +179,11 @@ fn build_suffix_cols_and_value_type(
     (suffix_cols, value_type)
 }
 
-/// Widest type of the observed keys (`TEXT` when there is none).
+/// Widest type of the observed keys (`TEXT` when there is none). A key only ever seen as `null`
+/// says nothing about the type: its tracker falls back to `TEXT` and would widen the whole column.
 fn widest_type<'a>(trackers: impl Iterator<Item = &'a TypeTracker>) -> PgType {
     trackers
+        .filter(|t| t.total_count > t.null_count)
         .fold(None::<PgType>, |acc, tracker| {
             let t = tracker.to_pg_type();
             Some(match acc {
@@ -295,6 +297,21 @@ mod tests {
             }
         }
         cols
+    }
+
+    #[test]
+    fn a_key_seen_only_as_null_does_not_widen_its_suffix_column() {
+        let mut cols = grid(&["fat", "salt", "sugars"], &["", "_100g"]);
+        let mut null_only = TypeTracker::new(256);
+        null_only.observe(&serde_json::Value::Null);
+        cols.insert("fiber_100g".to_string(), null_only);
+        let (ss, _) = detect_suffix_schema(&entry_of(cols), 0.3).expect("a 3-base grid");
+        let col = ss
+            .suffix_cols
+            .iter()
+            .find(|c| c.suffix == "_100g")
+            .expect("_100g");
+        assert_eq!(col.pg_type, PgType::DoublePrecision);
     }
 
     #[test]
