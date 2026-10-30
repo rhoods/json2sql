@@ -114,17 +114,17 @@ Les colonnes tableau ne sont ni médiums ni rares : elles restent dans la table 
 
 Pour les tables larges non-racines dont les colonnes suivent un pattern `{base}_{suffixe}` (ex. `calcium_100g`, `calcium_unit`, `calcium_serving`), un pivot structuré est auto-détecté.
 
-Une ligne de pivot structuré n'a pas de place pour une colonne tableau. Une table qui a une colonne PG array ne prend donc pas cette stratégie : un `WARNING` nomme ses colonnes tableau et la table retombe sur le split Pivot (§ 8, l'identité garde les tableaux) ou sur `Jsonb` (le tableau reste dans le blob) (#85). Seul l'override TOML ci-dessous force la stratégie malgré tout : un `WARNING` nomme alors les colonnes tableau, qui ne sont pas importées.
+La table n'est pas vidée : seules les clés de la grille (clés suffixées et clés nues qui en sont les bases) partent dans un compagnon `{table}_pivot` (`unique_pivot_name`), une ligne par base. La table garde son nom, ses scalaires hors grille, ses colonnes PG array et ses vraies tables filles ; elle prend `AutoSplit` avec les clés de la grille en `medium_keys` et le compagnon en `wide_table_name`, comme le split Pivot (§ 8). En Pass 2, `write_autosplit_rows` voit que le compagnon est un `StructuredPivot` et regroupe les clés par base (#163).
 
 ### Algorithme
 
-1. Extraction de tous les candidats suffixe (dernière partie après `_`)
-2. Sélection des suffixes présents dans ≥ 2 bases distinctes et dans ≥ 30% des colonnes
-3. Construction d'un `SuffixSchema` avec les types inférés par suffixe
+1. Seules les clés scalaires comptent (ni objet, ni tableau, ni colonne PG array)
+2. Candidats : tous les découpages `(base, suffixe)` sur `_` ; un suffixe est retenu s'il a au moins 3 bases distinctes (`MIN_BASES`)
+3. Chaque clé va au suffixe le plus long qui la termine ; un suffixe qui retombe sous 3 bases, ou sous 30 % de toutes les bases, est retiré et l'attribution recommence, jusqu'à ce que plus rien ne bouge
+4. La grille doit couvrir au moins 30 % des colonnes scalaires de la table (`SUFFIX_MIN_COVERAGE`)
+5. Construction d'un `SuffixSchema` : chaque colonne de suffixe est typée d'après ses clés, `value` d'après les clés nues seules ; pas de colonne `value` sans clé nue
 
-Le résultat est une table EAV avec une ligne par `(parent_id, base_nom, val_100g, val_unit, ...)`.
-
-Ce comportement peut être forcé manuellement dans le fichier de config TOML via `strategy = "structured_pivot"` et `suffix_columns = ["_100g", "_unit"]`.
+Ce comportement peut être forcé manuellement dans le fichier de config TOML via `strategy = "structured_pivot"` et `suffix_columns = ["_100g", "_unit"]`. L'override passe par le même découpage (`apply_structured_pivot_split`) ; le rejouer sur un snapshot qui a déjà le compagnon ne change rien.
 
 ---
 
@@ -211,7 +211,7 @@ Après la construction de toutes les `TableSchema`, une déduplication par nom P
 
 **Fichier :** `src/schema/registry.rs` — `exclude_absorbed_children()`
 
-Les stratégies **Pivot**, **Jsonb**, **StructuredPivot** et **KeyedPivot** absorbent leurs tables enfants (les données sont inline). La fonction `exclude_absorbed_children` supprime toutes les tables enfants (et leurs descendants) dont le parent a une stratégie absorbante.
+Les stratégies **Pivot**, **Jsonb**, **StructuredPivot** et **KeyedPivot** absorbent leurs tables enfants (les données sont inline). Une table à grille de suffixes n'est pas concernée : elle prend `AutoSplit`, et seul son compagnon `_pivot` est en `StructuredPivot` (#163). La fonction `exclude_absorbed_children` supprime toutes les tables enfants (et leurs descendants) dont le parent a une stratégie absorbante.
 
 `AutoSplit` n'absorbe **pas** ses enfants : les tables enfants (ex. `_nutriments`, `_ingredients`) restent indépendantes.
 

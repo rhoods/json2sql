@@ -137,7 +137,7 @@ SchemaRegistry::finalize_with_pg_guard (voir pass1.md)
    ├─ doublons de nom retirés, tri par profondeur puis nom
    ├─ phase 3  apply_wide_table_strategies : par TableEntry, si la table est encore Columns
    │           apply_wide_strategy → AutoSplit (racine) ou apply_non_autosplit_strategy
-   │           (StructuredPivot sauf colonne PG array, apply_pivot_split, Jsonb) ; compagnons _wide / _pivot
+   │           (apply_structured_pivot_split, apply_pivot_split, Jsonb) ; compagnons _wide / _pivot
    │           ajoutés à la fin
    └─ phase 4  apply_column_limit_guard (si apply_pg_guard), puis exclude_absorbed_children
 → (Vec<TableSchema>, Vec<ColumnCollision>, Vec<OverflowWarning>)
