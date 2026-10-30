@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS "public"."products" (
     "j2s_id" UUID NOT NULL,
     "code" VARCHAR(16),
     "name" VARCHAR(12),
-    "price" VARCHAR(30),        -- un seul "N/A" suffit : le type le plus large l'emporte
+    "price" VARCHAR(30),        -- un "N/A" sur 3 lignes suffit ; sous 0,1 % de chaînes, il deviendrait une anomalie
     "quantity_g" INTEGER,
     "tags" VARCHAR(11)[],       -- tableau de scalaires : une colonne tableau, pas de table de jonction
     CONSTRAINT "pk_products" PRIMARY KEY (j2s_id)

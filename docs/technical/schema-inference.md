@@ -29,18 +29,24 @@ Chaque champ JSON observé dans la Pass 1 alimente un `TypeTracker` qui accumule
 
 ### Règles de résolution (`to_pg_type`)
 
-Le type retenu est le **plus large** parmi ceux observés, pas le plus fréquent. Une seule valeur chaîne suffit à faire passer la colonne en texte. Ordre de priorité :
+Le type retenu est le **plus large** parmi ceux observés, pas le plus fréquent, à une exception près : les **chaînes rares**. Si les chaînes JSON représentent moins de 0,1 % des valeurs non nulles de la colonne (`RARE_STRING_RATE`, les `null` ne comptent pas), elles sont ignorées pour le typage, et la Pass 2 les signale comme anomalies (voir plus bas). Les dates, timestamps et UUID comptent comme des chaînes : la règle ne joue donc que pour une colonne numérique ou booléenne. Une colonne `DATE` avec un `"unknown"` rare reste en `VARCHAR`, car `coerce_date` ne vérifie pas le format et la chaîne ferait échouer le COPY. Ordre de priorité :
 
-1. **Une chaîne observée** → `VARCHAR(N)` ou `TEXT` (N tient compte de la représentation texte des nombres éventuellement mélangés)
+1. **Des chaînes, au moins 0,1 % des valeurs non nulles** → `VARCHAR(N)` ou `TEXT` (N tient compte de la représentation texte des nombres éventuellement mélangés)
 2. Sinon **numérique** : `DOUBLE PRECISION` > `BIGINT` > `INTEGER`
 3. Sinon : `BOOLEAN` > `TIMESTAMP` > `DATE` > `UUID`
 4. Aucun type observé (que des `null`) → `TEXT`
 
-Exemples : `1000 entiers + 3 chaînes` → `VARCHAR` (aucune anomalie, les entiers sont stockés en texte) ; `entiers + flottants` → `DOUBLE PRECISION`.
+Exemples : `1000 entiers + 3 chaînes` → `VARCHAR` (0,3 % de chaînes, aucune anomalie, les entiers sont stockés en texte) ; `10 000 flottants + 1 chaîne` → `DOUBLE PRECISION` et 1 anomalie ; `entiers + flottants` → `DOUBLE PRECISION`.
+
+Cas réel : sur OpenFoodFacts, 2 produits sur 4,4 M ont une valeur nutritionnelle en chaîne (`"energy-kcal_100g": "10000000000000000000"`, `"vitamin-c_100g": "9223372036854779904"`). Avant ce seuil, ces deux chaînes faisaient passer en `TEXT` les colonnes `_100g`, `value` et `norm_value` du pivot structuré.
 
 ### Détection d'anomalie
 
-Une anomalie est détectée en **Pass 2**, quand une valeur ne peut pas être convertie vers le type retenu (`src/pass2/coercer.rs`) : par exemple un booléen dans une colonne `INTEGER` (entiers + booléens → `INTEGER`), ou une chaîne plus longue que le `VARCHAR(N)` inféré. La valeur est insérée en `NULL` et enregistrée dans le rapport d'anomalies. Le taux d'anomalie est comparé à `--max-anomaly-rate` pour faire échouer l'import si les données sont trop incohérentes.
+Une anomalie est détectée en **Pass 2**, quand une valeur ne peut pas être convertie vers le type retenu (`src/pass2/coercer.rs`) : par exemple un booléen dans une colonne `INTEGER` (entiers + booléens → `INTEGER`), une chaîne rare dans une colonne numérique, ou une chaîne plus longue que le `VARCHAR(N)` inféré. La valeur est insérée en `NULL` et enregistrée dans le rapport d'anomalies.
+
+Une chaîne n'est **jamais convertie** vers `INTEGER`, `BIGINT` ou `DOUBLE PRECISION`, même si elle se lit comme un nombre : `"42"` devient `NULL` + anomalie de type `string`. Le typage seul ne peut pas distinguer `"42"` d'une valeur aberrante comme `"10000000000000000000"`, ni garder les zéros de tête de `"007"`. Chacune est donc écartée et visible dans le rapport, jamais modifiée en silence. Cela vaut aussi pour une colonne dont le type est forcé par surcharge (§ 12).
+
+Le taux d'anomalie est comparé à `--max-anomaly-rate` pour faire échouer l'import si les données sont trop incohérentes.
 
 Le rapport de schéma (`--schema-report`) signale en `MIXED` les colonnes ayant plusieurs types observés, avec leur histogramme : utile pour repérer en amont les colonnes qui vont basculer en texte.
 
@@ -118,7 +124,9 @@ Pour les tables larges non-racines dont les colonnes suivent un pattern `{base}_
 
 1. Extraction de tous les candidats suffixe (dernière partie après `_`)
 2. Sélection des suffixes présents dans ≥ 2 bases distinctes et dans ≥ 30% des colonnes
-3. Construction d'un `SuffixSchema` avec les types inférés par suffixe
+3. Construction d'un `SuffixSchema` avec les types inférés par suffixe : le type de chaque colonne de suffixe est l'élargissement (`widen_pg_types`) des types de toutes les colonnes `{base}{suffixe}`
+
+> **Limite.** L'élargissement se fait colonne par colonne. Une colonne de suffixe très creuse avec une chaîne (par exemple 3 valeurs, dont 1 chaîne : 33 %) reste en `VARCHAR`, et toute la colonne du pivot passe en `TEXT`. Les unions de tables sœurs (`wide_strategies.rs`) suivent la même règle.
 
 Le résultat est une table EAV avec une ligne par `(parent_id, base_nom, val_100g, val_unit, ...)`.
 
@@ -239,7 +247,7 @@ suffix_columns = ["_100g", "_unit"]  # suffixes explicites pour structured_pivot
 ma_colonne = "INTEGER"      # forcer un type de colonne
 ```
 
-Les types forçables sont scalaires : une surcharge sur une colonne tableau est ignorée avec un avertissement.
+Les types forçables sont scalaires : une surcharge sur une colonne tableau est ignorée avec un avertissement. Forcer un type numérique sur une colonne de chaînes n'est pas une conversion : chaque chaîne devient `NULL` + anomalie (§ 1).
 
 Les surcharges sont appliquées après `finalize()` et suivies d'une nouvelle passe d'exclusion.
 

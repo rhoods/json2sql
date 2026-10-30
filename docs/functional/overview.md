@@ -47,7 +47,7 @@ UUID v7 est choisi pour ses propriétés time-ordered (index B-tree efficace, in
 
 ### Inférence de types
 
-Le `TypeTracker` suit un histogramme de types pour chaque colonne. Le type **le plus large** observé gagne (pas le plus fréquent) :
+Le `TypeTracker` suit un histogramme de types pour chaque colonne. Le type **le plus large** observé gagne (pas le plus fréquent). Exception : des chaînes qui font moins de 0,1 % des valeurs non nulles ne décident pas du type ; elles deviennent `NULL` + anomalie en Pass 2 (détail : `docs/technical/schema-inference.md` § 1).
 
 ```
 int + float       → DOUBLE PRECISION

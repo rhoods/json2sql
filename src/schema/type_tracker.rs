@@ -9,13 +9,16 @@
 //! [`TypeTracker`] counts occurrences of each [`InferredType`] variant as the JSON is
 //! streamed. At finalization, `to_pg_type()` applies a widening hierarchy
 //! (Integer → `BigInt` → Float → Text) to pick the narrowest `PostgreSQL` type compatible
-//! with every observed value. The resolved type is stored as [`PgType`] in a `ColumnSchema`.
+//! with every observed value, except rare strings (below `RARE_STRING_RATE` of the non-null
+//! values), which Pass 2 reports as anomalies. The resolved type is stored as [`PgType`] in a
+//! `ColumnSchema`.
 //!
 //! Fonctions :
 //! - enum `InferredType` — tous les types inférables depuis une valeur JSON (indexable, `repr(usize)`).
 //! - enum `PgType` — type `PostgreSQL` résolu pour une colonne.
 //! - fn `PgType::as_sql` — représentation SQL du type (ex: `VARCHAR(60)`, `INTEGER[]`).
 //! - struct `TypeTracker` — suit tous les types et métadonnées observés pour un champ JSON.
+//! - const `RARE_STRING_RATE` — part de chaînes sous laquelle elles ne décident pas du type (0,1 %).
 //! - fn `TypeTracker::new` — crée un tracker vide pour un seuil TEXT/VARCHAR donné.
 //! - fn `TypeTracker::observe` — enregistre une valeur JSON (hot path, appelé par ligne/champ).
 //! - fn `TypeTracker::merge` — fusionne les observations d'un autre tracker (Pass 1 parallèle).
@@ -24,6 +27,8 @@
 //! - fn `TypeTracker::is_not_null` — vrai si aucune valeur nulle observée.
 //! - fn `TypeTracker::string_pg_type` — résout `VarChar`/`Text` en tenant compte de la longueur
 //!   des représentations numériques si le champ est mixte string+nombre.
+//! - fn `TypeTracker::has_frequent_strings` — vrai si les chaînes JSON (dates comprises) atteignent
+//!   `RARE_STRING_RATE` des valeurs non nulles (sinon elles ne décident pas du type).
 //! - fn `TypeTracker::to_pg_type` — résout le type PG final (dispatch + élargissement).
 //! - fn `TypeTracker::is_object_field` — vrai si le champ ne contient que des objets.
 //! - fn `TypeTracker::is_array_field` — vrai si le champ ne contient que des tableaux.
@@ -129,6 +134,9 @@ impl PgType {
         }
     }
 }
+
+/// Share of non-null values below which Varchar/Text observations are ignored by `to_pg_type`.
+const RARE_STRING_RATE: f64 = 0.001;
 
 /// Tracks all observed types and metadata for a single JSON field (future column).
 ///
@@ -264,10 +272,33 @@ impl TypeTracker {
         }
     }
 
+    /// True if Varchar/Text values were seen and JSON strings (dates, timestamps and UUIDs
+    /// included) make up at least `RARE_STRING_RATE` of the non-null values. Rarer strings don't
+    /// decide the type: in a numeric or boolean column, Pass 2 turns them into NULL + anomaly.
+    fn has_frequent_strings(&self) -> bool {
+        let count = |t: InferredType| self.type_counts[t as usize];
+        if count(InferredType::Varchar) + count(InferredType::Text) == 0 {
+            return false;
+        }
+        // Dates/UUIDs count as strings: a DATE column would send a rare "unknown" to COPY as is.
+        let strings: u64 = [
+            InferredType::Varchar,
+            InferredType::Text,
+            InferredType::Uuid,
+            InferredType::Date,
+            InferredType::Timestamp,
+        ]
+        .into_iter()
+        .map(count)
+        .sum();
+        let non_null = self.total_count - self.null_count;
+        strings as f64 >= RARE_STRING_RATE * non_null as f64
+    }
+
     pub fn to_pg_type(&self) -> PgType {
         let has = |t: InferredType| self.type_counts[t as usize] > 0;
 
-        if has(InferredType::Text) || has(InferredType::Varchar) {
+        if self.has_frequent_strings() {
             return self.string_pg_type(
                 has(InferredType::Float),
                 has(InferredType::BigInt),
@@ -642,6 +673,68 @@ mod tests {
         t.observe(&json!(3.14));
         // effective_max = max(30, 25) = 30 → ceil(30 * 1.2) = 36
         assert_eq!(t.to_pg_type(), PgType::VarChar(36));
+    }
+
+    // --- Chaînes rares : ignorées pour le typage sous RARE_STRING_RATE ---
+
+    /// Cas `OpenFoodFacts` : une chaîne parmi des milliers de flottants ne passe plus la colonne en texte.
+    #[test]
+    fn test_rare_string_keeps_float() {
+        let mut t = TypeTracker::new(256);
+        for i in 0..10_000 {
+            t.observe(&json!(f64::from(i) + 0.5));
+        }
+        t.observe(&json!("10000000000000000000"));
+        assert_eq!(t.to_pg_type(), PgType::DoublePrecision);
+    }
+
+    /// L'élargissement numérique reste appliqué au reste : int + bigint + chaîne rare → BIGINT.
+    #[test]
+    fn test_rare_string_keeps_numeric_widening() {
+        let mut t = TypeTracker::new(256);
+        for i in 0..5_000 {
+            t.observe(&json!(i));
+            t.observe(&json!(9_999_999_999_i64 + i64::from(i)));
+        }
+        t.observe(&json!("N/A"));
+        assert_eq!(t.to_pg_type(), PgType::BigInt);
+    }
+
+    /// Une chaîne parmi 100 entiers (1 %) n'est pas rare : la colonne reste texte.
+    #[test]
+    fn test_frequent_string_still_varchar() {
+        let mut t = TypeTracker::new(256);
+        for i in 0..100 {
+            t.observe(&json!(i));
+        }
+        t.observe(&json!("N/A"));
+        assert!(matches!(t.to_pg_type(), PgType::VarChar(_)));
+    }
+
+    /// La part se calcule sur les valeurs non nulles : des nulls ne rendent pas une chaîne rare.
+    #[test]
+    fn test_rare_string_rate_ignores_nulls() {
+        let mut t = TypeTracker::new(256);
+        for i in 0..999 {
+            t.observe(&json!(i));
+        }
+        t.observe(&json!("N/A")); // 1/1000 = exactement le seuil → pas rare
+        for _ in 0..1_000_000 {
+            t.observe(&Value::Null);
+        }
+        assert!(matches!(t.to_pg_type(), PgType::VarChar(_)));
+    }
+
+    /// Dates + une chaîne rare : la colonne reste texte. En `DATE`, la chaîne irait telle
+    /// quelle au COPY (`coerce_date` ne vérifie pas le format) et `PostgreSQL` l'interromprait.
+    #[test]
+    fn test_rare_string_among_dates_still_varchar() {
+        let mut t = TypeTracker::new(256);
+        for _ in 0..10_000 {
+            t.observe(&json!("2024-01-15"));
+        }
+        t.observe(&json!("unknown"));
+        assert!(matches!(t.to_pg_type(), PgType::VarChar(_)));
     }
 
     /// Parity test: observing on two separate trackers then merging must equal

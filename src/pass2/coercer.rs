@@ -1,7 +1,8 @@
 //! Coercition de types — conversion d'une valeur JSON vers le type `PostgreSQL` attendu.
 //!
 //! *Coercer* une valeur : tenter de la convertir vers le `PgType` inféré au Pass 1.
-//! Ex : la valeur JSON `"42"` est coercée vers `Integer` si le schéma attend un entier.
+//! Ex : la valeur JSON `42.0` est coercée vers `Integer` si le schéma attend un entier ; une
+//! chaîne (même `"42"`) ne l'est jamais vers un type numérique : c'est une anomalie.
 //! En cas d'échec (valeur incompatible), retourne `CoerceResult::Anomaly` — la valeur
 //! est alors enregistrée comme anomalie et remplacée par NULL en base.
 //!
@@ -218,13 +219,11 @@ fn coerce_integer(value: &Value) -> CoerceResult {
                 actual_type: "number_out_of_range",
             }
         }
-        Value::String(s) => s.trim().parse::<i32>().map_or_else(
-            |_| CoerceResult::Anomaly {
-                actual_value: s.clone(),
-                actual_type: "string",
-            },
-            |i| CoerceResult::Ok(CopyEscaped::from_safe_ascii(i.to_string())),
-        ),
+        // never parsed: a string in a numeric column is an anomaly, even when it reads as a number
+        Value::String(s) => CoerceResult::Anomaly {
+            actual_value: s.clone(),
+            actual_type: "string",
+        },
         _ => CoerceResult::Anomaly {
             actual_value: value.to_string(),
             actual_type: json_type_name(value),
@@ -261,13 +260,11 @@ fn coerce_bigint(value: &Value) -> CoerceResult {
                 actual_type: "float",
             }
         }
-        Value::String(s) => s.trim().parse::<i64>().map_or_else(
-            |_| CoerceResult::Anomaly {
-                actual_value: s.clone(),
-                actual_type: "string",
-            },
-            |i| CoerceResult::Ok(CopyEscaped::from_safe_ascii(i.to_string())),
-        ),
+        // never parsed: a string in a numeric column is an anomaly, even when it reads as a number
+        Value::String(s) => CoerceResult::Anomaly {
+            actual_value: s.clone(),
+            actual_type: "string",
+        },
         _ => CoerceResult::Anomaly {
             actual_value: value.to_string(),
             actual_type: json_type_name(value),
@@ -293,21 +290,11 @@ fn coerce_float(value: &Value) -> CoerceResult {
                 actual_type: "number",
             }
         }
-        Value::String(s) => s.trim().parse::<f64>().map_or_else(
-            |_| CoerceResult::Anomaly {
-                actual_value: s.clone(),
-                actual_type: "string",
-            },
-            |f| {
-                format_float(f).map_or_else(
-                    || CoerceResult::Anomaly {
-                        actual_value: value.to_string(),
-                        actual_type: "float_not_finite",
-                    },
-                    |s| CoerceResult::Ok(CopyEscaped::from_safe_ascii(s)),
-                )
-            },
-        ),
+        // never parsed: a string in a numeric column is an anomaly, even when it reads as a number
+        Value::String(s) => CoerceResult::Anomaly {
+            actual_value: s.clone(),
+            actual_type: "string",
+        },
         _ => CoerceResult::Anomaly {
             actual_value: value.to_string(),
             actual_type: json_type_name(value),
@@ -447,13 +434,31 @@ mod tests {
             CoerceResult::Ok(_)
         ));
         assert!(matches!(
-            coerce(&json!("42"), &PgType::Integer),
-            CoerceResult::Ok(_)
-        ));
-        assert!(matches!(
             coerce(&json!("N/A"), &PgType::Integer),
             CoerceResult::Anomaly { .. }
         ));
+    }
+
+    /// Une chaîne dans une colonne numérique n'est jamais convertie : NULL + anomalie, même
+    /// si elle se lit comme un nombre (valeurs aberrantes OFF, zéros de tête de "007").
+    #[test]
+    fn test_string_in_numeric_column_is_anomaly() {
+        for (value, pg_type) in [
+            ("42", PgType::Integer),
+            ("007", PgType::BigInt),
+            ("10000000000000000000", PgType::DoublePrecision),
+        ] {
+            assert!(
+                matches!(
+                    coerce(&json!(value), &pg_type),
+                    CoerceResult::Anomaly {
+                        actual_type: "string",
+                        ..
+                    }
+                ),
+                "{value} → {pg_type:?}"
+            );
+        }
     }
 
     #[test]
@@ -475,26 +480,25 @@ mod tests {
     #[test]
     #[allow(clippy::approx_constant)] // 3.14 is an arbitrary test float, not pi
     fn test_coerce_float_nan_infinity() {
-        // NaN et Infinity ne sont pas des valeurs JSON valides → anomalie
-        // On ne peut pas les créer via serde_json::json!(), on passe par f64 directement
+        // NaN et Infinity ne sont pas des nombres JSON valides : en chaîne, ce sont des anomalies
         assert!(matches!(
             coerce_float(&serde_json::Value::String("NaN".to_string())),
             CoerceResult::Anomaly {
-                actual_type: "float_not_finite",
+                actual_type: "string",
                 ..
             }
         ));
         assert!(matches!(
             coerce_float(&serde_json::Value::String("Infinity".to_string())),
             CoerceResult::Anomaly {
-                actual_type: "float_not_finite",
+                actual_type: "string",
                 ..
             }
         ));
         assert!(matches!(
             coerce_float(&serde_json::Value::String("-Infinity".to_string())),
             CoerceResult::Anomaly {
-                actual_type: "float_not_finite",
+                actual_type: "string",
                 ..
             }
         ));
