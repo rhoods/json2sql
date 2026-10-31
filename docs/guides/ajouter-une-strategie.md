@@ -1,7 +1,7 @@
 ---
 type: recette
 sujet: Ajouter une stratégie de matérialisation
-verified_at: aab585c
+verified_at: 5fc70fc
 files:
   - src/schema/table_schema.rs
   - src/schema/strategies.rs
@@ -71,7 +71,9 @@ symbols:
   - insert_array
   - dispatch_child_routes
   - route_independent_child
-  - insert_routed_object
+  - should_skip_parent
+  - refused_at_root
+  - push_generated_col_insert
   - StrategyName::as_str
   - StrategyName::try_from
   - StrategyName::OPTIONAL
@@ -149,7 +151,7 @@ Groupes de colonnes, seulement si TableSchema::takes_column_groups :
    CLI  apply_group_columns, après la sauvegarde du snapshot ; une clé column_groups du TOML l'emporte
    IHM  build_effective_schemas, pour les tables cochées
 Pass 2 : insert_object → recurse_children → insert_child_object
-         (enfant d'un objet JSONB : le même recurse_children ; tableau d'objets : insert_array)
+         (élément d'un tableau d'objets, via insert_array, et cible de routage : le même insert_child_object)
 ```
 
 ## 3. Invariants et pièges
@@ -180,7 +182,8 @@ Ajoute la variante à `InferredStrategy`, puis lance `cargo check --workspace --
 `match` sans cas par défaut à compléter (état au commit `verified_at`) :
 
 - `apply_wide_strategy_columns` : forme des colonnes de la table ;
-- `insert_child_object` : Pass 2, enfant d'un objet (ordinaire ou JSONB) ;
+- `insert_child_object` : Pass 2, seul aiguillage pour un enfant d'un objet (ordinaire ou JSONB), un élément de
+  tableau d'objets et une cible de routage (#172) ;
 - `strategy_label`, `strategy_badge` : libellé et badge dans l'IHM.
 
 Les erreurs de l'IHM n'apparaissent qu'une fois la lib corrigée : une erreur dans `json2sql` empêche de compiler
@@ -195,9 +198,11 @@ Le compilateur ne voit pas le reste :
   une stratégie oubliée ici n'est jamais découpée, sans avertissement.
 - [ ] Pass 2, table racine : `insert_object` traite à part `Jsonb` (`write_root_jsonb`), `SiblingCollapseMulti` et
   `AutoSplit` (`write_autosplit_rows`).
-- [ ] Pass 2, tableau d'objets : `insert_array` traite à part `Jsonb`.
-- [ ] Pass 2, routes : `insert_routed_object` (appelé par `dispatch_child_routes` et `route_independent_child`), si la
-  stratégie fusionne des tables comme `SiblingCollapse`.
+- [ ] Pass 2, tableau d'objets : la fonction d'écriture reçoit `order`, l'index de l'élément, à écrire dans
+  `j2s_order` (`push_generated_col_insert`). Seul un élément scalaire en `Jsonb` est traité à part par `insert_array`.
+- [ ] Racine : une stratégie qui écrit une ligne par clé n'a pas de ligne parente à laquelle relier ces lignes. La
+  détection (`should_skip_parent` pour `SiblingCollapse`), l'override de l'IHM (`apply_user_overrides`) et le TOML
+  (`refused_at_root`) la refusent sur la racine : à étendre à la nouvelle stratégie si elle en fait autant.
 
 ### A. Détection automatique
 

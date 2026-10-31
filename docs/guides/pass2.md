@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Pass 2, parcours du JSON et insertion dans PostgreSQL
-verified_at: be5b2e9
+verified_at: 5fc70fc
 files:
   - src/pass2/
   - src/db/copy_sink.rs
@@ -54,7 +54,6 @@ symbols:
   - push_coerced_as
   - write_row
   - insert_jsonb_object
-  - insert_routed_object
   - coerce
   - CoerceResult
   - AnomalyCollect
@@ -71,9 +70,12 @@ symbols:
   - InferredStrategy
   - PgType
   - insert_sibling_collapse_object
-  - insert_sibling_collapse_multi
   - insert_sibling_collapse_array_of_objects
   - insert_normalize_dynamic_keys
+  - insert_structured_pivot_object
+  - dispatch_child_routes
+  - route_independent_child
+  - write_wide_row
 ---
 
 # Pass 2 : parcours et insertion
@@ -115,7 +117,7 @@ run_pipeline (worker, IHM) ─┴─► run_interruptible
       │          ├─ write_group_rows, write_autosplit_rows
       │          └─ recurse_children : pour chaque champ objet / tableau
       │               ├─ objet  → insert_child_object (répartit selon effective_strategy)
-      │               └─ tableau → insert_array (un insert_object par élément objet, scalaires → anomalie)
+      │               └─ tableau → insert_array (un insert_child_object par élément objet, scalaires → anomalie)
       ├─ run_flusher : COPY FROM STDIN par lots, parents avant enfants au drain final
       └─ COMMIT, VACUUM (ANALYZE), contraintes (PK puis FK)
 ```
@@ -126,10 +128,18 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
 ## 3. Invariants et pièges
 
 - **Une ligne écrite = les colonnes de `schema.columns`, dans cet ordre.** `copy_sql` liste ces colonnes pour le
-  `COPY`, et `write_row_of` les parcourt. Mais plusieurs écritures de `traversal.rs` posent leurs valeurs en dur :
-  `insert_pivot_object` écrit `j2s_id`, le parent, la clé puis la valeur, sans lire `schema.columns`. Si la Pass 1
-  produit ces colonnes dans un autre ordre, ou en ajoute une, le `COPY` échoue sur un type ; pire, deux colonnes de
-  même type (deux UUID, deux textes) sont échangées **sans erreur**.
+  `COPY`, et `write_row_of` les parcourt, comme les écritures de `traversal.rs`. Deux écritures posent encore leurs
+  valeurs en dur, sans lire `schema.columns` : `write_wide_row` (compagnon `AutoSplit` : `j2s_id`, le parent, la clé
+  puis la valeur) et `write_root_jsonb` (`j2s_id` puis le blob). Si la Pass 1 produit ces colonnes dans un autre
+  ordre, ou en ajoute une, le `COPY` échoue sur un type ; pire, deux colonnes de même type (deux UUID, deux textes)
+  sont échangées **sans erreur**.
+- **Un seul aiguillage par stratégie** (#172). Un objet enfant, un élément de tableau d'objets et une cible de
+  routage (`dispatch_child_routes`, `route_independent_child`) passent tous par `insert_child_object`, qui choisit
+  l'écriture selon `effective_strategy` et transmet `order` (l'index de l'élément, pour `j2s_order`). Une table
+  `Pivot` ou `SiblingCollapse` atteinte autrement serait écrite comme une table `Columns` : ses colonnes ne
+  correspondraient pas à l'objet, et les enfants qu'elle absorbe seraient perdus. La racine n'y passe pas : elle ne
+  prend jamais une stratégie qui écrit une ligne par clé (elle n'a pas de ligne parente à laquelle relier ces
+  lignes), la Pass 1 et les overrides la refusent.
 - **Une clé sans table laisse une anomalie, sauf abandon voulu** (#167). `recurse_children` cherche le chemin du
   champ dans `path_map` ; absent, l'objet ou le tableau passe par `record_missing_table`, qui laisse une anomalie
   (type attendu `table`) sur la table parente. Elle se tait quand rien n'est perdu ou que l'abandon est voulu : valeur
@@ -175,8 +185,8 @@ compile donc sans erreur et reste vide en base. À faire à la main :
 
 - [ ] la créer côté schéma (`ColumnSchema::generated`) ;
 - [ ] ajouter son nom au `match` de `push_generated_col_insert`, avec la valeur à écrire ;
-- [ ] mettre à jour chaque écriture de `traversal.rs` qui pose ses valeurs dans un ordre fixe au lieu de suivre
-  `schema.columns` (`insert_pivot_object` et les autres `insert_*` qui remplissent un `RowBuilder` elles-mêmes) ;
+- [ ] mettre à jour chaque écriture qui pose ses valeurs dans un ordre fixe au lieu de suivre `schema.columns`
+  (`write_wide_row`, `write_root_jsonb`) ;
 - [ ] un test `CaptureSink` par forme de ligne touchée, puis un test PostgreSQL.
 
 **Nouveau paramètre du run.** `Pass2Config` force tous les sites de construction, mais chacun y met sa valeur à la main.
@@ -198,12 +208,12 @@ Les tests `tc_*` démarrent un PostgreSQL dans Docker (testcontainers) : il faut
 
 Vues en écrivant la fiche, pas tranchées.
 
-1. **Les écritures en dur de `traversal.rs`.** L'ordre des colonnes est défini deux fois : par la Pass 1 (le schéma)
-   et par chaque `insert_*` (les valeurs). Un `RowBuilder` qui remplirait les valeurs par nom de colonne supprimerait
+1. **Les écritures en dur.** Pour `write_wide_row` et `write_root_jsonb`, l'ordre des colonnes est défini deux fois :
+   par la Pass 1 (le schéma) et par l'écriture (les valeurs). Un `RowBuilder` qui remplirait les valeurs par nom de colonne supprimerait
    le piège de l'ordre.
 2. **Deux styles de contexte.** `insert.rs` passe un `InsertCtx`, `traversal.rs` passe `sinks` et `anomalies`
-   séparément. `insert_array`, `insert_jsonb_object` et `insert_routed_object` reçoivent les deux morceaux et
-   reconstruisent un `InsertCtx` pour appeler `insert_object` ou `recurse_children`.
-3. **architecture.md décalé sur `traversal.rs`** : il cite `insert_keyed_pivot_object`, `insert_multi_keyed_pivot`
-   et un enum `WideStrategy`, qui n'existent plus (aujourd'hui `insert_sibling_collapse_object`,
-   `insert_sibling_collapse_multi` et `InferredStrategy`).
+   séparément. `insert_array`, `insert_jsonb_object`, `dispatch_child_routes` et `route_independent_child` reçoivent
+   les deux morceaux et reconstruisent un `InsertCtx` pour appeler `insert_child_object` ou `recurse_children`.
+3. **architecture.md décalé hors Pass 2** : la section `traversal.rs` est à jour depuis #172, mais la partie
+   `src/schema/` cite encore un enum `WideStrategy` et une stratégie `KeyedPivot` (aujourd'hui `InferredStrategy` et
+   `SiblingCollapse`).

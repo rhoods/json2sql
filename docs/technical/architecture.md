@@ -217,16 +217,16 @@ Abstraction sur l'écriture de lignes, découplant la logique d'insertion du sto
 
 ### `traversal.rs`
 
-Toutes les fonctions `insert_*` privées — traversal du graphe JSON selon les `WideStrategy`.
+Les écritures propres à chaque stratégie (`InferredStrategy`), appelées par `insert_child_object()` (dans `insert.rs`). Chacune construit ses lignes en suivant `schema.columns` ; les colonnes générées (`j2s_id`, clé parente, `j2s_order`) passent par `push_generated_col_insert()`.
 
-- `insert_pivot_object()` : une ligne `(parent_id, key, value)` par champ
-- `insert_jsonb_object()` : l'objet entier sérialisé en JSONB
-- `insert_structured_pivot_object()` : une ligne par `(parent_id, base, val_suffixe1…)`
-- `dispatch_child_routes()` : dispatch récursif vers les tables enfants
-- `insert_keyed_pivot_object()` / `insert_keyed_pivot_array_of_objects()` : fusion de tables sœurs
-- `insert_normalize_dynamic_keys()` : clé/valeur normalisée depuis les sous-objets dynamiques
-- `insert_multi_keyed_pivot()` : pivot multiple via tables synthétiques
-- `insert_array()` : tableau d'objets → `insert_object()` récursif (un tableau de scalaires n'y passe pas : c'est une colonne tableau, écrite avec les autres colonnes de sa table)
+- `insert_pivot_object()` : une ligne `(key, value)` par champ
+- `insert_jsonb_object()` : l'objet entier sérialisé en JSONB, puis ses tables enfants
+- `insert_structured_pivot_object()` : une ligne par base de la grille de suffixes `(name, value, suffixe1…)`
+- `insert_sibling_collapse_object()` / `insert_sibling_collapse_array_of_objects()` : tables sœurs fusionnées, une ligne par clé (et par élément quand les sœurs sont des tableaux d'objets)
+- `insert_normalize_dynamic_keys()` : une ligne par clé dynamique
+- `route_multi_collapse_children()` : `SiblingCollapseMulti`, répartit les clés entre les tables pivot de chaque groupe
+- `dispatch_child_routes()` / `route_independent_child()` : envoient un sous-objet vers sa table cible (après une fusion de tables sœurs)
+- `insert_array()` : tableau d'objets, une ligne par élément objet (un tableau de scalaires n'y passe pas : c'est une colonne tableau, écrite avec les autres colonnes de sa table)
 
 ### `coercer.rs`
 
@@ -299,18 +299,16 @@ Un essai `UNLOGGED` puis `SET LOGGED` a été retiré : la réécriture dans le 
 - **`Pass2Timing { streaming_ms, copy_ms }`** : durée du streaming et de la phase finale (drain + contraintes). `total_ms()` retourne la somme.
 - **`Pass2Result { rows_per_table, anomaly_collector, constraint_warnings, timing }`** : résumé complet de la Pass 2.
 
-**`insert_object()`** (dans `insert.rs`) : orchestrateur principal (~50 lignes). Construit les colonnes générées (UUID, FK parent, j2s_order) puis délègue à `traversal.rs` selon la `WideStrategy` :
-  - `Columns` : une colonne par champ JSON
-  - `Pivot` : `insert_pivot_object()` — une ligne `(parent_id, key, value)` par champ
-  - `Jsonb` : `insert_jsonb_object()` — l'objet entier sérialisé en JSONB
-  - `StructuredPivot` : `insert_structured_pivot_object()` — une ligne par `(parent_id, base, val_suffixe1...)`
-  - `KeyedPivot` : `insert_keyed_pivot_object()` / `insert_keyed_pivot_array_of_objects()` — fusion de tables sœurs ; sérialise l'objet enfant dans `j2s_data JSONB`
-  - `AutoSplit` : colonnes stables → table principale, colonnes médiums → table `_wide` (EAV) ; les clés rares (`< --rare-threshold`) ne sont **pas importées** — voir [schema-inference.md](schema-inference.md)
-  - `Ignore` : clé supprimée
+**`insert_object()`** (dans `insert.rs`) : écrit la ligne d'un objet dans sa table (`write_row_of`), avec ses colonnes générées (UUID, FK parent, `j2s_order`) — sauf pour une racine en `Jsonb`, dont `write_root_jsonb()` écrit le blob — puis :
+  - `SiblingCollapseMulti` : la ligne écrite sert de ligne de routage, et `route_multi_collapse_children()` répartit les clés (rien d'autre n'est fait) ;
+  - `AutoSplit` : les clés médiums vont dans la table compagnon `_wide` (EAV, `write_autosplit_rows`) ; les clés rares (`< --rare-threshold`) ne sont **pas importées** — voir [schema-inference.md](schema-inference.md) ;
+  - enfin `recurse_children()` parcourt les champs objet et tableau.
+
+**Un seul aiguillage par stratégie** (#172) : `insert_child_object()` choisit l'écriture de `traversal.rs` selon `effective_strategy()` (sinon `insert_object()`). Un objet enfant (`recurse_children()`), un élément de tableau d'objets (`insert_array()`, avec l'index de l'élément pour `j2s_order`) et une cible de routage (`dispatch_child_routes()`, `route_independent_child()`) y passent tous. La racine n'y passe pas : elle ne prend jamais une stratégie qui écrit une ligne par clé (`Pivot`, `SiblingCollapse`, `NormalizeDynamicKeys`), faute de ligne parente à laquelle relier ces lignes ; la détection et les overrides (IHM et TOML) la refusent.
 
 **Groupes de colonnes** (#78, dans `insert.rs`) : pour une table `Columns` ou `AutoSplit` qui a des tables de groupe, `insert_object()` écrit après la ligne de la table (`write_row_of`) une ligne par groupe (`write_group_rows`) : même `j2s_id` et même clé étrangère que la ligne d'origine, seulement si une colonne du groupe a une valeur (ni `null`, ni `""`, ni `[]`, ni `{}`). Les tables enfants ordinaires restent rattachées à la ligne d'origine.
 
-**Traversal des tableaux** (dans `traversal.rs`) : `insert_array()` — tableau d'objets → `insert_object()` récursif. Un tableau de scalaires n'a pas de table : c'est une colonne tableau.
+**Traversal des tableaux** (dans `traversal.rs`) : `insert_array()` — chaque élément objet passe par `insert_child_object()`. Un tableau de scalaires n'a pas de table : c'est une colonne tableau.
 
 ---
 
