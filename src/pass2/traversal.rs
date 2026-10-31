@@ -29,6 +29,8 @@
 //! Routing générique :
 //! - fn `dispatch_child_routes` — route les sous-objets/arrays de `schema.child_routes`
 //!   vers leurs tables cibles (post-cascade merge).
+//! - fn `write_keyed_route_row` — route réécrite par la post-passe keyed-pivot : la clé routée est la clé
+//!   de la ligne cible (#173).
 //!
 //! `SiblingCollapse` (simple + multi) :
 //! - struct `SiblingCollapseRowInput` — paramètres empaquetés d'une ligne keyed-pivot à écrire.
@@ -322,6 +324,7 @@ pub(super) fn insert_structured_pivot_object<'a, S: RowSink>(
 /// Route sub-objects and sub-arrays declared in `schema.child_routes` to their target tables.
 /// Called after writing each pivot row so that nested tables created by cascade merging
 /// receive their data with the correct parent FK.
+#[allow(clippy::too_many_lines)] // one loop: keyed route first, then direct route by value type (#173)
 pub(super) fn dispatch_child_routes<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -337,6 +340,17 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
         let Some(child_schema) = path_map.values().find(|s| s.name == *child_table_name) else {
             continue;
         };
+        if write_keyed_route_row(
+            path_map,
+            sinks,
+            anomalies,
+            child_schema,
+            sub_key,
+            sub_value,
+            row_id,
+        )? {
+            continue;
+        }
         match sub_value {
             Value::Object(nested) => {
                 let ctx = &mut InsertCtx { sinks, anomalies };
@@ -350,6 +364,54 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
         }
     }
     Ok(())
+}
+
+/// A route the keyed post-pass rewrote (#173): `sub_key` is not the JSON key of `target` but the
+/// key of one of its rows (`fr` → `selected_key`, whose path ends in `key`). Writes that row and
+/// returns `true`; `false` for a direct route, or a target that does not write one row per key.
+#[allow(clippy::too_many_lines)] // one row: route check, strategy's key column, then the write (#173)
+fn write_keyed_route_row<S: RowSink>(
+    path_map: &HashMap<String, TableSchema>,
+    sinks: &mut HashMap<String, S>,
+    anomalies: &mut impl AnomalyCollect,
+    target: &TableSchema,
+    sub_key: &str,
+    sub_value: &Value,
+    parent_id: Uuid,
+) -> Result<bool> {
+    // shortcut: a row key spelled like the target's last path segment ("key") reads as a direct
+    // route; mark keyed routes in the schema if such a key shows up.
+    if target.path.last().is_some_and(|last| last == sub_key) {
+        return Ok(false);
+    }
+    let strategy = target.effective_strategy();
+    let (key_col_name, routes_children) = match &*strategy {
+        InferredStrategy::SiblingCollapse(s) if !s.array_children => (&s.key_col_name[..], true),
+        InferredStrategy::NormalizeDynamicKeys { id_column } => (&id_column[..], false),
+        _ => return Ok(false),
+    };
+    let Value::Object(child_obj) = sub_value else {
+        if !sub_value.is_null() {
+            record_dropped_scalar(anomalies, &target.name, sub_key, parent_id, sub_value)?;
+        }
+        return Ok(true);
+    };
+    let row = SiblingCollapseRowInput {
+        key: sub_key,
+        child_obj,
+        parent_id,
+        row_id: Uuid::now_v7(),
+        order: None,
+        key_col_name,
+    };
+    if routes_children {
+        write_sibling_row(path_map, sinks, anomalies, target, &row)?;
+    } else {
+        let mut builder = RowBuilder::new();
+        write_keyed_pivot_columns(&mut builder, anomalies, target, &row)?;
+        write_row(sinks, anomalies, &target.name, builder)?;
+    }
+    Ok(true)
 }
 
 /// One keyed-pivot row to write: a `SiblingCollapse` key, or a `NormalizeDynamicKeys` key.
@@ -2230,6 +2292,7 @@ mod tests {
         target.inferred_strategy = InferredStrategy::NormalizeDynamicKeys {
             id_column: "code".into(),
         };
+        target.path = vec!["root".to_string(), "sub".to_string()];
         let mut parent = TableSchema::new("root".to_string(), vec!["root".to_string()], 0);
         parent
             .child_routes
@@ -2261,6 +2324,56 @@ mod tests {
         assert_eq!(
             got,
             vec![("x".into(), "1".into()), ("y".into(), "2".into())]
+        );
+    }
+
+    /// A route the keyed post-pass rewrote (#173): the routed key is the key of the row, a
+    /// scalar under it is reported, not lost.
+    #[test]
+    fn a_keyed_route_writes_one_row_keyed_by_the_routed_key() {
+        let (mut target, _) = make_sibling_collapse_schema("images", "root", "code", &["a"]);
+        target.inferred_strategy = InferredStrategy::NormalizeDynamicKeys {
+            id_column: "code".into(),
+        };
+        target.path = vec!["root".to_string(), "key".to_string()];
+        let mut parent = TableSchema::new("root".to_string(), vec!["root".to_string()], 0);
+        for key in ["x", "y", "z"] {
+            parent
+                .child_routes
+                .insert(key.to_string(), "images".to_string());
+        }
+        let path_map = HashMap::from([("images".to_string(), target)]);
+        let mut sinks = make_sinks(&["images"]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"x": {"a": "1"}, "y": {"a": "2"}, "z": "3"}"#).unwrap();
+
+        super::dispatch_child_routes(
+            &path_map,
+            &mut sinks,
+            &mut anomalies,
+            &parent,
+            &obj,
+            dummy_parent_id(),
+        )
+        .unwrap();
+
+        let mut got: Vec<(String, String)> = sinks["images"]
+            .0
+            .iter()
+            .map(|r| {
+                let f = parse_fields(r);
+                (f[2].to_string(), f[3].to_string())
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![("x".into(), "1".into()), ("y".into(), "2".into())]
+        );
+        assert_eq!(
+            anomalies.records,
+            vec![("images".to_string(), "z".to_string())]
         );
     }
 

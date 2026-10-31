@@ -74,6 +74,7 @@ symbols:
   - insert_normalize_dynamic_keys
   - insert_structured_pivot_object
   - dispatch_child_routes
+  - write_keyed_route_row
   - route_independent_child
   - write_wide_row
 ---
@@ -140,6 +141,13 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   correspondraient pas à l'objet, et les enfants qu'elle absorbe seraient perdus. La racine n'y passe pas : elle ne
   prend jamais une stratégie qui écrit une ligne par clé (elle n'a pas de ligne parente à laquelle relier ces
   lignes), la Pass 1 et les overrides la refusent.
+- **Une route par clé écrit une seule ligne, sans passer par l'aiguillage** (#173). La post-passe keyed-pivot fait
+  pointer plusieurs clés (`fr`, `en`…) vers une même table dont le chemin finit par « key » (`…_selected_key`) : la
+  clé routée y est la clé de la ligne, pas le nom JSON de la table. `dispatch_child_routes` le reconnaît au dernier
+  segment du chemin de la cible, différent de la clé, et `write_keyed_route_row` écrit une ligne `SiblingCollapse` ou
+  `NormalizeDynamicKeys` avec cette clé. Passée à `insert_child_object`, la valeur serait lue comme un objet de clés
+  sœurs : colonnes en anomalie, sous-clés prises pour des clés de ligne. Une clé de ligne nommée « key » serait prise
+  pour une route directe.
 - **Une clé sans table laisse une anomalie, sauf abandon voulu** (#167). `recurse_children` cherche le chemin du
   champ dans `path_map` ; absent, l'objet ou le tableau passe par `record_missing_table`, qui laisse une anomalie
   (type attendu `table`) sur la table parente. Elle se tait quand rien n'est perdu ou que l'abandon est voulu : valeur
