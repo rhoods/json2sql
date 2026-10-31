@@ -48,6 +48,7 @@
 //! - fn `compute_skip_cascade` — ensemble complet des tables à retirer pour `Skip` + un
 //!   `SkipCascadeWarning` par racine ayant réellement cascadé (`pub` : requête pure réutilisable
 //!   par l'IHM pour afficher la cascade avant application).
+//! - fn `record_skipped_children` — note sur chaque parent survivant la clé de ses enfants `Skip` (#167).
 //! - fn `skip_cascade_warning` — avertissement d'une table `Skip` : les vrais enfants emportés avec elle.
 //! - fn `prime_tracker_from_pg_type` — reconstruit un `TypeTracker` représentatif depuis un `PgType`
 //!   déjà résolu (pour réutiliser `build_suffix_schema_from_list` après finalisation).
@@ -850,6 +851,7 @@ pub fn apply_user_overrides(
     }
 
     let (removed, warnings) = compute_skip_cascade(schemas, overrides);
+    record_skipped_children(schemas, &removed);
     schemas.retain(|s| !removed.contains(&s.name));
     crate::schema::finalizer::exclude_absorbed_children(schemas);
     prune_missing_groups(schemas);
@@ -958,6 +960,26 @@ fn close_over_real_children(schemas: &[TableSchema], seed: HashSet<String>) -> H
         }
     }
     closure
+}
+
+/// Note on each surviving parent the key of its children in `removed`, so Pass 2 knows they were dropped on purpose
+/// (#167).
+fn record_skipped_children(schemas: &mut [TableSchema], removed: &HashSet<String>) {
+    let skipped: Vec<(String, String)> = schemas
+        .iter()
+        .filter(|s| removed.contains(&s.name))
+        .filter_map(|s| Some((s.parent_table.clone()?, s.path.last()?.clone())))
+        .collect();
+    for (parent, segment) in skipped {
+        if let Some(p) = schemas
+            .iter_mut()
+            .find(|s| s.name == parent && !removed.contains(&s.name))
+        {
+            if !p.skipped_children.contains(&segment) {
+                p.skipped_children.push(segment);
+            }
+        }
+    }
 }
 
 /// Compute the full set of tables to remove for `Skip` (direct roots, their wide companions,
@@ -2471,6 +2493,34 @@ mod tests {
         apply_user_overrides(&mut schemas, &overrides);
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, "b");
+    }
+
+    #[test]
+    fn apply_user_overrides_skip_leaves_the_child_key_on_its_parent() {
+        let parent = simple_table("a");
+        let mut child = TableSchema::new("a_b".to_string(), vec!["a".into(), "b".into()], 1);
+        child.parent_table = Some("a".to_string());
+        let mut grandchild = TableSchema::new(
+            "a_b_c".to_string(),
+            vec!["a".into(), "b".into(), "c".into()],
+            2,
+        );
+        grandchild.parent_table = Some("a_b".to_string());
+        let mut schemas = vec![parent, child, grandchild];
+        let overrides = HashMap::from([("a_b".to_string(), UserOverride::Skip)]);
+
+        apply_user_overrides(&mut schemas, &overrides);
+
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(
+            schemas[0].skipped_children,
+            ["b"],
+            "seul le parent survivant (#167)"
+        );
+        // CLI snapshots are saved after the Skip, without the overrides: the trace must survive serde.
+        let json = serde_json::to_string(&schemas[0]).unwrap();
+        let back: TableSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.skipped_children, ["b"]);
     }
 
     #[test]

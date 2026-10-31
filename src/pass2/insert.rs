@@ -17,7 +17,7 @@
 //!   `InferredStrategy` (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`(Multi), `NormalizeDynamicKeys`,
 //!   ou insertion standard récursive).
 //! - fn `recurse_children` — parcourt les champs de l'objet, route chaque enfant (objet/array) vers
-//!   `insert_child_object`/`insert_array`.
+//!   `insert_child_object`/`insert_array` ; sans table → `record_missing_table` (#167).
 //! - fn `write_row_of` — écrit la ligne d'une table pour un objet : colonnes générées puis colonnes de données.
 //! - fn `write_group_rows` — écrit les lignes des tables de groupes de colonnes d'une table (une par groupe qui a au moins une valeur).
 //! - fn `column_value` — valeur JSON d'une colonne de données dans l'objet de sa table (via le champ d'origine si elle vient d'un `Flatten`).
@@ -47,7 +47,7 @@ use crate::schema::PATH_SEP;
 use super::traversal::{
     insert_array, insert_jsonb_object, insert_normalize_dynamic_keys, insert_pivot_object,
     insert_sibling_collapse_multi, insert_sibling_collapse_object, insert_structured_pivot_object,
-    keeps_scalars_in_array_column, push_coerced, push_coerced_as, push_text,
+    keeps_scalars_in_array_column, push_coerced, push_coerced_as, push_text, record_missing_table,
     route_multi_collapse_children, write_row,
 };
 
@@ -166,7 +166,8 @@ fn write_row_of<S: RowSink, A: AnomalyCollect>(
 /// Write the rows of the column groups split off `schema` (#78): one row per group table that has at least one
 /// value in `obj`, none when all its values are empty (null, `""`, `[]`, `{}`: the rule the groups were proposed
 /// with). The row takes the id of the row just written for both its `j2s_id` and its foreign key, which is what makes
-/// the table 1:1. A group table the path map does not have is skipped.
+/// the table 1:1. A group table the path map does not have is skipped: `prune_missing_groups` drops it from
+/// `column_groups` after each Skip, so only a hand-edited snapshot gets here.
 fn write_group_rows<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
@@ -389,18 +390,19 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     let medium = obj.iter().filter(|(k, v)| {
         medium_keys.contains(k.as_str()) && !matches!(v, Value::Object(_) | Value::Array(_))
     });
-    let companion = path_map.get(wide_table_name.as_str());
-    if let Some(companion) = companion {
-        if let InferredStrategy::StructuredPivot(ss) = &*companion.effective_strategy() {
-            return insert_structured_pivot_object(
-                ctx.sinks,
-                ctx.anomalies,
-                companion,
-                medium,
-                row_id,
-                ss,
-            );
-        }
+    // The companion is missing only when the user Skip-ed it alone: its keys are dropped on purpose (#167).
+    let Some(companion) = path_map.get(wide_table_name.as_str()) else {
+        return Ok(());
+    };
+    if let InferredStrategy::StructuredPivot(ss) = &*companion.effective_strategy() {
+        return insert_structured_pivot_object(
+            ctx.sinks,
+            ctx.anomalies,
+            companion,
+            medium,
+            row_id,
+            ss,
+        );
     }
     write_eav_rows(ctx, companion, wide_table_name, medium, row_id)
 }
@@ -408,13 +410,13 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
 /// One EAV row (`key`, `value`) per medium key of the `AutoSplit` companion `wide_table_name`.
 fn write_eav_rows<'a, S: RowSink, A: AnomalyCollect>(
     ctx: &mut InsertCtx<'_, S, A>,
-    companion: Option<&TableSchema>,
+    companion: &TableSchema,
     wide_table_name: &str,
     medium: impl Iterator<Item = (&'a String, &'a Value)>,
     row_id: Uuid,
 ) -> Result<()> {
     let value_type = companion
-        .and_then(|ws| ws.find_by_original("value"))
+        .find_by_original("value")
         .map(|c| c.pg_type.clone());
     for (field, value) in medium {
         write_wide_row(
@@ -444,6 +446,8 @@ pub(super) fn recurse_children<S: RowSink, A: AnomalyCollect>(
             Value::Object(nested) => {
                 if let Some(child_schema) = path_map.get(&child_key) {
                     insert_child_object(path_map, ctx, child_schema, nested, value, row_id)?;
+                } else {
+                    record_missing_table(path_map, ctx.anomalies, schema, field, row_id, value)?;
                 }
             }
             Value::Array(arr) => {
@@ -457,6 +461,8 @@ pub(super) fn recurse_children<S: RowSink, A: AnomalyCollect>(
                         row_id,
                         keeps_scalars_in_array_column(schema, field),
                     )?;
+                } else {
+                    record_missing_table(path_map, ctx.anomalies, schema, field, row_id, value)?;
                 }
             }
             _ => {} // scalar — already handled as a column above
@@ -661,13 +667,77 @@ mod tests {
         );
         let id = ID.to_string();
         assert_eq!(rows["t"], [[id.clone(), "acme".to_string()]]);
-        // salt_100g holds an object: not a grid value, no row and no anomaly (#69).
+        // salt_100g holds an object: not a grid value, no pivot row (#69). This schema has no table for it either,
+        // so the object is lost: one anomaly on the identity table (#167).
         let pivot: Vec<&[String]> = rows["t_pivot"].iter().map(|r| &r[1..]).collect();
         assert_eq!(
             pivot,
-            [[id, "fat".into(), "1".into(), "2".into(), "3".into()]]
+            [[id.clone(), "fat".into(), "1".into(), "2".into(), "3".into()]]
+        );
+        assert_eq!(
+            recorder.anomalies,
+            [("t".to_string(), "salt_100g".to_string(), id)]
+        );
+    }
+
+    #[test]
+    fn an_object_or_array_without_table_records_an_anomaly() {
+        let mut recorder = Recorder::default();
+        let rows = write(
+            &split_table(),
+            r#"{"a": "A", "lost": {"k": 1}, "list": [{"k": 1}], "none": [], "empty": {}}"#,
+            &mut recorder,
+        );
+        assert_eq!(rows["t"].len(), 1);
+        let mut lost: Vec<&str> = recorder.anomalies.iter().map(|a| a.1.as_str()).collect();
+        lost.sort_unstable();
+        assert_eq!(lost, ["list", "lost"], "vides : rien de perdu (#167)");
+    }
+
+    #[test]
+    fn an_array_kept_by_a_column_group_records_no_anomaly() {
+        let mut path_map = split_table();
+        path_map.get_mut("t_g").unwrap().columns[2] =
+            column("x1", "x1", PgType::Array(Box::new(PgType::Text)));
+        let mut recorder = Recorder::default();
+        let rows = write(&path_map, r#"{"a": "A", "x1": ["v"]}"#, &mut recorder);
+        assert_eq!(
+            rows["t_g"].len(),
+            1,
+            "le tableau va dans la table de groupe"
         );
         assert!(recorder.anomalies.is_empty(), "{:?}", recorder.anomalies);
+    }
+
+    #[test]
+    fn an_object_flattened_into_a_column_group_records_no_anomaly() {
+        let mut path_map = split_table();
+        let group = path_map.get_mut("t_g").unwrap();
+        group
+            .flatten_sources
+            .insert("x1".to_string(), "m".to_string());
+        let mut recorder = Recorder::default();
+        let rows = write(&path_map, r#"{"a": "A", "m": {"x1": "v"}}"#, &mut recorder);
+        assert_eq!(
+            rows["t_g"][0][2], "v",
+            "l'objet aplati va dans la table de groupe"
+        );
+        assert!(recorder.anomalies.is_empty(), "{:?}", recorder.anomalies);
+    }
+
+    #[test]
+    fn a_companion_skipped_alone_drops_its_keys_without_error() {
+        let mut path_map = structured_split_table();
+        path_map.remove("t_pivot");
+        let mut recorder = Recorder::default();
+        let rows = write(&path_map, r#"{"brand": "acme", "fat": 1}"#, &mut recorder);
+        assert_eq!(rows["t"].len(), 1);
+        assert!(recorder.anomalies.is_empty(), "{:?}", recorder.anomalies);
+        assert_eq!(
+            recorder.totals.len(),
+            1,
+            "seule la ligne de t est comptée (#167)"
+        );
     }
 
     #[test]

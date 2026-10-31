@@ -1,12 +1,13 @@
 ---
 type: carte
 sujet: Pass 2, parcours du JSON et insertion dans PostgreSQL
-verified_at: 195b56b
+verified_at: be5b2e9
 files:
   - src/pass2/
   - src/db/copy_sink.rs
   - src/db/copy_text.rs
   - src/schema/table_schema.rs
+  - src/schema/config.rs
   - src/anomaly/collector.rs
   - src/pipeline.rs
   - json2sql-worker/src/pipeline.rs
@@ -16,6 +17,9 @@ files:
   - tests/integration_anomalies.rs
   - tests/integration_limit.rs
 symbols:
+  - record_missing_table
+  - route_multi_collapse_children
+  - apply_user_overrides
   - run_interruptible
   - load_and_constrain
   - run_pass2
@@ -126,12 +130,17 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   `insert_pivot_object` écrit `j2s_id`, le parent, la clé puis la valeur, sans lire `schema.columns`. Si la Pass 1
   produit ces colonnes dans un autre ordre, ou en ajoute une, le `COPY` échoue sur un type ; pire, deux colonnes de
   même type (deux UUID, deux textes) sont échangées **sans erreur**.
-- **Une table sans schéma est sautée en silence.** `recurse_children` cherche le chemin du champ dans `path_map` ;
-  absent, l'objet ou le tableau est ignoré. C'est voulu (table absorbée, `Skip`), mais c'est aussi ce que donne un
-  chemin mal construit : des données perdues, sans anomalie.
-- **Un sink absent est sauté en silence.** Chaque écriture passe par `write_row`, qui compte la ligne puis fait
-  `if let Some(sink) = sinks.get_mut(…)`. Les sinks et
-  `path_map` viennent de la même liste `schemas` : une table ajoutée ailleurs que dans cette liste n'est jamais écrite.
+- **Une clé sans table laisse une anomalie, sauf abandon voulu** (#167). `recurse_children` cherche le chemin du
+  champ dans `path_map` ; absent, l'objet ou le tableau passe par `record_missing_table`, qui laisse une anomalie
+  (type attendu `table`) sur la table parente. Elle se tait quand rien n'est perdu ou que l'abandon est voulu : valeur
+  vide (`{}`, `[]`), parent en `Jsonb` (le blob garde tout), colonne du même nom ou enfant aplati (`flatten_sources`),
+  sur le parent ou sur l'une de ses tables de groupe (colonne tableau, `JsonbFlatten`, type mixte), ou enfant retiré
+  par un `Skip` (`skipped_children`, rempli par `apply_user_overrides` et gardé dans le snapshot). Même règle pour
+  la table pivot d'un groupe `SiblingCollapseMulti` absente (`route_multi_collapse_children`). Une nouvelle façon de retirer une table du schéma
+  doit donc soit laisser sa trace sur le parent, soit accepter l'anomalie.
+- **Un sink absent est une erreur.** Les sinks et `path_map` viennent de la même liste `schemas` : `write_row` refuse
+  d'écrire dans une table sans sink au lieu de compter la ligne et de la perdre. Le seul cas connu, un compagnon
+  `AutoSplit` retiré seul par `Skip`, est écarté avant (`write_autosplit_rows` ne l'écrit pas).
 - **Une colonne générée inconnue vaut `NULL`.** `push_generated_col_insert` reconnaît `j2s_id`, `j2s_order` et la
   clé parente (`is_parent_fk`) ; tout autre nom tombe dans `_ => push_null()`. Une colonne `NOT NULL` le signale au
   `COPY` ; sinon, rien. Les colonnes générées se construisent avec `ColumnSchema::generated` et
@@ -195,7 +204,6 @@ Vues en écrivant la fiche, pas tranchées.
 2. **Deux styles de contexte.** `insert.rs` passe un `InsertCtx`, `traversal.rs` passe `sinks` et `anomalies`
    séparément. `insert_array`, `insert_jsonb_object` et `insert_routed_object` reçoivent les deux morceaux et
    reconstruisent un `InsertCtx` pour appeler `insert_object` ou `recurse_children`.
-3. **Les pertes silencieuses** (chemin absent de `path_map`, sink absent) ne laissent aucune trace. Un compteur, ou une anomalie, distinguerait « absorbé exprès » de « perdu ».
-4. **architecture.md décalé sur `traversal.rs`** : il cite `insert_keyed_pivot_object`, `insert_multi_keyed_pivot`
+3. **architecture.md décalé sur `traversal.rs`** : il cite `insert_keyed_pivot_object`, `insert_multi_keyed_pivot`
    et un enum `WideStrategy`, qui n'existent plus (aujourd'hui `insert_sibling_collapse_object`,
    `insert_sibling_collapse_multi` et `InferredStrategy`).

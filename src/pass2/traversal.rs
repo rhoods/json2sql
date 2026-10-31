@@ -13,7 +13,7 @@
 //! - fn `push_coerced` — coerce et écrit une valeur de colonne (avec anomalie si besoin).
 //! - fn `push_coerced_as` — idem pour une colonne donnée par son nom et son type.
 //! - fn `push_text` — écrit un texte échappé pour COPY (`NULL` s'il contient un octet nul).
-//! - fn `write_row` — compte une ligne et l'écrit dans le sink de sa table.
+//! - fn `write_row` — compte une ligne et l'écrit dans le sink de sa table ; sink absent → erreur (#167).
 //!
 //! Pivot :
 //! - fn `insert_pivot_object` — une ligne par paire clé/valeur.
@@ -52,6 +52,7 @@
 //! Tableaux :
 //! - fn `keeps_scalars_in_array_column` — le parent garde-t-il les scalaires du champ dans une colonne tableau.
 //! - fn `record_dropped_scalar` — anomalie pour une valeur non objet là où un objet est attendu, sans table où aller (#86, #162).
+//! - fn `record_missing_table` — anomalie pour une clé objet ou tableau sans table, sauf abandon voulu (#167).
 //! - fn `insert_array` — tableau d'objets : une ligne par élément (`ObjectArray`) ; scalaires → anomalie,
 //!   ou blob en `Jsonb`.
 
@@ -63,7 +64,7 @@ use uuid::Uuid;
 use crate::anomaly::collector::AnomalyCollect;
 use crate::db::copy_sink::RowBuilder;
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};
-use crate::error::Result;
+use crate::error::{J2sError, Result};
 use crate::pass2::coercer::{coerce, json_type_name, CoerceResult};
 use crate::pass2::sink::RowSink;
 use crate::schema::table_schema::{
@@ -146,19 +147,21 @@ pub(super) fn push_text(builder: &mut RowBuilder, text: &str) {
     }
 }
 
-/// Count one row for `table`, then write it to the table's sink. A table without a sink is
-/// only counted.
+/// Count one row for `table`, then write it to the table's sink. Every table of the schema has a sink, so a missing
+/// one is a routing bug: an error rather than a row counted and lost (#167).
 pub(super) fn write_row<S: RowSink>(
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
     table: &str,
     builder: RowBuilder,
 ) -> Result<()> {
+    let Some(sink) = sinks.get_mut(table) else {
+        return Err(J2sError::Schema(format!(
+            "Pass 2 : la table '{table}' n'a pas de sink, la ligne serait perdue"
+        )));
+    };
     anomalies.inc_total(table);
-    if let Some(sink) = sinks.get_mut(table) {
-        sink.write_row(&builder.finish())?;
-    }
-    Ok(())
+    sink.write_row(&builder.finish())
 }
 
 /// Insert one row per key-value pair for a Pivot wide table.
@@ -693,6 +696,10 @@ pub(super) fn route_multi_collapse_children<S: RowSink>(
                 routing_id,
                 &group.sibling_schema,
             )?;
+        } else {
+            let segment = group_path_segment(group);
+            let value = Value::Object(submap.clone());
+            record_missing_table(path_map, anomalies, schema, segment, routing_id, &value)?;
         }
     }
     Ok(())
@@ -754,6 +761,48 @@ fn record_dropped_scalar(
         "object",
         &item.to_string(),
         json_type_name(item),
+    )
+}
+
+/// One anomaly for an object or array under `parent` whose key has no table to go to (#167), unless it is dropped on
+/// purpose: empty, kept by the parent (its `Jsonb` blob, a column of the same name on it or on one of its column
+/// groups, a flattened child) or Skip-ed by the user.
+pub(super) fn record_missing_table(
+    path_map: &HashMap<String, TableSchema>,
+    anomalies: &mut impl AnomalyCollect,
+    parent: &TableSchema,
+    field: &str,
+    parent_id: Uuid,
+    value: &Value,
+) -> Result<()> {
+    let empty = match value {
+        Value::Object(o) => o.is_empty(),
+        Value::Array(a) => a.is_empty(),
+        _ => true,
+    };
+    // Column groups take their columns and flatten sources from the parent (#78): they keep the field too.
+    let keeps = |t: &TableSchema| {
+        t.find_by_original(field).is_some() || t.flatten_sources.values().any(|f| f == field)
+    };
+    if empty
+        || matches!(*parent.effective_strategy(), InferredStrategy::Jsonb)
+        || keeps(parent)
+        || parent
+            .column_groups
+            .iter()
+            .filter_map(|g| path_map.get(g.as_str()))
+            .any(keeps)
+        || parent.skipped_children.iter().any(|f| f == field)
+    {
+        return Ok(());
+    }
+    anomalies.record(
+        &parent.name,
+        field,
+        &parent_id.to_string(),
+        "table",
+        &value.to_string(),
+        json_type_name(value),
     )
 }
 
@@ -1046,21 +1095,26 @@ mod tests {
     }
 
     #[test]
-    fn pivot_sink_absent_inc_total_still_called_no_row_written() {
+    fn a_table_without_sink_is_an_error_not_a_lost_row() {
         let schema = make_pivot_schema("attrs", "root");
         let mut sinks: HashMap<String, CaptureSink> = HashMap::new();
         let mut anomalies = CountingAnomaly::default();
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"k": "v"}"#).unwrap();
 
-        super::insert_pivot_object(&mut sinks, &mut anomalies, &schema, &obj, dummy_parent_id())
-            .unwrap();
+        let err = super::insert_pivot_object(
+            &mut sinks,
+            &mut anomalies,
+            &schema,
+            &obj,
+            dummy_parent_id(),
+        )
+        .unwrap_err();
 
-        assert_eq!(sinks.len(), 0);
-        assert_eq!(
-            anomalies.totals.get("attrs").copied().unwrap_or(0),
-            1,
-            "inc_total called even without sink"
+        assert!(err.to_string().contains("attrs"), "{err}");
+        assert!(
+            anomalies.totals.is_empty(),
+            "la ligne n'est pas comptée (#167)"
         );
     }
 
@@ -1807,6 +1861,95 @@ mod tests {
         assert_eq!(sinks["pivot_a_key"].0.len(), 2, "a1 + a2 → pivot_a_key");
         assert_eq!(sinks["pivot_b_key"].0.len(), 2, "b1 + b2 → pivot_b_key");
         // root sink is absent → no routing row emitted by route_multi_collapse_children
+    }
+
+    #[test]
+    fn a_missing_pivot_table_records_an_anomaly_unless_skipped() {
+        let mut schema = make_routing_schema("root", "root", &["root"]);
+        let groups = vec![
+            make_group("a_key", false, &["a1"], "key"),
+            make_group("b_key", false, &["b1"], "key"),
+        ];
+        let (pivot_a_schema, _) =
+            make_sibling_collapse_schema("pivot_a_key", "root", "key", &["color"]);
+        let sep = crate::schema::PATH_SEP.to_string();
+        let path_map = HashMap::from([(format!("root{sep}a_key"), pivot_a_schema)]);
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"a1": {"color": "red"}, "b1": {"size": "10"}}"#).unwrap();
+
+        let route = |schema: &TableSchema| {
+            let mut sinks = make_sinks(&["pivot_a_key"]);
+            let mut anomalies = CountingAnomaly::default();
+            super::route_multi_collapse_children(
+                &path_map,
+                &mut sinks,
+                &mut anomalies,
+                schema,
+                &obj,
+                dummy_parent_id(),
+                &groups,
+            )
+            .unwrap();
+            assert_eq!(sinks["pivot_a_key"].0.len(), 1);
+            anomalies.records
+        };
+
+        assert_eq!(
+            route(&schema),
+            [("root".to_string(), "b_key".to_string())],
+            "pivot b_key absent : perte (#167)"
+        );
+        schema.skipped_children.push("b_key".to_string());
+        assert!(route(&schema).is_empty(), "pivot Skip-é : abandon voulu");
+    }
+
+    #[test]
+    fn record_missing_table_stays_quiet_on_intentional_drops() {
+        let mut parent = make_routing_schema("t", "root", &["t"]);
+        parent.columns.push(ColumnSchema {
+            name: "tags".to_string(),
+            original_name: "tags".to_string(),
+            pg_type: PgType::Array(Box::new(PgType::Text)),
+            not_null: false,
+            is_generated: false,
+            is_parent_fk: false,
+        });
+        parent
+            .flatten_sources
+            .insert("n_k".to_string(), "n".to_string());
+        parent.skipped_children.push("gone".to_string());
+        let record = |parent: &TableSchema, field: &str, json: &str| {
+            let mut anomalies = CountingAnomaly::default();
+            let value: serde_json::Value = serde_json::from_str(json).unwrap();
+            super::record_missing_table(
+                &HashMap::new(),
+                &mut anomalies,
+                parent,
+                field,
+                dummy_parent_id(),
+                &value,
+            )
+            .unwrap();
+            anomalies.records.len()
+        };
+
+        assert_eq!(
+            record(&parent, "lost", r#"{"k": 1}"#),
+            1,
+            "objet sans table"
+        );
+        assert_eq!(
+            record(&parent, "lost", r#"[{"k": 1}]"#),
+            1,
+            "tableau sans table"
+        );
+        assert_eq!(record(&parent, "lost", "{}"), 0, "objet vide");
+        assert_eq!(record(&parent, "lost", "[]"), 0, "tableau vide");
+        assert_eq!(record(&parent, "tags", r#"["x"]"#), 0, "colonne tableau");
+        assert_eq!(record(&parent, "n", r#"{"k": 1}"#), 0, "enfant aplati");
+        assert_eq!(record(&parent, "gone", r#"{"k": 1}"#), 0, "enfant Skip-é");
+        parent.inferred_strategy = InferredStrategy::Jsonb;
+        assert_eq!(record(&parent, "lost", r#"{"k": 1}"#), 0, "blob Jsonb");
     }
 
     // ---------------------------------------------------------------------------
