@@ -20,6 +20,7 @@
 //!   (#31, `suffix_columns` gagne toujours).
 //! - fn `apply_strategy_override` — applique la clé `strategy` (`pivot`/`jsonb`/`columns`/`structured_pivot`/
 //!   `normalize_dynamic_keys`/`flatten`).
+//! - fn `refused_at_root` — vrai si la stratégie demande à la racine une ligne par clé (#172).
 //! - fn `suffix_list_of` — les `suffix_columns` d'une table dans la config.
 //! - fn `apply_suffix_columns_override` — applique `suffix_columns` : la grille part dans un compagnon `_pivot` (#163).
 //! - fn `suffix_columns_already_applied` — vrai si la table est déjà l'identité de ces `suffix_columns` (#129).
