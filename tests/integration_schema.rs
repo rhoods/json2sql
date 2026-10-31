@@ -1278,7 +1278,8 @@ async fn test_no_duplicate_pk_on_num_key_collision_structure() {
 /// Regression test for findings 1+2: `SiblingCollapseMulti` with two non-numeric clusters must
 /// populate BOTH pivot tables, not just the last one (path collision bug).
 ///
-/// The fixture has 6 child keys split into 2 incompatible clusters (Jaccard=0 between them):
+/// The fixture nests them under `attrs`: the root never takes a one-row-per-key strategy (#172).
+/// It has 6 child keys split into 2 incompatible clusters (Jaccard=0 between them):
 ///   cluster A: a1, a2, a3 (column "color")
 ///   cluster B: b1, b2, b3 (column "size")
 /// 3 JSON documents → each cluster should have 9 rows (3 keys × 3 docs).
