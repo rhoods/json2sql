@@ -2,7 +2,7 @@
 //!
 //! - struct `OverflowWarning` — enregistré quand une table est auto-convertie en JSONB (> 1600 colonnes).
 //! - fn `apply_column_limit_guard` — convertit en Jsonb les tables dépassant 1600 colonnes.
-//! - fn `collect_surviving_route_targets` — calcule les cibles de routing protégées.
+//! - fn `collect_surviving_route_targets` — calcule les cibles de routing protégées, et celles de ces cibles (point fixe).
 //! - fn `exclude_absorbed_children` — retire les tables absorbées par une stratégie parente
 //!   (sauf cibles de routing survivantes).
 
@@ -63,12 +63,23 @@ fn collect_surviving_route_targets<'a>(
             }
         }
     }
-    // Route targets from excluded tables are stale — only surviving tables' routes count.
-    schemas
-        .iter()
-        .filter(|s| !preliminary_excluded.contains(s.name.as_str()))
-        .flat_map(|s| s.child_routes.values().map(std::string::String::as_str))
-        .collect()
+    // Route targets from excluded tables are stale — only surviving tables' routes count. A
+    // protected target survives too, so its own routes count (`…_selected_key` → `sizes`, #177).
+    let mut targets: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    loop {
+        let found: Vec<&str> = schemas
+            .iter()
+            .filter(|s| {
+                !preliminary_excluded.contains(s.name.as_str()) || targets.contains(s.name.as_str())
+            })
+            .flat_map(|s| s.child_routes.values().map(std::string::String::as_str))
+            .collect();
+        let before = targets.len();
+        targets.extend(found);
+        if targets.len() == before {
+            return targets;
+        }
+    }
 }
 
 pub fn exclude_absorbed_children(schemas: &mut Vec<TableSchema>) {

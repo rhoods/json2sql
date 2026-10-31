@@ -1342,3 +1342,35 @@ async fn test_multi_cluster_non_numeric_both_pivots_populated() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// Régression : une table protégée comme cible de route garde ses propres cibles.
+//
+// Structure : root.images.selected.<type>.<langue> = {imgid, rev, sizes: {...}}
+//   Post-passe keyed-pivot : fr/en/de → p_images_selected_key (SiblingCollapse)
+//   p_images_selected_key.child_routes["sizes"] → p_images_selected_key_sizes
+//   Bug : p_images_selected_key est sous une table absorbante, ses routes étaient
+//   jugées périmées → p_images_selected_key_sizes exclue, sizes perdus en Pass 2.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_every_child_route_target_is_in_the_schema() {
+    let path = common::fixture("keyed_route_selected_images.jsonl");
+    let p1 = pass1::runner::run(&path, &common::pass1_config("p"), None).unwrap();
+    let names: std::collections::HashSet<&str> =
+        p1.schemas.iter().map(|s| s.name.as_str()).collect();
+    let key = p1
+        .schemas
+        .iter()
+        .find(|s| s.name == "p_images_selected_key")
+        .expect("the fixture must reach the keyed post-pass");
+    assert!(key.child_routes.contains_key("sizes"));
+    for s in &p1.schemas {
+        for (k, target) in &s.child_routes {
+            assert!(
+                names.contains(target.as_str()),
+                "{}.child_routes[{k:?}] → {target}, absente du schéma ; schemas: {names:?}",
+                s.name
+            );
+        }
+    }
+}

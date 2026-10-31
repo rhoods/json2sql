@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Finalisation du schéma, des observations de la Pass 1 aux TableSchema
-verified_at: aab585c
+verified_at: 56160c6
 files:
   - src/schema/finalizer/
   - src/schema/cascading/
@@ -69,6 +69,7 @@ symbols:
   - apply_wide_strategy_columns
   - apply_column_limit_guard
   - exclude_absorbed_children
+  - collect_surviving_route_targets
   - apply_overrides_complete
   - build_sibling_collapse_from_siblings
   - InferredStrategy::absorbs_children
@@ -178,6 +179,10 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
   table absorbante en un seul passage sur la liste. Le tri par profondeur puis nom est refait après la phase 2, mais
   les compagnons de la phase 3 sont ajoutés à la fin sans nouveau tri : sans risque tant qu'ils n'ont pas d'enfants.
   Une table ajoutée en fin de liste avec des enfants casserait l'exclusion en cascade.
+- **Une cible de `child_routes` survit, et ses propres cibles aussi** (#177). `collect_surviving_route_targets`
+  protège les cibles des tables qui survivent, puis recommence avec les cibles protégées jusqu'à ce que rien ne
+  change. `…_selected_key` est sous une table `SiblingCollapse` : sans ce point fixe, sa route `sizes` passait pour
+  périmée, et `…_selected_key_sizes` était retirée alors que la Pass 2 y écrit.
 - **Un chemin non pré-enregistré n'est vu qu'en debug.** `NamingRegistry::table_name_lookup_from_dot_key` a un
   `debug_assert` ; en release, il recalcule un nom qui peut différer de celui du registre (sans troncature à 53, sans
   suffixe d'unicité).
