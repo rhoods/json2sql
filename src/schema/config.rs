@@ -168,6 +168,12 @@ pub enum ConfigWarning {
         column: String,
         type_str: String,
     },
+    /// `strategy` asks the root table for a strategy that writes one row per key (`pivot`, `normalize_dynamic_keys`):
+    /// the root has no parent row to tie those rows to, so they could not be traced back to their line (#172).
+    RootOverride {
+        table: String,
+        strategy: String,
+    },
     /// `column_groups` of a table is not a table of lists of column names (#78).
     ColumnGroupsMalformed {
         table: String,
@@ -249,6 +255,8 @@ impl ConfigWarning {
                 format!("schema-config: table '{table}' has both 'strategy' and 'suffix_columns' set — suffix_columns takes precedence, ignoring strategy = '{ignored_strategy}'"),
             Self::ArrayColumnOverride { table, column, type_str } =>
                 format!("schema-config: '{table}.{column}' is a PG array column, its type cannot be overridden (got '{type_str}'), ignored"),
+            Self::RootOverride { table, strategy } =>
+                format!("schema-config: '{table}' is the root table, strategy '{strategy}' would cut its rows from the line they come from, ignored"),
             Self::ColumnGroupsMalformed { table } =>
                 format!("schema-config: '{table}.column_groups' must be a table of lists of column names, ignored"),
             Self::ColumnGroupMalformed { table, group } =>
@@ -305,7 +313,11 @@ pub fn apply_overrides(
             .find(|s| &s.name == table_name)
             .and_then(|s| already_overridden(s, table_name, col_overrides));
         let suffix_applied = suffix_columns_already_applied(schemas, table_name, col_overrides);
-        if already.is_none() && !suffix_applied && rebuilds_columns(col_overrides) {
+        let refused = schemas
+            .iter()
+            .find(|s| &s.name == table_name)
+            .is_some_and(|s| refused_at_root(s, col_overrides));
+        if already.is_none() && !suffix_applied && !refused && rebuilds_columns(col_overrides) {
             dissolve_column_groups(schemas, table_name);
         }
         match schemas.iter_mut().find(|s| &s.name == table_name) {
@@ -424,6 +436,17 @@ fn already_overridden(
     Some(warning.into_iter().collect())
 }
 
+/// True when `strategy` asks the root `schema` for one row per key, which has no parent row to be tied to (#172).
+fn refused_at_root(schema: &TableSchema, col_overrides: &HashMap<String, toml::Value>) -> bool {
+    schema.parent_table.is_none()
+        && toml_str(col_overrides, "strategy").is_some_and(|s| {
+            matches!(
+                s.to_lowercase().as_str(),
+                "pivot" | "normalize_dynamic_keys"
+            )
+        })
+}
+
 /// True when the overrides of a table rebuild its columns or take them to another table (`pivot`, `jsonb`,
 /// `normalize_dynamic_keys`, `flatten`, `suffix_columns`): a table that was split into column groups gets them back
 /// first, or the columns now in the group tables would be missing from the result (#78).
@@ -480,6 +503,12 @@ fn apply_strategy_override(
     let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") else {
         return vec![];
     };
+    if refused_at_root(schema, col_overrides) {
+        return vec![ConfigWarning::RootOverride {
+            table: table_name.to_string(),
+            strategy: strategy_str.to_lowercase(),
+        }];
+    }
     match strategy_str.to_lowercase().as_str() {
         "pivot" => {
             let original = schema.inferred_strategy.clone();
@@ -842,6 +871,16 @@ pub fn apply_user_overrides(
     overrides: &HashMap<String, UserOverride>,
 ) -> Vec<SkipCascadeWarning> {
     for (table_name, ov) in overrides {
+        let is_root = schemas
+            .iter()
+            .any(|s| &s.name == table_name && s.parent_table.is_none());
+        if is_root && matches!(ov, UserOverride::Pivot) {
+            // No parent row to tie one row per key to: they could not be traced back to their line (#172).
+            eprintln!(
+                "WARNING: '{table_name}' is the root table, the IHM Pivot override is ignored"
+            );
+            continue;
+        }
         if matches!(ov, UserOverride::Pivot | UserOverride::Jsonb) {
             dissolve_column_groups(schemas, table_name);
         }
@@ -865,6 +904,7 @@ fn apply_single_user_override(s: &mut TableSchema, ov: &UserOverride) {
     if kept_toml_rebuild(s, ov) {
         return;
     }
+
     match ov {
         UserOverride::Pivot | UserOverride::Jsonb => {
             let strategy = if matches!(ov, UserOverride::Pivot) {
@@ -1506,7 +1546,7 @@ mod tests {
 
     #[test]
     fn toml_pivot_sets_toml_override_and_preserves_inferred() {
-        let mut schemas = vec![simple_table("tags")];
+        let mut schemas = vec![child_table("tags")];
         schemas[0].inferred_strategy = InferredStrategy::Columns;
         let mut tables = HashMap::new();
         tables.insert("tags".to_string(), toml_strategy("pivot"));
@@ -1547,7 +1587,7 @@ mod tests {
     #[test]
     fn toml_normalize_dynamic_keys_sets_toml_override_and_preserves_inferred() {
         use crate::schema::table_schema::{ChildKind, ColumnSchema};
-        let mut parent = simple_table("images");
+        let mut parent = child_table("images");
         parent.inferred_strategy = InferredStrategy::Columns;
         parent
             .columns
@@ -1725,7 +1765,7 @@ mod tests {
     #[test]
     fn toml_normalize_dynamic_keys_with_suffix_columns_ignores_strategy() {
         use crate::schema::table_schema::{ChildKind, ColumnSchema};
-        let mut parent = simple_table("images");
+        let mut parent = child_table("images");
         parent
             .columns
             .push(ColumnSchema::generated("j2s_id", PgType::BigInt));
@@ -1783,6 +1823,13 @@ mod tests {
 
     fn simple_table(name: &str) -> TableSchema {
         TableSchema::new(name.to_string(), vec![name.to_string()], 0)
+    }
+
+    /// A table under a `root` table: the root refuses the strategies that write one row per key (#172).
+    fn child_table(name: &str) -> TableSchema {
+        let mut t = simple_table(name);
+        t.parent_table = Some("root".to_string());
+        t
     }
 
     // --- #163: suffix_columns moves only the grid to a `_pivot` companion ---
@@ -2235,7 +2282,7 @@ mod tests {
     /// same call that flips `absorbs_children()` to true must already be visible to it.
     #[test]
     fn apply_overrides_complete_excludes_children_absorbed_by_a_new_override() {
-        let mut parent = simple_table("images");
+        let mut parent = child_table("images");
         parent.inferred_strategy = InferredStrategy::Columns;
         let mut child = simple_table("images_items");
         child.parent_table = Some("images".to_string());
@@ -2260,7 +2307,7 @@ mod tests {
 
     /// `name`: `j2s_id`, three columns for each of two groups (`x*`, `y*`) and one that stays.
     fn splittable(name: &str) -> TableSchema {
-        let mut t = simple_table(name);
+        let mut t = child_table(name);
         t.columns
             .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
         for c in ["x1", "x2", "x3", "y1", "y2", "y3", "z1"] {
@@ -2723,7 +2770,7 @@ mod tests {
 
     /// `addr`: two VARCHAR(2) data columns, so a first Pivot gives `value VARCHAR(2)`.
     fn addr_table() -> TableSchema {
-        let mut t = simple_table("addr");
+        let mut t = child_table("addr");
         for name in ["city", "zip"] {
             t.columns.push(ColumnSchema {
                 name: name.to_string(),
@@ -2735,6 +2782,52 @@ mod tests {
             });
         }
         t
+    }
+
+    /// The root with one data column `a`.
+    fn root_with_a_column() -> TableSchema {
+        let mut root = simple_table("root");
+        root.columns
+            .push(ColumnSchema::data("a", PgType::Text, false));
+        root
+    }
+
+    #[test]
+    fn the_ui_pivot_override_on_the_root_is_ignored() {
+        let mut schemas = vec![root_with_a_column()];
+        apply_user_overrides(
+            &mut schemas,
+            &HashMap::from([("root".to_string(), UserOverride::Pivot)]),
+        );
+        assert_eq!(schemas[0].ui_override(), None);
+        assert_eq!(
+            data_columns_of(&schemas[0]),
+            data_columns_of(&root_with_a_column()),
+            "the root keeps its columns (#172)"
+        );
+    }
+
+    #[test]
+    fn a_toml_strategy_of_one_row_per_key_on_the_root_is_ignored_with_a_warning() {
+        for strategy in ["pivot", "normalize_dynamic_keys"] {
+            let mut schemas = vec![root_with_a_column()];
+            let warnings =
+                apply_overrides(&mut schemas, &toml_config("root", toml_strategy(strategy)))
+                    .unwrap();
+            assert_eq!(
+                warnings,
+                vec![ConfigWarning::RootOverride {
+                    table: "root".to_string(),
+                    strategy: strategy.to_string(),
+                }]
+            );
+            assert_eq!(schemas[0].toml_override(), None, "{strategy}");
+            assert_eq!(
+                data_columns_of(&schemas[0]),
+                data_columns_of(&root_with_a_column()),
+                "{strategy}"
+            );
+        }
     }
 
     fn toml_config(table: &str, keys: HashMap<String, toml::Value>) -> SchemaConfig {
@@ -2854,7 +2947,8 @@ mod tests {
     #[test]
     fn apply_user_overrides_jsonb_or_pivot_excludes_absorbed_children() {
         for ov in [UserOverride::Jsonb, UserOverride::Pivot] {
-            let root = simple_table("root");
+            let mut root = simple_table("root");
+            root.parent_table = Some("doc".to_string());
             let mut addr = simple_table("root_addr");
             addr.parent_table = Some("root".to_string());
             let mut geo = simple_table("root_addr_geo");
@@ -2876,7 +2970,7 @@ mod tests {
 
     #[test]
     fn apply_user_overrides_pivot_sets_ui_override_and_preserves_inferred() {
-        let mut schemas = vec![simple_table("tags")];
+        let mut schemas = vec![child_table("tags")];
         let mut overrides = HashMap::new();
         overrides.insert("tags".to_string(), UserOverride::Pivot);
         apply_user_overrides(&mut schemas, &overrides);

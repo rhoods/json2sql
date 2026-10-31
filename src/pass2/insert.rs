@@ -13,9 +13,9 @@
 //! - fn `insert_object` — point d'entrée : écrit la ligne (colonnes + générées), gère le cas racine
 //!   JSONB, délègue `AutoSplit` et récurse dans les enfants.
 //! - fn `write_root_jsonb` — cas spécial racine en stratégie Jsonb : écrit le blob JSON puis recurse.
-//! - fn `insert_child_object` — dispatch un objet enfant vers la fonction d'insertion selon son
-//!   `InferredStrategy` (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`(Multi), `NormalizeDynamicKeys`,
-//!   ou insertion standard récursive).
+//! - fn `insert_child_object` — dispatch un objet vers la fonction d'insertion selon son `InferredStrategy`
+//!   (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`, `NormalizeDynamicKeys`, ou insertion standard récursive) ;
+//!   seul aiguillage pour un objet enfant, un élément de tableau et une cible de routage (#172).
 //! - fn `recurse_children` — parcourt les champs de l'objet, route chaque enfant (objet/array) vers
 //!   `insert_child_object`/`insert_array` ; sans table → `record_missing_table` (#167).
 //! - fn `write_row_of` — écrit la ligne d'une table pour un objet : colonnes générées puis colonnes de données.
@@ -46,9 +46,9 @@ use crate::schema::PATH_SEP;
 
 use super::traversal::{
     insert_array, insert_jsonb_object, insert_normalize_dynamic_keys, insert_pivot_object,
-    insert_sibling_collapse_multi, insert_sibling_collapse_object, insert_structured_pivot_object,
-    keeps_scalars_in_array_column, push_coerced, push_coerced_as, push_text, record_missing_table,
-    route_multi_collapse_children, write_row,
+    insert_sibling_collapse_object, insert_structured_pivot_object, keeps_scalars_in_array_column,
+    push_coerced, push_coerced_as, push_text, record_missing_table, route_multi_collapse_children,
+    write_row,
 };
 
 /// Mutable context for the recursive insert pass.
@@ -245,94 +245,77 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
     recurse_children(path_map, ctx, schema, obj, row_id)
 }
 
-/// Dispatch a child Object value to the appropriate insertion function based on its `InferredStrategy`.
+/// Dispatch an object under `parent_id` to the insertion function of its `InferredStrategy`: the one dispatch for an
+/// object child, an array element (`order` is its index) and a routed object (#172). The root never gets here: it can
+/// not take a strategy that absorbs its children.
 #[allow(clippy::too_many_lines)] // exhaustive dispatch over all InferredStrategy variants
-fn insert_child_object<S: RowSink, A: AnomalyCollect>(
+pub(super) fn insert_child_object<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
     child_schema: &TableSchema,
     nested: &serde_json::Map<String, Value>,
     value: &Value,
     parent_id: Uuid,
+    order: Option<i64>,
 ) -> Result<()> {
-    let eff = child_schema.effective_strategy();
-    match &*eff {
+    let (sinks, anomalies) = (&mut *ctx.sinks, &mut *ctx.anomalies);
+    match &*child_schema.effective_strategy() {
         InferredStrategy::Pivot => {
-            insert_pivot_object(ctx.sinks, ctx.anomalies, child_schema, nested, parent_id)?;
+            insert_pivot_object(sinks, anomalies, child_schema, nested, parent_id, order)
         }
-        InferredStrategy::Jsonb => {
-            // Object-kind child: no positional order (only ObjectArray elements carry one,
-            // cf. insert_array in traversal.rs).
-            insert_jsonb_object(
-                path_map,
-                ctx.sinks,
-                ctx.anomalies,
-                child_schema,
-                value,
-                parent_id,
-                None,
-            )?;
-        }
-        InferredStrategy::StructuredPivot(suffix_schema) => {
-            insert_structured_pivot_object(
-                ctx.sinks,
-                ctx.anomalies,
-                child_schema,
-                nested,
-                parent_id,
-                suffix_schema,
-            )?;
-        }
-        InferredStrategy::SiblingCollapse(sibling_schema) => {
-            insert_sibling_collapse_object(
-                path_map,
-                ctx.sinks,
-                ctx.anomalies,
-                child_schema,
-                nested,
-                parent_id,
-                sibling_schema,
-            )?;
-        }
-        InferredStrategy::SiblingCollapseMulti(groups) => {
-            insert_sibling_collapse_multi(
-                path_map,
-                ctx.sinks,
-                ctx.anomalies,
-                child_schema,
-                nested,
-                parent_id,
-                groups,
-            )?;
-        }
-        InferredStrategy::NormalizeDynamicKeys { id_column } => {
-            insert_normalize_dynamic_keys(
-                ctx.sinks,
-                ctx.anomalies,
-                child_schema,
-                nested,
-                parent_id,
-                id_column,
-            )?;
-        }
-        InferredStrategy::Columns
+        InferredStrategy::Jsonb => insert_jsonb_object(
+            path_map,
+            sinks,
+            anomalies,
+            child_schema,
+            value,
+            parent_id,
+            order,
+        ),
+        InferredStrategy::StructuredPivot(suffix_schema) => insert_structured_pivot_object(
+            sinks,
+            anomalies,
+            child_schema,
+            nested,
+            parent_id,
+            order,
+            suffix_schema,
+        ),
+        InferredStrategy::SiblingCollapse(sibling_schema) => insert_sibling_collapse_object(
+            path_map,
+            sinks,
+            anomalies,
+            child_schema,
+            nested,
+            parent_id,
+            order,
+            sibling_schema,
+        ),
+        InferredStrategy::NormalizeDynamicKeys { id_column } => insert_normalize_dynamic_keys(
+            sinks,
+            anomalies,
+            child_schema,
+            nested,
+            parent_id,
+            order,
+            id_column,
+        ),
+        // insert_object writes the routing row of a SiblingCollapseMulti table, with its order, then routes its keys.
+        InferredStrategy::SiblingCollapseMulti(_)
+        | InferredStrategy::Columns
         | InferredStrategy::AutoSplit { .. }
         | InferredStrategy::Ignore
         | InferredStrategy::Flatten { .. }
-        | InferredStrategy::JsonbFlatten => {
-            let child_id = Uuid::now_v7();
-            insert_object(
-                path_map,
-                ctx,
-                child_schema,
-                nested,
-                child_id,
-                Some(parent_id),
-                None,
-            )?;
-        }
+        | InferredStrategy::JsonbFlatten => insert_object(
+            path_map,
+            ctx,
+            child_schema,
+            nested,
+            Uuid::now_v7(),
+            Some(parent_id),
+            order,
+        ),
     }
-    Ok(())
 }
 
 /// Write one EAV row (`j2s_id`, parent, key, value) of the `AutoSplit` companion wide table
@@ -401,6 +384,7 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
             companion,
             medium,
             row_id,
+            None,
             ss,
         );
     }
@@ -445,7 +429,7 @@ pub(super) fn recurse_children<S: RowSink, A: AnomalyCollect>(
         match value {
             Value::Object(nested) => {
                 if let Some(child_schema) = path_map.get(&child_key) {
-                    insert_child_object(path_map, ctx, child_schema, nested, value, row_id)?;
+                    insert_child_object(path_map, ctx, child_schema, nested, value, row_id, None)?;
                 } else {
                     record_missing_table(path_map, ctx.anomalies, schema, field, row_id, value)?;
                 }

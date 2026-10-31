@@ -577,11 +577,20 @@ fn build_sibling_ctx(
     Some((ctx, is_mixed))
 }
 
-const fn should_skip_parent(schemas: &[TableSchema], parent_idx: usize) -> bool {
-    !matches!(
-        schemas[parent_idx].inferred_strategy,
-        InferredStrategy::Columns | InferredStrategy::AutoSplit { .. }
-    )
+/// The root is skipped too: it has no parent row to tie one row per key to. So is an array element whose siblings are
+/// arrays of objects: its `j2s_order` could not hold both the element and the item index (#172).
+const fn should_skip_parent(
+    schemas: &[TableSchema],
+    parent_idx: usize,
+    array_children: bool,
+) -> bool {
+    let parent = &schemas[parent_idx];
+    parent.parent_table.is_none()
+        || (array_children && parent.has_order_column())
+        || !matches!(
+            parent.inferred_strategy,
+            InferredStrategy::Columns | InferredStrategy::AutoSplit { .. }
+        )
 }
 
 pub(super) fn collect_sibling_collapses(
@@ -598,7 +607,9 @@ pub(super) fn collect_sibling_collapses(
         let Some(&parent_idx) = name_to_idx.get(parent_name.as_str()) else {
             continue;
         };
-        if child_indices.len() < threshold || should_skip_parent(schemas, parent_idx) {
+        if child_indices.len() < threshold
+            || should_skip_parent(schemas, parent_idx, *array_children)
+        {
             continue;
         }
         let Some((ctx, is_mixed)) = build_sibling_ctx(
@@ -633,6 +644,34 @@ mod tests {
 
     fn make_parent(name: &str) -> TableSchema {
         TableSchema::new(name.to_string(), vec![name.to_string()], 0)
+    }
+
+    #[test]
+    fn the_root_is_never_collapsed() {
+        let mut child = make_parent("items");
+        child.parent_table = Some("root".to_string());
+        let schemas = [make_parent("root"), child];
+        assert!(
+            should_skip_parent(&schemas, 0, false),
+            "no parent row for one row per key (#172)"
+        );
+        assert!(!should_skip_parent(&schemas, 1, false));
+    }
+
+    #[test]
+    fn an_array_element_with_arrays_of_objects_is_never_collapsed() {
+        let mut element = make_parent("items");
+        element.parent_table = Some("root".to_string());
+        element.child_kind = Some(crate::schema::table_schema::ChildKind::ObjectArray);
+        let schemas = [element];
+        assert!(
+            should_skip_parent(&schemas, 0, true),
+            "one j2s_order for two indexes (#172)"
+        );
+        assert!(
+            !should_skip_parent(&schemas, 0, false),
+            "objects keep the element index"
+        );
     }
 
     fn make_sibling(name: &str, parent: &str, data_keys: &[&str]) -> TableSchema {

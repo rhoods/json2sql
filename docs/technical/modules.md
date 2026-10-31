@@ -63,8 +63,8 @@ Pass 2 : relecture du fichier pour insérer les données.
 | Fichier | Rôle |
 |---|---|
 | `runner/` | Pipeline diskless : `mod.rs` (`run()`), `dispatch.rs` (dispatcher round-robin), `worker.rs` (parse + `MemSink` par table), `flusher.rs` (COPY vers PG, pause sous pression mémoire), `config.rs` (`Pass2Config`) |
-| `insert.rs` | `insert_object()` — orchestrateur. Écrit la ligne de la table (`write_row_of`), puis la ligne 1:1 de chaque table de groupe de colonnes (`write_group_rows`, #78 : même `j2s_id` et même clé étrangère que la ligne d'origine, seulement si une colonne du groupe a une valeur au sens de `is_present`), puis délègue à `traversal.rs` selon la `WideStrategy` |
-| `traversal.rs` | Toutes les fonctions `insert_*` privées : traversal du graphe JSON selon les stratégies (`insert_pivot_object`, `insert_jsonb_object`, `insert_flatten`, `insert_array`…) |
+| `insert.rs` | `insert_object()` — orchestrateur. Écrit la ligne de la table (`write_row_of`), puis la ligne 1:1 de chaque table de groupe de colonnes (`write_group_rows`, #78 : même `j2s_id` et même clé étrangère que la ligne d'origine, seulement si une colonne du groupe a une valeur au sens de `is_present`), puis `recurse_children` parcourt les champs objet et tableau. `insert_child_object` est le seul aiguillage vers l'écriture de chaque stratégie, pour un objet enfant, un élément de tableau et une cible de routage (#172) |
+| `traversal.rs` | Les écritures propres à chaque stratégie, construites selon `schema.columns` (`insert_pivot_object`, `insert_jsonb_object`, `insert_sibling_collapse_object`, `insert_normalize_dynamic_keys`…), le routage (`dispatch_child_routes`) et `insert_array` |
 | `sink.rs` | `trait RowSink { write_row() }` — abstraction sur l'écriture de lignes. `MemSink` (dans `db/copy_sink.rs`) en est l'implémentation concrète |
 | `coercer.rs` | Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cible. Produit `Ok(CopyEscaped)`, `Null` ou `Anomaly` |
 | `mod.rs` | Déclare le module |
