@@ -153,8 +153,10 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   (type attendu `table`) sur la table parente. Elle se tait quand rien n'est perdu ou que l'abandon est voulu : valeur
   vide (`{}`, `[]`), parent en `Jsonb` (le blob garde tout), colonne du même nom ou enfant aplati (`flatten_sources`),
   sur le parent ou sur l'une de ses tables de groupe (colonne tableau, `JsonbFlatten`, type mixte), ou enfant retiré
-  par un `Skip` (`skipped_children`, rempli par `apply_user_overrides` et gardé dans le snapshot). Même règle pour
-  la table pivot d'un groupe `SiblingCollapseMulti` absente (`route_multi_collapse_children`). Une nouvelle façon de retirer une table du schéma
+  par un `Skip` (`skipped_children`, rempli par `apply_user_overrides` et gardé dans le snapshot ; il y note aussi
+  les clés de `child_routes` qui menaient à la table retirée). Même règle pour la table pivot d'un groupe
+  `SiblingCollapseMulti` absente (`route_multi_collapse_children`) et pour une cible de `child_routes` absente
+  (`dispatch_child_routes`, #177). Une nouvelle façon de retirer une table du schéma
   doit donc soit laisser sa trace sur le parent, soit accepter l'anomalie.
 - **Un sink absent est une erreur.** Les sinks et `path_map` viennent de la même liste `schemas` : `write_row` refuse
   d'écrire dans une table sans sink au lieu de compter la ligne et de la perdre. Le seul cas connu, un compagnon

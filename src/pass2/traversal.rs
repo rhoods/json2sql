@@ -28,7 +28,7 @@
 //!
 //! Routing générique :
 //! - fn `dispatch_child_routes` — route les sous-objets/arrays de `schema.child_routes`
-//!   vers leurs tables cibles (post-cascade merge).
+//!   vers leurs tables cibles (post-cascade merge) ; cible absente → anomalie, sauf `Skip`.
 //! - fn `write_keyed_route_row` — route réécrite par la post-passe keyed-pivot : la clé routée est la clé
 //!   de la ligne cible (#173).
 //!
@@ -338,6 +338,7 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
             continue;
         };
         let Some(child_schema) = path_map.values().find(|s| s.name == *child_table_name) else {
+            record_missing_table(path_map, anomalies, schema, sub_key, row_id, sub_value)?;
             continue;
         };
         if write_keyed_route_row(
@@ -2374,6 +2375,37 @@ mod tests {
         assert_eq!(
             anomalies.records,
             vec![("images".to_string(), "z".to_string())]
+        );
+    }
+
+    /// A route whose table is not in the schema leaves an anomaly, unless it was Skip-ed.
+    #[test]
+    fn a_route_to_a_missing_table_leaves_an_anomaly_unless_skipped() {
+        let mut parent = TableSchema::new("root".to_string(), vec!["root".to_string()], 0);
+        for key in ["sizes", "gone"] {
+            parent
+                .child_routes
+                .insert(key.to_string(), format!("root_{key}"));
+        }
+        parent.skipped_children.push("gone".to_string());
+        let mut sinks = make_sinks(&[]);
+        let mut anomalies = CountingAnomaly::default();
+        let obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"sizes": {"h": 1}, "gone": {"h": 2}}"#).unwrap();
+
+        super::dispatch_child_routes(
+            &HashMap::new(),
+            &mut sinks,
+            &mut anomalies,
+            &parent,
+            &obj,
+            dummy_parent_id(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            anomalies.records,
+            vec![("root".to_string(), "sizes".to_string())]
         );
     }
 

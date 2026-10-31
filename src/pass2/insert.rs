@@ -998,7 +998,8 @@ mod tests {
     }
 
     /// `selected.<type>.<lang>` (#173): the keyed post-pass routes each lang code to the
-    /// `selected_key` table. The lang code is the key of the row, `imgid`/`rev` its columns.
+    /// `selected_key` table. The lang code is the key of the row, `imgid`/`rev` its columns,
+    /// and `sizes` hangs off that row.
     #[test]
     fn a_route_to_a_keyed_table_writes_one_row_keyed_by_the_routed_key() {
         let path_map = pass1_path_map("keyed_route_selected_images.jsonl");
@@ -1060,6 +1061,15 @@ mod tests {
         for row in &key_rows {
             assert!(["fr", "en", "de"].contains(&row[lang].as_str()), "{row:?}");
             assert!(row[imgid] != "\\N" && row[rev] != "\\N", "{row:?}");
+        }
+        let key_ids: Vec<&String> = key_rows.iter().map(|r| &r[0]).collect();
+        let sizes_rows = cells(&key_table.child_routes["sizes"]);
+        assert!(!sizes_rows.is_empty(), "sizes is written");
+        for row in &sizes_rows {
+            assert!(
+                key_ids.contains(&&row[1]),
+                "sizes hangs off a lang row: {row:?}"
+            );
         }
     }
 }

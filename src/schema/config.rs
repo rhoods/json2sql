@@ -49,7 +49,7 @@
 //! - fn `compute_skip_cascade` — ensemble complet des tables à retirer pour `Skip` + un
 //!   `SkipCascadeWarning` par racine ayant réellement cascadé (`pub` : requête pure réutilisable
 //!   par l'IHM pour afficher la cascade avant application).
-//! - fn `record_skipped_children` — note sur chaque parent survivant la clé de ses enfants `Skip` (#167).
+//! - fn `record_skipped_children` — note sur chaque parent survivant la clé de ses enfants `Skip` (#167), et ses clés de `child_routes` vers eux.
 //! - fn `skip_cascade_warning` — avertissement d'une table `Skip` : les vrais enfants emportés avec elle.
 //! - fn `prime_tracker_from_pg_type` — reconstruit un `TypeTracker` représentatif depuis un `PgType`
 //!   déjà résolu (pour réutiliser `build_suffix_schema_from_list` après finalisation).
@@ -1006,11 +1006,18 @@ fn close_over_real_children(schemas: &[TableSchema], seed: HashSet<String>) -> H
 /// Note on each surviving parent the key of its children in `removed`, so Pass 2 knows they were dropped on purpose
 /// (#167).
 fn record_skipped_children(schemas: &mut [TableSchema], removed: &HashSet<String>) {
-    let skipped: Vec<(String, String)> = schemas
+    let mut skipped: Vec<(String, String)> = schemas
         .iter()
         .filter(|s| removed.contains(&s.name))
         .filter_map(|s| Some((s.parent_table.clone()?, s.path.last()?.clone())))
         .collect();
+    // A route key is not always the path segment of its target (`fr` → `…_selected_key`).
+    skipped.extend(schemas.iter().flat_map(|s| {
+        s.child_routes
+            .iter()
+            .filter(|(_, target)| removed.contains(*target))
+            .map(|(key, _)| (s.name.clone(), key.clone()))
+    }));
     for (parent, segment) in skipped {
         if let Some(p) = schemas
             .iter_mut()
@@ -2569,6 +2576,30 @@ mod tests {
         let json = serde_json::to_string(&schemas[0]).unwrap();
         let back: TableSchema = serde_json::from_str(&json).unwrap();
         assert_eq!(back.skipped_children, ["b"]);
+    }
+
+    #[test]
+    fn skipping_a_keyed_route_target_records_its_route_keys() {
+        let mut parent = simple_table("a");
+        for key in ["fr", "en"] {
+            parent
+                .child_routes
+                .insert(key.to_string(), "a_key".to_string());
+        }
+        let mut target = TableSchema::new("a_key".to_string(), vec!["a".into(), "key".into()], 1);
+        target.parent_table = Some("a".to_string());
+        let mut schemas = vec![parent, target];
+        let overrides = HashMap::from([("a_key".to_string(), UserOverride::Skip)]);
+
+        apply_user_overrides(&mut schemas, &overrides);
+
+        let mut skipped = schemas[0].skipped_children.clone();
+        skipped.sort();
+        assert_eq!(
+            skipped,
+            ["en", "fr", "key"],
+            "a route key is dropped on purpose too"
+        );
     }
 
     #[test]
