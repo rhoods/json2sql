@@ -40,7 +40,8 @@ impl LockfileGuard {
             .open(path)?;
         match file.try_lock_exclusive() {
             Ok(()) => Ok(Some(Self { _file: file })),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            // Windows reports a held lock as ERROR_LOCK_VIOLATION, not WouldBlock.
+            Err(e) if e.raw_os_error() == fs2::lock_contended_error().raw_os_error() => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -327,11 +328,16 @@ mod tests {
         let _ = std::fs::remove_file(&dest);
     }
 
+    /// macOS caps socket paths at 104 bytes and its `$TMPDIR` alone takes ~50, so test sockets go under /tmp.
+    #[cfg(unix)]
+    fn short_tmp() -> &'static std::path::Path {
+        std::path::Path::new("/tmp")
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn bind_socket_creates_socket_file() {
-        let path =
-            std::env::temp_dir().join(format!("json2sql-test-{}.sock", uuid::Uuid::now_v7()));
+        let path = short_tmp().join(format!("json2sql-test-{}.sock", uuid::Uuid::now_v7()));
         let _listener = bind_socket(&path).expect("bind must succeed");
         assert!(path.exists(), "socket file must exist after bind");
         let _ = std::fs::remove_file(&path);
@@ -340,8 +346,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn bind_socket_removes_stale_socket() {
-        let path =
-            std::env::temp_dir().join(format!("json2sql-test-stale-{}.sock", uuid::Uuid::now_v7()));
+        let path = short_tmp().join(format!("json2sql-test-stale-{}.sock", uuid::Uuid::now_v7()));
         std::fs::write(&path, b"stale").expect("write stale file");
         let _listener = bind_socket(&path).expect("bind must succeed even with stale file");
         assert!(path.exists(), "socket file must exist after bind");
@@ -352,8 +357,7 @@ mod tests {
     #[tokio::test]
     async fn bind_socket_accepts_connection() {
         use tokio::net::UnixStream;
-        let path =
-            std::env::temp_dir().join(format!("json2sql-test-conn-{}.sock", uuid::Uuid::now_v7()));
+        let path = short_tmp().join(format!("json2sql-test-conn-{}.sock", uuid::Uuid::now_v7()));
         let _listener = bind_socket(&path).expect("bind must succeed");
         UnixStream::connect(&path)
             .await

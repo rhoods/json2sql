@@ -164,8 +164,9 @@ mod tests {
     use tokio::io::AsyncBufReadExt;
     use tokio::net::UnixStream;
 
+    // /tmp, not temp_dir(): macOS's $TMPDIR pushes these names past the 104-byte socket path limit.
     fn temp_path(tag: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
+        std::path::Path::new("/tmp").join(format!(
             "json2sql-serve-{}-{}.sock",
             tag,
             uuid::Uuid::now_v7()

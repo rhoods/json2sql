@@ -45,7 +45,8 @@ jobs:
         run: cargo check
 
       - name: Unit tests
-        run: cargo test --lib --bins
+        # json2sql-ui is left out: it needs the Dioxus system deps; the coverage job runs its tests on Linux.
+        run: cargo test -p json2sql -p json2sql-worker --lib --bins
 
   # ── Format — rustfmt only, nothing to compile ───────────────────────────────
   fmt:
@@ -78,9 +79,8 @@ jobs:
         with:
           components: clippy
 
-      # json2sql-ui (Dioxus desktop) needs these to build on Linux — other CI jobs never
-      # hit this because they run bare `cargo check`/`cargo test` (root package only, no
-      # --workspace), so json2sql-ui is never compiled there.
+      # json2sql-ui (Dioxus desktop) needs these to build on Linux. Only this job and the
+      # coverage job compile it; the others build json2sql and json2sql-worker alone.
       - name: Install Dioxus desktop system deps (Linux)
         run: |
           # shortcut: azure.archive.ubuntu.com sometimes serves archives at ~50 kB/s and apt never fails over
@@ -99,7 +99,70 @@ jobs:
           key: ubuntu-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Clippy (workspace, all targets)
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ── Coverage — whole workspace, one build, one threshold per crate ──────────
+  coverage:
+    name: Coverage
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Same deps as the clippy job: --workspace compiles json2sql-ui.
+      - name: Install Dioxus desktop system deps (Linux)
+        run: |
+          # shortcut: same azure mirror workaround as the clippy job; drop it there and here together.
+          sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ubuntu-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run tests with coverage
+        run: cargo llvm-cov --workspace --lib --bins --no-report
+
+      # `report -p` counts only that crate's own files, so each crate gets its own figure
+      # without rebuilding. Thresholds sit a little under the 2026-10-31 levels (87.6 / 76.2 / 69.0).
+      - name: Coverage per crate
+        run: |
+          fail=0
+          echo '| Crate | Lignes couvertes | Seuil |' >> "$GITHUB_STEP_SUMMARY"
+          echo '|---|---|---|' >> "$GITHUB_STEP_SUMMARY"
+          for spec in json2sql:85 json2sql-worker:75 json2sql-ui:65; do
+            p=${spec%:*} min=${spec#*:}
+            pct=$(cargo llvm-cov report -p "$p" --summary-only | awk '/^TOTAL/ {print $10}')
+            echo "| $p | $pct | $min% |" >> "$GITHUB_STEP_SUMMARY"
+            cargo llvm-cov report -p "$p" --summary-only --fail-under-lines "$min" > /dev/null || fail=1
+          done
+          exit $fail
+
+      - name: HTML report
+        if: always()
+        run: cargo llvm-cov report --workspace --html
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html
 
   # ── Integration tests — Linux only (testcontainers via Docker) ──────────────
   integration-docker:
@@ -123,7 +186,7 @@ jobs:
           key: ubuntu-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Integration tests (testcontainers)
-        run: cargo test --features integration-tests --tests -- --nocapture
+        run: cargo test -p json2sql -p json2sql-worker --features json2sql/integration-tests,json2sql-worker/integration-tests --tests -- --nocapture
 
   # ── Integration tests — Ubuntu native PG (action-setup-postgres) ─────────────
   integration-ubuntu:
