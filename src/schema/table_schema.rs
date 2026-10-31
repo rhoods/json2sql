@@ -608,6 +608,10 @@ pub struct TableSchema {
     /// applied. Each of them lists this table as `parent_table`. Empty for a table that was not split.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub column_groups: Vec<String>,
+    /// Last path segment of each child table the user Skip-ed (#167). Pass 2 drops these keys on purpose; any
+    /// other object or array key without a table leaves an anomaly. Kept in snapshots: they are saved after the Skip.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_children: Vec<String>,
 }
 
 impl TableSchema {
@@ -628,6 +632,7 @@ impl TableSchema {
             child_routes: HashMap::new(),
             row_count: 0,
             column_groups: Vec::new(),
+            skipped_children: Vec::new(),
         }
     }
 
