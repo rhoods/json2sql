@@ -11,6 +11,8 @@
 //! - fn `emit` — envoie un `ProgressEvent` si un canal est fourni.
 //!
 //! Génération DDL (pure) :
+//! - fn `pk_name` — nom de la contrainte PK, ramené à 63 octets avec un hash (#179).
+//! - fn `fk_name` — nom de la contrainte FK parent, ramené de même.
 //! - fn `build_col_defs` — définitions de colonnes communes.
 //! - fn `generate_create_table` — CREATE TABLE avec PK inline.
 //! - fn `generate_create_table_no_constraints` — CREATE TABLE colonnes seules (IF NOT EXISTS).
@@ -92,16 +94,29 @@ fn build_col_defs(schema: &TableSchema) -> Vec<String> {
 
 /// Generate the CREATE TABLE SQL for a single schema.
 /// Uses `IF NOT EXISTS` when `drop_existing` is false (append / rerun mode).
+/// `pk_{table}`, cut to 63 bytes with a hash when longer: the cascade appends `_cluster_N`, `_key`… past the
+/// 53 bytes `NamingRegistry` keeps, and two names PostgreSQL cuts the same way would collide (#179).
+#[must_use]
+pub fn pk_name(table: &str) -> String {
+    let name = format!("pk_{table}");
+    crate::schema::naming::truncate_to_pg_limit(&name, &name)
+}
+
+/// `fk_{table}_parent`, cut like [`pk_name`].
+#[must_use]
+pub fn fk_name(table: &str) -> String {
+    let name = format!("fk_{table}_parent");
+    crate::schema::naming::truncate_to_pg_limit(&name, &name)
+}
+
 #[must_use]
 pub fn generate_create_table(schema: &TableSchema, pg_schema: &str, drop_existing: bool) -> String {
     let if_not_exists = if drop_existing { "" } else { "IF NOT EXISTS " };
     let mut col_defs = build_col_defs(schema);
 
-    // Primary key constraint — name is guaranteed ≤ 63 chars because NamingRegistry
-    // caps table names at PG_TABLE_MAX_IDENT (53): "pk_" (3) + 53 = 56 ≤ 63.
     col_defs.push(format!(
         "    CONSTRAINT {} PRIMARY KEY (j2s_id)",
-        quote_ident(&format!("pk_{}", schema.name))
+        quote_ident(&pk_name(&schema.name))
     ));
 
     format!(
@@ -136,7 +151,7 @@ pub fn generate_add_pk_sql(schema: &TableSchema, pg_schema: &str) -> String {
         "ALTER TABLE {}.{} ADD CONSTRAINT {} PRIMARY KEY (j2s_id) WITH (fillfactor = 100)",
         quote_ident(pg_schema),
         quote_ident(&schema.name),
-        quote_ident(&format!("pk_{}", schema.name)),
+        quote_ident(&pk_name(&schema.name)),
     )
 }
 
@@ -158,7 +173,7 @@ pub fn generate_add_fk_sql(schema: &TableSchema, pg_schema: &str) -> Option<Stri
          REFERENCES {schema_q}.{parent_q} (j2s_id) NOT VALID",
         schema_q = quote_ident(pg_schema),
         table_q = quote_ident(&schema.name),
-        constraint_q = quote_ident(&format!("fk_{}_parent", schema.name)),
+        constraint_q = quote_ident(&fk_name(&schema.name)),
         fk_col_q = quote_ident(fk_col),
         parent_q = quote_ident(parent_name),
     ))
@@ -173,7 +188,7 @@ pub fn generate_validate_fk_sql(schema: &TableSchema, pg_schema: &str) -> Option
         "ALTER TABLE {}.{} VALIDATE CONSTRAINT {}",
         quote_ident(pg_schema),
         quote_ident(&schema.name),
-        quote_ident(&format!("fk_{}_parent", schema.name)),
+        quote_ident(&fk_name(&schema.name)),
     ))
 }
 
@@ -471,7 +486,7 @@ async fn drop_unvalidated_fk(client: &Client, schema: &TableSchema, pg_schema: &
         "ALTER TABLE {}.{} DROP CONSTRAINT IF EXISTS {}",
         quote_ident(pg_schema),
         quote_ident(&schema.name),
-        quote_ident(&format!("fk_{}_parent", schema.name)),
+        quote_ident(&fk_name(&schema.name)),
     );
     if let Err(drop_e) = cancel_on_drop(client, client.execute(drop_sql.as_str(), &[])).await {
         eprintln!(
@@ -668,7 +683,7 @@ pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
 
     col_defs.push(format!(
         "    CONSTRAINT {} PRIMARY KEY (j2s_id)",
-        quote_ident(&format!("pk_{}", schema.name))
+        quote_ident(&pk_name(&schema.name))
     ));
 
     if let Some(ref parent_name) = schema.parent_table {
@@ -679,7 +694,7 @@ pub fn generate_ddl_preview(schema: &TableSchema, pg_schema: &str) -> String {
             .map_or("j2s_parent_id", |c| c.name.as_str());
         col_defs.push(format!(
             "    CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}.{} (j2s_id)",
-            quote_ident(&format!("fk_{}_parent", schema.name)),
+            quote_ident(&fk_name(&schema.name)),
             quote_ident(fk_col),
             quote_ident(pg_schema),
             quote_ident(parent_name),
@@ -797,6 +812,46 @@ mod tests {
     use super::*;
     use crate::schema::table_schema::{ColumnSchema, TableSchema};
     use crate::schema::type_tracker::PgType;
+
+    /// The name after `ADD CONSTRAINT` in `sql`, unquoted.
+    fn constraint_of(sql: &str) -> String {
+        let after = sql.split("ADD CONSTRAINT \"").nth(1).unwrap();
+        after[..after.find('"').unwrap()].to_string()
+    }
+
+    /// Two cascade tables of 63 bytes that differ only at the end (`…_cluster_0` / `…_cluster_1`, OFF): their
+    /// constraint names must stay distinct once cut to PostgreSQL's 63 bytes (#179).
+    #[test]
+    fn long_table_names_get_distinct_constraint_names_within_63_bytes() {
+        let names = [
+            "openfoodfacts_products_nutrition_input_sets_nutrients_cluster_0",
+            "openfoodfacts_products_nutrition_input_sets_nutrients_cluster_1",
+        ];
+        let tables: Vec<TableSchema> = names
+            .iter()
+            .map(|n| {
+                let mut t = TableSchema::new((*n).to_string(), vec![(*n).to_string()], 1);
+                t.parent_table = Some("parent".to_string());
+                t
+            })
+            .collect();
+        for sql_of in [
+            |t: &TableSchema| generate_add_pk_sql(t, "public"),
+            |t: &TableSchema| generate_add_fk_sql(t, "public").unwrap(),
+        ] {
+            let [a, b] = [&tables[0], &tables[1]].map(|t| constraint_of(&sql_of(t)));
+            assert_ne!(a, b);
+            assert!(a.len() <= 63 && b.len() <= 63, "{a} / {b}");
+        }
+        assert_eq!(
+            constraint_of(&generate_add_pk_sql(
+                &TableSchema::new("tags".to_string(), vec![], 1),
+                "public"
+            )),
+            "pk_tags",
+            "a short name is unchanged"
+        );
+    }
 
     #[test]
     fn autovacuum_sql_off_quotes_identifiers() {

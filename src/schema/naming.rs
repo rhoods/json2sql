@@ -395,7 +395,7 @@ fn truncate_to_limit(sanitized: &str, original_key: &str, max_len: usize) -> Str
     format!("{prefix}_{hash}")
 }
 
-fn truncate_to_pg_limit(sanitized: &str, original_key: &str) -> String {
+pub fn truncate_to_pg_limit(sanitized: &str, original_key: &str) -> String {
     truncate_to_limit(sanitized, original_key, PG_MAX_IDENT)
 }
 

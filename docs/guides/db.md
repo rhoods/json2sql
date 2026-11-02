@@ -30,6 +30,10 @@ symbols:
   - generate_create_table
   - generate_create_table_no_constraints
   - generate_add_pk_sql
+  - pk_name
+  - fk_name
+  - truncate_to_pg_limit
+  - NamingRegistry
   - generate_add_fk_sql
   - generate_validate_fk_sql
   - generate_ddl_preview
@@ -169,10 +173,13 @@ Les deux points d'entrée (CLI et worker de l'IHM) créent les tables chacun de 
 - **Une table existante garde ses anciennes colonnes.** Avec `IF NOT EXISTS`, un schéma qui a changé n'est pas
   appliqué : le `COPY` liste ses colonnes, donc une colonne absente le fait échouer, une colonne en trop reste `NULL`.
 - **`DROP … CASCADE` emporte aussi les objets de l'utilisateur** qui dépendent des tables (vues, FK d'autres tables).
-- **Noms de contraintes à la limite.** Les contraintes s'appellent `pk_<table>` et `fk_<table>_parent`. Un nom de
-  table fait au plus `PG_TABLE_MAX_IDENT` (53) caractères : `fk_` + 53 + `_parent` = 63, exactement la limite de
-  PostgreSQL. Avec un préfixe ou un suffixe plus long, PostgreSQL tronque le nom (un simple `NOTICE`, que
-  json2sql n'affiche pas) et deux contraintes peuvent alors porter le même nom.
+- **Noms de contraintes à la limite.** Les contraintes s'appellent `pk_<table>` et `fk_<table>_parent`, construits
+  par `pk_name` et `fk_name`. `NamingRegistry` limite un nom de table à `PG_TABLE_MAX_IDENT` (53) caractères :
+  `fk_` + 53 + `_parent` = 63, exactement la limite de PostgreSQL. Mais la cascade ajoute des suffixes sans
+  raccourcir (`_cluster_N`, `_key`, `_num_2`, `_pivot`). Sans précaution, PostgreSQL tronquerait le nom (un simple
+  `NOTICE`, que json2sql n'affiche pas) et deux contraintes porteraient le même nom (sur OFF :
+  `…_nutrients_cluster_0` et `_1`, 42P07). `pk_name` et `fk_name` coupent donc à 63 avec un hash du nom complet
+  (#179). Un nom de **table** de plus de 63 caractères reste coupé par PostgreSQL lui-même.
 - **`NOT NULL` seulement sur les colonnes générées.** `build_col_defs` ne l'écrit que si la colonne est `not_null`
   **et** générée (`j2s_…`). Une colonne de données est toujours nullable : une valeur non convertie devient `NULL`
   (voir pass2.md).
@@ -202,15 +209,15 @@ Les deux points d'entrée (CLI et worker de l'IHM) créent les tables chacun de 
 Les fonctions `generate_*` de `ddl.rs` sont pures (du texte SQL, sans base) : chaque changement de DDL commence par
 un test unitaire dans `ddl.rs`, comme ceux qui existent.
 
-**Renommer une contrainte, ou en ajouter une.** Les noms `pk_<table>` et `fk_<table>_parent`, et la recherche de
-la colonne parente (repli sur `j2s_parent_id`), sont écrits en dur. À faire à la main :
+**Renommer une contrainte, ou en ajouter une.** Les noms `pk_<table>` et `fk_<table>_parent` viennent de `pk_name`
+et `fk_name` ; la recherche de la colonne parente (repli sur `j2s_parent_id`) est écrite en dur. À faire à la main :
 
 - [ ] `generate_add_pk_sql`, `generate_add_fk_sql`, `generate_validate_fk_sql` ;
 - [ ] la suppression de la FK non validée dans `drop_unvalidated_fk` ;
 - [ ] l'aperçu `generate_ddl_preview`, le dry-run `generate_create_table` et `print_dry_run_ddl` ;
 - [ ] pour une nouvelle contrainte : sa phase dans `add_constraints`, son compte dans le total de progression,
   fatale ou en `ConstraintWarning` ;
-- [ ] vérifier la longueur du nom (≤ 63 avec une table de 53 caractères) ;
+- [ ] passer le nom par `truncate_to_pg_limit`, comme `pk_name` (une table de la cascade dépasse 53 caractères) ;
 - [ ] un test PostgreSQL (`tc_nested_fk.rs` pose les PK et FK sur un vrai serveur).
 
 **Nouveau réglage temporaire du serveur.** Suivre `raise_max_wal_size` :
@@ -242,8 +249,8 @@ Les tests `tc_*` démarrent un PostgreSQL dans Docker (testcontainers) : il faut
 
 Vues en écrivant la fiche, pas tranchées ; chacune a son issue.
 
-1. **Noms de contraintes recopiés.** `pk_<table>`, `fk_<table>_parent` et la recherche de la colonne parente sont
-   écrits dans cinq fonctions, dont une dans `pipeline.rs`. Une fonction par nom les garderait d'accord. (#147)
+1. **Recherche de la colonne parente recopiée.** Les noms de contraintes passent par `pk_name` et `fk_name` (#179),
+   mais la recherche de la colonne parente est encore écrite dans plusieurs fonctions, dont une dans `pipeline.rs`. (#147)
 2. **Trois rendus du `CREATE TABLE`**, déjà différents de ce qui est exécuté (§ 3). Le dry-run et l'aperçu
    pourraient afficher la suite exacte des requêtes exécutées. (#148)
 3. **Quatre façons d'ouvrir une connexion**, avec des délais différents ; `to_fk_warning` recopie la mise en forme
