@@ -977,4 +977,99 @@ mod tests {
             "ui_override=Jsonb on root must produce one JSONB row"
         );
     }
+
+    /// Schemas Pass 1 produces for `tests/fixtures/{name}`, by path, as Pass 2 looks them up.
+    fn pass1_path_map(name: &str) -> HashMap<String, TableSchema> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        let config = crate::pass1::runner::Pass1Config {
+            root_table: "p".to_string(),
+            registry: crate::schema::registry::RegistryConfig::default(),
+            num_workers: None,
+        };
+        let sep = crate::schema::PATH_SEP.to_string();
+        crate::pass1::runner::run(&path, &config, None)
+            .unwrap()
+            .schemas
+            .into_iter()
+            .map(|s| (s.path.join(&sep), s))
+            .collect()
+    }
+
+    /// `selected.<type>.<lang>` (#173): the keyed post-pass routes each lang code to the
+    /// `selected_key` table. The lang code is the key of the row, `imgid`/`rev` its columns,
+    /// and `sizes` hangs off that row.
+    #[test]
+    fn a_route_to_a_keyed_table_writes_one_row_keyed_by_the_routed_key() {
+        let path_map = pass1_path_map("keyed_route_selected_images.jsonl");
+        let by_name = |n: &str| path_map.values().find(|s| s.name == n).unwrap();
+        let selected = by_name("p_images_selected");
+        let key_table = by_name("p_images_selected_key");
+        assert!(
+            matches!(&*key_table.effective_strategy(), InferredStrategy::SiblingCollapse(s) if s.key_col_name == "lang_code"),
+            "the fixture must reach the keyed post-pass: {:?}",
+            key_table.inferred_strategy
+        );
+        for lang in ["fr", "en", "de"] {
+            assert_eq!(selected.child_routes[lang], key_table.name);
+        }
+
+        let mut sinks: HashMap<String, CaptureSink> = path_map
+            .values()
+            .map(|s| (s.name.clone(), CaptureSink(Vec::new())))
+            .collect();
+        let mut recorder = Recorder::default();
+        let root = by_name("p");
+        let line = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/keyed_route_selected_images.jsonl"),
+        )
+        .unwrap();
+        let obj: serde_json::Map<String, Value> =
+            serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        let ctx = &mut InsertCtx {
+            sinks: &mut sinks,
+            anomalies: &mut recorder,
+        };
+        insert_object(&path_map, ctx, root, &obj, ID, None, None).unwrap();
+
+        assert_eq!(recorder.anomalies, [], "imgid and rev have a column");
+        let cells = |table: &str| -> Vec<Vec<String>> {
+            sinks[table]
+                .0
+                .iter()
+                .map(|r| {
+                    String::from_utf8_lossy(r)
+                        .trim_end_matches('\n')
+                        .split('\t')
+                        .map(str::to_string)
+                        .collect()
+                })
+                .collect()
+        };
+        let col = |schema: &TableSchema, name: &str| {
+            schema.columns.iter().position(|c| c.name == name).unwrap()
+        };
+        let key_rows = cells(&key_table.name);
+        assert_eq!(key_rows.len(), 9, "3 image types × 3 lang codes");
+        let (lang, imgid, rev) = (
+            col(key_table, "lang_code"),
+            col(key_table, "imgid"),
+            col(key_table, "rev"),
+        );
+        for row in &key_rows {
+            assert!(["fr", "en", "de"].contains(&row[lang].as_str()), "{row:?}");
+            assert!(row[imgid] != "\\N" && row[rev] != "\\N", "{row:?}");
+        }
+        let key_ids: Vec<&String> = key_rows.iter().map(|r| &r[0]).collect();
+        let sizes_rows = cells(&key_table.child_routes["sizes"]);
+        assert!(!sizes_rows.is_empty(), "sizes is written");
+        for row in &sizes_rows {
+            assert!(
+                key_ids.contains(&&row[1]),
+                "sizes hangs off a lang row: {row:?}"
+            );
+        }
+    }
 }

@@ -418,7 +418,11 @@ mod tests {
 
     #[test]
     fn a_pivot_or_skip_chosen_for_a_ticked_table_wins() {
-        let schemas = vec![wide_table("a"), wide_table("b")];
+        // Not roots: a root refuses the Pivot override (#172).
+        let mut schemas = vec![wide_table("a"), wide_table("b")];
+        for t in &mut schemas {
+            t.parent_table = Some("root".to_string());
+        }
         let overrides = HashMap::from([
             ("a".to_string(), UserOverride::Pivot),
             ("b".to_string(), UserOverride::Skip),

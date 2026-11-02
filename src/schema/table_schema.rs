@@ -594,9 +594,11 @@ pub struct TableSchema {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub flatten_sources: HashMap<String, String>,
     /// Cascaded routing: maps a JSON sub-key found inside a sibling pivot row to the child
-    /// table that should receive that sub-object. Populated by `finalize_cascading` for two cases:
+    /// table that should receive that sub-object. Populated by `finalize_cascading` for three cases:
     ///   1. Co-sibling children merged into a synthetic pivot T (`child_routes["k"]` = T.name)
     ///   2. Independent children re-parented from an absorbed sibling to this pivot table
+    ///   3. Keyed post-pass: many keys (`fr`, `en`…) → one sub-pivot whose path ends in `key`;
+    ///      the routed key is the key of the target's row, not its JSON key (#173)
     ///      Empty for all non-cascaded tables (routing falls back to `path_map` in Pass 2).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub child_routes: HashMap<String, String>,
