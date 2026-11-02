@@ -142,10 +142,10 @@ fn parents_of_object_children(
 }
 
 /// After the cascade: drop the synthetic tables whose name collides with an already-registered
-/// one (the first, pre-cascade occurrence is kept), then restore the depth-then-name order
+/// one (the first, pre-cascade occurrence is kept), then restore the depth-then-path order (#180)
 /// that `finalize_cascading` does not maintain.
 fn dedup_and_sort(schemas: &mut Vec<TableSchema>) {
     let mut seen = std::collections::HashSet::new();
     schemas.retain(|s| seen.insert(s.name.clone()));
-    schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
+    schemas.sort_by(|a, b| (a.depth, &a.path, &a.name).cmp(&(b.depth, &b.path, &b.name)));
 }

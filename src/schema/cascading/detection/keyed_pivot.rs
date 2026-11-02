@@ -202,7 +202,7 @@ fn collect_keyed_pivot_work_items(
             if children.len() < threshold {
                 return None;
             }
-            children.sort_unstable_by_key(|&i| &schemas[i].name);
+            children.sort_unstable_by_key(|&i| (&schemas[i].path, &schemas[i].name));
             Some((parent_idx, children))
         })
         .collect()

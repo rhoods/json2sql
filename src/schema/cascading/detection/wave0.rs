@@ -41,9 +41,9 @@ use super::{Collapse, CollapseKind, SiblingDetectCtx, SubgroupData};
 /// Run wave 0 of sibling detection — with
 /// the child-compatibility gate added. Returns co-sibling groups for cascade waves 1+.
 /// Build the sorted work list for `run_sibling_wave`.
-/// Each item is `(parent_name, child_indices_sorted_by_name, array_children)`.
-/// Child indices are sorted alphabetically so the Jaccard large-group fast path
-/// always uses the same reference sibling (deterministic).
+/// Each item is `(parent_name, child_indices_sorted_by_path, array_children)`, parents in JSON path order.
+/// Sorting by path, not name, keeps the Jaccard reference sibling and the order of the work independent of how
+/// names were cut (#180).
 pub(super) fn build_work_items(
     schemas: &[TableSchema],
     threshold: usize,
@@ -55,12 +55,14 @@ pub(super) fn build_work_items(
         for (parent_name, child_indices) in parent_map {
             if child_indices.len() >= threshold {
                 let mut sorted = child_indices.clone();
-                sorted.sort_by_key(|&i| &schemas[i].name);
+                sorted.sort_by_key(|&i| (&schemas[i].path, &schemas[i].name));
                 work.push((parent_name.clone(), sorted, array_children));
             }
         }
     }
-    work.sort_by(|a, b| a.0.cmp(&b.0));
+    let path_of: std::collections::HashMap<&str, &Vec<String>> =
+        schemas.iter().map(|s| (s.name.as_str(), &s.path)).collect();
+    work.sort_by(|a, b| (path_of.get(a.0.as_str()), &a.0).cmp(&(path_of.get(b.0.as_str()), &b.0)));
     work
 }
 

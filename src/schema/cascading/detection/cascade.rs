@@ -60,8 +60,8 @@ pub(super) fn collect_children_by_key(
     let mut out: Vec<(String, Vec<usize>, bool)> = key_map
         .into_iter()
         .map(|(k, (mut v, a))| {
-            // Sort children by name so sibling[0] is always deterministic.
-            v.sort_by_key(|&i| &schemas[i].name);
+            // Sort children by JSON path so sibling[0] never depends on how names were cut (#180).
+            v.sort_by_key(|&i| (&schemas[i].path, &schemas[i].name));
             (k, v, a)
         })
         .collect();

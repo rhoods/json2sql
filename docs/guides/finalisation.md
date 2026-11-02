@@ -136,7 +136,7 @@ SchemaRegistry::finalize_with_pg_guard (voir pass1.md)
    ├─ phase 2  finalize_cascading (sauf --disable-strategy sibling)
    │           run_sibling_wave (vague 0) → drain_cascade_waves (vagues 1+) → vague 0 bis
    │           → run_keyed_pivot_children_wave ; crée des tables synthétiques et des child_routes
-   ├─ doublons de nom retirés, tri par profondeur puis nom
+   ├─ doublons de nom retirés, tri par profondeur puis chemin JSON
    ├─ phase 3  apply_wide_table_strategies : par TableEntry, si la table est encore Columns
    │           apply_wide_strategy → AutoSplit (racine) ou apply_non_autosplit_strategy
    │           (apply_structured_pivot_split, apply_pivot_split, Jsonb) ; compagnons _wide / _pivot
@@ -183,7 +183,7 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
 - **La phase 2 ne touche que les parents `Columns` ou `AutoSplit`** (`should_skip_parent`). Un parent déjà fusionné
   n'est pas refusionné : c'est ce qui rend les vagues successives sûres.
 - **L'exclusion suppose les parents avant les enfants.** `exclude_absorbed_children` retire les descendants d'une
-  table absorbante en un seul passage sur la liste. Le tri par profondeur puis nom est refait après la phase 2, mais
+  table absorbante en un seul passage sur la liste. Le tri par profondeur puis chemin est refait après la phase 2, mais
   les compagnons de la phase 3 sont ajoutés à la fin sans nouveau tri : sans risque tant qu'ils n'ont pas d'enfants.
   Une table ajoutée en fin de liste avec des enfants casserait l'exclusion en cascade.
 - **Une cible de `child_routes` survit, et ses propres cibles aussi** (#177). `collect_surviving_route_targets`
