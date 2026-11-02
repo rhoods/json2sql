@@ -18,6 +18,7 @@
 //!   seul aiguillage pour un objet enfant, un élément de tableau et une cible de routage (#172).
 //! - fn `recurse_children` — parcourt les champs de l'objet, route chaque enfant (objet/array) vers
 //!   `insert_child_object`/`insert_array` ; sans table → `record_missing_table` (#167).
+//! - fn `child_table` — table d'un champ : sa route d'abord (enfant rattaché sans fusion, #180), puis son chemin.
 //! - fn `write_row_of` — écrit la ligne d'une table pour un objet : colonnes générées puis colonnes de données.
 //! - fn `write_group_rows` — écrit les lignes des tables de groupes de colonnes d'une table (une par groupe qui a au moins une valeur).
 //! - fn `column_value` — valeur JSON d'une colonne de données dans l'objet de sa table (via le champ d'origine si elle vient d'un `Flatten`).
@@ -415,6 +416,21 @@ fn write_eav_rows<'a, S: RowSink, A: AnomalyCollect>(
     Ok(())
 }
 
+/// The table of `field` under `schema`: its route first — a child the cascade re-parented without merging keeps its
+/// own path (#180) — then its path.
+fn child_table<'a>(
+    path_map: &'a HashMap<String, TableSchema>,
+    schema: &TableSchema,
+    parent_path_key: &str,
+    field: &str,
+) -> Option<&'a TableSchema> {
+    schema
+        .child_routes
+        .get(field)
+        .and_then(|name| path_map.values().find(|s| s.name == *name))
+        .or_else(|| path_map.get(&format!("{parent_path_key}{PATH_SEP}{field}")))
+}
+
 /// Recurse into child fields of `obj`, routing each to the appropriate insertion function.
 pub(super) fn recurse_children<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
@@ -425,17 +441,17 @@ pub(super) fn recurse_children<S: RowSink, A: AnomalyCollect>(
 ) -> Result<()> {
     let parent_path_key = schema.path.join(&PATH_SEP.to_string());
     for (field, value) in obj {
-        let child_key = format!("{parent_path_key}{PATH_SEP}{field}");
+        let child = || child_table(path_map, schema, &parent_path_key, field);
         match value {
             Value::Object(nested) => {
-                if let Some(child_schema) = path_map.get(&child_key) {
+                if let Some(child_schema) = child() {
                     insert_child_object(path_map, ctx, child_schema, nested, value, row_id, None)?;
                 } else {
                     record_missing_table(path_map, ctx.anomalies, schema, field, row_id, value)?;
                 }
             }
             Value::Array(arr) => {
-                if let Some(child_schema) = path_map.get(&child_key) {
+                if let Some(child_schema) = child() {
                     insert_array(
                         path_map,
                         ctx.sinks,
@@ -1071,5 +1087,43 @@ mod tests {
                 "sizes hangs off a lang row: {row:?}"
             );
         }
+    }
+
+    /// The merged `nutriscore.data` table (#180): only 2023 has `components`, so the cascade re-parents that table to
+    /// it without merging, keeping its path (`nutriscore.2023.data.components`). Pass 2 finds it by `child_routes`.
+    #[test]
+    fn a_child_re_parented_by_the_cascade_is_found_by_its_route() {
+        let path_map = pass1_path_map("derived_names_nutriscore_collision.jsonl");
+        let by_path = |p: &[&str]| path_map.values().find(|s| s.path == p).unwrap();
+        let data = by_path(&["p", "nutriscore", "data"]);
+        let components = by_path(&["p", "nutriscore", "2023", "data", "components"]);
+        assert_eq!(
+            data.child_routes["components"], components.name,
+            "the fixture re-parents components"
+        );
+
+        let mut sinks: HashMap<String, CaptureSink> = path_map
+            .values()
+            .map(|s| (s.name.clone(), CaptureSink(Vec::new())))
+            .collect();
+        let mut recorder = Recorder::default();
+        let line = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/derived_names_nutriscore_collision.jsonl"),
+        )
+        .unwrap();
+        let obj: serde_json::Map<String, Value> =
+            serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        let root = path_map.values().find(|s| s.path == ["p"]).unwrap();
+        let ctx = &mut InsertCtx {
+            sinks: &mut sinks,
+            anomalies: &mut recorder,
+        };
+        insert_object(&path_map, ctx, root, &obj, ID, None, None).unwrap();
+
+        assert_eq!(recorder.anomalies, [], "components has a table");
+        let rows = |table: &str| sinks[table].0.len();
+        assert_eq!(rows(&data.name), 3, "one data row per year");
+        assert_eq!(rows(&components.name), 1, "2023 only");
     }
 }
