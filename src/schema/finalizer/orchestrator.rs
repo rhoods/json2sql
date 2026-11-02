@@ -4,7 +4,7 @@
 //! - fn `SchemaFinalizer::new` — construit le finaliseur avec ses seuils.
 //! - fn `SchemaFinalizer::run` — orchestre les 4 phases (base → cascade → wide strategies → guard).
 //! - fn `parents_of_object_children` — tables qui ont au moins un enfant objet.
-//! - fn `dedup_and_sort` — après la cascade : retire les noms en double, rétablit l'ordre profondeur puis nom.
+//! - fn `dedup_and_sort` — après la cascade : retire les noms en double (`WARNING` si deux chemins, #180), rétablit l'ordre profondeur puis chemin.
 
 use indexmap::IndexMap;
 use std::collections::HashSet;
@@ -143,9 +143,29 @@ fn parents_of_object_children(
 
 /// After the cascade: drop the synthetic tables whose name collides with an already-registered
 /// one (the first, pre-cascade occurrence is kept), then restore the depth-then-path order (#180)
-/// that `finalize_cascading` does not maintain.
+/// that `finalize_cascading` does not maintain. Names come unique from their creation
+/// (`unique_derived_table_name`); a duplicate of another path is a bug, reported.
 fn dedup_and_sort(schemas: &mut Vec<TableSchema>) {
-    let mut seen = std::collections::HashSet::new();
-    schemas.retain(|s| seen.insert(s.name.clone()));
+    let mut seen: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    schemas.retain(|s| match seen.entry(s.name.clone()) {
+        std::collections::hash_map::Entry::Vacant(first) => {
+            first.insert(s.path.clone());
+            true
+        }
+        std::collections::hash_map::Entry::Occupied(first) => {
+            // Same path: the same table built twice. Another path: a name collision — the routes to the dropped
+            // table would write into the kept one (#180).
+            if *first.get() != s.path {
+                eprintln!(
+                    "WARNING: '{}' and '{}' both get the table name '{}': the second is dropped",
+                    first.get().join("."),
+                    s.path.join("."),
+                    s.name
+                );
+                debug_assert!(false, "table name '{}' used by two paths", s.name);
+            }
+            false
+        }
+    });
     schemas.sort_by(|a, b| (a.depth, &a.path, &a.name).cmp(&(b.depth, &b.path, &b.name)));
 }

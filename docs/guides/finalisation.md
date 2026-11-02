@@ -55,6 +55,8 @@ symbols:
   - make_subgroup
   - make_pivot_preamble
   - derived_table_name
+  - unique_derived_table_name
+  - dedup_and_sort
   - unique_cluster_suffix
   - pick_unique_suffix
   - unique_pivot_name
@@ -153,21 +155,25 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
   observés en Pass 1 et saute toute table qui n'est plus `Columns` (garde de #45 : un chemin peut désigner une table
   déjà fusionnée). Une table créée par la phase 2 n'a pas de `TableEntry` : elle ne reçoit jamais de stratégie large,
   quelle que soit sa largeur. Seule la garde des 1 600 colonnes la rattrape.
-- **Une table de même nom qu'une autre est retirée en silence.** Après la phase 1 et après la phase 2, un `retain`
-  ne garde que la première table de chaque nom. Une table synthétique dont le nom existe déjà disparaît sans message.
-  Les noms synthétiques se rendent uniques avec `unique_cluster_suffix` (phase 2) ou `unique_pivot_name` (phase 3) ;
-  `make_subgroup` et la passe keyed-pivot comptent sur le premier.
+- **Une table de même nom qu'une autre est retirée.** Après la phase 1 et après la phase 2, un `retain` ne garde que
+  la première table de chaque nom. Deux tables de même chemin sont la même table construite deux fois : la seconde
+  disparaît sans message. Deux chemins sous un même nom sont une collision : la cascade retrouve ses tables par leur
+  nom, les enfants des deux se mélangent et les routes vers la table retirée écrivent dans l'autre. `dedup_and_sort`
+  l'annonce par un `WARNING` (et un `debug_assert` en test, #180). Sur OFF, avant #180, `nutriscore.<année>.data`
+  écrivait ainsi dans la table du champ racine `nutriscore_data`. Les noms synthétiques se rendent donc uniques à leur
+  création : `unique_cluster_suffix` (phase 2, et la passe keyed-pivot), `pick_unique_suffix` (`make_subgroup`),
+  `unique_derived_table_name` (tables fusionnées de `cascade.rs`), `unique_pivot_name` (phase 3).
 - **Les noms synthétiques passent par `derived_table_name`** (#180). `NamingRegistry` limite un nom de table à
   53 octets (`PG_TABLE_MAX_IDENT`), pour que `pk_…`, `fk_…_parent` et `j2s_…_id` tiennent dans les 63 de PostgreSQL.
   Un nom construit en ajoutant un suffixe (`{parent}_key`, `_num_2`, `_cluster_N`, `{table}_pivot`, table fusionnée
   `{parent}_{clé}`) est nettoyé, puis ses premiers mots sont retirés jusqu'à ce qu'il tienne : la fin, qui distingue
   les tables, reste lisible ; un hash seulement en dernier recours. Seul le nom change : `path`, `path_segment` et
-  `absorbed_path_segments` restent bruts, la Pass 2 route avec. Les fonctions qui choisissent un suffixe libre
-  (`unique_cluster_suffix`, `pick_unique_suffix`, `unique_pivot_name`) comparent les noms coupés ; les tables
-  fusionnées de `cascade.rs` non. Deux noms qui ne diffèrent que dans les mots retirés seraient alors confondus, et le
-  dédoublonnage ci-dessus retirerait la seconde table : `test_every_table_name_fits_postgresql` le vérifie sur les
-  fixtures. `make_pivot_preamble` écrit encore la colonne parente à la main, sans l'assertion de
-  `ColumnSchema::parent_fk`.
+  `absorbed_path_segments` restent bruts, la Pass 2 route avec. Le nettoyage confond des clés différentes (`es` /
+  `ES`, `en:x` / `en-x`) : les fonctions de création comparent donc les noms dérivés, et une table fusionnée dont le
+  nom est déjà pris par un autre chemin reçoit un hash de sa clé brute (`unique_derived_table_name`). Les décisions de
+  la cascade (graine des regroupements, ordre du travail) suivent le chemin JSON, pas le nom : couper ou hasher un nom
+  ne change pas les regroupements. `make_pivot_preamble` écrit encore la colonne parente à la main, sans l'assertion
+  de `ColumnSchema::parent_fk`.
 - **Une table rattachée à un autre parent garde sa colonne parente.** `handle_single_co_sibling` change
   `parent_table` sans renommer la colonne `j2s_{ancien parent}_id`. Le DDL et la Pass 2 cherchent cette colonne par son
   indicateur `is_parent_fk`, pas par son nom : cela marche, mais le nom en base ne correspond plus au parent.

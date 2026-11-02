@@ -113,6 +113,7 @@ fn handle_single_co_sibling(
 }
 
 pub(super) fn build_co_sibling_schema(
+    schemas: &[TableSchema],
     group: &CoSiblingGroup,
     parent_depth: usize,
     parent_path: Vec<String>,
@@ -121,14 +122,15 @@ pub(super) fn build_co_sibling_schema(
     // Sum of sibling children's row_count — approximation for classify_tables.
     source_row_count: u64,
 ) -> (String, TableSchema) {
-    let t_name = crate::schema::naming::derived_table_name(&format!(
-        "{}_{}",
-        group.synthetic_parent_name, group.json_key
-    ));
-    let mut cols = apply::make_pivot_preamble(&parent_name, group.array_children);
-    cols.extend(union_cols);
     let mut t_path = parent_path;
     t_path.push(group.json_key.clone());
+    // Taken only by another path: a table of the same path is this one, the dedup keeps the first (#180).
+    let t_name = crate::schema::naming::unique_derived_table_name(
+        &format!("{}_{}", group.synthetic_parent_name, group.json_key),
+        |n| schemas.iter().any(|s| s.name == n && s.path != t_path),
+    );
+    let mut cols = apply::make_pivot_preamble(&parent_name, group.array_children);
+    cols.extend(union_cols);
     let mut t_schema = TableSchema::new(t_name.clone(), t_path, parent_depth + 1);
     t_schema.parent_table = Some(parent_name);
     t_schema.columns = cols;
@@ -188,6 +190,7 @@ fn merge_co_sibling_group(
     let parent_name = schemas[parent_idx].name.clone();
 
     let (t_name, t_schema) = build_co_sibling_schema(
+        schemas,
         group,
         parent_depth,
         parent_path,
@@ -328,6 +331,40 @@ mod tests {
         assert_eq!(info.1.len(), 2, "both child indices must be included");
     }
 
+    /// Two JSON keys that differ only by case (`es` / `ES`, OFF lang codes) are two tables: their merged tables must not
+    /// share a name, or every lookup by name mixes them (#180).
+    #[test]
+    fn co_sibling_keys_that_differ_by_case_get_distinct_tables() {
+        let mut schemas = vec![
+            make_parent("p"),
+            make_child_with_key("p_a_es", "p", "es", &["imgid"]),
+            make_child_with_key("p_b_es", "p", "es", &["imgid"]),
+            make_child_with_key("p_a_ES", "p", "ES", &["imgid"]),
+            make_child_with_key("p_b_ES", "p", "ES", &["imgid"]),
+        ];
+        for (key, indices) in [("ES", vec![3, 4]), ("es", vec![1, 2])] {
+            let group = CoSiblingGroup {
+                synthetic_parent_name: "p".to_string(),
+                json_key: key.to_string(),
+                sibling_indices: indices,
+                array_children: false,
+            };
+            let (obj_map, arr_map) = super::super::build_parent_child_maps(&schemas);
+            let name_to_idx: std::collections::HashMap<String, usize> = schemas
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.name.clone(), i))
+                .collect();
+            process_co_sibling_group(&mut schemas, &group, &obj_map, &arr_map, &name_to_idx);
+        }
+        let routes = &schemas[0].child_routes;
+        assert_ne!(routes["es"], routes["ES"], "one table per key");
+        for key in ["es", "ES"] {
+            let target = schemas.iter().find(|s| s.name == routes[key]).unwrap();
+            assert_eq!(target.path, ["p", key], "{key} → {}", target.name);
+        }
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)] // single test case with verbose setup
     fn test_process_co_sibling_low_jaccard_still_merges_and_routes() {
@@ -459,6 +496,7 @@ mod tests {
             array_children: false,
         };
         let (_name, schema) = build_co_sibling_schema(
+            &[],
             &group,
             1,
             vec!["parent".to_string(), "en".to_string()],

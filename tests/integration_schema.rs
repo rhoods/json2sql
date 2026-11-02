@@ -1424,3 +1424,30 @@ fn test_every_table_name_fits_postgresql() {
     assert!(checked > 10, "only {checked} fixtures went through Pass 1");
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
+
+// ---------------------------------------------------------------------------
+// Régression : la fusion de `nutriscore.<année>.data` et le champ racine
+// `nutriscore_data` se nettoient tous deux en `p_nutriscore_data`. Le retrait
+// des doublons gardait le champ racine, et la route `data` de `p_nutriscore`
+// y menait : sur OFF, 8,7 M lignes `data` écrites dans la mauvaise table (#180).
+// ---------------------------------------------------------------------------
+#[test]
+fn test_a_merged_table_does_not_take_the_name_of_another_path() {
+    let path = common::fixture("derived_names_nutriscore_collision.jsonl");
+    let p1 = pass1::runner::run(&path, &common::pass1_config("p"), None).unwrap();
+    let by_name = |n: &str| p1.schemas.iter().find(|s| s.name == n);
+    let nutriscore = by_name("p_nutriscore").expect("p_nutriscore");
+    let target = by_name(&nutriscore.child_routes["data"]).expect("route target exists");
+    assert_eq!(
+        target.path,
+        ["p", "nutriscore", "data"],
+        "route data → {}",
+        target.name
+    );
+    let root_field = p1
+        .schemas
+        .iter()
+        .find(|s| s.path == ["p", "nutriscore_data"])
+        .expect("the root field keeps its table");
+    assert_ne!(root_field.name, target.name);
+}

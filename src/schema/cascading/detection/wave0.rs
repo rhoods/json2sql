@@ -167,11 +167,11 @@ fn pick_unique_suffix(
     schemas: &[TableSchema],
     used: &std::collections::HashSet<String>,
 ) -> String {
+    // Compare derived names: two suffixes can derive the same one (`ES_key` / `es_key`, #180).
+    let name_of = |s: &str| crate::schema::naming::derived_table_name(&format!("{parent}_{s}"));
     let taken = |s: &str| {
-        used.contains(s)
-            || schemas.iter().any(|t| {
-                t.name == crate::schema::naming::derived_table_name(&format!("{parent}_{s}"))
-            })
+        let name = name_of(s);
+        used.iter().any(|u| name_of(u) == name) || schemas.iter().any(|t| t.name == name)
     };
     if !taken(desired) {
         return desired.to_string();
