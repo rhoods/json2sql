@@ -33,6 +33,7 @@ symbols:
   - pk_name
   - fk_name
   - truncate_to_pg_limit
+  - derived_table_name
   - NamingRegistry
   - generate_add_fk_sql
   - generate_validate_fk_sql
@@ -175,11 +176,11 @@ Les deux points d'entrée (CLI et worker de l'IHM) créent les tables chacun de 
 - **`DROP … CASCADE` emporte aussi les objets de l'utilisateur** qui dépendent des tables (vues, FK d'autres tables).
 - **Noms de contraintes à la limite.** Les contraintes s'appellent `pk_<table>` et `fk_<table>_parent`, construits
   par `pk_name` et `fk_name`. `NamingRegistry` limite un nom de table à `PG_TABLE_MAX_IDENT` (53) caractères :
-  `fk_` + 53 + `_parent` = 63, exactement la limite de PostgreSQL. Mais la cascade ajoute des suffixes sans
-  raccourcir (`_cluster_N`, `_key`, `_num_2`, `_pivot`). Sans précaution, PostgreSQL tronquerait le nom (un simple
-  `NOTICE`, que json2sql n'affiche pas) et deux contraintes porteraient le même nom (sur OFF :
-  `…_nutrients_cluster_0` et `_1`, 42P07). `pk_name` et `fk_name` coupent donc à 63 avec un hash du nom complet
-  (#179). Un nom de **table** de plus de 63 caractères reste coupé par PostgreSQL lui-même.
+  `fk_` + 53 + `_parent` = 63, exactement la limite de PostgreSQL ; les noms de la cascade passent aussi par cette
+  limite (`derived_table_name`, #180). Si un nom dépassait quand même, PostgreSQL le tronquerait (un simple `NOTICE`,
+  que json2sql n'affiche pas) et deux contraintes porteraient le même nom (sur OFF, avant #180 :
+  `…_nutrients_cluster_0` et `_1`, 42P07). `pk_name` et `fk_name` coupent donc aussi à 63 avec un hash du nom complet
+  (#179), en filet. Un nom de **table** de plus de 63 caractères reste coupé par PostgreSQL lui-même.
 - **`NOT NULL` seulement sur les colonnes générées.** `build_col_defs` ne l'écrit que si la colonne est `not_null`
   **et** générée (`j2s_…`). Une colonne de données est toujours nullable : une valeur non convertie devient `NULL`
   (voir pass2.md).
@@ -217,7 +218,7 @@ et `fk_name` ; la recherche de la colonne parente (repli sur `j2s_parent_id`) es
 - [ ] l'aperçu `generate_ddl_preview`, le dry-run `generate_create_table` et `print_dry_run_ddl` ;
 - [ ] pour une nouvelle contrainte : sa phase dans `add_constraints`, son compte dans le total de progression,
   fatale ou en `ConstraintWarning` ;
-- [ ] passer le nom par `truncate_to_pg_limit`, comme `pk_name` (une table de la cascade dépasse 53 caractères) ;
+- [ ] passer le nom par `truncate_to_pg_limit`, comme `pk_name` ;
 - [ ] un test PostgreSQL (`tc_nested_fk.rs` pose les PK et FK sur un vrai serveur).
 
 **Nouveau réglage temporaire du serveur.** Suivre `raise_max_wal_size` :

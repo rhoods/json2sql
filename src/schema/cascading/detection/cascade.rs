@@ -12,7 +12,6 @@
 
 use super::super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
 use super::super::super::wide_strategies::build_union_columns;
-use super::super::scoring::pg_truncate_name;
 use super::{apply, CoSiblingGroup};
 
 /// Collect the children of `sibling_indices` grouped by their last JSON path segment.
@@ -122,7 +121,7 @@ pub(super) fn build_co_sibling_schema(
     // Sum of sibling children's row_count — approximation for classify_tables.
     source_row_count: u64,
 ) -> (String, TableSchema) {
-    let t_name = pg_truncate_name(&format!(
+    let t_name = crate::schema::naming::derived_table_name(&format!(
         "{}_{}",
         group.synthetic_parent_name, group.json_key
     ));

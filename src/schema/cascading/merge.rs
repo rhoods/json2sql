@@ -15,7 +15,6 @@
 
 use super::super::table_schema::{InferredStrategy, SiblingGroup, SiblingSchema, TableSchema};
 use super::super::wide_strategies::classify_key_shape;
-use super::scoring::pg_truncate_name;
 
 /// Error returned by [`build_sibling_collapse_from_siblings`].
 #[allow(dead_code)] // used by json2sql-ui::state::apply_sibling_merge
@@ -136,7 +135,9 @@ fn build_mixed_keyed_pivot_strategy(
     }
     InferredStrategy::SiblingCollapseMulti(vec![
         SiblingGroup {
-            pivot_table: pg_truncate_name(&format!("{parent_name}_{key_col_name}_num")),
+            pivot_table: crate::schema::naming::derived_table_name(&format!(
+                "{parent_name}_{key_col_name}_num"
+            )),
             key_is_numeric: true,
             sibling_schema: SiblingSchema {
                 key_col_name: key_col_name.to_string(),
@@ -148,7 +149,9 @@ fn build_mixed_keyed_pivot_strategy(
             absorbed_path_segments: numeric_keys.iter().map(ToString::to_string).collect(),
         },
         SiblingGroup {
-            pivot_table: pg_truncate_name(&format!("{parent_name}_{key_col_name}_txt")),
+            pivot_table: crate::schema::naming::derived_table_name(&format!(
+                "{parent_name}_{key_col_name}_txt"
+            )),
             key_is_numeric: false,
             sibling_schema: SiblingSchema {
                 key_col_name: key_col_name.to_string(),

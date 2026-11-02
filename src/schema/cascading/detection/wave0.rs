@@ -165,8 +165,12 @@ fn pick_unique_suffix(
     schemas: &[TableSchema],
     used: &std::collections::HashSet<String>,
 ) -> String {
-    let taken =
-        |s: &str| used.contains(s) || schemas.iter().any(|t| t.name == format!("{parent}_{s}"));
+    let taken = |s: &str| {
+        used.contains(s)
+            || schemas.iter().any(|t| {
+                t.name == crate::schema::naming::derived_table_name(&format!("{parent}_{s}"))
+            })
+    };
     if !taken(desired) {
         return desired.to_string();
     }
@@ -511,7 +515,7 @@ pub(super) fn make_subgroup(
     key_is_numeric: bool,
     suffix: &str,
 ) -> SubgroupData {
-    let pivot_name = format!("{parent_name}_{suffix}");
+    let pivot_name = crate::schema::naming::derived_table_name(&format!("{parent_name}_{suffix}"));
     let sub_keys = sibling_keys(schemas, indices);
     let shape = classify_key_shape(&sub_keys);
     let key_col = if key_is_numeric {

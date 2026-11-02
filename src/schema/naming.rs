@@ -32,6 +32,7 @@
 //! - fn `truncate_to_pg_limit` — tronque un identifiant à la limite `PostgreSQL` (63 octets).
 //! - fn `floor_char_boundary` — tronque au dernier caractère UTF-8 valide.
 //! - fn `truncate_table_name` — tronque un nom de table en dépiautant les segments de chemin avant repli hash.
+//! - fn `derived_table_name` — nom d'une table dérivée d'une autre (`_key`, `_pivot`…), nettoyé et coupé à 53 octets par le début (#180).
 //! - fn `group_table_name` — nom de la table 1:1 d'un groupe de colonnes (`{parent}_{groupe}`, 53 octets au plus, hash au-delà).
 //! - fn `short_hash` — hash FNV-1a 64 bits, 7 caractères hex (stable entre versions).
 
@@ -401,6 +402,27 @@ pub fn truncate_to_pg_limit(sanitized: &str, original_key: &str) -> String {
 
 fn floor_char_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..s.floor_char_boundary(max_bytes)]
+}
+
+/// Name of a table built by appending to another table's name (`{parent}_key`, `{table}_pivot`…), cut like a
+/// registry name (#180): sanitized, then leading words dropped until it fits [`PG_TABLE_MAX_IDENT`], so the end that
+/// tells the tables apart stays readable; a hash only when no tail fits.
+/// shortcut: two names that differ only in the dropped words would collide; the callers that pick a free suffix
+/// compare cut names, the merged tables of `cascade.rs` do not — check there too if a collision shows up.
+#[must_use]
+pub fn derived_table_name(raw: &str) -> String {
+    let name = sanitize_identifier(raw);
+    let mut rest = name.as_str();
+    while rest.len() > PG_TABLE_MAX_IDENT {
+        let Some((_, tail)) = rest.split_once('_') else {
+            break;
+        };
+        rest = tail;
+    }
+    if rest.len() <= PG_TABLE_MAX_IDENT {
+        return rest.to_string();
+    }
+    truncate_to_limit(&name, raw, PG_TABLE_MAX_IDENT)
 }
 
 /// Truncate a table name to `max_len` bytes by progressively stripping leading path segments
@@ -1056,5 +1078,30 @@ mod tests {
         assert_eq!(short_hash("ja:カルシウム"), "42c9fde");
         // Two distinct inputs must produce distinct hashes
         assert_ne!(short_hash("ja:カルシウム"), short_hash("ja:脂質"));
+    }
+
+    /// A derived name drops leading words until it fits, keeping the end that tells tables apart (#180).
+    #[test]
+    fn derived_table_name_drops_leading_words_and_keeps_the_end() {
+        assert_eq!(
+            derived_table_name("products_images_key"),
+            "products_images_key"
+        );
+        assert_eq!(
+            derived_table_name("openfoodfacts_products_nutrition_input_sets_nutrients_cluster_0"),
+            "products_nutrition_input_sets_nutrients_cluster_0"
+        );
+        assert_eq!(
+            derived_table_name(
+                "openfoodfacts_products_improvements_data_en:better-nutri-score-with-_key"
+            ),
+            "improvements_data_en_better_nutri_score_with_key"
+        );
+        // One word longer than the limit: no tail fits, a hash keeps it unique.
+        let long = derived_table_name(&"a".repeat(70));
+        assert!(long.len() <= PG_TABLE_MAX_IDENT, "{long}");
+        // Multi-byte characters never split.
+        let utf8 = derived_table_name(&format!("{}{}{}", "a".repeat(50), "é", "b".repeat(8)));
+        assert!(utf8.len() <= PG_TABLE_MAX_IDENT, "{utf8}");
     }
 }

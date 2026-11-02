@@ -54,8 +54,9 @@ symbols:
   - build_co_sibling_schema
   - make_subgroup
   - make_pivot_preamble
-  - pg_truncate_name
+  - derived_table_name
   - unique_cluster_suffix
+  - pick_unique_suffix
   - unique_pivot_name
   - classify_key_shape
   - build_union_columns
@@ -156,11 +157,17 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
   ne garde que la première table de chaque nom. Une table synthétique dont le nom existe déjà disparaît sans message.
   Les noms synthétiques se rendent uniques avec `unique_cluster_suffix` (phase 2) ou `unique_pivot_name` (phase 3) ;
   `make_subgroup` et la passe keyed-pivot comptent sur le premier.
-- **Les noms synthétiques ne passent pas par `NamingRegistry`.** Celui-ci limite un nom de table à 53 octets
-  (`PG_TABLE_MAX_IDENT`), pour que `pk_…`, `fk_…_parent` et `j2s_…_id` tiennent dans les 63 de PostgreSQL. La phase 2
-  construit ses noms par `format!`, au mieux coupés à 63 par `pg_truncate_name`, et `make_pivot_preamble` écrit la
-  colonne parente à la main, sans l'assertion de `ColumnSchema::parent_fk`. Un nom long dépasse donc ces limites
-  sans erreur dans json2sql.
+- **Les noms synthétiques passent par `derived_table_name`** (#180). `NamingRegistry` limite un nom de table à
+  53 octets (`PG_TABLE_MAX_IDENT`), pour que `pk_…`, `fk_…_parent` et `j2s_…_id` tiennent dans les 63 de PostgreSQL.
+  Un nom construit en ajoutant un suffixe (`{parent}_key`, `_num_2`, `_cluster_N`, `{table}_pivot`, table fusionnée
+  `{parent}_{clé}`) est nettoyé, puis ses premiers mots sont retirés jusqu'à ce qu'il tienne : la fin, qui distingue
+  les tables, reste lisible ; un hash seulement en dernier recours. Seul le nom change : `path`, `path_segment` et
+  `absorbed_path_segments` restent bruts, la Pass 2 route avec. Les fonctions qui choisissent un suffixe libre
+  (`unique_cluster_suffix`, `pick_unique_suffix`, `unique_pivot_name`) comparent les noms coupés ; les tables
+  fusionnées de `cascade.rs` non. Deux noms qui ne diffèrent que dans les mots retirés seraient alors confondus, et le
+  dédoublonnage ci-dessus retirerait la seconde table : `test_every_table_name_fits_postgresql` le vérifie sur les
+  fixtures. `make_pivot_preamble` écrit encore la colonne parente à la main, sans l'assertion de
+  `ColumnSchema::parent_fk`.
 - **Une table rattachée à un autre parent garde sa colonne parente.** `handle_single_co_sibling` change
   `parent_table` sans renommer la colonne `j2s_{ancien parent}_id`. Le DDL et la Pass 2 cherchent cette colonne par son
   indicateur `is_parent_fk`, pas par son nom : cela marche, mais le nom en base ne correspond plus au parent.
@@ -205,7 +212,7 @@ Les endroits prévus sont listés au § 1. Trois changements demandent des étap
 
 - [ ] un nom unique contre toutes les tables déjà connues (`unique_cluster_suffix`, `unique_pivot_name`), sinon le
   dédoublonnage la retire ;
-- [ ] un nom de 53 octets au plus, et la colonne parente par `ColumnSchema::parent_fk` ;
+- [ ] un nom passé par `derived_table_name` (53 octets au plus), et la colonne parente par `ColumnSchema::parent_fk` ;
 - [ ] `parent_table`, `child_kind`, `depth` et `path` remplis : la Pass 2 retrouve la table par son chemin ;
 - [ ] si la Pass 2 doit y router des sous-objets, une entrée dans `child_routes` du parent ;
 - [ ] décider si elle doit recevoir une stratégie large : la phase 3 ne la verra pas (§ 3).
