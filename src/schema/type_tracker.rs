@@ -45,6 +45,8 @@
 //! - fn `is_zone` — fin d'un timestamp : rien, `Z` ou un décalage `±HH`, `±HHMM`, `±HH:MM`.
 //! - fn `at_most` — vrai si deux octets sont des chiffres ASCII dont la valeur ne dépasse pas un maximum.
 //! - fn `is_date_bytes` — date `AAAA-MM-JJ` sur les 10 premiers octets, qui existe dans le calendrier.
+//! - fn `days_in_month` — nombre de jours d'un mois, années bissextiles comprises ; la Pass 2 s'en sert pour
+//!   passer un timestamp en UTC (#194).
 //! - fn `two_digits` — valeur de deux chiffres ASCII.
 //! - fn `is_digit` — vrai si l'octet est un chiffre ASCII.
 
@@ -545,15 +547,19 @@ const fn is_date_bytes(b: &[u8]) -> bool {
         return false;
     };
     let year = century * 100 + yy;
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let days_in_month = match month {
+    year > 0 && day >= 1 && day <= days_in_month(year, month)
+}
+
+/// Number of days of `month` (1 to 12) in `year`, with Gregorian leap years; 0 for any other month.
+pub const fn days_in_month(year: u16, month: u16) -> u16 {
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    match month {
         2 if leap => 29,
         2 => 28,
         4 | 6 | 9 | 11 => 30,
         1..=12 => 31,
         _ => 0,
-    };
-    year > 0 && day >= 1 && day <= days_in_month
+    }
 }
 
 /// Value of two ASCII digits, or `None` if one is not a digit.
