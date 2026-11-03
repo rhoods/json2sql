@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Worker de l'IHM et protocole IPC (config, socket, fichier résultat)
-verified_at: 812f341
+verified_at: 0bf8661
 files:
   - json2sql-worker/src/
   - src/ipc.rs
