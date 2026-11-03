@@ -25,7 +25,7 @@
 //! - fn `apply_suffix_columns_override` — applique `suffix_columns` : la grille part dans un compagnon `_pivot` (#163).
 //! - fn `suffix_columns_already_applied` — vrai si la table est déjà l'identité de ces `suffix_columns` (#129).
 //! - fn `require_columns_strategy` — refuse un override qui suppose une table encore en `Columns`.
-//! - fn `type_map_of` — `TypeTracker` factices tirés des types des colonnes d'un schéma figé.
+//! - fn `type_map_of` — `TypeTracker` factices tirés des types des colonnes d'un schéma figé (sans tableaux PG ni JSONB).
 //! - fn `apply_column_type_overrides` — applique les overrides de type par colonne.
 //! - fn `override_column_type` — change le type d'une colonne, ou dit pourquoi c'est impossible.
 //! - fn `apply_group_overrides` — applique les groupes de fusion (`[group.*]`, stratégie `keyed_pivot`).
@@ -53,7 +53,8 @@
 //! - fn `record_skipped_children` — note sur chaque parent survivant la clé de ses enfants `Skip` (#167), et ses clés de `child_routes` vers eux.
 //! - fn `skip_cascade_warning` — avertissement d'une table `Skip` : les vrais enfants emportés avec elle.
 //! - fn `prime_tracker_from_pg_type` — reconstruit un `TypeTracker` représentatif depuis un `PgType`
-//!   déjà résolu (pour réutiliser `build_suffix_schema_from_list` après finalisation).
+//!   déjà résolu (pour réutiliser `build_suffix_schema_from_list` après finalisation), jamais plus
+//!   étroit : `VARCHAR(n)` garde sa longueur, les autres textes donnent `TEXT` (#117).
 //! - fn `parse_pg_type` — parse une chaîne de type SQL (avec alias) en `PgType`.
 
 use std::collections::{HashMap, HashSet};
@@ -676,10 +677,11 @@ fn type_map_of(
     schema: &TableSchema,
 ) -> indexmap::IndexMap<String, crate::schema::type_tracker::TypeTracker> {
     let mut type_map = indexmap::IndexMap::new();
-    // PG array columns are not part of a suffix grid: they stay on the identity table.
+    // PG array and JSONB columns hold arrays and objects, which Pass 2 never sends to the
+    // pivot: they stay on the identity table, as the detection's `scalar_keys` keeps them out.
     for col in schema
         .data_columns()
-        .filter(|c| !matches!(c.pg_type, PgType::Array(_)))
+        .filter(|c| !matches!(c.pg_type, PgType::Array(_) | PgType::Jsonb))
     {
         let mut tracker = crate::schema::type_tracker::TypeTracker::new(256);
         prime_tracker_from_pg_type(&mut tracker, &col.pg_type);
@@ -1127,9 +1129,10 @@ fn skip_cascade_warning(
     })
 }
 
-/// Prime a `TypeTracker` with a representative observation so `to_pg_type()` returns
-/// a type consistent with the given `PgType`.  Used when rebuilding type maps from
-/// already-resolved column schemas.
+/// Prime a `TypeTracker` with a representative observation so `to_pg_type()` returns the
+/// given `PgType` or a wider one, never a narrower one. Used when rebuilding type maps from
+/// already-resolved column schemas: `VARCHAR(n)` keeps its length (plus the margin of
+/// `to_pg_type`), the other text types come back as `TEXT` (#117: they were `VARCHAR(1)`).
 const fn prime_tracker_from_pg_type(
     tracker: &mut crate::schema::type_tracker::TypeTracker,
     pg_type: &PgType,
@@ -1143,8 +1146,14 @@ const fn prime_tracker_from_pg_type(
         PgType::Uuid => InferredType::Uuid,
         PgType::Date => InferredType::Date,
         PgType::Timestamp => InferredType::Timestamp,
-        PgType::VarChar(_) | PgType::Text | PgType::Jsonb | PgType::Array(_) => {
+        PgType::VarChar(n) => {
+            tracker.max_len = *n;
             InferredType::Varchar
+        }
+        // JSONB and arrays never reach a grid (`type_map_of`); TEXT would hold them anyway.
+        PgType::Text | PgType::Jsonb | PgType::Array(_) => {
+            tracker.max_len = u32::MAX; // above any `text_threshold`
+            InferredType::Text
         }
     };
     tracker.type_counts[inferred as usize] += 1;
@@ -1964,6 +1973,11 @@ mod tests {
             PgType::DoublePrecision,
             "typed from the bare keys only"
         );
+        let unit = &pivot.find_by_original("_unit").unwrap().pg_type;
+        assert!(
+            matches!(unit, PgType::VarChar(n) if *n >= 4),
+            "unit holds the VARCHAR(4) of the *_unit keys (#117), got {unit:?}"
+        );
     }
 
     #[test]
@@ -1988,6 +2002,58 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         // TableSchema has no PartialEq; a clone keeps the HashSet order, so Debug compares.
         assert_eq!(format!("{schemas:?}"), format!("{once:?}"));
+    }
+
+    // --- #117: the grid is typed from the resolved column types ---
+
+    /// The type a tracker primed from `pg_type` resolves to.
+    fn primed(pg_type: &PgType) -> PgType {
+        let mut tracker = crate::schema::type_tracker::TypeTracker::new(256);
+        prime_tracker_from_pg_type(&mut tracker, pg_type);
+        tracker.to_pg_type()
+    }
+
+    #[test]
+    fn a_primed_tracker_is_never_narrower_than_its_type() {
+        // max_len stayed at 0: every text type came back as VARCHAR(1).
+        for same in [
+            PgType::Integer,
+            PgType::BigInt,
+            PgType::DoublePrecision,
+            PgType::Boolean,
+            PgType::Uuid,
+            PgType::Date,
+            PgType::Timestamp,
+            PgType::Text,
+        ] {
+            assert_eq!(primed(&same), same);
+        }
+        for n in [1, 4, 255] {
+            let t = primed(&PgType::VarChar(n));
+            assert!(
+                matches!(t, PgType::VarChar(m) if m >= n),
+                "VARCHAR({n}) → {t:?}"
+            );
+        }
+        for wide in [
+            PgType::VarChar(300),
+            PgType::Jsonb,
+            PgType::Array(Box::new(PgType::Text)),
+        ] {
+            assert_eq!(primed(&wide), PgType::Text, "{wide:?}");
+        }
+    }
+
+    #[test]
+    fn toml_suffix_columns_leave_a_jsonb_column_on_the_identity_table() {
+        // Pass 2 sends only scalars to the pivot: in the grid, the objects of a JSONB column
+        // would be lost. Only `apply_jsonb_flatten` (no caller outside tests) makes one.
+        let mut schemas = vec![nutrients_table(false)];
+        schemas[0]
+            .columns
+            .push(ColumnSchema::data("labels_unit", PgType::Jsonb, false));
+        apply_overrides(&mut schemas, &suffix_config(&["_100g", "_unit"])).unwrap();
+        assert_eq!(data_names(&schemas[0]), ["brand", "tags", "labels_unit"]);
     }
 
     // --- Guard 2: suffix_columns requires inferred_strategy == Columns (#31) ---

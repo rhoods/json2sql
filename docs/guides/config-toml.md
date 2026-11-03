@@ -41,6 +41,7 @@ symbols:
   - compute_skip_cascade
   - SkipCascadeWarning
   - prime_tracker_from_pg_type
+  - type_map_of
   - parse_pg_type
   - UserOverride
   - InferredStrategy
@@ -225,6 +226,12 @@ IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snap
   `people.home`) est pris pour une route directe, et ce membre retombe en anomalies ; un Jsonb posé ensuite par l'IHM
   sur le parent garde ses routes, donc la table du groupe, écrite en plus du blob (`collect_surviving_route_targets`,
   même trou que pour les tables routées de la cascade).
+- **`suffix_columns` type la grille d'après les colonnes déjà typées (#117).** À ce moment, les compteurs de la
+  Pass 1 n'existent plus : `type_map_of` en refait un par colonne avec `prime_tracker_from_pg_type`. Un `VARCHAR(n)`
+  garde sa longueur (avec la marge de 20 % de la Pass 1 : `VARCHAR(4)` devient `VARCHAR(5)`), `TEXT` reste `TEXT`.
+  Avant #117 la longueur était oubliée : `unit` sortait en `VARCHAR(1)`, et la Pass 2 mettait à `NULL` toute unité de
+  plus d'une lettre (vérifié sur 20 000 lignes OFF : 148 035 unités perdues sur 286 615). Les colonnes tableau PG et
+  `JSONB` restent sur la table d'identité : la Pass 2 n'envoie au pivot que des valeurs simples (ni objets ni tableaux).
 - **Des clés TOML ignorées sans avertissement.** Les types forcés se mettent à plat dans `[table]` (`age = "BIGINT"`,
   comme `tests/fixtures/`). La forme `[table.columns]` des deux docs donne une clé `columns` dont la valeur est une
   table : `apply_column_type_overrides` saute toute valeur qui n'est pas une chaîne. Vérifié : aucun override, aucun
