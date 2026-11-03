@@ -1,0 +1,3 @@
+[products_nutriments]
+strategy = "structured_pivot"
+suffix_columns = ["_100g", "_unit"]

@@ -1964,6 +1964,11 @@ mod tests {
             PgType::DoublePrecision,
             "typed from the bare keys only"
         );
+        let unit = &pivot.find_by_original("_unit").unwrap().pg_type;
+        assert!(
+            matches!(unit, PgType::VarChar(n) if *n >= 4),
+            "unit holds the VARCHAR(4) of the *_unit keys (#117), got {unit:?}"
+        );
     }
 
     #[test]
@@ -1988,6 +1993,55 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         // TableSchema has no PartialEq; a clone keeps the HashSet order, so Debug compares.
         assert_eq!(format!("{schemas:?}"), format!("{once:?}"));
+    }
+
+    // --- #117: the grid is typed from the resolved column types ---
+
+    /// The type a tracker primed from `pg_type` resolves to.
+    fn primed(pg_type: &PgType) -> PgType {
+        let mut tracker = crate::schema::type_tracker::TypeTracker::new(256);
+        prime_tracker_from_pg_type(&mut tracker, pg_type);
+        tracker.to_pg_type()
+    }
+
+    #[test]
+    fn a_primed_tracker_is_never_narrower_than_its_type() {
+        // max_len stayed at 0: every text type came back as VARCHAR(1).
+        for same in [
+            PgType::Integer,
+            PgType::BigInt,
+            PgType::DoublePrecision,
+            PgType::Boolean,
+            PgType::Uuid,
+            PgType::Date,
+            PgType::Timestamp,
+            PgType::Text,
+        ] {
+            assert_eq!(primed(&same), same);
+        }
+        for n in [1, 4, 255] {
+            let t = primed(&PgType::VarChar(n));
+            assert!(matches!(t, PgType::VarChar(m) if m >= n), "VARCHAR({n}) → {t:?}");
+        }
+        for wide in [
+            PgType::VarChar(300),
+            PgType::Jsonb,
+            PgType::Array(Box::new(PgType::Text)),
+        ] {
+            assert_eq!(primed(&wide), PgType::Text, "{wide:?}");
+        }
+    }
+
+    #[test]
+    fn toml_suffix_columns_leave_a_jsonb_column_on_the_identity_table() {
+        // Pass 2 sends only scalars to the pivot: in the grid, the objects of a JSONB column
+        // would be lost. Only `apply_jsonb_flatten` (no caller outside tests) makes one.
+        let mut schemas = vec![nutrients_table(false)];
+        schemas[0]
+            .columns
+            .push(ColumnSchema::data("labels_unit", PgType::Jsonb, false));
+        apply_overrides(&mut schemas, &suffix_config(&["_100g", "_unit"])).unwrap();
+        assert_eq!(data_names(&schemas[0]), ["brand", "tags", "labels_unit"]);
     }
 
     // --- Guard 2: suffix_columns requires inferred_strategy == Columns (#31) ---

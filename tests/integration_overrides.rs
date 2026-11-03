@@ -370,3 +370,90 @@ async fn test_toml_group_keyed_pivot_fills_the_group_table() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// [issue #117] `suffix_columns` du TOML sur des clés texte (`fat_unit`, `sodium_unit`…) :
+// la colonne `unit` du pivot est typée d'après les types déjà résolus de ces clés. Avant
+// #117, leur longueur était perdue : `unit` sortait en VARCHAR(1), et la Pass 2 mettait
+// à NULL (anomalie `string_too_long`) toute unité de plus d'une lettre (`mg`, `kcal`).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_toml_suffix_columns_keep_every_unit() {
+    use json2sql::schema::config::apply_overrides_complete;
+    use json2sql::schema::type_tracker::PgType;
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("suffix_columns_units.jsonl");
+        let mut p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
+        let config =
+            SchemaConfig::from_file(&common::fixture("suffix_columns_units.toml")).unwrap();
+        assert_eq!(
+            apply_overrides_complete(&mut p1.schemas, &config).unwrap(),
+            []
+        );
+
+        let pivot = p1
+            .schemas
+            .iter()
+            .find(|s| s.name == "products_nutriments_pivot")
+            .expect("suffix_columns gives products_nutriments its _pivot companion");
+        let unit = &pivot.find_by_original("_unit").unwrap().pg_type;
+        assert!(
+            matches!(unit, PgType::Text) || matches!(unit, PgType::VarChar(n) if *n >= 4),
+            "unit must hold \"kcal\", got {unit:?}"
+        );
+
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("products", &schema),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let anomalies: Vec<(String, String, String)> = p2
+            .anomaly_collector
+            .summaries()
+            .into_iter()
+            .map(|s| (s.table, s.column, s.expected_type))
+            .collect();
+        assert_eq!(anomalies, [], "every unit fits in the unit column");
+        let mut rows: Vec<(i64, String, Option<String>)> = client
+            .query(
+                &format!(
+                    "SELECT p.id::bigint, v.name, v.unit \
+                     FROM \"{schema}\".\"products_nutriments_pivot\" v \
+                     JOIN \"{schema}\".\"products_nutriments\" n \
+                       ON v.j2s_products_nutriments_id = n.j2s_id \
+                     JOIN \"{schema}\".\"products\" p ON n.j2s_products_id = p.j2s_id"
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect();
+        rows.sort();
+        let expected = [
+            (1, "energy", "kcal"),
+            (1, "fat", "g"),
+            (1, "sodium", "mg"),
+            (1, "vitamin-d", "µg"),
+            (2, "energy", "kJ"),
+            (2, "fat", "g"),
+            (2, "sodium", "g"),
+            (3, "energy", "kcal"),
+            (3, "fat", "g"),
+            (3, "sodium", "mg"),
+        ]
+        .map(|(id, name, unit)| (id, name.to_string(), Some(unit.to_string())));
+        assert_eq!(rows, expected, "one row per nutrient, with its unit");
+    })
+    .await;
+}
