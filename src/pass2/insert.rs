@@ -1169,4 +1169,52 @@ mod tests {
         empty.sort();
         assert!(empty.is_empty(), "tables without rows: {empty:?}");
     }
+
+    /// `x` is an object in one row and an array of objects in the other (#169), in both orders: its table has a row
+    /// for every element, and the lone object is an array of one element (`j2s_order` 0: the column is NOT NULL).
+    #[test]
+    fn a_key_seen_as_object_and_as_array_of_objects_keeps_every_element() {
+        for fixture in ["object_or_array.jsonl", "array_or_object.jsonl"] {
+            let path_map = pass1_path_map(fixture);
+            let mut sinks: HashMap<String, CaptureSink> = path_map
+                .values()
+                .map(|s| (s.name.clone(), CaptureSink(Vec::new())))
+                .collect();
+            let mut recorder = Recorder::default();
+            let root = path_map.values().find(|s| s.path == ["p"]).unwrap();
+            let text = std::fs::read_to_string(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures")
+                    .join(fixture),
+            )
+            .unwrap();
+            for line in text.lines() {
+                let obj: serde_json::Map<String, Value> = serde_json::from_str(line).unwrap();
+                let ctx = &mut InsertCtx {
+                    sinks: &mut sinks,
+                    anomalies: &mut recorder,
+                };
+                insert_object(&path_map, ctx, root, &obj, ID, None, None).unwrap();
+            }
+
+            assert_eq!(recorder.anomalies, [], "{fixture}");
+            assert_eq!(sinks["p_x"].0.len(), 3, "{fixture}: one row per element");
+            let x = path_map.values().find(|s| s.name == "p_x").unwrap();
+            let position = |name: &str| x.columns.iter().position(|c| c.name == name).unwrap();
+            let (a, order) = (position("a"), position("j2s_order"));
+            let mut rows: Vec<(String, String)> = sinks["p_x"]
+                .0
+                .iter()
+                .map(|r| {
+                    let text = String::from_utf8_lossy(r);
+                    let cells: Vec<&str> = text.trim_end_matches('\n').split('\t').collect();
+                    (cells[a].to_string(), cells[order].to_string())
+                })
+                .collect();
+            rows.sort();
+            let expected =
+                [("1", "0"), ("2", "0"), ("3", "1")].map(|(a, o)| (a.to_string(), o.to_string()));
+            assert_eq!(rows, expected, "{fixture}: (a, j2s_order)");
+        }
+    }
 }

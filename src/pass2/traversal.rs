@@ -2154,6 +2154,51 @@ mod tests {
         assert_eq!(anomalies.records, [] as [(String, String); 0]);
     }
 
+    /// In a snapshot saved before #169, a key seen first as an object keeps an `Object` table even if it is also an
+    /// array of objects: the array has no table to go to. It is reported once instead of vanishing; an empty array
+    /// and the scalars the parent keeps in an array column stay quiet.
+    #[test]
+    fn an_array_under_an_object_table_records_one_anomaly() {
+        let mut schema = TableSchema::new(
+            "root_x".to_string(),
+            vec!["root".to_string(), "x".to_string()],
+            1,
+        );
+        schema.child_kind = Some(ChildKind::Object);
+        schema.columns = vec![generated_id(), parent_fk("root"), col("a", PgType::Integer)];
+        let objects = vec![serde_json::json!({"a": 2}), serde_json::json!({"a": 3})];
+        let scalars = vec![serde_json::json!(1), serde_json::json!(2)];
+        let empty = Vec::new();
+        for (arr, parent_keeps_scalars, expected) in [
+            (&objects, false, 1),
+            (&objects, true, 1),
+            (&scalars, false, 1),
+            (&scalars, true, 0),
+            (&empty, false, 0),
+        ] {
+            let mut sinks = make_sinks(&["root_x"]);
+            let mut anomalies = CountingAnomaly::default();
+
+            super::insert_array(
+                &HashMap::new(),
+                &mut sinks,
+                &mut anomalies,
+                &schema,
+                arr,
+                dummy_parent_id(),
+                parent_keeps_scalars,
+            )
+            .unwrap();
+
+            assert!(sinks["root_x"].0.is_empty());
+            assert_eq!(
+                anomalies.records,
+                vec![("root_x".to_string(), "x".to_string()); expected],
+                "{arr:?}, parent keeps scalars: {parent_keeps_scalars}"
+            );
+        }
+    }
+
     #[test]
     fn keeps_scalars_in_array_column_reads_parent_column_type() {
         let mut parent = TableSchema::new("root".to_string(), vec!["root".to_string()], 0);
