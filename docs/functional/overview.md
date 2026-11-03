@@ -60,7 +60,7 @@ UUID (36 chars)   → UUID
 bool              → BOOLEAN
 ```
 
-Une seule chaîne suffit à faire passer la colonne en texte : `1000 INTEGER + 3 STRING` → `VARCHAR`, sans anomalie. Les anomalies concernent les valeurs qui ne rentrent pas dans le type retenu (ex. : booléen dans une colonne `INTEGER`, chaîne plus longue que le `VARCHAR(N)` inféré) : elles sont insérées en `NULL` et enregistrées dans le rapport. Détails : [schema-inference.md](../technical/schema-inference.md).
+Quelques chaînes suffisent à faire passer la colonne en texte : `1000 INTEGER + 3 STRING` → `VARCHAR`, sans anomalie (3 chaînes sur 1 003 valeurs, au-dessus de 0,1 %). Sous ce seuil, elles ne comptent pas : `10000 INTEGER + 1 STRING` reste `INTEGER`. Les anomalies concernent les valeurs qui ne rentrent pas dans le type retenu (ex. : booléen dans une colonne `INTEGER`, chaîne rare dans une colonne numérique, chaîne plus longue que le `VARCHAR(N)` inféré) : elles sont insérées en `NULL` et enregistrées dans le rapport. Détails : [schema-inference.md](../technical/schema-inference.md).
 
 ### Nommage des tables
 

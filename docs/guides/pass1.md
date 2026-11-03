@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Pass 1, lecture du fichier, observation des types et échantillon
-verified_at: d84fee2
+verified_at: bb6a711
 files:
   - src/pass1/
   - src/io/reader.rs
@@ -60,6 +60,7 @@ symbols:
   - TypeTracker::observe
   - TypeTracker::merge
   - TypeTracker::to_pg_type
+  - TypeTracker::has_frequent_strings
   - TypeTracker::has_anomalies
   - InferredType
   - infer_string_type
@@ -219,6 +220,10 @@ pas ; ce sont les recettes de #96 « Ajouter un signal ou une statistique en Pas
 - [ ] sa détection dans `infer_string_type` ou `infer_number_type` (attention au tri par longueur de chaîne : 36, 10,
   16 octets et plus) ;
 - [ ] sa place dans `TypeTracker::to_pg_type` et dans `widen_pg_types` ;
+- [ ] s'il se détecte sur une chaîne (`infer_string_type`) : l'ajouter à la liste écrite en dur de
+  `TypeTracker::has_frequent_strings` (#166). Sinon ses valeurs ne comptent pas dans la part des chaînes : mêlées à des
+  nombres et à quelques chaînes ordinaires, elles passent pour rares, la colonne reste numérique, et chacune devient
+  `NULL` + anomalie en Pass 2 ;
 - [ ] s'il faut un nouveau `PgType` : le compilateur signale `PgType::as_sql`, `coerce` et
   `prime_tracker_from_pg_type`, mais pas `widen_pg_types`, `coerce_pg_array_element` ni `parse_pg_type` (types des
   overrides TOML) ;

@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Finalisation du schéma, des observations de la Pass 1 aux TableSchema
-verified_at: 56160c6
+verified_at: bb6a711
 files:
   - src/schema/finalizer/
   - src/schema/cascading/
@@ -51,6 +51,14 @@ symbols:
   - run_keyed_pivot_children_wave
   - should_skip_parent
   - handle_single_co_sibling
+  - cascade_grandchildren_to_next_wave
+  - collect_pivot_co_siblings
+  - collect_children_by_key
+  - is_multi_pivot
+  - reparent
+  - reparent_and_update_routes
+  - pk_name
+  - fk_name
   - build_co_sibling_schema
   - make_subgroup
   - make_pivot_preamble
@@ -174,9 +182,26 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
   la cascade (graine des regroupements, ordre du travail) suivent le chemin JSON, pas le nom : couper ou hasher un nom
   ne change pas les regroupements. `make_pivot_preamble` écrit encore la colonne parente à la main, sans l'assertion
   de `ColumnSchema::parent_fk`.
-- **Une table rattachée à un autre parent garde sa colonne parente.** `handle_single_co_sibling` change
-  `parent_table` sans renommer la colonne `j2s_{ancien parent}_id`. Le DDL et la Pass 2 cherchent cette colonne par son
-  indicateur `is_parent_fk`, pas par son nom : cela marche, mais le nom en base ne correspond plus au parent.
+- **Rattacher une table à un autre parent passe par `reparent`** (#183). La cascade rattache sans fusion trois genres
+  de table : le seul co-sibling d'un groupe (`handle_single_co_sibling`), le petit-enfant présent sous une seule des
+  tables fusionnées (`cascade_grandchildren_to_next_wave`) et l'enfant unique d'un sous-pivot
+  (`collect_pivot_co_siblings`). `reparent` change `parent_table` et refait la colonne parente avec
+  `ColumnSchema::parent_fk`. Écrire `parent_table` à la main garde `j2s_{ancien parent}_id` : le DDL et la Pass 2
+  trouvent la colonne par son indicateur `is_parent_fk`, donc tout marche, mais le nom en base désigne une table qui
+  n'existe pas (sur OFF, `nutriscore_2023_data_components` avant #183). `test_every_table_name_fits_postgresql`
+  vérifie ce nom sur toutes les fixtures. Seul `reparent_and_update_routes` écrit encore `parent_table` à la main :
+  ses tables sont absorbées, puis retirées.
+- **Un pivot `SiblingCollapseMulti` n'est pas une clé JSON** (#182). Pour fusionner les enfants de tables sœurs,
+  `collect_children_by_key` les regroupe par le dernier segment de leur chemin. Le segment d'un pivot de groupe
+  (`"key"`, `"num"`, `"num_2"`, `"cluster_N"`) n'est pas une clé du JSON : fusionné, il donnait une table routée
+  sous une clé que la Pass 2 ne rencontre jamais, donc toujours vide (sur OFF, `…selected_key_sizes_key`, `_num` et
+  `_num_2`).
+  `is_multi_pivot` écarte ces pivots, d'après les `pivot_table` des groupes de la table sœur ; une autre table
+  synthétique qui ne vient pas d'une clé du JSON devra être écartée au même endroit. Effet sur la vague 0 bis : la
+  table fusionnée ne voit plus que de vraies clés. Sous `images.uploaded`, `full` était regroupée avec le faux `"num"`
+  fusionné dans un pivot `_key` ; seule désormais, elle garde sa table `…_sizes_full`, et le pivot des tailles
+  numériques s'appelle `_num` au lieu de `_num_2`. `test_every_child_route_key_is_a_json_key` vérifie la fixture
+  `keyed_route_selected_images.jsonl`.
 - **Une nouvelle forme de clé devient `"key"` en silence.** Le nom de la colonne clé est choisi par un `match` sur
   `KeyShape` avec un cas par défaut `_ => "key"`, recopié trois fois (deux dans `wave0.rs`, un dans
   `keyed_pivot.rs`).
@@ -260,9 +285,10 @@ de la fiche des stratégies).
 
 1. **Colonne clé choisie en trois copies** (#135). `KeyShape` → `key_id` / `lang_code` / `"key"` est écrit trois fois avec un
    cas par défaut. Une méthode de `KeyShape` sans cas par défaut ferait signaler une forme oubliée.
-2. **Noms synthétiques hors `NamingRegistry`** (#136). La phase 2 a ses propres règles de nom (63 au lieu de 53, colonne
-   parente à la main). L'effet réel sur un nom long (contraintes `pk_` / `fk_` coupées par PostgreSQL) reste à
-   mesurer.
+2. **Colonne parente écrite à la main** (#136, #147). Depuis #180, les noms de la phase 2 passent par
+   `derived_table_name` (53 octets), et `pk_name` / `fk_name` coupent à 63 avec un hash (#179) : la partie « 63 au
+   lieu de 53 » de #136 ne tient plus. Reste la colonne parente : `make_pivot_preamble` et d'autres constructeurs de la
+   cascade l'écrivent en littéral, sans l'assertion de `ColumnSchema::parent_fk` (#147).
 3. **La phase 3 parcourt les `TableEntry` pré-fusion** (#137) au lieu des schémas, d'où la garde de #45 et les tables
    synthétiques jamais élargies. `build_base_schemas` garde aussi un paramètre inutilisé.
 4. **Docs décalées** (#138). `schema-inference.md` situe la finalisation dans `registry.rs` (`finalize_siblings`, aujourd'hui

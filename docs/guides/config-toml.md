@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Config TOML, overrides de l'IHM et snapshot du schéma
-verified_at: 5fc70fc
+verified_at: bb6a711
 files:
   - src/schema/config.rs
   - src/schema/persistence.rs
