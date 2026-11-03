@@ -1988,6 +1988,11 @@ mod tests {
         assert_eq!(record(&parent, "lost", "[]"), 0, "tableau vide");
         assert_eq!(record(&parent, "tags", r#"["x"]"#), 0, "colonne tableau");
         assert_eq!(record(&parent, "n", r#"{"k": 1}"#), 0, "enfant aplati");
+        assert_eq!(
+            record(&parent, "n", r#"[{"k": 1}]"#),
+            1,
+            "tableau sous un enfant aplati : ses colonnes ne lisent qu'un objet (#170)"
+        );
         assert_eq!(record(&parent, "gone", r#"{"k": 1}"#), 0, "enfant Skip-é");
         parent.inferred_strategy = InferredStrategy::Jsonb;
         assert_eq!(record(&parent, "lost", r#"{"k": 1}"#), 0, "blob Jsonb");

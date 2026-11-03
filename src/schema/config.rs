@@ -2651,6 +2651,62 @@ mod tests {
     }
 
     #[test]
+    fn flattening_an_object_and_its_child_gives_the_same_tables_in_both_orders() {
+        // t → t_n (kcal) → t_n_sub (x): the TOML tables come in any order (#170).
+        let tables = || {
+            let table = |name: &str, path: &[&str], parent: Option<&str>, column: &str| {
+                let mut t = simple_table(name);
+                t.path = path.iter().map(|p| (*p).to_string()).collect();
+                t.columns
+                    .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+                if let Some(parent) = parent {
+                    t.parent_table = Some(parent.to_string());
+                    t.child_kind = Some(crate::schema::table_schema::ChildKind::Object);
+                    t.columns.push(ColumnSchema::parent_fk(parent));
+                }
+                t.columns.push(ColumnSchema {
+                    name: column.to_string(),
+                    original_name: column.to_string(),
+                    pg_type: PgType::BigInt,
+                    not_null: false,
+                    is_generated: false,
+                    is_parent_fk: false,
+                });
+                t
+            };
+            vec![
+                table("t", &["t"], None, "id"),
+                table("t_n", &["t", "n"], Some("t"), "kcal"),
+                table("t_n_sub", &["t", "n", "sub"], Some("t_n"), "x"),
+            ]
+        };
+        for order in [["t_n", "t_n_sub"], ["t_n_sub", "t_n"]] {
+            let mut schemas = tables();
+            let mut warnings = Vec::new();
+            for table in order {
+                let config: SchemaConfig =
+                    toml::from_str(&format!("[{table}]\nstrategy = \"flatten\"\n")).unwrap();
+                warnings.extend(apply_overrides(&mut schemas, &config).unwrap());
+            }
+            let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+            assert_eq!(
+                names,
+                ["t", "t_n"],
+                "t_n_sub goes into t_n, t_n stays: {order:?}"
+            );
+            assert_eq!(warnings.len(), 1, "t_n is refused: {order:?} {warnings:?}");
+            assert_eq!(
+                schemas[1]
+                    .flatten_sources
+                    .get("t_n_sub_x")
+                    .map(String::as_str),
+                Some("sub"),
+                "{order:?}"
+            );
+        }
+    }
+
+    #[test]
     fn normalizing_the_dynamic_keys_of_a_split_table_does_not_take_its_group_tables_for_keys() {
         let mut real_child = simple_table("items_a");
         real_child.parent_table = Some("items".to_string());
