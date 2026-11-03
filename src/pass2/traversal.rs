@@ -50,10 +50,10 @@
 //!
 //! Tableaux :
 //! - fn `keeps_scalars_in_array_column` — le parent garde-t-il les scalaires du champ dans une colonne tableau.
-//! - fn `record_dropped_scalar` — anomalie pour une valeur non objet là où un objet est attendu, sans table où aller (#86, #162).
+//! - fn `record_dropped_scalar` — anomalie pour une valeur non objet là où un objet est attendu, sans table où aller (#86, #162, #169).
 //! - fn `record_missing_table` — anomalie pour une clé objet ou tableau sans table, sauf abandon voulu (#167).
 //! - fn `insert_array` — tableau d'objets : une ligne par élément (`ObjectArray`) ; scalaires → anomalie,
-//!   ou blob en `Jsonb`.
+//!   ou blob en `Jsonb` ; sous une table `Object` (snapshot d'avant #169) → une anomalie pour le tableau.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -738,8 +738,9 @@ pub(super) fn keeps_scalars_in_array_column(parent: &TableSchema, field: &str) -
 }
 
 /// One anomaly for a non-object value where an object is expected: the scalars of an
-/// `ObjectArray` (first one as the value, #86), or a scalar under a `SiblingCollapse` /
-/// `NormalizeDynamicKeys` key (#162). These tables only have columns for object fields.
+/// `ObjectArray` (first one as the value, #86), a scalar under a `SiblingCollapse` /
+/// `NormalizeDynamicKeys` key (#162), or an array under an `Object` table (#169). These tables
+/// only have columns for object fields.
 fn record_dropped_scalar(
     anomalies: &mut impl AnomalyCollect,
     table: &str,
@@ -809,7 +810,15 @@ pub(super) fn insert_array<S: RowSink>(
     parent_id: Uuid,
     parent_keeps_scalars: bool,
 ) -> Result<()> {
+    // Nothing is lost by skipping a null, or a scalar the parent keeps in an array column (#86).
+    let skipped = |item: &Value| !item.is_object() && (item.is_null() || parent_keeps_scalars);
     if !matches!(schema.child_kind, Some(ChildKind::ObjectArray)) {
+        // A snapshot saved before #169 keeps `Object` for a key first seen as an object: its arrays have no table.
+        if !arr.iter().all(skipped) {
+            let field = schema.path.last().map_or("", String::as_str);
+            let array = Value::Array(arr.to_vec());
+            record_dropped_scalar(anomalies, &schema.name, field, parent_id, &array)?;
+        }
         return Ok(());
     }
     // An object element goes through the same dispatch as an object child (#172); in Jsonb a scalar element is
@@ -818,7 +827,7 @@ pub(super) fn insert_array<S: RowSink>(
     let mut dropped: Option<&Value> = None;
     for (i, item) in arr.iter().enumerate() {
         let order = Some(i as i64);
-        if !item.is_object() && (item.is_null() || parent_keeps_scalars) {
+        if skipped(item) {
             continue;
         }
         if let Value::Object(obj) = item {
@@ -2152,6 +2161,51 @@ mod tests {
 
         assert_eq!(sinks["root_items"].0.len(), 1);
         assert_eq!(anomalies.records, [] as [(String, String); 0]);
+    }
+
+    /// In a snapshot saved before #169, a key seen first as an object keeps an `Object` table even if it is also an
+    /// array of objects: the array has no table to go to. It is reported once instead of vanishing; an empty array
+    /// and the scalars the parent keeps in an array column stay quiet.
+    #[test]
+    fn an_array_under_an_object_table_records_one_anomaly() {
+        let mut schema = TableSchema::new(
+            "root_x".to_string(),
+            vec!["root".to_string(), "x".to_string()],
+            1,
+        );
+        schema.child_kind = Some(ChildKind::Object);
+        schema.columns = vec![generated_id(), parent_fk("root"), col("a", PgType::Integer)];
+        let objects = vec![serde_json::json!({"a": 2}), serde_json::json!({"a": 3})];
+        let scalars = vec![serde_json::json!(1), serde_json::json!(2)];
+        let empty = Vec::new();
+        for (arr, parent_keeps_scalars, expected) in [
+            (&objects, false, 1),
+            (&objects, true, 1),
+            (&scalars, false, 1),
+            (&scalars, true, 0),
+            (&empty, false, 0),
+        ] {
+            let mut sinks = make_sinks(&["root_x"]);
+            let mut anomalies = CountingAnomaly::default();
+
+            super::insert_array(
+                &HashMap::new(),
+                &mut sinks,
+                &mut anomalies,
+                &schema,
+                arr,
+                dummy_parent_id(),
+                parent_keeps_scalars,
+            )
+            .unwrap();
+
+            assert_eq!(sinks["root_x"].0.len(), 0);
+            assert_eq!(
+                anomalies.records,
+                vec![("root_x".to_string(), "x".to_string()); expected],
+                "{arr:?}, parent keeps scalars: {parent_keeps_scalars}"
+            );
+        }
     }
 
     #[test]

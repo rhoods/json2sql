@@ -406,3 +406,61 @@ async fn test_value_of_another_format_in_a_typed_column_is_an_anomaly() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// #169 — clé tantôt objet, tantôt tableau d'objets, dans les deux ordres, Pass 1 séquentielle et
+// parallèle : la table de `x` reçoit chaque élément, l'objet seul comme un tableau d'un élément
+// (`j2s_order` 0). Avant : objet d'abord, la table était `Object` et les éléments du tableau
+// disparaissaient sans anomalie ; tableau d'abord, l'objet seul avait `j2s_order` NULL et
+// PostgreSQL arrêtait le COPY (NOT NULL).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_key_seen_as_object_and_as_array_of_objects_keeps_every_element() {
+    for fixture in ["object_or_array.jsonl", "array_or_object.jsonl"] {
+        for workers in [1, 4] {
+            common::with_schema_url(|client, schema, url| async move {
+                let path = common::fixture(fixture);
+                let config = pass1::runner::Pass1Config {
+                    num_workers: Some(workers),
+                    ..common::pass1_config("p")
+                };
+                let p1 = if workers > 1 {
+                    pass1::runner::run_parallel(&path, &config, None)
+                } else {
+                    pass1::runner::run(&path, &config, None)
+                }
+                .unwrap();
+                db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+                    .await
+                    .unwrap();
+                let p2 = pass2::runner::run(
+                    &path,
+                    &p1.schemas,
+                    &client,
+                    &url,
+                    &common::pass2_config("p", &schema),
+                    None,
+                )
+                .await
+                .unwrap();
+
+                let case = format!("{fixture}, {workers} worker(s)");
+                assert_eq!(p2.anomaly_collector.total_anomalies(), 0, "{case}");
+                let rows: Vec<(i32, i64)> = client
+                    .query(
+                        &format!(
+                            "SELECT \"a\", \"j2s_order\" FROM \"{schema}\".\"p_x\" ORDER BY \"a\""
+                        ),
+                        &[],
+                    )
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|r| (r.get(0), r.get(1)))
+                    .collect();
+                assert_eq!(rows, [(1, 0), (2, 0), (3, 1)], "{case}: (a, j2s_order)");
+            })
+            .await;
+        }
+    }
+}
