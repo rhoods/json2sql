@@ -1455,6 +1455,12 @@ fn test_every_table_name_fits_postgresql() {
                 if c.name.len() > 63 {
                     problems.push(format!("{file}: colonne {}.{}", s.name, c.name));
                 }
+                // The FK column names the real parent, even after the cascade re-parents it (#183).
+                if let Some(parent) = &s.parent_table {
+                    if c.name != format!("j2s_{parent}_id") {
+                        problems.push(format!("{file}: colonne {}.{} → {parent}", s.name, c.name));
+                    }
+                }
             }
         }
     }

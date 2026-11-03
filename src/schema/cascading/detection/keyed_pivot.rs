@@ -164,7 +164,7 @@ fn collect_pivot_co_siblings(
                 array_children: arr,
             });
         } else if let Some(&sole_idx) = siblings.first() {
-            schemas[sole_idx].parent_table = Some(sub_pivot_name.to_string());
+            cascade::reparent(&mut schemas[sole_idx], sub_pivot_name);
         }
     }
     result

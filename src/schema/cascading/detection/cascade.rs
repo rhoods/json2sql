@@ -7,6 +7,7 @@
 //! - fn `is_multi_pivot` — repère un pivot `SiblingCollapseMulti`, qui n'est pas une clé JSON.
 //! - fn `process_co_sibling_group` — dispatch fusion ou reparentage seul.
 //! - fn `handle_single_co_sibling` — reparente un co-sibling isolé.
+//! - fn `reparent` — change le parent d'une table et renomme sa colonne FK en conséquence.
 //! - fn `merge_co_sibling_group` — fusionne un groupe de co-siblings en une nouvelle table T.
 //! - fn `build_co_sibling_schema` — construit le schéma de la nouvelle table T fusionnée.
 //! - fn `cascade_grandchildren_to_next_wave` — propage les enfants de T à la vague suivante.
@@ -105,6 +106,14 @@ pub(super) fn process_co_sibling_group(
     merge_co_sibling_group(schemas, group, parent_idx, obj_map, arr_map)
 }
 
+/// Point `schema` at `parent` and rename its FK column to `j2s_<parent>_id` (#183).
+pub(super) fn reparent(schema: &mut TableSchema, parent: &str) {
+    schema.parent_table = Some(parent.to_string());
+    for c in schema.columns.iter_mut().filter(|c| c.is_parent_fk) {
+        *c = ColumnSchema::parent_fk(parent);
+    }
+}
+
 /// Re-parent a sole co-sibling to its synthetic pivot and register it in `child_routes`.
 fn handle_single_co_sibling(
     schemas: &mut [TableSchema],
@@ -115,7 +124,7 @@ fn handle_single_co_sibling(
         return;
     };
     let child_name = schemas[idx].name.clone();
-    schemas[idx].parent_table = Some(group.synthetic_parent_name.clone());
+    reparent(&mut schemas[idx], &group.synthetic_parent_name);
     if let Some(&pi) = name_to_idx.get(&group.synthetic_parent_name) {
         schemas[pi]
             .child_routes
@@ -174,7 +183,7 @@ fn cascade_grandchildren_to_next_wave(
             });
         } else if let Some(&sole_idx) = siblings.first() {
             let child_name = schemas[sole_idx].name.clone();
-            schemas[sole_idx].parent_table = Some(t_name.to_string());
+            reparent(&mut schemas[sole_idx], t_name);
             // t_name was pushed to schemas immediately before this function was called.
             let t_pos = schemas.len() - 1;
             schemas[t_pos].child_routes.insert(json_key, child_name);
