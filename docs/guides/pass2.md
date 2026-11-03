@@ -180,8 +180,8 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
 - **Une valeur qui ne se convertit pas devient `NULL` et une anomalie** (`CoerceResult`), jamais une erreur : le
   `COPY` ne doit pas échouer sur une donnée. Une erreur de `COPY` est donc un bug de schéma ou d'écriture, pas de
   donnée. Une colonne UUID, DATE ou TIMESTAMP ne reçoit que ce que la Pass 1 type ainsi (`infer_string_type`) ;
-  une autre chaîne laisse une anomalie `string_invalid_format` (#116). Les éléments d'un tableau de ces types ne sont
-  pas encore vérifiés. Chaque ligne compte aussi dans le total de sa table (`inc_total`), dénominateur du taux d'anomalies.
+  une autre chaîne laisse une anomalie `string_invalid_format` (#116). Les éléments d'un tableau de ces types sont
+  vérifiés de la même façon : un élément d'un autre format devient `NULL` dans le tableau, une anomalie par cellule. Chaque ligne compte aussi dans le total de sa table (`inc_total`), dénominateur du taux d'anomalies.
 - **La stratégie lue est `TableSchema::effective_strategy`**, pas `inferred_strategy` (voir la fiche des stratégies).
 - **Deux points d'entrée.** La CLI (`run_pass2`) et le worker de l'IHM (`run_pipeline` de `json2sql-worker`) appellent
   tous deux `run_interruptible`, chacun après son propre DDL. Un changement d'appel se fait dans les deux.

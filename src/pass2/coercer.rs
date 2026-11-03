@@ -149,9 +149,16 @@ fn coerce_pg_array_element(
     pg_type: &PgType,
 ) -> Result<String, (String, &'static str)> {
     match pg_type {
-        PgType::Integer | PgType::BigInt | PgType::DoublePrecision | PgType::Boolean => {
+        // UUIDs, dates and timestamps are checked as a scalar is (#116)
+        PgType::Integer
+        | PgType::BigInt
+        | PgType::DoublePrecision
+        | PgType::Boolean
+        | PgType::Uuid
+        | PgType::Date
+        | PgType::Timestamp => {
             match coerce(value, pg_type) {
-                CoerceResult::Ok(s) => Ok(s.as_str().to_owned()), // numeric/bool: ASCII-safe, bare in array literal
+                CoerceResult::Ok(s) => Ok(s.as_str().to_owned()), // ASCII, no `,{}"\`: bare in array literal
                 CoerceResult::Anomaly {
                     actual_value,
                     actual_type,
@@ -161,11 +168,6 @@ fn coerce_pg_array_element(
                     Err((value.to_string(), json_type_name(value)))
                 }
             }
-        }
-        // Dates, UUIDs and timestamps must be JSON strings, as for a scalar; unlike a scalar
-        // (`coerce_formatted`), their format is not checked here.
-        PgType::Uuid | PgType::Date | PgType::Timestamp if !matches!(value, Value::String(_)) => {
-            Err((value.to_string(), json_type_name(value)))
         }
         PgType::VarChar(max_len) => quote_array_text(value, Some(*max_len as usize)),
         // JSONB[] (#83, point 2): the element is written as its JSON, a string with its quotes. jsonb refuses
@@ -687,7 +689,7 @@ mod tests {
     fn test_pg_array_non_string_element_in_date_array_becomes_null() {
         let (literal, bad, kind) =
             coerce_partial(&json!(["2024-01-01", 5]), &array_of(PgType::Date));
-        assert_eq!(literal, r#"{"2024-01-01",NULL}"#);
+        assert_eq!(literal, "{2024-01-01,NULL}");
         assert_eq!((bad.as_str(), kind), ("5", "number"));
     }
 
