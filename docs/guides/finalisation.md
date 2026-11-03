@@ -67,6 +67,7 @@ symbols:
   - dedup_and_sort
   - unique_cluster_suffix
   - pick_unique_suffix
+  - rename_shared_pivots
   - unique_pivot_name
   - classify_key_shape
   - build_union_columns
@@ -170,7 +171,13 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
   l'annonce par un `WARNING` (et un `debug_assert` en test, #180). Sur OFF, avant #180, `nutriscore.<année>.data`
   écrivait ainsi dans la table du champ racine `nutriscore_data`. Les noms synthétiques se rendent donc uniques à leur
   création : `unique_cluster_suffix` (phase 2, et la passe keyed-pivot), `pick_unique_suffix` (`make_subgroup`),
-  `unique_derived_table_name` (tables fusionnées de `cascade.rs`), `unique_pivot_name` (phase 3).
+  `unique_derived_table_name` (tables fusionnées de `cascade.rs`), `unique_pivot_name` (phase 3). Unique aussi
+  contre les tables créées plus tôt dans la même vague (#136) : deux parents longs qui ne diffèrent que par les
+  premiers mots que `derived_table_name` retire tirent le même nom de table pivot. La vague 0 choisit les noms de
+  tous ses parents avant d'en créer une seule : `rename_shared_pivots` donne ensuite un hash du nom brut au doublon,
+  sans changer son chemin. La passe keyed-pivot ajoute chaque sous-pivot dès sa création, pour que
+  `unique_cluster_suffix` le voie au parent suivant (`…_key_2`). Avant #136, la seconde table était retirée : sur un
+  test, 9 lignes perdues, et 27 lignes écrites dans la table de l'autre parent, dont la FK était refusée.
 - **Les noms synthétiques passent par `derived_table_name`** (#180). `NamingRegistry` limite un nom de table à
   53 octets (`PG_TABLE_MAX_IDENT`), pour que `pk_…`, `fk_…_parent` et `j2s_…_id` tiennent dans les 63 de PostgreSQL.
   Un nom construit en ajoutant un suffixe (`{parent}_key`, `_num_2`, `_cluster_N`, `{table}_pivot`, table fusionnée
@@ -241,8 +248,8 @@ Les endroits prévus sont listés au § 1. Trois changements demandent des étap
 
 **Nouvelle table créée par la finalisation** (une table qui ne vient pas d'un chemin observé).
 
-- [ ] un nom unique contre toutes les tables déjà connues (`unique_cluster_suffix`, `unique_pivot_name`), sinon le
-  dédoublonnage la retire ;
+- [ ] un nom unique contre toutes les tables déjà connues (`unique_cluster_suffix`, `unique_pivot_name`), y compris
+  celles créées plus tôt dans la même vague (§ 3), sinon le dédoublonnage la retire ;
 - [ ] un nom passé par `derived_table_name` (53 octets au plus), et la colonne parente par `ColumnSchema::parent_fk` ;
 - [ ] `parent_table`, `child_kind`, `depth` et `path` remplis : la Pass 2 retrouve la table par son chemin ;
 - [ ] si la Pass 2 doit y router des sous-objets, une entrée dans `child_routes` du parent ;
@@ -285,10 +292,11 @@ de la fiche des stratégies).
 
 1. **Colonne clé choisie en trois copies** (#135). `KeyShape` → `key_id` / `lang_code` / `"key"` est écrit trois fois avec un
    cas par défaut. Une méthode de `KeyShape` sans cas par défaut ferait signaler une forme oubliée.
-2. **Colonne parente écrite à la main** (#136, #147). Depuis #180, les noms de la phase 2 passent par
-   `derived_table_name` (53 octets), et `pk_name` / `fk_name` coupent à 63 avec un hash (#179) : la partie « 63 au
-   lieu de 53 » de #136 ne tient plus. Reste la colonne parente : `make_pivot_preamble` et d'autres constructeurs de la
-   cascade l'écrivent en littéral, sans l'assertion de `ColumnSchema::parent_fk` (#147).
+2. **Colonne parente écrite à la main** (#147). #136 a mesuré la phase 2 contre PostgreSQL : aucun nom coupé (les
+   noms passent par `derived_table_name`, 53 octets au plus, depuis #180 ; `pk_name` / `fk_name` coupent à 63 avec un
+   hash, #179), mais deux tables pivot qui prenaient le même nom, corrigées (§ 3). Reste la colonne parente :
+   `make_pivot_preamble` et d'autres constructeurs de la cascade l'écrivent en littéral, sans l'assertion de
+   `ColumnSchema::parent_fk`. Sans effet aujourd'hui : un parent fait 53 octets au plus, donc `j2s_…_id` au plus 60.
 3. **La phase 3 parcourt les `TableEntry` pré-fusion** (#137) au lieu des schémas, d'où la garde de #45 et les tables
    synthétiques jamais élargies. `build_base_schemas` garde aussi un paramètre inutilisé.
 4. **Docs décalées** (#138). `schema-inference.md` situe la finalisation dans `registry.rs` (`finalize_siblings`, aujourd'hui
