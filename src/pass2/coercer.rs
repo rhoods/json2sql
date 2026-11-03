@@ -701,11 +701,13 @@ mod tests {
         assert_eq!((literal.as_str(), kind), ("{NULL}", "string_too_long"));
     }
 
+    /// #83, point 2 : dès qu'un élément est un tableau, la colonne est `JSONB[]` et chaque élément y
+    /// garde son JSON, chaînes et nombres compris. Avant : `TEXT[]`, `VARCHAR(n)[]` ou `DOUBLE PRECISION[]`
+    /// selon les autres éléments, et l'élément imbriqué devenait NULL dans les deux derniers.
     #[test]
-    fn test_pg_array_nested_arrays_stay_json_text_with_the_inferred_type() {
+    fn test_pg_array_nested_arrays_are_jsonb_with_the_inferred_type() {
         use crate::schema::registry::{RegistryConfig, SchemaRegistry};
-        // Written with the type Pass 1 really infers, not a hand-built one. Arrays do not widen a
-        // VARCHAR: elements that are all arrays give TEXT[], strings mixed with arrays give VARCHAR(n)[].
+        // Written with the type Pass 1 really infers, not a hand-built one.
         let inferred = |row: &Value| {
             let mut reg = SchemaRegistry::new(RegistryConfig::default());
             reg.observe_root("t", row.as_object().unwrap());
@@ -715,24 +717,34 @@ mod tests {
                 .pg_type
                 .clone()
         };
-
-        // all arrays → TEXT[]: nested arrays stay JSON text (#83), no anomaly
-        let all_arrays = json!({"m": [["a"], ["b"]]});
-        let pg_type = inferred(&all_arrays);
-        assert_eq!(pg_type, array_of(PgType::Text));
+        // literals are COPY-escaped: `\"` is written `\\"`
+        for (row, literal) in [
+            (json!({"m": [["a"], ["b"]]}), r#"{"[\\"a\\"]","[\\"b\\"]"}"#),
+            (json!({"m": ["a", ["b"]]}), r#"{"\\"a\\"","[\\"b\\"]"}"#),
+            (
+                json!({"m": [2.35, [[0, 0], [1, 0]]]}),
+                r#"{"2.35","[[0,0],[1,0]]"}"#,
+            ),
+        ] {
+            let pg_type = inferred(&row);
+            assert_eq!(pg_type, array_of(PgType::Jsonb), "{row}");
+            assert_eq!(coerce_ok(&row["m"], &pg_type), literal, "{row}");
+        }
+        // a scalar occurrence of the field (#48) is a one-element array, its JSON kept as well
         assert_eq!(
-            coerce_ok(&all_arrays["m"], &pg_type),
-            r#"{"[\\"a\\"]","[\\"b\\"]"}"#
-        ); // COPY-escaped
-
-        // strings mixed with arrays → VARCHAR(2)[]: the nested array overflows, which used to abort the COPY
-        let mixed = json!({"m": ["a", ["b"]]});
-        let pg_type = inferred(&mixed);
-        assert_eq!(pg_type, array_of(PgType::VarChar(2)));
-        let (literal, _, kind) = coerce_partial(&mixed["m"], &pg_type);
-        assert_eq!(
-            (literal.as_str(), kind),
-            (r#"{"a",NULL}"#, "string_too_long")
+            coerce_ok(&json!("bio"), &array_of(PgType::Jsonb)),
+            r#"{"\\"bio\\""}"#
         );
+    }
+
+    /// jsonb refuse `\u0000`, l'écriture JSON d'un octet nul : l'élément qui en contient un (dans une
+    /// chaîne ou une clé d'objet, à n'importe quelle profondeur) devient NULL + anomalie, le COPY continue.
+    #[test]
+    fn test_pg_array_jsonb_element_with_null_byte_becomes_null() {
+        let arr = json!([["ok"], ["a\u{0}b"], [{"k\u{0}": 1}]]);
+        let (literal, bad, kind) = coerce_partial(&arr, &array_of(PgType::Jsonb));
+        assert_eq!(literal, r#"{"[\\"ok\\"]",NULL,NULL}"#);
+        assert_eq!(kind, "string_contains_null_byte");
+        assert!(bad.contains("a\\u0000b"), "first faulty element, got {bad}");
     }
 }

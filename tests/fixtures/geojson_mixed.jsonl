@@ -1,0 +1,3 @@
+{"type":"Feature","properties":{"NAME":"Paris","ADM0NAME":"France","POP_MAX":11000000,"NAMEALT":null,"LATITUDE":48.85,"ALIASES":["Lutece",["Ville","lumiere"]]},"geometry":{"type":"Point","coordinates":[2.35,48.85]}}
+{"type":"Feature","properties":{"NAME":"Zone A","ADM0NAME":"France","POP_MAX":null,"LATITUDE":1.5,"ALIASES":["A"]},"geometry":{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,1],[0,0]]]}}
+{"type":"Feature","properties":{"NAME":"Archipel","ADM0NAME":"Spain","POP_MAX":5,"LATITUDE":2.5},"geometry":{"type":"MultiPolygon","coordinates":[[[[0,0],[1,0],[1,1],[0,0]]],[[[2,2],[3,2],[3,3],[2,2]]]]}}
