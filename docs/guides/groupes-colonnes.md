@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Groupes de colonnes, proposition (--suggest-groups) et application (TOML, --group-columns, IHM)
-verified_at: bb6a711
+verified_at: 812f341
 files:
   - src/schema/grouping/
   - src/schema/column_groups.rs

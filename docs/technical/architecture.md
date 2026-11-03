@@ -234,7 +234,7 @@ Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cibl
 
 - **`CoerceResult`** : `Ok(CopyEscaped)`, `Null`, `Anomaly`, ou `OkWithAnomaly` (tableau écrit dont au moins un élément est mis à `NULL`)
 - **`coerce()`** : dispatch principal vers des coerceurs spécialisés par type
-- Types gérés : Integer (contrôle de plage i32), BigInt, DoublePrecision (NaN/Infini → NULL), Boolean (flexible : "yes"/"no"/"1"/"0"...), UUID, Date, Timestamp, Text, VarChar, Jsonb, Array PG
+- Types gérés : Integer (contrôle de plage i32), BigInt, DoublePrecision (NaN/Infini → NULL), Boolean (flexible : "yes"/"no"/"1"/"0"...), UUID, Date, Timestamp (seules les chaînes que la Pass 1 type ainsi, `infer_string_type`, sinon anomalie `string_invalid_format`), Text, VarChar, Jsonb, Array PG
 - **`coerce_pg_array()`** : sérialise un tableau JSON en litéral PostgreSQL `{elem1,elem2,NULL}`. Un élément non convertible (type, longueur d'un `VARCHAR(n)`, octet nul) devient `NULL` et le premier est rapporté : une seule anomalie par cellule
 
 ### `runner/`

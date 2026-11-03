@@ -20,8 +20,8 @@ Chaque champ JSON observé dans la Pass 1 alimente un `TypeTracker` qui accumule
 | Entier hors de cette plage | BigInt |
 | Nombre flottant | Float |
 | Chaîne UUID (pattern RFC 4122) | Uuid |
-| Chaîne date `YYYY-MM-DD` | Date |
-| Chaîne timestamp ISO 8601 | Timestamp |
+| Chaîne date `YYYY-MM-DD` d'un jour qui existe (`2024-13-45` et `2023-02-29` restent des chaînes) | Date |
+| Chaîne timestamp : date, `T` ou espace, `HH:MM`, puis secondes, fraction, `Z` ou décalage (`±HH`, `±HHMM`, `±HH:MM`) facultatifs, rien d'autre après | Timestamp |
 | Chaîne ≤ `text_threshold` chars | VarChar(N) |
 | Chaîne > `text_threshold` chars | Text |
 | Objet `{}` | Object (→ table enfant) |
@@ -31,7 +31,7 @@ Un tableau qui mêle objets et scalaires (`[{"a":1},"x",2]`) est un tableau d'ob
 
 ### Règles de résolution (`to_pg_type`)
 
-Le type retenu est le **plus large** parmi ceux observés, pas le plus fréquent, à une exception près : les **chaînes rares**. Si les chaînes JSON représentent moins de 0,1 % des valeurs non nulles de la colonne (`RARE_STRING_RATE`, les `null` ne comptent pas), elles sont ignorées pour le typage, et la Pass 2 les signale comme anomalies (voir plus bas). Les dates, timestamps et UUID comptent comme des chaînes : la règle ne joue donc que pour une colonne numérique ou booléenne. Une colonne `DATE` avec un `"unknown"` rare reste en `VARCHAR`, car `coerce_date` ne vérifie pas le format et la chaîne ferait échouer le COPY. Ordre de priorité :
+Le type retenu est le **plus large** parmi ceux observés, pas le plus fréquent, à une exception près : les **chaînes rares**. Si les chaînes JSON représentent moins de 0,1 % des valeurs non nulles de la colonne (`RARE_STRING_RATE`, les `null` ne comptent pas), elles sont ignorées pour le typage, et la Pass 2 les signale comme anomalies (voir plus bas). Les dates, timestamps et UUID comptent comme des chaînes dès qu'ils sont mêlés à autre chose : des chaînes ordinaires, des nombres, des booléens, et, pour les UUID, des dates ou des timestamps, avec lesquels ils n'ont pas de type commun (#116). Mêlés entre eux, dates et timestamps donnent `TIMESTAMP`. La règle ne joue donc que pour une colonne numérique ou booléenne : une colonne `DATE` avec un `"unknown"` rare passe en `VARCHAR`, de même qu'une colonne de dates avec quelques nombres (avant #116, elle devenait `INTEGER` et toutes ses dates passaient en `NULL`). Ordre de priorité :
 
 1. **Des chaînes, au moins 0,1 % des valeurs non nulles** → `VARCHAR(N)` ou `TEXT` (N tient compte de la représentation texte des nombres éventuellement mélangés)
 2. Sinon **numérique** : `DOUBLE PRECISION` > `BIGINT` > `INTEGER`
@@ -44,7 +44,7 @@ Cas réel : sur OpenFoodFacts, 2 produits sur 4,4 M ont une valeur nutritionnell
 
 ### Détection d'anomalie
 
-Une anomalie est détectée en **Pass 2**, quand une valeur ne peut pas être convertie vers le type retenu (`src/pass2/coercer.rs`) : par exemple un booléen dans une colonne `INTEGER` (entiers + booléens → `INTEGER`), une chaîne rare dans une colonne numérique, ou une chaîne plus longue que le `VARCHAR(N)` inféré. La valeur est insérée en `NULL` et enregistrée dans le rapport d'anomalies.
+Une anomalie est détectée en **Pass 2**, quand une valeur ne peut pas être convertie vers le type retenu (`src/pass2/coercer.rs`) : par exemple un booléen dans une colonne `INTEGER` (entiers + booléens → `INTEGER`), une chaîne rare dans une colonne numérique, une chaîne plus longue que le `VARCHAR(N)` inféré, ou, dans une colonne `UUID`, `DATE` ou `TIMESTAMP` (type inféré ou forcé), une chaîne que la Pass 1 ne typerait pas ainsi (`string_invalid_format`, #116 ; avant, le COPY échouait). La valeur est insérée en `NULL` et enregistrée dans le rapport d'anomalies.
 
 Une chaîne n'est **jamais convertie** vers `INTEGER`, `BIGINT` ou `DOUBLE PRECISION`, même si elle se lit comme un nombre : `"42"` devient `NULL` + anomalie de type `string`. Le typage seul ne peut pas distinguer `"42"` d'une valeur aberrante comme `"10000000000000000000"`, ni garder les zéros de tête de `"007"`. Chacune est donc écartée et visible dans le rapport, jamais modifiée en silence. Cela vaut aussi pour une colonne dont le type est forcé par surcharge (§ 12).
 
@@ -213,7 +213,7 @@ Les noms tronqués et les collisions résolues sont rapportés dans les logs en 
 
 **Fichier :** `src/schema/registry.rs` — après le tri topologique
 
-Après la construction de toutes les `TableSchema`, une déduplication par nom PG est appliquée. Si deux chemins JSON différents produisent le même nom de table (cas rare de collision non détectée par le registre de nommage), seule la première occurrence est conservée.
+Après la construction de toutes les `TableSchema`, une déduplication par nom PG est appliquée. Si deux chemins JSON différents produisent le même nom de table (cas rare de collision non détectée par le registre de nommage), seule la première occurrence est conservée. Les tables pivot de la cascade n'y arrivent plus en double : avant #136, deux parents longs pouvaient tirer le même nom de pivot, et la seconde table était retirée ici avec ses lignes ; la finalisation les départage désormais à leur création ([finalisation.md](../guides/finalisation.md) § 3).
 
 ---
 
