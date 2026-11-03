@@ -618,7 +618,7 @@ fn print_dry_run_ddl(
                 "ALTER TABLE {schema_q}.{table_q}\n    ADD CONSTRAINT {constraint}\n    FOREIGN KEY ({fk_col_q})\n    REFERENCES {schema_q}.{parent_q} (j2s_id);",
                 schema_q = crate::db::ddl::quote_ident(pg_schema),
                 table_q  = crate::db::ddl::quote_ident(&schema.name),
-                constraint = crate::db::ddl::quote_ident(&format!("fk_{}_parent", schema.name)),
+                constraint = crate::db::ddl::quote_ident(&crate::db::ddl::fk_name(&schema.name)),
                 fk_col_q = crate::db::ddl::quote_ident(fk_col),
                 parent_q = crate::db::ddl::quote_ident(parent_name),
             );

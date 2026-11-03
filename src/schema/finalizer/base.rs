@@ -37,7 +37,7 @@ pub(super) fn build_base_schemas(
         schemas.retain(|s| seen.insert(s.name.clone()));
     }
     // Secondary sort by name within each depth level ensures deterministic ordering
-    schemas.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
+    schemas.sort_by(|a, b| (a.depth, &a.path, &a.name).cmp(&(b.depth, &b.path, &b.name)));
     (schemas, all_collisions)
 }
 

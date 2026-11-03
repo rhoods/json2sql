@@ -32,6 +32,8 @@
 //! - fn `truncate_to_pg_limit` — tronque un identifiant à la limite `PostgreSQL` (63 octets).
 //! - fn `floor_char_boundary` — tronque au dernier caractère UTF-8 valide.
 //! - fn `truncate_table_name` — tronque un nom de table en dépiautant les segments de chemin avant repli hash.
+//! - fn `derived_table_name` — nom d'une table dérivée d'une autre (`_key`, `_pivot`…), nettoyé et coupé à 53 octets par le début (#180).
+//! - fn `unique_derived_table_name` — idem, avec un hash de la clé brute si le nom est déjà pris (#180).
 //! - fn `group_table_name` — nom de la table 1:1 d'un groupe de colonnes (`{parent}_{groupe}`, 53 octets au plus, hash au-delà).
 //! - fn `short_hash` — hash FNV-1a 64 bits, 7 caractères hex (stable entre versions).
 
@@ -395,12 +397,60 @@ fn truncate_to_limit(sanitized: &str, original_key: &str, max_len: usize) -> Str
     format!("{prefix}_{hash}")
 }
 
-fn truncate_to_pg_limit(sanitized: &str, original_key: &str) -> String {
+pub fn truncate_to_pg_limit(sanitized: &str, original_key: &str) -> String {
     truncate_to_limit(sanitized, original_key, PG_MAX_IDENT)
 }
 
 fn floor_char_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..s.floor_char_boundary(max_bytes)]
+}
+
+/// Name of a table built by appending to another table's name (`{parent}_key`, `{table}_pivot`…), cut like a
+/// registry name (#180): sanitized, then leading words dropped until it fits [`PG_TABLE_MAX_IDENT`], so the end that
+/// tells the tables apart stays readable; a hash only when no tail fits.
+/// Two raw names can give the same result (`es` / `ES`, `nutriscore.data` / `nutriscore_data`): a caller that
+/// creates a table goes through [`unique_derived_table_name`] or picks a free suffix.
+#[must_use]
+pub fn derived_table_name(raw: &str) -> String {
+    let name = sanitize_identifier(raw);
+    let mut rest = name.as_str();
+    while rest.len() > PG_TABLE_MAX_IDENT {
+        let Some((_, tail)) = rest.split_once('_') else {
+            break;
+        };
+        rest = tail;
+    }
+    if rest.len() <= PG_TABLE_MAX_IDENT {
+        return rest.to_string();
+    }
+    truncate_to_limit(&name, raw, PG_TABLE_MAX_IDENT)
+}
+
+/// [`derived_table_name`], or that name with a hash of `raw` when `taken` says another table already has it, like
+/// `NamingRegistry::ensure_unique`: the cascade finds its tables by name, so two tables sharing one mix their children
+/// and the duplicate is dropped (OFF: `es` / `ES`, `nutriscore.data` / `nutriscore_data`, #180).
+#[must_use]
+pub fn unique_derived_table_name(raw: &str, taken: impl Fn(&str) -> bool) -> String {
+    let name = derived_table_name(raw);
+    if !taken(&name) {
+        return name;
+    }
+    let base = format!(
+        "{}_{}",
+        floor_char_boundary(&name, PG_TABLE_MAX_IDENT - HASH_SUFFIX_LEN),
+        short_hash(raw)
+    );
+    let mut candidate = base.clone();
+    let mut n = 2usize;
+    while taken(&candidate) {
+        let suffix = format!("_{n}");
+        candidate = format!(
+            "{}{suffix}",
+            floor_char_boundary(&base, PG_TABLE_MAX_IDENT - suffix.len())
+        );
+        n += 1;
+    }
+    candidate
 }
 
 /// Truncate a table name to `max_len` bytes by progressively stripping leading path segments
@@ -1056,5 +1106,48 @@ mod tests {
         assert_eq!(short_hash("ja:カルシウム"), "42c9fde");
         // Two distinct inputs must produce distinct hashes
         assert_ne!(short_hash("ja:カルシウム"), short_hash("ja:脂質"));
+    }
+
+    /// A name already taken gets a hash of the raw name: `ES` and `es` end up apart, a free name stays clean (#180).
+    #[test]
+    fn unique_derived_table_name_hashes_only_a_taken_name() {
+        assert_eq!(unique_derived_table_name("p_es", |_| false), "p_es");
+        let upper = unique_derived_table_name("p_ES", |n| n == "p_es");
+        assert!(upper.starts_with("p_es_") && upper != "p_es", "{upper}");
+        assert_ne!(
+            upper,
+            unique_derived_table_name("p_Es", |n| n == "p_es"),
+            "the hash comes from the raw name"
+        );
+        let long = unique_derived_table_name(&"a_".repeat(40), |n| !n.ends_with("_2"));
+        assert!(
+            long.ends_with("_2") && long.len() <= PG_TABLE_MAX_IDENT,
+            "{long}"
+        );
+    }
+
+    /// A derived name drops leading words until it fits, keeping the end that tells tables apart (#180).
+    #[test]
+    fn derived_table_name_drops_leading_words_and_keeps_the_end() {
+        assert_eq!(
+            derived_table_name("products_images_key"),
+            "products_images_key"
+        );
+        assert_eq!(
+            derived_table_name("openfoodfacts_products_nutrition_input_sets_nutrients_cluster_0"),
+            "products_nutrition_input_sets_nutrients_cluster_0"
+        );
+        assert_eq!(
+            derived_table_name(
+                "openfoodfacts_products_improvements_data_en:better-nutri-score-with-_key"
+            ),
+            "improvements_data_en_better_nutri_score_with_key"
+        );
+        // One word longer than the limit: no tail fits, a hash keeps it unique.
+        let long = derived_table_name(&"a".repeat(70));
+        assert!(long.len() <= PG_TABLE_MAX_IDENT, "{long}");
+        // Multi-byte characters never split.
+        let utf8 = derived_table_name(&format!("{}{}{}", "a".repeat(50), "é", "b".repeat(8)));
+        assert!(utf8.len() <= PG_TABLE_MAX_IDENT, "{utf8}");
     }
 }

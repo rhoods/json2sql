@@ -1375,3 +1375,79 @@ fn test_every_child_route_target_is_in_the_schema() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Invariant : un nom de table tient en 53 octets, ne contient que [a-z0-9_] et
+// est unique ; une colonne FK tient en 63 (#180). La racine longue d'OFF pousse
+// les noms dérivés par la cascade (`_key`, `_num_2`, `_cluster_N`, `_pivot`…)
+// au-delà de la limite si rien ne les coupe.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_every_table_name_fits_postgresql() {
+    use json2sql::schema::naming::PG_TABLE_MAX_IDENT;
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut checked = 0;
+    let mut problems = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        // Some fixtures are meant to fail Pass 1: only the schemas it produces are checked.
+        let Ok(p1) =
+            pass1::runner::run(&path, &common::pass1_config("openfoodfacts_products"), None)
+        else {
+            continue;
+        };
+        checked += 1;
+        let file = path.file_name().unwrap().to_string_lossy().to_string();
+        let mut seen = std::collections::HashSet::new();
+        for s in &p1.schemas {
+            let ok_chars = s
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+            if s.name.len() > PG_TABLE_MAX_IDENT || !ok_chars || !seen.insert(s.name.clone()) {
+                problems.push(format!(
+                    "{file}: table {} ({} octets)",
+                    s.name,
+                    s.name.len()
+                ));
+            }
+            for c in s.columns.iter().filter(|c| c.is_parent_fk) {
+                if c.name.len() > 63 {
+                    problems.push(format!("{file}: colonne {}.{}", s.name, c.name));
+                }
+            }
+        }
+    }
+    assert!(checked > 10, "only {checked} fixtures went through Pass 1");
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// Régression : la fusion de `nutriscore.<année>.data` et le champ racine
+// `nutriscore_data` se nettoient tous deux en `p_nutriscore_data`. Le retrait
+// des doublons gardait le champ racine, et la route `data` de `p_nutriscore`
+// y menait : sur OFF, 8,7 M lignes `data` écrites dans la mauvaise table (#180).
+// ---------------------------------------------------------------------------
+#[test]
+fn test_a_merged_table_does_not_take_the_name_of_another_path() {
+    let path = common::fixture("derived_names_nutriscore_collision.jsonl");
+    let p1 = pass1::runner::run(&path, &common::pass1_config("p"), None).unwrap();
+    let by_name = |n: &str| p1.schemas.iter().find(|s| s.name == n);
+    let nutriscore = by_name("p_nutriscore").expect("p_nutriscore");
+    let target = by_name(&nutriscore.child_routes["data"]).expect("route target exists");
+    assert_eq!(
+        target.path,
+        ["p", "nutriscore", "data"],
+        "route data → {}",
+        target.name
+    );
+    let root_field = p1
+        .schemas
+        .iter()
+        .find(|s| s.path == ["p", "nutriscore_data"])
+        .expect("the root field keeps its table");
+    assert_ne!(root_field.name, target.name);
+}

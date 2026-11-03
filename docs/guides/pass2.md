@@ -148,8 +148,10 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   `NormalizeDynamicKeys` avec cette clé. Passée à `insert_child_object`, la valeur serait lue comme un objet de clés
   sœurs : colonnes en anomalie, sous-clés prises pour des clés de ligne. Une clé de ligne nommée « key » serait prise
   pour une route directe.
-- **Une clé sans table laisse une anomalie, sauf abandon voulu** (#167). `recurse_children` cherche le chemin du
-  champ dans `path_map` ; absent, l'objet ou le tableau passe par `record_missing_table`, qui laisse une anomalie
+- **Une clé sans table laisse une anomalie, sauf abandon voulu** (#167). `recurse_children` cherche d'abord le champ
+  dans `child_routes` (un enfant que la cascade a rattaché sans fusion garde son propre chemin : sur OFF,
+  `nutriscore.2023.data.components` sous la fusion `nutriscore.data`, #180), puis son chemin dans `path_map` ; absent,
+  l'objet ou le tableau passe par `record_missing_table`, qui laisse une anomalie
   (type attendu `table`) sur la table parente. Elle se tait quand rien n'est perdu ou que l'abandon est voulu : valeur
   vide (`{}`, `[]`), parent en `Jsonb` (le blob garde tout), colonne du même nom ou enfant aplati (`flatten_sources`),
   sur le parent ou sur l'une de ses tables de groupe (colonne tableau, `JsonbFlatten`, type mixte), ou enfant retiré

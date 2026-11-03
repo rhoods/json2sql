@@ -10,7 +10,6 @@
 //! - fn `greedy_schema_clusters` — clustering glouton par seuil de Jaccard (ordre déterministe).
 //! - fn `siblings_key_prefix` — préfixe commun le plus long des clés JSON (sans chiffres/`_` finaux).
 //! - fn `unique_cluster_suffix` — suffixe de nom de table garanti sans collision.
-//! - fn `pg_truncate_name` — tronque un nom de table pivot synthétique à 63 octets (suffixe hash).
 //! - fn `noise_filtered_col_sets` — filtre le bruit (colonnes rares) quand tous les siblings sont data-bearing.
 //! - fn `build_jaccard_col_sets` — construit les ensembles de colonnes par sibling pour le calcul Jaccard.
 //! - fn `col_sets` — noms des colonnes de données de chaque sibling.
@@ -69,7 +68,8 @@ pub fn child_compatibility_score(
 /// Greedy schema clustering: partition `indices` into groups where every member
 /// has Jaccard ≥ `min_jaccard` against the cluster seed (first unassigned sibling).
 /// Only clusters with at least `min_size` members are returned.
-/// Indices are sorted by table name before processing for determinism.
+/// Indices are sorted by JSON path before processing: the seed order, hence the clusters, never depends on how a
+/// name was cut (#180).
 #[allow(clippy::too_many_lines)] // greedy O(n²) clustering algorithm, self-contained loop
 pub(super) fn greedy_schema_clusters(
     schemas: &[TableSchema],
@@ -78,7 +78,7 @@ pub(super) fn greedy_schema_clusters(
     min_size: usize,
 ) -> Vec<Vec<usize>> {
     let mut unassigned: Vec<usize> = indices.to_vec();
-    unassigned.sort_unstable_by_key(|&i| &schemas[i].name);
+    unassigned.sort_unstable_by_key(|&i| (&schemas[i].path, &schemas[i].name));
     let mut clusters: Vec<Vec<usize>> = Vec::new();
 
     while !unassigned.is_empty() {
@@ -154,9 +154,9 @@ pub(super) fn unique_cluster_suffix(
     schemas: &[TableSchema],
 ) -> String {
     let taken = |suffix: &str| {
-        schemas
-            .iter()
-            .any(|s| s.name == format!("{parent_name}_{suffix}"))
+        schemas.iter().any(|s| {
+            s.name == crate::schema::naming::derived_table_name(&format!("{parent_name}_{suffix}"))
+        })
     };
     if !taken(desired_suffix) {
         return desired_suffix.to_string();
@@ -169,23 +169,6 @@ pub(super) fn unique_cluster_suffix(
         }
         n += 1;
     }
-}
-
-/// Truncate a raw pivot table name to fit `PostgreSQL`'s 63-byte identifier limit.
-/// Uses a hash suffix strategy (FNV-1a, 7 hex chars) — intentionally different from
-/// `NamingRegistry::truncate_table_name` which strips leading path segments first.
-/// Pivot names are synthetic (not hierarchical paths), so segment-stripping is not applicable.
-pub(super) fn pg_truncate_name(raw: &str) -> String {
-    const MAX: usize = 63;
-    if raw.len() <= MAX {
-        return raw.to_string();
-    }
-    // FNV-1a 64-bit hash → 7 hex chars (same algorithm as naming::short_hash)
-    let h = raw.bytes().fold(14_695_981_039_346_656_037_u64, |acc, b| {
-        (acc ^ u64::from(b)).wrapping_mul(1_099_511_628_211)
-    });
-    let hash = format!("{:07x}", h & 0x0fff_ffff);
-    format!("{}_{}", &raw[..raw.floor_char_boundary(MAX - 8)], hash)
 }
 
 /// Build per-sibling column sets for Jaccard computation.
@@ -298,10 +281,10 @@ pub fn pairwise_jaccard_min(schemas: &[TableSchema], indices: &[usize]) -> f64 {
     if indices.len() < 2 {
         return 1.0;
     }
-    // Sort by name so col_sets[0] is always the alphabetically-first sibling —
-    // deterministic regardless of call-site ordering.
+    // Sort by JSON path so col_sets[0] is always the same sibling —
+    // deterministic regardless of call-site ordering and of how names were cut (#180).
     let mut sorted: Vec<usize> = indices.to_vec();
-    sorted.sort_unstable_by_key(|&i| &schemas[i].name);
+    sorted.sort_unstable_by_key(|&i| (&schemas[i].path, &schemas[i].name));
     let indices = sorted.as_slice();
     // Fast path 1: pure containers — every sibling has no data columns.
     if indices
@@ -368,29 +351,38 @@ mod tests {
     // bravo-first (before fix): col_sets[0]={a,b,c} → min=0.6 (misses the 0.4 pair)
     // alpha-first  (before fix): col_sets[0]={a,b}  → min=0.4
     // After fix (sort by name): alpha is always [0] → min=0.4 for both orderings.
+    /// The greedy seed is the first sibling by JSON path: cutting names (`products_…` vs `images_…`) must not change
+    /// the clusters (#180). Here the seed decides: `a` takes `b`, `c` would take `b` instead.
     #[test]
-    fn test_pg_truncate_name_utf8_no_panic() {
-        // 54 ASCII + 'é' (2 bytes) + 8 ASCII = 64 bytes total.
-        // Before fix: &raw[..55] panics — byte 55 is 0xA9, continuation byte of 'é'.
-        let name = format!("{}{}{}", "a".repeat(54), "é", "b".repeat(8));
-        assert!(name.len() > 63, "precondition: raw must exceed MAX");
-        let result = pg_truncate_name(&name);
-        assert!(result.len() <= 63, "truncated name must fit PG MAX_IDENT");
-        assert!(
-            std::str::from_utf8(result.as_bytes()).is_ok(),
-            "result must be valid UTF-8"
+    fn greedy_clusters_follow_the_json_path_not_the_name() {
+        let clusters_with = |names: [&str; 3]| {
+            let schemas: Vec<TableSchema> = [
+                ("a", &["x", "y"][..]),
+                ("b", &["y", "z"]),
+                ("c", &["z", "w"]),
+            ]
+            .iter()
+            .zip(names)
+            .map(|((key, cols), name)| {
+                let mut t = make_sibling(name, "p", cols);
+                t.path = vec!["p".to_string(), (*key).to_string()];
+                t
+            })
+            .collect();
+            let mut keys: Vec<Vec<String>> = greedy_schema_clusters(&schemas, &[0, 1, 2], 0.3, 1)
+                .iter()
+                .map(|c| c.iter().map(|&i| schemas[i].path[1].clone()).collect())
+                .collect();
+            keys.sort();
+            keys
+        };
+        let in_path_order = clusters_with(["p_a", "p_b", "p_c"]);
+        assert_eq!(in_path_order, [vec!["a", "b"], vec!["c"]]);
+        assert_eq!(
+            clusters_with(["z_a", "y_b", "x_c"]),
+            in_path_order,
+            "names in reverse order"
         );
-    }
-
-    #[test]
-    fn test_pg_truncate_name_ascii_unchanged() {
-        let short = "short_name";
-        assert_eq!(pg_truncate_name(short), short);
-        let exact = "a".repeat(63);
-        assert_eq!(pg_truncate_name(&exact), exact);
-        let long_ascii = "a".repeat(70);
-        let result = pg_truncate_name(&long_ascii);
-        assert_eq!(result.len(), 63);
     }
 
     #[test]

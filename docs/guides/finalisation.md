@@ -54,8 +54,11 @@ symbols:
   - build_co_sibling_schema
   - make_subgroup
   - make_pivot_preamble
-  - pg_truncate_name
+  - derived_table_name
+  - unique_derived_table_name
+  - dedup_and_sort
   - unique_cluster_suffix
+  - pick_unique_suffix
   - unique_pivot_name
   - classify_key_shape
   - build_union_columns
@@ -135,7 +138,7 @@ SchemaRegistry::finalize_with_pg_guard (voir pass1.md)
    ├─ phase 2  finalize_cascading (sauf --disable-strategy sibling)
    │           run_sibling_wave (vague 0) → drain_cascade_waves (vagues 1+) → vague 0 bis
    │           → run_keyed_pivot_children_wave ; crée des tables synthétiques et des child_routes
-   ├─ doublons de nom retirés, tri par profondeur puis nom
+   ├─ doublons de nom retirés, tri par profondeur puis chemin JSON
    ├─ phase 3  apply_wide_table_strategies : par TableEntry, si la table est encore Columns
    │           apply_wide_strategy → AutoSplit (racine) ou apply_non_autosplit_strategy
    │           (apply_structured_pivot_split, apply_pivot_split, Jsonb) ; compagnons _wide / _pivot
@@ -152,15 +155,25 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
   observés en Pass 1 et saute toute table qui n'est plus `Columns` (garde de #45 : un chemin peut désigner une table
   déjà fusionnée). Une table créée par la phase 2 n'a pas de `TableEntry` : elle ne reçoit jamais de stratégie large,
   quelle que soit sa largeur. Seule la garde des 1 600 colonnes la rattrape.
-- **Une table de même nom qu'une autre est retirée en silence.** Après la phase 1 et après la phase 2, un `retain`
-  ne garde que la première table de chaque nom. Une table synthétique dont le nom existe déjà disparaît sans message.
-  Les noms synthétiques se rendent uniques avec `unique_cluster_suffix` (phase 2) ou `unique_pivot_name` (phase 3) ;
-  `make_subgroup` et la passe keyed-pivot comptent sur le premier.
-- **Les noms synthétiques ne passent pas par `NamingRegistry`.** Celui-ci limite un nom de table à 53 octets
-  (`PG_TABLE_MAX_IDENT`), pour que `pk_…`, `fk_…_parent` et `j2s_…_id` tiennent dans les 63 de PostgreSQL. La phase 2
-  construit ses noms par `format!`, au mieux coupés à 63 par `pg_truncate_name`, et `make_pivot_preamble` écrit la
-  colonne parente à la main, sans l'assertion de `ColumnSchema::parent_fk`. Un nom long dépasse donc ces limites
-  sans erreur dans json2sql.
+- **Une table de même nom qu'une autre est retirée.** Après la phase 1 et après la phase 2, un `retain` ne garde que
+  la première table de chaque nom. Deux tables de même chemin sont la même table construite deux fois : la seconde
+  disparaît sans message. Deux chemins sous un même nom sont une collision : la cascade retrouve ses tables par leur
+  nom, les enfants des deux se mélangent et les routes vers la table retirée écrivent dans l'autre. `dedup_and_sort`
+  l'annonce par un `WARNING` (et un `debug_assert` en test, #180). Sur OFF, avant #180, `nutriscore.<année>.data`
+  écrivait ainsi dans la table du champ racine `nutriscore_data`. Les noms synthétiques se rendent donc uniques à leur
+  création : `unique_cluster_suffix` (phase 2, et la passe keyed-pivot), `pick_unique_suffix` (`make_subgroup`),
+  `unique_derived_table_name` (tables fusionnées de `cascade.rs`), `unique_pivot_name` (phase 3).
+- **Les noms synthétiques passent par `derived_table_name`** (#180). `NamingRegistry` limite un nom de table à
+  53 octets (`PG_TABLE_MAX_IDENT`), pour que `pk_…`, `fk_…_parent` et `j2s_…_id` tiennent dans les 63 de PostgreSQL.
+  Un nom construit en ajoutant un suffixe (`{parent}_key`, `_num_2`, `_cluster_N`, `{table}_pivot`, table fusionnée
+  `{parent}_{clé}`) est nettoyé, puis ses premiers mots sont retirés jusqu'à ce qu'il tienne : la fin, qui distingue
+  les tables, reste lisible ; un hash seulement en dernier recours. Seul le nom change : `path`, `path_segment` et
+  `absorbed_path_segments` restent bruts, la Pass 2 route avec. Le nettoyage confond des clés différentes (`es` /
+  `ES`, `en:x` / `en-x`) : les fonctions de création comparent donc les noms dérivés, et une table fusionnée dont le
+  nom est déjà pris par un autre chemin reçoit un hash de sa clé brute (`unique_derived_table_name`). Les décisions de
+  la cascade (graine des regroupements, ordre du travail) suivent le chemin JSON, pas le nom : couper ou hasher un nom
+  ne change pas les regroupements. `make_pivot_preamble` écrit encore la colonne parente à la main, sans l'assertion
+  de `ColumnSchema::parent_fk`.
 - **Une table rattachée à un autre parent garde sa colonne parente.** `handle_single_co_sibling` change
   `parent_table` sans renommer la colonne `j2s_{ancien parent}_id`. Le DDL et la Pass 2 cherchent cette colonne par son
   indicateur `is_parent_fk`, pas par son nom : cela marche, mais le nom en base ne correspond plus au parent.
@@ -176,7 +189,7 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
 - **La phase 2 ne touche que les parents `Columns` ou `AutoSplit`** (`should_skip_parent`). Un parent déjà fusionné
   n'est pas refusionné : c'est ce qui rend les vagues successives sûres.
 - **L'exclusion suppose les parents avant les enfants.** `exclude_absorbed_children` retire les descendants d'une
-  table absorbante en un seul passage sur la liste. Le tri par profondeur puis nom est refait après la phase 2, mais
+  table absorbante en un seul passage sur la liste. Le tri par profondeur puis chemin est refait après la phase 2, mais
   les compagnons de la phase 3 sont ajoutés à la fin sans nouveau tri : sans risque tant qu'ils n'ont pas d'enfants.
   Une table ajoutée en fin de liste avec des enfants casserait l'exclusion en cascade.
 - **Une cible de `child_routes` survit, et ses propres cibles aussi** (#177). `collect_surviving_route_targets`
@@ -205,7 +218,7 @@ Les endroits prévus sont listés au § 1. Trois changements demandent des étap
 
 - [ ] un nom unique contre toutes les tables déjà connues (`unique_cluster_suffix`, `unique_pivot_name`), sinon le
   dédoublonnage la retire ;
-- [ ] un nom de 53 octets au plus, et la colonne parente par `ColumnSchema::parent_fk` ;
+- [ ] un nom passé par `derived_table_name` (53 octets au plus), et la colonne parente par `ColumnSchema::parent_fk` ;
 - [ ] `parent_table`, `child_kind`, `depth` et `path` remplis : la Pass 2 retrouve la table par son chemin ;
 - [ ] si la Pass 2 doit y router des sous-objets, une entrée dans `child_routes` du parent ;
 - [ ] décider si elle doit recevoir une stratégie large : la phase 3 ne la verra pas (§ 3).

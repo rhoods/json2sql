@@ -301,15 +301,16 @@ fn unique_pivot_name(
     existing_names: &std::collections::HashSet<String>,
 ) -> String {
     let base_name = schema_name.strip_suffix("_pivot").unwrap_or(schema_name);
-    let candidate = format!("{base_name}_pivot");
+    let candidate = crate::schema::naming::derived_table_name(&format!("{base_name}_pivot"));
     let mut candidate = if candidate == schema_name {
-        format!("{base_name}_pivot_eav")
+        crate::schema::naming::derived_table_name(&format!("{base_name}_pivot_eav"))
     } else {
         candidate
     };
     let mut suffix_n = 2;
     while existing_names.contains(&candidate) {
-        candidate = format!("{base_name}_pivot_{suffix_n}");
+        candidate =
+            crate::schema::naming::derived_table_name(&format!("{base_name}_pivot_{suffix_n}"));
         suffix_n += 1;
     }
     candidate

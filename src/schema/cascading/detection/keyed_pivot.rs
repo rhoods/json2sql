@@ -48,7 +48,8 @@ fn resolve_pivot_key_info(
     let children_refs: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
     let union_cols = build_union_columns(&children_refs);
     let suffix = unique_cluster_suffix(parent_name, "key", schemas);
-    let sub_pivot_name = format!("{parent_name}_{suffix}");
+    let sub_pivot_name =
+        crate::schema::naming::derived_table_name(&format!("{parent_name}_{suffix}"));
     let fk_col = format!("j2s_{parent_name}_id");
     let cols = build_sub_pivot_columns(&fk_col, &key_col_name, &union_cols);
     let sibling_schema = SiblingSchema {
@@ -201,7 +202,7 @@ fn collect_keyed_pivot_work_items(
             if children.len() < threshold {
                 return None;
             }
-            children.sort_unstable_by_key(|&i| &schemas[i].name);
+            children.sort_unstable_by_key(|&i| (&schemas[i].path, &schemas[i].name));
             Some((parent_idx, children))
         })
         .collect()
