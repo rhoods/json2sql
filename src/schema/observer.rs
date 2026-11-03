@@ -8,7 +8,8 @@
 //! Fonctions :
 //! - struct `TableEntry` — une entrée par table découverte pendant l'observation Pass 1.
 //! - fn `TableEntry::new` — crée une entrée de table vide pour un chemin donné.
-//! - fn `TableEntry::merge` — fusionne les colonnes/compteurs d'une autre entrée (multi-worker).
+//! - fn `TableEntry::merge` — fusionne les colonnes/compteurs d'une autre entrée (multi-worker) ; un tableau d'objets
+//!   l'emporte sur un objet (#169).
 //! - fn `TableEntry::array_column_type` — type PG d'une colonne array, élargi par les occurrences scalaires (#48).
 //! - fn `TableEntry::observe_field` — met à jour le `TypeTracker` d'un champ scalaire.
 //! - struct `SchemaObserver` — accumulateur par worker des observations JSON brutes (Pass 1).
@@ -20,7 +21,8 @@
 //!   scalaires → colonne PG array).
 //! - fn `SchemaObserver::merge` — fusionne un observateur d'un autre worker (Pass 1 parallèle).
 //! - fn `SchemaObserver::anomaly_iter` — itère les colonnes ayant des anomalies de type.
-//! - fn `SchemaObserver::ensure_table_key` — crée l'entrée de table si absente (idempotent).
+//! - fn `SchemaObserver::ensure_table_key` — crée l'entrée de table si absente ; une clé vue aussi en tableau
+//!   d'objets devient `ObjectArray`, quel que soit l'ordre (#169).
 
 use indexmap::IndexMap;
 use serde_json::Value;
@@ -58,6 +60,10 @@ impl TableEntry {
 
     pub(crate) fn merge(&mut self, other: Self) {
         self.row_count += other.row_count;
+        // A key one worker saw as an array of objects is an array of objects, whatever the merge order (#169).
+        if other.child_kind == Some(ChildKind::ObjectArray) {
+            self.child_kind = other.child_kind;
+        }
         for (name, tracker) in other.columns {
             if let Some(existing) = self.columns.get_mut(&name) {
                 existing.merge(&tracker);
@@ -215,12 +221,17 @@ impl SchemaObserver {
     }
 
     fn ensure_table_key(&mut self, key: &str, parent_key: &str, child_kind: Option<ChildKind>) {
-        self.tables.entry(key.to_string()).or_insert_with(|| {
+        let is_array = child_kind == Some(ChildKind::ObjectArray);
+        let entry = self.tables.entry(key.to_string()).or_insert_with(|| {
             let path: Vec<String> = key
                 .split(PATH_SEP)
                 .map(std::string::ToString::to_string)
                 .collect();
             TableEntry::new(path, parent_key.to_string(), child_kind)
         });
+        // A key seen both as an object and as an array of objects is an array of objects, whatever the order (#169).
+        if is_array {
+            entry.child_kind = Some(ChildKind::ObjectArray);
+        }
     }
 }

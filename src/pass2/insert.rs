@@ -15,7 +15,8 @@
 //! - fn `write_root_jsonb` — cas spécial racine en stratégie Jsonb : écrit le blob JSON puis recurse.
 //! - fn `insert_child_object` — dispatch un objet vers la fonction d'insertion selon son `InferredStrategy`
 //!   (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`, `NormalizeDynamicKeys`, ou insertion standard récursive) ;
-//!   seul aiguillage pour un objet enfant, un élément de tableau et une cible de routage (#172).
+//!   seul aiguillage pour un objet enfant, un élément de tableau et une cible de routage (#172) ; un objet seul dans
+//!   une table `ObjectArray` y est un tableau d'un élément, `j2s_order` 0 (#169).
 //! - fn `recurse_children` — parcourt les champs de l'objet, route chaque enfant (objet/array) vers
 //!   `insert_child_object`/`insert_array`, ou une ligne de sa route par clé (membre d'un groupe TOML, #171) ;
 //!   sans table → `record_missing_table` (#167).
@@ -248,8 +249,9 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
 }
 
 /// Dispatch an object under `parent_id` to the insertion function of its `InferredStrategy`: the one dispatch for an
-/// object child, an array element (`order` is its index) and a routed object (#172). The root never gets here: it can
-/// not take a strategy that absorbs its children.
+/// object child, an array element (`order` is its index) and a routed object (#172). A lone object in an
+/// `ObjectArray` table (its key is also an array of objects, #169) is an array of one element: `order` 0. The root
+/// never gets here: it can not take a strategy that absorbs its children.
 #[allow(clippy::too_many_lines)] // exhaustive dispatch over all InferredStrategy variants
 pub(super) fn insert_child_object<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
@@ -260,6 +262,7 @@ pub(super) fn insert_child_object<S: RowSink, A: AnomalyCollect>(
     parent_id: Uuid,
     order: Option<i64>,
 ) -> Result<()> {
+    let order = order.or_else(|| child_schema.has_order_column().then_some(0));
     let (sinks, anomalies) = (&mut *ctx.sinks, &mut *ctx.anomalies);
     match &*child_schema.effective_strategy() {
         InferredStrategy::Pivot => {

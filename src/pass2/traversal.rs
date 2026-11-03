@@ -50,10 +50,10 @@
 //!
 //! Tableaux :
 //! - fn `keeps_scalars_in_array_column` — le parent garde-t-il les scalaires du champ dans une colonne tableau.
-//! - fn `record_dropped_scalar` — anomalie pour une valeur non objet là où un objet est attendu, sans table où aller (#86, #162).
+//! - fn `record_dropped_scalar` — anomalie pour une valeur non objet là où un objet est attendu, sans table où aller (#86, #162, #169).
 //! - fn `record_missing_table` — anomalie pour une clé objet ou tableau sans table, sauf abandon voulu (#167).
 //! - fn `insert_array` — tableau d'objets : une ligne par élément (`ObjectArray`) ; scalaires → anomalie,
-//!   ou blob en `Jsonb`.
+//!   ou blob en `Jsonb` ; sous une table `Object` (snapshot d'avant #169) → une anomalie pour le tableau.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -738,8 +738,9 @@ pub(super) fn keeps_scalars_in_array_column(parent: &TableSchema, field: &str) -
 }
 
 /// One anomaly for a non-object value where an object is expected: the scalars of an
-/// `ObjectArray` (first one as the value, #86), or a scalar under a `SiblingCollapse` /
-/// `NormalizeDynamicKeys` key (#162). These tables only have columns for object fields.
+/// `ObjectArray` (first one as the value, #86), a scalar under a `SiblingCollapse` /
+/// `NormalizeDynamicKeys` key (#162), or an array under an `Object` table (#169). These tables
+/// only have columns for object fields.
 fn record_dropped_scalar(
     anomalies: &mut impl AnomalyCollect,
     table: &str,
@@ -809,7 +810,15 @@ pub(super) fn insert_array<S: RowSink>(
     parent_id: Uuid,
     parent_keeps_scalars: bool,
 ) -> Result<()> {
+    // Nothing is lost by skipping a null, or a scalar the parent keeps in an array column (#86).
+    let skipped = |item: &Value| !item.is_object() && (item.is_null() || parent_keeps_scalars);
     if !matches!(schema.child_kind, Some(ChildKind::ObjectArray)) {
+        // A snapshot saved before #169 keeps `Object` for a key first seen as an object: its arrays have no table.
+        if !arr.iter().all(skipped) {
+            let field = schema.path.last().map_or("", String::as_str);
+            let array = Value::Array(arr.to_vec());
+            record_dropped_scalar(anomalies, &schema.name, field, parent_id, &array)?;
+        }
         return Ok(());
     }
     // An object element goes through the same dispatch as an object child (#172); in Jsonb a scalar element is
@@ -818,7 +827,7 @@ pub(super) fn insert_array<S: RowSink>(
     let mut dropped: Option<&Value> = None;
     for (i, item) in arr.iter().enumerate() {
         let order = Some(i as i64);
-        if !item.is_object() && (item.is_null() || parent_keeps_scalars) {
+        if skipped(item) {
             continue;
         }
         if let Value::Object(obj) = item {
@@ -2190,7 +2199,7 @@ mod tests {
             )
             .unwrap();
 
-            assert!(sinks["root_x"].0.is_empty());
+            assert_eq!(sinks["root_x"].0.len(), 0);
             assert_eq!(
                 anomalies.records,
                 vec![("root_x".to_string(), "x".to_string()); expected],
