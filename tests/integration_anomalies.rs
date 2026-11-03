@@ -499,3 +499,76 @@ async fn test_value_of_another_format_in_a_typed_column_is_an_anomaly() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// Éléments d'un tableau UUID[], DATE[] ou TIMESTAMP[] imposé (snapshot --schema-input périmé) qui ne
+// sont pas de ce format : NULL dans le tableau + une anomalie par cellule, le COPY continue, comme
+// pour un scalaire depuis #116. Avant : élément écrit sans vérification, et le COPY s'arrêtait.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_array_element_of_another_format_is_an_anomaly() {
+    use json2sql::schema::type_tracker::PgType;
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("anomalies_dates_array.jsonl");
+        let mut p1 = pass1::runner::run(&path, &common::pass1_config("events"), None).unwrap();
+        let events = p1.schemas.iter_mut().find(|s| s.name == "events").unwrap();
+        for (column, elem) in [
+            ("refs", PgType::Uuid),
+            ("days", PgType::Date),
+            ("ats", PgType::Timestamp),
+        ] {
+            events
+                .columns
+                .iter_mut()
+                .find(|c| c.name == column)
+                .unwrap()
+                .pg_type = PgType::Array(Box::new(elem));
+        }
+
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("events", &schema),
+            None,
+        )
+        .await
+        .expect("an element of another format must not abort the COPY");
+
+        // first row: one faulty element per column
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 3);
+        let cells: Vec<Vec<String>> = client
+            .query(
+                &format!(
+                    "SELECT \"refs\"::text, \"days\"::text, \"ats\"::text \
+                     FROM \"{schema}\".\"events\" ORDER BY \"id\""
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (0..3).map(|i| r.get(i)).collect())
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                [
+                    "{550e8400-e29b-41d4-a716-446655440000,NULL}",
+                    "{2024-01-15,NULL}",
+                    "{\"2024-01-15 10:30:00\",NULL}",
+                ],
+                [
+                    "{6ba7b810-9dad-11d1-80b4-00c04fd430c8}",
+                    "{2024-02-20}",
+                    "{\"2024-03-01 00:00:00\"}",
+                ],
+            ]
+        );
+    })
+    .await;
+}
