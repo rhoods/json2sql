@@ -39,7 +39,7 @@ Une clé qui vaut tantôt un objet, tantôt un tableau d'objets donne une table 
 
 Le type retenu est le **plus large** parmi ceux observés, pas le plus fréquent, à une exception près : les **chaînes rares**. Si les chaînes JSON représentent moins de 0,1 % des valeurs non nulles de la colonne (`RARE_STRING_RATE`, les `null` ne comptent pas), elles sont ignorées pour le typage, et la Pass 2 les signale comme anomalies (voir plus bas). Les dates, timestamps et UUID comptent comme des chaînes dès qu'ils sont mêlés à autre chose : des chaînes ordinaires, des nombres, des booléens, et, pour les UUID, des dates ou des timestamps, avec lesquels ils n'ont pas de type commun (#116). Mêlés entre eux, dates et timestamps donnent `TIMESTAMP`. La règle ne joue donc que pour une colonne numérique ou booléenne : une colonne `DATE` avec un `"unknown"` rare passe en `VARCHAR`, de même qu'une colonne de dates avec quelques nombres (avant #116, elle devenait `INTEGER` et toutes ses dates passaient en `NULL`). Ordre de priorité :
 
-1. **Des chaînes, au moins 0,1 % des valeurs non nulles** → `VARCHAR(N)` ou `TEXT` (N tient compte de la représentation texte des nombres éventuellement mélangés)
+1. **Des chaînes, au moins 0,1 % des valeurs non nulles** → `VARCHAR(N)` ou `TEXT` (N tient compte de la représentation texte des nombres et des booléens éventuellement mélangés : un `false` tient aussi parmi des chaînes très courtes, #195)
 2. Sinon **numérique** : `DOUBLE PRECISION` > `BIGINT` > `INTEGER`
 3. Sinon : `BOOLEAN` > `TIMESTAMP` > `DATE` > `UUID`
 4. Aucun type observé (que des `null`) → `TEXT`

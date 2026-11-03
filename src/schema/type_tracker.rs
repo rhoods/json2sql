@@ -26,7 +26,7 @@
 //! - fn `TypeTracker::anomaly_rate` — fraction de valeurs différant du type dominant.
 //! - fn `TypeTracker::is_not_null` — vrai si aucune valeur nulle observée.
 //! - fn `TypeTracker::string_pg_type` — résout `VarChar`/`Text` en tenant compte de la longueur
-//!   des représentations numériques si le champ est mixte string+nombre.
+//!   des nombres et des booléens écrits en texte si le champ en mêle aux chaînes (#195).
 //! - fn `TypeTracker::has_frequent_strings` — vrai si les chaînes JSON (dates comprises) atteignent
 //!   `RARE_STRING_RATE` des valeurs non nulles (sinon elles ne décident pas du type), sauf si ce ne sont
 //!   que des UUID, ou que des dates et timestamps, sans nombre ni booléen (ils gardent leur type).
@@ -258,20 +258,23 @@ impl TypeTracker {
     /// Resolve to the final `PostgreSQL` type.
     /// Merging rules: the "widest" type wins.
     #[must_use]
-    fn string_pg_type(&self, has_float: bool, has_bigint: bool, has_int: bool) -> PgType {
-        // max_len tracks observed string lengths only. For mixed string+numeric fields,
-        // pass2 also formats numbers as strings — use conservative upper bounds so VarChar
+    fn string_pg_type(&self) -> PgType {
+        let has = |t: InferredType| self.type_counts[t as usize] > 0;
+        // max_len tracks observed string lengths only. For fields mixing strings with numbers or
+        // booleans, pass2 also writes those as strings — use conservative upper bounds so VarChar
         // is always wide enough without false positives in the anomaly detector.
-        let num_repr_len = if has_float {
+        let num_repr_len = if has(InferredType::Float) {
             25u32
-        } else if has_bigint {
+        } else if has(InferredType::BigInt) {
             20u32
-        } else if has_int {
+        } else if has(InferredType::Integer) {
             11u32
         } else {
             0u32
         };
-        let effective_max = self.max_len.max(num_repr_len);
+        // `false`, the longer boolean (#195)
+        let bool_repr_len = if has(InferredType::Boolean) { 5 } else { 0 };
+        let effective_max = self.max_len.max(num_repr_len).max(bool_repr_len);
         if effective_max > self.text_threshold {
             PgType::Text
         } else {
@@ -310,11 +313,7 @@ impl TypeTracker {
         let has = |t: InferredType| self.type_counts[t as usize] > 0;
 
         if self.has_frequent_strings() {
-            return self.string_pg_type(
-                has(InferredType::Float),
-                has(InferredType::BigInt),
-                has(InferredType::Integer),
-            );
+            return self.string_pg_type();
         }
 
         // Numeric widening: float > bigint > int
