@@ -4,6 +4,7 @@
 //!
 //! Fonctions :
 //! - fn `collect_children_by_key` — regroupe les enfants par clé JSON partagée.
+//! - fn `is_multi_pivot` — repère un pivot `SiblingCollapseMulti`, qui n'est pas une clé JSON.
 //! - fn `process_co_sibling_group` — dispatch fusion ou reparentage seul.
 //! - fn `handle_single_co_sibling` — reparente un co-sibling isolé.
 //! - fn `merge_co_sibling_group` — fusionne un groupe de co-siblings en une nouvelle table T.
@@ -46,6 +47,9 @@ pub(super) fn collect_children_by_key(
         for (child_map, is_arr) in [(&obj_map, false), (&arr_map, true)] {
             if let Some(children) = child_map.get(name) {
                 for &ci in children {
+                    if is_multi_pivot(&schemas[i], &schemas[ci].name) {
+                        continue;
+                    }
                     if let Some(key) = schemas[ci].path.last() {
                         let entry = key_map
                             .entry(key.clone())
@@ -67,6 +71,13 @@ pub(super) fn collect_children_by_key(
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+/// True when `child` is a pivot of `parent`'s `SiblingCollapseMulti` groups: its path segment
+/// (`key`, `num`…) is no JSON key, so a merged table under it would never be filled (#182).
+fn is_multi_pivot(parent: &TableSchema, child: &str) -> bool {
+    matches!(&parent.inferred_strategy,
+        InferredStrategy::SiblingCollapseMulti(groups) if groups.iter().any(|g| g.pivot_table == child))
 }
 
 /// Process one `CoSiblingGroup` from a cascade wave.

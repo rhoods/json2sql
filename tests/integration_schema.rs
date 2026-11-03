@@ -1377,6 +1377,43 @@ fn test_every_child_route_target_is_in_the_schema() {
 }
 
 // ---------------------------------------------------------------------------
+// Invariant : une clé de `child_routes` est une clé du JSON (#182). Les segments
+// des pivots `SiblingCollapseMulti` (`key`, `num`, `num_2`) n'en sont pas : une
+// route sous ce nom mène à une table que la Pass 2 ne remplit jamais.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_every_child_route_key_is_a_json_key() {
+    fn collect_keys(v: &serde_json::Value, out: &mut std::collections::HashSet<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, v) in m {
+                    out.insert(k.clone());
+                    collect_keys(v, out);
+                }
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|v| collect_keys(v, out)),
+            _ => {}
+        }
+    }
+    let path = common::fixture("keyed_route_selected_images.jsonl");
+    let mut keys = std::collections::HashSet::new();
+    for line in std::fs::read_to_string(&path).unwrap().lines() {
+        collect_keys(&serde_json::from_str(line).unwrap(), &mut keys);
+    }
+    let p1 = pass1::runner::run(&path, &common::pass1_config("p"), None).unwrap();
+    let names: Vec<&str> = p1.schemas.iter().map(|s| s.name.as_str()).collect();
+    for s in &p1.schemas {
+        for (k, target) in &s.child_routes {
+            assert!(
+                keys.contains(k),
+                "{}.child_routes[{k:?}] → {target} : clé absente du JSON ; schemas: {names:?}",
+                s.name
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Invariant : un nom de table tient en 53 octets, ne contient que [a-z0-9_] et
 // est unique ; une colonne FK tient en 63 (#180). La racine longue d'OFF pousse
 // les noms dérivés par la cascade (`_key`, `_num_2`, `_cluster_N`, `_pivot`…)
