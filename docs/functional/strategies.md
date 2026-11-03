@@ -132,6 +132,11 @@ CREATE TABLE products_brand (
 );
 ```
 
+PostgreSQL refuse l'octet nul dans une colonne JSONB. Un objet qui en contient un, dans une chaîne ou dans une clé,
+n'y est pas écrit : sa colonne `data` vaut `NULL`, et l'objet est rapporté comme anomalie
+(`string_contains_null_byte`). L'import continue. Sur la table racine, c'est tout l'enregistrement qui manque ; le
+rapport d'anomalies n'en garde que les 200 premiers caractères.
+
 ---
 
 ## `structured_pivot` : des clés à suffixes en lignes typées
