@@ -11,7 +11,10 @@
 //! - fn `coerce` — dispatch principal selon le `PgType` cible (NULL court-circuité en amont).
 //! - fn `coerce_pg_array` — sérialise un tableau JSON en littéral `PostgreSQL` `{e1,e2,...}` ; un élément
 //!   non convertible devient `NULL`, le premier est rapporté (une anomalie par cellule, #84).
-//! - fn `coerce_pg_array_element` — représentation d'un élément dans le littéral, ou la raison de son rejet.
+//! - fn `coerce_pg_array_element` — représentation d'un élément dans le littéral, ou la raison de son rejet ;
+//!   dans un `JSONB[]`, le JSON de l'élément (#83).
+//! - fn `contains_null_byte` — vrai si une chaîne ou une clé d'objet de la valeur, à toute profondeur, contient un
+//!   octet nul.
 //! - fn `quote_array_text` — élément texte entre guillemets ; octet nul ou dépassement de `VARCHAR(n)` = rejet.
 //! - fn `coerce_integer` — coercition vers INTEGER, produit `Ok`/`Anomaly`.
 //! - fn `coerce_bigint` — coercition vers BIGINT, produit `Ok`/`Anomaly`.
@@ -165,7 +168,25 @@ fn coerce_pg_array_element(
             Err((value.to_string(), json_type_name(value)))
         }
         PgType::VarChar(max_len) => quote_array_text(value, Some(*max_len as usize)),
+        // JSONB[] (#83, point 2): the element is written as its JSON, a string with its quotes. jsonb refuses
+        // `\u0000`, the JSON of a null byte.
+        PgType::Jsonb if contains_null_byte(value) => {
+            Err((value.to_string(), "string_contains_null_byte"))
+        }
+        PgType::Jsonb => quote_array_text(&Value::String(value.to_string()), None),
         _ => quote_array_text(value, None),
+    }
+}
+
+/// True if a string or an object key of `value`, at any depth, holds a null byte.
+fn contains_null_byte(value: &Value) -> bool {
+    match value {
+        Value::String(s) => s.contains('\0'),
+        Value::Array(items) => items.iter().any(contains_null_byte),
+        Value::Object(map) => map
+            .iter()
+            .any(|(k, v)| k.contains('\0') || contains_null_byte(v)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
 

@@ -9,7 +9,8 @@
 //! - struct `TableEntry` — une entrée par table découverte pendant l'observation Pass 1.
 //! - fn `TableEntry::new` — crée une entrée de table vide pour un chemin donné.
 //! - fn `TableEntry::merge` — fusionne les colonnes/compteurs d'une autre entrée (multi-worker).
-//! - fn `TableEntry::array_column_type` — type PG d'une colonne array, élargi par les occurrences scalaires (#48).
+//! - fn `TableEntry::array_column_type` — type PG d'une colonne array, élargi par les occurrences scalaires (#48) ;
+//!   `JSONB[]` dès qu'un élément est lui-même un tableau (#83).
 //! - fn `TableEntry::observe_field` — met à jour le `TypeTracker` d'un champ scalaire.
 //! - struct `SchemaObserver` — accumulateur par worker des observations JSON brutes (Pass 1).
 //! - fn `SchemaObserver::new` — crée l'observateur (seuil texte).
@@ -26,7 +27,7 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 use super::table_schema::ChildKind;
-use super::type_tracker::{widen_pg_types, PgType, TypeTracker};
+use super::type_tracker::{widen_pg_types, InferredType, PgType, TypeTracker};
 use super::PATH_SEP;
 
 /// One entry per table discovered during Pass 1 observation, keyed by PATH_SEP-joined path.
@@ -76,7 +77,12 @@ impl TableEntry {
 
     /// PG type of a PG array column. A field with mixed scalar/array occurrences
     /// widens its element type with its scalar occurrences, which Pass 2 wraps as `{x}` (issue #48).
+    /// One element that is itself an array (the `coordinates` of a polygon) makes it `JSONB[]`, whatever the other
+    /// elements: each keeps its JSON (#83, point 2). An object element makes the array a child table instead.
     pub(crate) fn array_column_type(&self, field: &str, elem_tracker: &TypeTracker) -> PgType {
+        if elem_tracker.type_counts[InferredType::Array as usize] > 0 {
+            return PgType::Array(Box::new(PgType::Jsonb));
+        }
         let elem_type = self.columns.get(field).map_or_else(
             || elem_tracker.to_pg_type(),
             |scalar_tracker| {
