@@ -1494,3 +1494,109 @@ fn test_a_merged_table_does_not_take_the_name_of_another_path() {
         .expect("the root field keeps its table");
     assert_ne!(root_field.name, target.name);
 }
+
+// ---------------------------------------------------------------------------
+// Mesure (#136) : des parents de 52 octets passent par la cascade, puis tout est
+// importé dans PostgreSQL, qui coupe à 63 octets sans erreur (simple NOTICE).
+// `aa`/`bb` et `cc`/`dd` ne diffèrent que par leur premier mot, que
+// `derived_table_name` retire pour tenir en 53 : le sous-pivot `…_key` (passe
+// keyed-pivot) et le pivot `…_num` (vague 0) de chaque chemin doivent rester
+// deux tables, chacune avec ses lignes. Le catalogue doit montrer les noms du
+// schéma octet pour octet, et `pk_…` / `fk_…_parent` entiers.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_long_cascade_names_reach_postgresql_whole_and_distinct() {
+    const T: &str = "selected_images_for_the_packaging_and_labelling";
+    const U: &str = "nutrient_levels_per_portion_for_the_reference_x";
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("cascade_long_names.jsonl");
+        let p1 = pass1::runner::run(&path, &common::pass1_config("p"), None).unwrap();
+        // The measure, shown with `-- --nocapture`: length, table, path.
+        for s in &p1.schemas {
+            eprintln!("{:>2} {:<53} {}", s.name.len(), s.name, s.path.join("."));
+        }
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("p", &schema),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(p2.constraint_warnings.is_empty());
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+
+        let catalog = |sql: &'static str| {
+            let (client, schema) = (&client, &schema);
+            async move {
+                let rows = client.query(sql, &[schema]).await.unwrap();
+                let mut names: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+                names.sort();
+                names
+            }
+        };
+        let mut planned: Vec<String> = p1.schemas.iter().map(|s| s.name.clone()).collect();
+        planned.sort();
+        let tables = catalog(
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind = 'r'",
+        )
+        .await;
+        assert_eq!(tables, planned, "tables in PostgreSQL vs schema");
+
+        let mut expected: Vec<String> = p1
+            .schemas
+            .iter()
+            .flat_map(|s| {
+                let fk = s
+                    .parent_table
+                    .as_ref()
+                    .map(|_| format!("fk_{}_parent", s.name));
+                std::iter::once(format!("pk_{}", s.name)).chain(fk)
+            })
+            .collect();
+        expected.sort();
+        let constraints = catalog(
+            "SELECT k.conname FROM pg_constraint k JOIN pg_namespace n ON n.oid = k.connamespace \
+             WHERE n.nspname = $1",
+        )
+        .await;
+        assert_eq!(
+            constraints, expected,
+            "constraints: whole pk_/fk_ names, none shared"
+        );
+
+        // Each path keeps its own table, with its own rows: 3 docs × 3 types × 3 languages under
+        // `key` and its `sizes`, 3 docs × 3 numeric keys under `num`.
+        let pairs: [(&str, &str, &[&str], i64); 3] = [
+            ("aa", "bb", &[T, "key"], 27),
+            ("aa", "bb", &[T, "key", "sizes"], 27),
+            ("cc", "dd", &[U, "num"], 9),
+        ];
+        for (a, b, tail, rows) in pairs {
+            let table_of = |top: &str| {
+                let path = [&["p", top][..], tail].concat();
+                p1.schemas
+                    .iter()
+                    .find(|s| s.path == path)
+                    .unwrap_or_else(|| panic!("no table for {}", path.join(".")))
+                    .name
+                    .clone()
+            };
+            let (ta, tb) = (table_of(a), table_of(b));
+            assert_ne!(ta, tb, "p.{a}… and p.{b}… share one table");
+            let (ra, rb) = (
+                common::row_count(&client, &schema, &ta).await,
+                common::row_count(&client, &schema, &tb).await,
+            );
+            eprintln!("{ta}: {ra} rows, {tb}: {rb} rows");
+            assert_eq!((ra, rb), (rows, rows), "{ta}: {ra} rows, {tb}: {rb} rows");
+        }
+    })
+    .await;
+}

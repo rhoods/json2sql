@@ -124,7 +124,6 @@ pub(super) fn run_keyed_pivot_children_wave(
     let (obj_map, arr_map) = super::build_parent_child_maps(schemas);
     let work = collect_keyed_pivot_work_items(schemas, &obj_map, threshold);
 
-    let mut new_schemas: Vec<TableSchema> = Vec::new();
     let mut co_siblings: Vec<CoSiblingGroup> = Vec::new();
 
     for (parent_idx, child_indices) in work {
@@ -136,12 +135,13 @@ pub(super) fn run_keyed_pivot_children_wave(
             &obj_map,
             &arr_map,
         ) {
-            new_schemas.push(t_schema);
+            // Pushed now: the next parent's `unique_cluster_suffix` must see this name, which two long parents
+            // can both derive once `derived_table_name` drops their first words (#136).
+            schemas.push(t_schema);
             co_siblings.extend(co_sibs);
         }
     }
 
-    schemas.append(&mut new_schemas);
     co_siblings
 }
 
