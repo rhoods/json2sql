@@ -200,8 +200,10 @@ Tous les noms de tables et colonnes issus des clés JSON sont sanitisés avant u
 2. Remplacement des caractères non-alphanumériques par `_`
 3. Élimination des `_` consécutifs
 4. Préfixe `c_` si le nom commence par un chiffre
-5. **Troncature à 63 bytes** (limite PostgreSQL) avec hash 7 hex pour préserver l'unicité
-6. **Détection de collision** : si plusieurs clés JSON produisent le même identifiant SQL, un suffixe de hash est ajouté
+5. **Longueur** :
+   - un nom de **table** tient en 53 octets (`PG_TABLE_MAX_IDENT`), pour que les noms qui en dérivent (`pk_…`, `fk_…_parent`, `j2s_…_id`) restent sous la limite de 63 octets de PostgreSQL. Un nom trop long perd d'abord les premiers segments de son chemin JSON (`openfoodfacts_products_ecoscore_extended_data_impact_likeliest_recipe` → `ecoscore_extended_data_impact_likeliest_recipe`) ; en dernier recours, il garde le parent direct et la feuille, coupés, suivis d'un hash 7 hex. Les tables dérivées d'une autre (`_pivot`, `_key`, table fusionnée de la cascade…) suivent la même règle (`derived_table_name`, #180) ; une table de groupe de colonnes est coupée à 53 octets avec un hash (`group_table_name`) ;
+   - un nom de **colonne** tient en 63 octets : au-delà, ses derniers caractères sont remplacés par `_` + un hash 7 hex du nom d'origine. Les noms de contraintes `pk_…` et `fk_…_parent` suivent la même règle (#179).
+6. **Détection de collision** : si plusieurs clés JSON produisent le même identifiant SQL (deux chemins pour un nom de table, deux champs pour un nom de colonne), un suffixe de hash les départage
 
 Les noms tronqués et les collisions résolues sont rapportés dans les logs en avertissement.
 

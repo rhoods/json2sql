@@ -8,90 +8,92 @@ La **Premium Density** n'est pas du désordre : c'est une hiérarchie intentionn
 
 ---
 
-## 2. Tokens de couleur (`src/theme.rs`)
+## 2. Tokens (`assets/styles.css`)
 
-`theme.rs` est la **source de vérité unique** pour toutes les valeurs. Les constantes Rust sont directement interpolées dans les styles (`style: "background:{theme::BG_ROOT};"`) et exposées comme variables CSS via `theme::css()`.
+Les tokens sont des variables CSS, déclarées dans le `:root` de `json2sql-ui/assets/styles.css`. `theme::design_css()` embarque ce fichier à la compilation (`include_str!`) : c'est la **source de vérité unique**. Un composant passe par `var(--…)` ou par une classe de ce fichier ; il n'y a pas de constante Rust de couleur.
 
-### Hiérarchie de surfaces (règle "No-Line")
+### Surfaces (règle "No-Line")
 
-Les bordures sont des reliques basse résolution. La logique visuelle est définie par des décalages de fond, pas par des traits.
+La logique visuelle est définie par des décalages de fond, pas par des traits.
 
-| Constante Rust       | Valeur    | Rôle                                         |
-|----------------------|-----------|----------------------------------------------|
-| `BG_ROOT`            | `#131313` | Fond racine — fenêtre de l'application       |
-| `BG_WORKSPACE`       | `#1B1B1C` | Espace de travail principal (headers, panels)|
-| `BG_SIDEBAR`         | `#2A2A2A` | Sidebars, panneaux d'outils                  |
-| `BG_INPUT`           | `#353535` | Champs de saisie, dropdowns                  |
-| `BG_EDITOR`          | `#111111` | Log panel, éditeur SQL (plus sombre que root)|
+| Variable | Valeur | Rôle |
+|---|---|---|
+| `--bg` | `#0d1014` | Fond racine de l'application |
+| `--bg-1` / `--bg-2` / `--bg-3` | `#131820` / `#1a1f29` / `#232936` | Paliers de surface, du plus sombre au plus clair (`--bg-2` : en-têtes de panneau, survol d'une ligne) |
+| `--bg-elev` | `#1e242e` | Surface flottante |
+| `--bg-input` | `#0e131a` | Champs de saisie, fond de la barre de progression |
+| `--bg-code` | `#0a0d12` | Logs et blocs de code |
+
+### Bordures
+
+| Variable | Valeur | Rôle |
+|---|---|---|
+| `--bd` / `--bd-2` / `--bd-3` | `#262d3a` / `#323a48` / `#404a5b` | Bordures, de la plus discrète à la plus visible (`--bd` : séparation des panneaux et des tableaux) |
 
 ### Texte
 
-| Constante Rust         | Valeur    | Rôle                                  |
-|------------------------|-----------|---------------------------------------|
-| `ON_SURFACE`           | `#E4E2E6` | Texte principal                       |
-| `ON_SURFACE_VARIANT`   | `#C5C6D0` | Texte secondaire                      |
-| `ON_SURFACE_DIM`       | `#717680` | Labels, métadonnées, texte désactivé  |
-| `ON_PRIMARY`           | `#0D0D0D` | Texte sur fond primaire (contraste)   |
+| Variable | Valeur | Rôle |
+|---|---|---|
+| `--fg` | `#e6eaf0` | Texte principal |
+| `--fg-2` | `#b2bac7` | Texte secondaire |
+| `--fg-3` | `#7a8290` | Labels, métadonnées, en-têtes de tableau |
+| `--fg-4` | `#555c69` | Texte effacé, commentaires SQL |
 
-### Tokens sémantiques
+### Accent et sémantique
 
-| Constante Rust   | Valeur    | Sémantique                        |
-|------------------|-----------|-----------------------------------|
-| `PRIMARY`        | `#99CBFF` | Action, intention (bleu)          |
-| `PRIMARY_DARK`   | `#007BC4` | Fin du dégradé primaire           |
-| `SECONDARY`      | `#4EDEA3` | Succès, connexion active (vert)   |
-| `SECONDARY_DARK` | `#00C47A` | Fin du dégradé secondaire         |
-| `TERTIARY`       | `#FFB95F` | Avertissement, troncature (orange)|
-| `ERROR`          | `#FFB4AB` | Erreur, échec de connexion (rouge)|
+| Variable | Valeur | Sémantique |
+|---|---|---|
+| `--acc` | `#4dd0c9` | Accent principal (teal) : action, sélection |
+| `--acc-hi` / `--acc-lo` | `#62e0d9` / `#2da39d` | Variantes claire et sombre (dégradé de la barre de progression) |
+| `--acc-bg` / `--acc-bd` | `rgba(77, 208, 201, 0.12)` / `rgba(77, 208, 201, 0.4)` | Fond et bordure translucides (ligne sélectionnée, bouton actif) |
+| `--info` | `#6aa9ff` | Information |
+| `--success` | `#5bcf8e` | Succès, connexion active |
+| `--warning` | `#f0b072` | Avertissement |
+| `--danger` | `#e87862` | Erreur, échec |
 
-### Bordures et état
-
-| Constante Rust      | Valeur       | Rôle                                    |
-|---------------------|--------------|-----------------------------------------|
-| `OUTLINE_VARIANT`   | `#40475266`  | Ghost border (40% opacity) — séparation|
-| `OUTLINE_FAINT`     | `#40475233`  | Séparateur de lignes subtil (20%)       |
-| `SELECTED_BG`       | `#00A57233`  | Fond ligne sélectionnée (20% secondary) |
-| `PRIMARY_ALPHA_08`  | `rgba(153,203,255,0.08)` | Hover fond btn-ghost       |
+`--info`, `--success`, `--warning` et `--danger` ont chacun une variante `-bg` (la même couleur à 12 % d'opacité) pour les fonds.
 
 ### Badges de stratégie
 
-| Constante Rust        | Valeur    | Stratégie                              |
-|-----------------------|-----------|----------------------------------------|
-| `BADGE_DEFAULT`       | `#4A90D9` | DEFAULT (colonnes)                     |
-| `BADGE_JSONB`         | `#9B59B6` | JSONB séparé (table propre)            |
-| `BADGE_JSONB_OVERFLOW`| `#B8810E` | JSONB auto-converti (>1600 colonnes)   |
-| `BADGE_JSONB_INLINE`  | `#16A085` | JSONB inline (colonne parent)          |
-| `BADGE_FLATTEN`       | `#27AE60` | FLATTEN / PIVOT / KEYED / MULTI        |
-| `BADGE_NORMALIZE`     | `#E67E22` | NORMALIZE / AUTO SPLIT / PIVOT EAV     |
-| `BADGE_SKIP`          | `#E74C3C` | SKIP (table exclue)                    |
-| `BADGE_ROUTE`         | `#525A65` | ROUTE (routing container — atténué)    |
+| Variable | Valeur | Classe | Stratégies |
+|---|---|---|---|
+| `--s-default` | `#6aa9ff` | `.badge.default` | `Columns` |
+| `--s-jsonb` | `#b48cf0` | `.badge.jsonb`, `.badge.jsonbi` | `Jsonb` ; `JsonbFlatten` en `.jsonbi` s'il est inféré, en `.jsonb` s'il est choisi dans l'IHM |
+| `--s-flatten` | `#5bcf8e` | `.badge.flatten` | `Flatten` |
+| `--s-pivot` | `#f0b072` | `.badge.pivot` | `Pivot`, `StructuredPivot`, `SiblingCollapse`, `SiblingCollapseMulti` |
+| `--s-norm` | `#f0b072` | `.badge.normalize` | `NormalizeDynamicKeys`, `AutoSplit` |
+| `--s-skip` | `#e87862` | `.badge.skip` | `Skip` (IHM), tables absorbées (`Ignore`) |
+
+La correspondance est dans `strategy_badge` et `user_override_badge` (`json2sql-ui/src/screens/common/strategy_badges.rs`).
+
+### Rayons, ombres, densité
+
+- Rayons : `--r-sm` (4px), `--r-md` (6px), `--r-lg` (10px), `--r-xl` (14px, défini mais pas utilisé).
+- Ombres : `--shadow-1` (léger relief), `--shadow-2` (défini mais pas utilisé), `--shadow-pop` (élément flottant).
+- Densité : `--row-h` (28px, hauteur de ligne), `--pad-x` (14px) et `--pad-y` (10px) pour les marges internes.
 
 ---
 
 ## 3. Typographie
 
-| Famille           | Constante Rust | Usage                                              |
-|-------------------|----------------|----------------------------------------------------|
-| Inter             | `FONT_UI`      | Interface, labels, boutons                         |
-| JetBrains Mono    | `FONT_CODE`    | Noms de tables/colonnes, SQL, JSON, valeurs copiables |
+| Famille | Où | Usage |
+|---|---|---|
+| Inter | police de `body` | Interface, labels, boutons |
+| JetBrains Mono | `.mono`, blocs de code, logs | Noms de tables/colonnes, SQL, JSON, valeurs copiables |
 
-Règle : tout texte copiable/collable dans un terminal utilise `FONT_CODE`. Tout ce qui est interface pure utilise `FONT_UI`.
+Règle : tout texte copiable/collable dans un terminal utilise JetBrains Mono (`.mono`). Tout ce qui est interface pure utilise Inter.
 
-Tailles courantes :
-- Titres de section : `0.875rem`, `font-weight:600`
-- Labels ALL-CAPS : `0.6875rem`, `letter-spacing:0.05em`
-- Corps / colonnes : `0.8125rem`
-- Badges : `0.5625rem` – `0.6875rem`, `font-weight:700`
+Tailles : `--fs-xs` (11px), `--fs-sm` (12px), `--fs-md` (13px), `--fs-lg` (15px).
 
 ---
 
 ## 4. Élévation et profondeur
 
-On n'utilise pas de drop-shadows pour indiquer la hauteur : on utilise la lumière (décalage de fond).
+La hauteur se marque d'abord par la lumière : un palier de surface plus clair (`--bg-1` à `--bg-3`, `--bg-elev`), pas une ombre.
 
-- **Ghost Border** : si une séparation haute contraste est requise entre deux panneaux sombres, utiliser `OUTLINE_VARIANT` (40% opacity). Ne jamais utiliser une bordure opaque à 100%.
-- **Ligne sélectionnée** : `SELECTED_BG` (fond) + `border-left:2px solid SECONDARY` (accent vertical).
-- **Modales flottantes** (non utilisées actuellement) : tinted glow `ON_SURFACE` à 6% opacity, blur 32px.
+- **Séparation** : une bordure `--bd` de 1px entre deux panneaux.
+- **Ombres** : seulement les tokens `--shadow-*` — `--shadow-1` pour un léger relief (`.card`, bouton actif d'un `.seg`), `--shadow-pop` pour un élément flottant (`.tweaks-panel`, `.proto-switcher`). L'étape active du wizard (`.step-card.active`) a un halo d'accent.
+- **Ligne sélectionnée** : fond `--acc-bg` (`table.t tbody tr.sel`) ; un bouton de stratégie actif (`.strat-btn.on`) ajoute un trait d'accent à gauche (`box-shadow: inset 2px 0 0 var(--acc)`).
 
 ---
 
@@ -99,10 +101,9 @@ On n'utilise pas de drop-shadows pour indiquer la hauteur : on utilise la lumiè
 
 | Source | Chargée par | Contenu |
 |---|---|---|
-| `assets/styles.css` | `theme::design_css()` → `include_str!` | Design system complet (1046 lignes) — layouts, composants, utilitaires |
-| `theme::css()` | inline | Variables CSS `:root`, `.btn-primary`, `.btn-ghost`, `.input-field`, `.progress-track`, `.log-panel`, overrides webkit |
+| `assets/styles.css` | `theme::design_css()` → `include_str!` | Tout le design system : tokens du `:root`, layouts, composants, utilitaires, overrides webkit2gtk |
 
-Les deux sont injectées dans un `<style>` unique dans le `<head>` du webview au démarrage. `assets/styles.css` est la source à éditer pour tout nouveau composant.
+`main.rs` l'injecte dans un `<style>` du `<head>` du webview au démarrage (`with_custom_head`). C'est le seul fichier à éditer pour un nouveau composant ou un nouveau token.
 
 ---
 
@@ -117,7 +118,7 @@ Panneaux enfants : `.pane` (largeur fixe) ou `.pane.fluid` (flex:1). Dernier `.p
 
 #### `.split-60-40`
 Layout deux panneaux 60/40 fixe. Utilisé par Analysis et Import.  
-Panneaux : `.pane` (fond `--bg-sidebar`).
+Panneaux : `.pane`, séparés par une bordure `--bd`.
 
 #### `.pane`
 Conteneur de panneau : flex column, `overflow:hidden`, bordure droite `--bd`.  
@@ -136,7 +137,7 @@ Carte d'étape accordion. États : `.done` (bordure verte), `.active` (bordure a
 
 #### `.stat-tile`
 Tuile de statistique. `.lbl` (label ALL-CAPS), `.val` (valeur monospace 28px), `.sub` (sous-label monospace xs).  
-Variantes : `.stat-tile.warn` (valeur orange), `.stat-tile.acc` (valeur bleue).
+Variantes : `.stat-tile.warn` (valeur orange), `.stat-tile.acc` (valeur en couleur d'accent `--acc`).
 
 ### Écrans 3 & 4 — Strategy / Preview
 
@@ -148,19 +149,19 @@ Liste et boutons de sélection de stratégie (flex column, gap 4px).
 
 #### `table.t`
 Table de données dense. `thead th` : texte xs ALL-CAPS, `--fg-3`, fond `--bg-2`, sticky.  
-`tbody td` : texte xs, bordure basse `--bd`, padding `5px 10px`.  
-`tr:hover` → `--bg-2` | `tr.sel` → fond accent alpha + `box-shadow inset 2px` accent gauche.
+`tbody td` : texte xs, bordure basse `--bd`, padding `6px 10px`.  
+`tr:hover` → `--bg-2` | `tr.sel` → fond `--acc-bg`.
 
 #### `.badge`
 Badge inline. Fond translucide + bordure colorée selon variante.  
-Variantes sémantiques : `.badge.default`, `.badge.jsonb`, `.badge.jsonbi`, `.badge.flatten`, `.badge.normalize`, `.badge.pivot`, `.badge.skip`.  
+Variantes sémantiques : `.badge.default`, `.badge.jsonb`, `.badge.jsonbi`, `.badge.flatten`, `.badge.normalize`, `.badge.pivot`, `.badge.skip` (voir § 2).  
 Variantes état : `.badge.warn`, `.badge.danger`, `.badge.success`, `.badge.info`, `.badge.muted`, `.badge.acc`.  
 Variante forme : `.badge.sq` (border-radius réduit).
 
 ### Écrans 2 & 5 — Logs
 
 #### `.log`
-Panneau de log monospace. Fond `--bg-editor`, `overflow-y:auto`.  
+Panneau de log monospace. Fond `--bg-code`, `overflow-y:auto`.  
 Colorisation des lignes :  
 - `.log .ts` → gris faint (timestamp)  
 - `.log .warn` → orange  
@@ -172,7 +173,7 @@ Colorisation des lignes :
 ### Écrans 2 & 5 — Progress
 
 #### `.prog`
-Barre de progression. Hauteur 6px, fond `--bg-3`, dégradé vert `--success → --success-dark` (enfant `i`).  
+Barre de progression. Hauteur 6px, fond `--bg-input`, dégradé d'accent `--acc-lo → --acc` (enfant `i`).  
 `.prog.thick` → hauteur 10px.  
 `.prog.indeterminate` → animation de balayage gauche→droite.  
 `.prog.warn` → dégradé orange | `.prog.danger` → dégradé rouge.
@@ -180,14 +181,14 @@ Barre de progression. Hauteur 6px, fond `--bg-3`, dégradé vert `--success → 
 ### Écran 4 — DDL Preview
 
 #### `pre.code` / `.code`
-Bloc code monospace, fond `--bg-editor`, `white-space:pre-wrap`.  
+Bloc code monospace, fond `--bg-code`, `white-space:pre-wrap`.  
 Tokens DDL SQL :  
-- `.code .kw` → violet (`#b48cf0`, bold) — mots-clés SQL (`CREATE`, `TABLE`, `NOT NULL`, etc.)  
-- `.code .ty` → cyan (`#4dd0c9`) — types PG (`TEXT`, `INTEGER`, `JSONB`, etc.)  
-- `.code .pn` → blanc bold — noms de tables/colonnes  
+- `.code .kw` → violet (`#b48cf0`, gras) — mots-clés SQL (`CREATE`, `TABLE`, `NOT NULL`, etc.)  
+- `.code .ty` → teal (`#4dd0c9`) — types PG (`TEXT`, `INTEGER`, `JSONB`, etc.)  
+- `.code .pn` → `--fg` en gras — noms de tables/colonnes  
 - `.code .num` → orange — littéraux numériques  
 - `.code .str` → vert — littéraux chaîne  
-- `.code .com` → gris italique — commentaires
+- `.code .com` → `--fg-4` en italique — commentaires
 
 ### Utilitaires
 
@@ -207,29 +208,17 @@ Tokens DDL SQL :
 | `.cdot` | indicateur de statut rond — `.cdot.ok` (vert), `.cdot.warn` (orange), `.cdot.err` (rouge) |
 | `.mono` | force JetBrains Mono |
 
-### Héritage — `theme::css()`
-
-Classes historiques encore utilisées dans les composants inline :
-
-| Classe | Rôle |
-|---|---|
-| `.btn-primary` | Dégradé `PRIMARY → PRIMARY_DARK`, texte `ON_PRIMARY` |
-| `.btn-ghost` / `.btn-ghost--sm` | Fond transparent, texte `PRIMARY`, bordure ghost |
-| `.input-field` | Fond `BG_INPUT`, bordure basse uniquement, override webkit-autofill |
-| `.progress-track` / `.progress-bar` | Track 6px + bar dégradé vert |
-| `.log-panel` | Fond `BG_EDITOR`, FONT_CODE |
-
 ---
 
 ## 7. Règles d'application
 
 **À faire :**
-- Utiliser les tiers `BG_*` pour grouper des éléments liés sans boîtes ni lignes.
-- Utiliser `FONT_CODE` pour tout texte qui représente de la donnée (noms de tables, types SQL, chemins).
+- Utiliser les paliers de surface (`--bg`, `--bg-1` à `--bg-3`) pour grouper des éléments liés sans boîtes ni lignes.
+- Utiliser JetBrains Mono (`.mono`) pour tout texte qui représente de la donnée (noms de tables, types SQL, chemins).
 - Aligner les labels de métadonnées à droite, les données primaires à gauche (asymétrie intentionnelle).
 
 **À ne pas faire :**
-- Ne pas utiliser `border-radius > 6px`. Les outils professionnels restent stables avec `2px` ou `4px`.
-- Ne pas utiliser du noir pur (`#000`) ou du blanc pur (`#FFF`). Utiliser `BG_ROOT` et `ON_SURFACE`.
-- Ne pas utiliser de drop-shadows standard. Si un élément doit ressortir, augmenter son tier `BG_*`.
-- Ne pas hardcoder de valeurs hex dans les fichiers de composants — toujours passer par `theme::CONSTANTE`.
+- Ne pas dépasser `--r-lg` (10px), réservé aux cartes et panneaux (`.card`, `.step-card`, `.stat-tile`, `.tweaks-panel`) ; les contrôles restent à `--r-sm` ou `--r-md`.
+- Ne pas utiliser du noir pur (`#000`) ou du blanc pur (`#FFF`). Utiliser `--bg` et `--fg`.
+- Pas d'ombre en dehors des tokens `--shadow-*`. Si un élément doit ressortir, monter d'un palier de surface.
+- Ne pas hardcoder de valeurs hex dans les composants Rust : passer par une variable CSS (`var(--…)`) ou une classe de `assets/styles.css`.
