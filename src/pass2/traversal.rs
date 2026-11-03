@@ -214,7 +214,14 @@ pub(super) fn insert_jsonb_object<S: RowSink>(
         if col.is_generated {
             push_generated_col_insert(&mut builder, col, child_id, Some(parent_id), order);
         } else {
-            push_jsonb_col(&mut builder, value);
+            push_jsonb_col(
+                &mut builder,
+                anomalies,
+                &schema.name,
+                &col.name,
+                child_id,
+                value,
+            )?;
         }
     }
     write_row(sinks, anomalies, &schema.name, builder)?;

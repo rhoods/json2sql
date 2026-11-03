@@ -12,7 +12,8 @@
 //! - struct `InsertCtx` — contexte mutable du passage d'insertion récursif (sinks + anomalies).
 //! - fn `insert_object` — point d'entrée : écrit la ligne (colonnes + générées), gère le cas racine
 //!   JSONB, délègue `AutoSplit` et récurse dans les enfants.
-//! - fn `write_root_jsonb` — cas spécial racine en stratégie Jsonb : écrit le blob JSON puis recurse.
+//! - fn `write_root_jsonb` — cas spécial racine en stratégie Jsonb : écrit le blob JSON puis recurse ; octet nul →
+//!   `NULL` + anomalie, comme `push_jsonb_col` (#192).
 //! - fn `insert_child_object` — dispatch un objet vers la fonction d'insertion selon son `InferredStrategy`
 //!   (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`, `NormalizeDynamicKeys`, ou insertion standard récursive) ;
 //!   seul aiguillage pour un objet enfant, un élément de tableau et une cible de routage (#172) ; un objet seul dans
@@ -31,7 +32,8 @@
 //! - fn `write_eav_rows` — une ligne EAV (clé, valeur) par clé moyenne du compagnon `AutoSplit`.
 //! - fn `push_data_col` — résout et coerce la valeur d'une colonne de données (flatten, JSONB, coercition).
 //! - fn `push_generated_col_insert` — écrit une colonne générée (`j2s_id`, `j2s_parent_id`, `j2s_order`).
-//! - fn `push_jsonb_col` — sérialise une valeur JSON brute en colonne JSONB.
+//! - fn `push_jsonb_col` — sérialise une valeur JSON brute en colonne JSONB ; octet nul (jsonb refuse `\u0000`) →
+//!   `NULL` + anomalie (#192).
 
 use std::collections::HashMap;
 
@@ -40,8 +42,9 @@ use uuid::Uuid;
 
 use crate::anomaly::collector::AnomalyCollect;
 use crate::db::copy_sink::RowBuilder;
-use crate::db::copy_text::{escape_copy_text, CopyEscaped};
+use crate::db::copy_text::CopyEscaped;
 use crate::error::Result;
+use crate::pass2::coercer::contains_null_byte;
 use crate::pass2::sink::RowSink;
 use crate::schema::grouping::sample::is_present;
 use crate::schema::table_schema::{InferredStrategy, TableSchema};
@@ -92,8 +95,14 @@ fn push_data_col<A: AnomalyCollect>(
 
     // JSONB columns accept any JSON value — serialize the raw value directly.
     if matches!(col.pg_type, crate::schema::type_tracker::PgType::Jsonb) {
-        push_jsonb_col(builder, json_val);
-        return Ok(());
+        return push_jsonb_col(
+            builder,
+            anomalies,
+            &schema.name,
+            &col.name,
+            row_id,
+            json_val,
+        );
     }
 
     // Objects and non-array-typed arrays become child tables, not columns.
@@ -216,20 +225,39 @@ pub(super) fn push_generated_col_insert(
     }
 }
 
-pub(super) fn push_jsonb_col(builder: &mut RowBuilder, json_val: &Value) {
+/// Push the JSON of `json_val` into a JSONB column, or `NULL` + one anomaly when a string or an object key of it holds
+/// a null byte: jsonb refuses `\u0000`, the JSON of a null byte, and would abort the COPY (#192).
+pub(super) fn push_jsonb_col<A: AnomalyCollect>(
+    builder: &mut RowBuilder,
+    anomalies: &mut A,
+    table: &str,
+    column: &str,
+    row_id: Uuid,
+    json_val: &Value,
+) -> Result<()> {
     if matches!(json_val, Value::Null) {
         builder.push_null();
-        return;
+        return Ok(());
     }
-    let json_str = serde_json::to_string(json_val).unwrap_or_default();
-    match escape_copy_text(&json_str) {
-        Some(escaped) => builder.push_value(&escaped),
-        None => builder.push_null(),
+    let json = serde_json::to_string(json_val).unwrap_or_default();
+    if contains_null_byte(json_val) {
+        builder.push_null();
+        return anomalies.record(
+            table,
+            column,
+            &row_id.to_string(),
+            "JSONB",
+            &json,
+            "string_contains_null_byte",
+        );
     }
+    push_text(builder, &json);
+    Ok(())
 }
 
-/// Write the full object as a JSONB blob for a root table with Jsonb strategy,
-/// then recurse into child fields so their tables still get populated.
+/// Write the full object as a JSONB blob for a root table with Jsonb strategy, then recurse into child fields so their
+/// tables still get populated. The blob is `NULL` + one anomaly when the object holds a null byte, as in
+/// `push_jsonb_col` (#192).
 fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
@@ -239,11 +267,23 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
 ) -> Result<()> {
     let mut builder = RowBuilder::new();
     builder.push_uuid(row_id); // j2s_id (no j2s_parent_id for root)
-                               // A null byte in the JSON makes the blob NULL.
-    push_text(
-        &mut builder,
-        &serde_json::to_string(obj).unwrap_or_default(),
-    );
+    let json = serde_json::to_string(obj).unwrap_or_default();
+    if obj
+        .iter()
+        .any(|(k, v)| k.contains('\0') || contains_null_byte(v))
+    {
+        builder.push_null();
+        ctx.anomalies.record(
+            &schema.name,
+            "data",
+            &row_id.to_string(),
+            "JSONB",
+            &json,
+            "string_contains_null_byte",
+        )?;
+    } else {
+        push_text(&mut builder, &json);
+    }
     write_row(ctx.sinks, ctx.anomalies, &schema.name, builder)?;
     recurse_children(path_map, ctx, schema, obj, row_id)
 }

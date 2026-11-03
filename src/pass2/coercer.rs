@@ -181,7 +181,7 @@ fn coerce_pg_array_element(
 }
 
 /// True if a string or an object key of `value`, at any depth, holds a null byte.
-fn contains_null_byte(value: &Value) -> bool {
+pub(super) fn contains_null_byte(value: &Value) -> bool {
     match value {
         Value::String(s) => s.contains('\0'),
         Value::Array(items) => items.iter().any(contains_null_byte),
