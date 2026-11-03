@@ -56,6 +56,7 @@ symbols:
   - SchemaObserver::observe_root
   - TableEntry
   - TableEntry::merge
+  - TableEntry::array_column_type
   - TypeTracker
   - TypeTracker::observe
   - TypeTracker::merge
@@ -124,7 +125,7 @@ Les types inférés, et le type PostgreSQL (`PgType`) qu'ils donnent quand ils s
 | `Varchar` | `VarChar(n)` ou `Text` | toute autre chaîne ; `Text` au-delà de `text_threshold` |
 | `Text` | `Text` | **jamais produit** : le choix `VarChar` / `Text` se fait sur la longueur, dans `TypeTracker::to_pg_type` |
 | `Object` | — | un objet : devient une table enfant, jamais une colonne |
-| `Array` | — | un tableau : table enfant (tableau d'objets) ou colonne tableau (tableau de scalaires) |
+| `Array` | — | un tableau : table enfant (tableau d'objets) ou colonne tableau (tableau de scalaires) ; comme élément d'un tableau, il rend la colonne `JSONB[]` (#83) |
 
 ## 2. Flux
 
@@ -198,6 +199,10 @@ Le worker de l'IHM (`json2sql-worker`) ne fait jamais de Pass 1 : il reçoit les
   coupé entre deux éléments est lu comme une fin normale (#37).
 - **Ce que l'observateur ne voit pas** : un tableau vide (pareil qu'un champ absent) ; les scalaires d'un tableau qui
   contient aussi des objets (aucun type observé, pas de colonne : la Pass 2 en fait une anomalie, #86).
+- **Un seul élément tableau change le type de toute la colonne tableau** : `TableEntry::array_column_type` rend
+  `JSONB[]` dès que le compte `Array` du `TypeTracker` des éléments n'est pas nul, avant l'élargissement par les
+  occurrences scalaires (#48), sans seuil de rareté : un seuil ferait revenir la perte de #83. Un objet n'y arrive
+  jamais : il fait du tableau une table enfant.
 - **La Pass 1 ne s'annule pas.** Dans l'IHM, l'annulation fait `abort()` sur une tâche `spawn_blocking`, sans effet
   une fois lancée : la lecture va jusqu'au bout du fichier.
 

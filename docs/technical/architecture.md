@@ -235,7 +235,7 @@ Convertit les valeurs JSON en format texte COPY PostgreSQL selon le type PG cibl
 - **`CoerceResult`** : `Ok(CopyEscaped)`, `Null`, `Anomaly`, ou `OkWithAnomaly` (tableau écrit dont au moins un élément est mis à `NULL`)
 - **`coerce()`** : dispatch principal vers des coerceurs spécialisés par type
 - Types gérés : Integer (contrôle de plage i32), BigInt, DoublePrecision (NaN/Infini → NULL), Boolean (flexible : "yes"/"no"/"1"/"0"...), UUID, Date, Timestamp (seules les chaînes que la Pass 1 type ainsi, `infer_string_type`, sinon anomalie `string_invalid_format`), Text, VarChar, Jsonb, Array PG
-- **`coerce_pg_array()`** : sérialise un tableau JSON en litéral PostgreSQL `{elem1,elem2,NULL}`. Un élément non convertible (type, longueur d'un `VARCHAR(n)`, octet nul) devient `NULL` et le premier est rapporté : une seule anomalie par cellule
+- **`coerce_pg_array()`** : sérialise un tableau JSON en litéral PostgreSQL `{elem1,elem2,NULL}`. Un élément non convertible (type, longueur d'un `VARCHAR(n)`, octet nul) devient `NULL` et le premier est rapporté : une seule anomalie par cellule. Dans un `JSONB[]` (#83), chaque élément est écrit en JSON ; un octet nul, que jsonb refuse, rend l'élément `NULL`
 
 ### `runner/`
 
@@ -351,7 +351,7 @@ Observation mutable row-by-row pendant le streaming JSON.
 
 - **`SchemaObserver`** : accumule les observations dans un `IndexMap<String, TableEntry>` indexé par `path_key` (chemin JSON joint par `\x00`)
 - **`TableEntry`** (privé) : état d'observation d'une table (colonnes `IndexMap<String, TypeTracker>`, compteurs, type d'enfants)
-- **`observe_root()`** : parcours d'un objet racine avec une pile explicite, sans récursion (pas de dépassement de pile sur une imbrication profonde) — un champ scalaire passe par `TableEntry::observe_field` (son `TypeTracker`), un tableau par `observe_array_field` (objets → table enfant, scalaires → colonne PG array), un objet est empilé comme table enfant
+- **`observe_root()`** : parcours d'un objet racine avec une pile explicite, sans récursion (pas de dépassement de pile sur une imbrication profonde) — un champ scalaire passe par `TableEntry::observe_field` (son `TypeTracker`), un tableau par `observe_array_field` (objets → table enfant, scalaires → colonne PG array ; `TableEntry::array_column_type` en fait un `JSONB[]` si un élément est un tableau), un objet est empilé comme table enfant
 - **`merge()`** : fusionne deux `SchemaObserver` (parallélisme de la Pass 1)
 
 ### `finalizer/`

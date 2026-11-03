@@ -157,7 +157,7 @@ Un tableau de scalaires n'est jamais une table : c'est une colonne tableau de la
 | `"tags": []` | `{}` (tableau vide) |
 | `tags` absent, ou `"tags": null` | `NULL` |
 | `"tags": "bio"` (champ tantôt scalaire, tantôt tableau) | `{bio}` : une seule colonne tableau, la valeur scalaire y est un tableau à un élément ; le type des éléments est élargi si besoin (entier + texte → texte) |
-| `"tags": [["a"], ["b"]]` (tableaux imbriqués) | colonne `TEXT[]` dont chaque élément est le JSON du sous-tableau, en texte |
+| `"coordinates": [[0, 0], [1, 0]]` (tableaux imbriqués) | colonne `JSONB[]` dès qu'un élément du champ est un tableau, même si d'autres lignes y mettent des nombres ou des chaînes : chaque élément garde son JSON, et `to_jsonb(coordinates)` redonne le tableau d'origine (`[[0, 0], [1, 0]]`) |
 
 Requêtes, sur l'import de [`examples/products.jsonl`](../../examples/products.jsonl) :
 
