@@ -17,9 +17,8 @@
 //! - fn `coerce_bigint` — coercition vers BIGINT, produit `Ok`/`Anomaly`.
 //! - fn `coerce_float` — coercition vers DOUBLE PRECISION, produit `Ok`/`Anomaly`.
 //! - fn `coerce_bool` — coercition vers BOOLEAN, produit `Ok`/`Anomaly`.
-//! - fn `coerce_uuid` — coercition vers UUID, produit `Ok`/`Anomaly`.
-//! - fn `coerce_date` — coercition vers DATE, produit `Ok`/`Anomaly`.
-//! - fn `coerce_timestamp` — coercition vers TIMESTAMP, produit `Ok`/`Anomaly`.
+//! - fn `coerce_formatted` — coercition vers UUID, DATE ou TIMESTAMP : seule une chaîne que la Pass 1
+//!   type ainsi passe (#116), produit `Ok`/`Anomaly`.
 //! - fn `coerce_text` — coercition vers TEXT/VARCHAR/JSONB, produit `Ok`/`Anomaly`.
 //! - fn `format_float` — formate un f64 fini en chaîne, `None` si NaN/infini.
 //! - fn `json_type_name` — nom du type JSON pour les messages d'anomalie.
@@ -27,7 +26,7 @@
 use serde_json::Value;
 
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};
-use crate::schema::type_tracker::PgType;
+use crate::schema::type_tracker::{infer_string_type, InferredType, PgType};
 
 /// Result of attempting to coerce a JSON value to a `PgType`.
 pub enum CoerceResult {
@@ -63,9 +62,11 @@ pub fn coerce(value: &Value, pg_type: &PgType) -> CoerceResult {
         PgType::BigInt => coerce_bigint(value),
         PgType::DoublePrecision => coerce_float(value),
         PgType::Boolean => coerce_bool(value),
-        PgType::Uuid => coerce_uuid(value),
-        PgType::Date => coerce_date(value),
-        PgType::Timestamp => coerce_timestamp(value),
+        PgType::Uuid => coerce_formatted(value, &[InferredType::Uuid]),
+        // PostgreSQL reads a date as midnight, and keeps the day of a timestamp in a DATE
+        PgType::Date | PgType::Timestamp => {
+            coerce_formatted(value, &[InferredType::Date, InferredType::Timestamp])
+        }
         PgType::VarChar(max_len) => {
             let result = coerce_text(value);
             // Guard against values longer than the inferred VARCHAR width.
@@ -158,8 +159,8 @@ fn coerce_pg_array_element(
                 }
             }
         }
-        // Dates, UUIDs and timestamps must be JSON strings, as for their scalar coerce_*
-        // (the content of a date is not checked there either).
+        // Dates, UUIDs and timestamps must be JSON strings, as for a scalar; unlike a scalar
+        // (`coerce_formatted`), their format is not checked here.
         PgType::Uuid | PgType::Date | PgType::Timestamp if !matches!(value, Value::String(_)) => {
             Err((value.to_string(), json_type_name(value)))
         }
@@ -332,47 +333,17 @@ fn coerce_bool(value: &Value) -> CoerceResult {
     }
 }
 
-fn coerce_uuid(value: &Value) -> CoerceResult {
+/// UUID, DATE, TIMESTAMP: only a string that Pass 1 types as one of `formats` is written, as is (ASCII
+/// with nothing to escape). `PostgreSQL` would reject anything else and abort the COPY (#116).
+fn coerce_formatted(value: &Value, formats: &[InferredType]) -> CoerceResult {
     match value {
-        Value::String(s) => escape_copy_text(s).map_or_else(
-            || CoerceResult::Anomaly {
-                actual_value: value.to_string(),
-                actual_type: "string_contains_null_byte",
-            },
-            CoerceResult::Ok,
-        ),
-        _ => CoerceResult::Anomaly {
-            actual_value: value.to_string(),
-            actual_type: json_type_name(value),
+        Value::String(s) if formats.contains(&infer_string_type(s)) => {
+            CoerceResult::Ok(CopyEscaped::from_safe_ascii(s.as_str()))
+        }
+        Value::String(s) => CoerceResult::Anomaly {
+            actual_value: s.clone(),
+            actual_type: "string_invalid_format",
         },
-    }
-}
-
-fn coerce_date(value: &Value) -> CoerceResult {
-    match value {
-        Value::String(s) => escape_copy_text(s).map_or_else(
-            || CoerceResult::Anomaly {
-                actual_value: value.to_string(),
-                actual_type: "string_contains_null_byte",
-            },
-            CoerceResult::Ok,
-        ),
-        _ => CoerceResult::Anomaly {
-            actual_value: value.to_string(),
-            actual_type: json_type_name(value),
-        },
-    }
-}
-
-fn coerce_timestamp(value: &Value) -> CoerceResult {
-    match value {
-        Value::String(s) => escape_copy_text(s).map_or_else(
-            || CoerceResult::Anomaly {
-                actual_value: value.to_string(),
-                actual_type: "string_contains_null_byte",
-            },
-            CoerceResult::Ok,
-        ),
         _ => CoerceResult::Anomaly {
             actual_value: value.to_string(),
             actual_type: json_type_name(value),
@@ -591,6 +562,43 @@ mod tests {
             matches!(coerce(&ok_float, &PgType::BigInt), CoerceResult::Ok(_)),
             "whole-number float within i64 range must coerce OK"
         );
+    }
+
+    /// #116 : une colonne UUID, DATE ou TIMESTAMP ne reçoit que les formats que la Pass 1 type ainsi
+    /// (une date ou un timestamp pour DATE et TIMESTAMP) ; le reste devient NULL + anomalie au lieu
+    /// d'arrêter le COPY.
+    #[test]
+    fn test_uuid_date_timestamp_check_the_format() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        for (value, pg_type) in [
+            (uuid, PgType::Uuid),
+            ("2024-01-15", PgType::Date),
+            ("2024-01-15T10:30:00Z", PgType::Date),
+            ("2024-01-15T10:30:00Z", PgType::Timestamp),
+            ("2024-01-15", PgType::Timestamp),
+        ] {
+            assert_eq!(coerce_ok(&json!(value), &pg_type), value, "{pg_type:?}");
+        }
+        for (value, pg_type) in [
+            ("2024-01-15", PgType::Uuid),
+            ("not-a-uuid", PgType::Uuid),
+            (uuid, PgType::Date),
+            (uuid, PgType::Timestamp),
+            ("2024-13-45", PgType::Date),
+            ("2024-01-15T10:30 junk", PgType::Timestamp),
+            ("2024\x00-01-15", PgType::Date),
+        ] {
+            assert!(
+                matches!(
+                    coerce(&json!(value), &pg_type),
+                    CoerceResult::Anomaly {
+                        actual_type: "string_invalid_format",
+                        ..
+                    }
+                ),
+                "{value:?} → {pg_type:?}"
+            );
+        }
     }
 
     // ── issue #48 : occurrence scalaire dans une colonne PG array → tableau à un élément ──
