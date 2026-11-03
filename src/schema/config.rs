@@ -2030,7 +2030,10 @@ mod tests {
         }
         for n in [1, 4, 255] {
             let t = primed(&PgType::VarChar(n));
-            assert!(matches!(t, PgType::VarChar(m) if m >= n), "VARCHAR({n}) → {t:?}");
+            assert!(
+                matches!(t, PgType::VarChar(m) if m >= n),
+                "VARCHAR({n}) → {t:?}"
+            );
         }
         for wide in [
             PgType::VarChar(300),

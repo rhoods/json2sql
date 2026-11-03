@@ -132,7 +132,7 @@ La table n'est pas vidée : seules les clés de la grille (clés suffixées et c
 
 > **Limite.** L'élargissement se fait colonne par colonne. Une colonne de suffixe très creuse avec une chaîne (par exemple 3 valeurs, dont 1 chaîne : 33 %) reste en `VARCHAR`, et toute la colonne du pivot passe en `TEXT`. Les unions de tables sœurs (`wide_strategies.rs`) suivent la même règle.
 
-Ce comportement peut être forcé manuellement dans le fichier de config TOML via `strategy = "structured_pivot"` et `suffix_columns = ["_100g", "_unit"]`. L'override passe par le même découpage (`apply_structured_pivot_split`) ; le rejouer sur un snapshot qui a déjà le compagnon ne change rien.
+Ce comportement peut être forcé manuellement dans le fichier de config TOML via `strategy = "structured_pivot"` et `suffix_columns = ["_100g", "_unit"]`. L'override passe par le même découpage (`apply_structured_pivot_split`) ; le rejouer sur un snapshot qui a déjà le compagnon ne change rien. Les colonnes de suffixe sont typées d'après les types déjà résolus des clés : un `VARCHAR(n)` garde sa longueur, avec la marge de 20 % (#117) ; les colonnes tableau PG et `JSONB` restent sur la table d'identité.
 
 ---
 
