@@ -6,7 +6,7 @@
 //! stay within `PostgreSQL`'s 63-byte `NAMEDATALEN` limit.
 //!
 //! Fonctions :
-//! - struct `TruncatedName` — nom de table tronqué pour tenir dans la limite 63 octets `PostgreSQL`.
+//! - struct `TruncatedName` — nom de table raccourci pour tenir en 53 octets (`PG_TABLE_MAX_IDENT`).
 //! - struct `ColumnCollision` — collision de noms de colonnes : plusieurs champs JSON → même identifiant SQL.
 //! - struct `ColumnNameRegistry` — registre par table pour la détection/résolution de collisions de colonnes.
 //! - fn `ColumnNameRegistry::new` — construit un registre vide.
@@ -23,7 +23,7 @@
 //! - fn `NamingRegistry::column_name` — nom de colonne PG sûr pour un champ JSON.
 //! - fn `NamingRegistry::ensure_unique` — résout les collisions de noms de table (suffixe hash déterministe).
 //! - fn `NamingRegistry::hash_suffixed_name` — construit un nom avec suffixe hash (repli compteur si collision).
-//! - fn `NamingRegistry::truncated_names` — noms tronqués à 63 octets (pour les warnings).
+//! - fn `NamingRegistry::truncated_names` — noms de tables raccourcis à 53 octets (pour les warnings).
 //! - fn `sanitize_ascii` — sanitisation rapide pour entrée tout-ASCII (minuscules, `_` pour non-alphanumérique).
 //! - fn `sanitize_unicode` — sanitisation pour entrée non-ASCII (même règles, chemin Unicode).
 //! - fn `sanitize_identifier` — dispatch vers `sanitize_ascii`/`sanitize_unicode` selon le contenu.
@@ -49,7 +49,7 @@ pub const PG_TABLE_MAX_IDENT: usize = 53;
 /// Characters reserved for the hash suffix when truncating.
 const HASH_SUFFIX_LEN: usize = 8; // "_" + 7 hex chars
 
-/// A table name that was truncated to fit within the 63-byte `PostgreSQL` limit.
+/// A table name that was shortened to fit within `PG_TABLE_MAX_IDENT` (53 bytes).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TruncatedName {
     /// Dot-joined original path, e.g. "users.orders.items"
@@ -168,7 +168,7 @@ impl NamingRegistry {
     }
 
     /// Convert a hierarchical path (e.g. `["users", "orders", "items"]`) to a
-    /// safe `PostgreSQL` table name (<= 63 bytes, lowercase, no special chars).
+    /// safe `PostgreSQL` table name (<= `PG_TABLE_MAX_IDENT` = 53 bytes, lowercase, no special chars).
     #[allow(dead_code)]
     pub fn table_name(&mut self, path: &[String]) -> String {
         let key = path.join(&PATH_SEP.to_string());
@@ -302,7 +302,7 @@ impl NamingRegistry {
         }
     }
 
-    /// Returns all table names that were truncated to fit the 63-byte `PostgreSQL` limit.
+    /// Returns all table names that were shortened to fit `PG_TABLE_MAX_IDENT` (53 bytes).
     #[must_use]
     pub fn truncated_names(&self) -> &[TruncatedName] {
         &self.truncations

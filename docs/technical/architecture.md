@@ -202,7 +202,7 @@ Retourne `Pass1Result` contenant :
 - `schemas` : liste topologique des `TableSchema`
 - `total_rows` : nombre total de lignes lues
 - `stats` : statistiques de colonnes pour le rapport
-- `truncated_names` : noms de tables tronqués à 63 bytes
+- `truncated_names` : noms de tables raccourcis pour tenir en 53 octets
 - `column_collisions` : collisions de noms de colonnes résolues par hash
 
 ---
@@ -320,19 +320,22 @@ Modèle de données du schéma et toute la logique d'inférence.
 
 Définit les types de données fondamentaux du schéma :
 
-- **`WideStrategy`** : stratégie de stockage pour les tables larges
+- **`InferredStrategy`** : stratégie de stockage d'une table, choisie par la Pass 1 et par le TOML
   - `Columns` : colonnes normales (défaut)
   - `Pivot` : EAV générique
   - `Jsonb` : objet JSONB
   - `StructuredPivot(SuffixSchema)` : pivot par pattern de suffixes
-  - `KeyedPivot(SiblingSchema)` : fusion de tables sœurs
+  - `SiblingCollapse(SiblingSchema)` : fusion de tables sœurs en une table, une ligne par clé
+  - `SiblingCollapseMulti(Vec<SiblingGroup>)` : fusion de tables sœurs en une table pivot par forme de clé
   - `AutoSplit { stable_threshold, rare_threshold, medium_keys, wide_table_name }` : tri par fréquence
-  - `Ignore` : clé supprimée
+  - `NormalizeDynamicKeys { id_column }`, `Flatten { prefix, max_depth }`, `JsonbFlatten` : surcharges (TOML ou IHM)
+  - `Ignore` : clé supprimée ; marque aussi les tables absorbées par une fusion de tables sœurs
+- **`UserOverride`** : choix de l'IHM (`Columns`, `Pivot`, `Jsonb`, `Skip`, `JsonbFlatten`, `Flatten`, `NormalizeDynamicKeys`), prioritaire sur `InferredStrategy` ; `TableSchema::effective_strategy` donne la stratégie retenue
 - **`ColumnSchema`** : définition d'une colonne (nom PG, nom original, type, nullable, is_generated)
 - **`TableSchema`** : définition complète d'une table (nom, chemin JSON, colonnes, parent, profondeur, stratégie)
 - **`ChildKind`** : `Object`, `ObjectArray`
 - **`KeyShape`** : forme des clés détectées (Numeric, IsoLang, Slug, Mixed)
-- **`SuffixSchema`** / **`SiblingSchema`** : métadonnées pour StructuredPivot et KeyedPivot. `SiblingSchema` contient le nom de la colonne clé, la forme des clés (`KeyShape`), le flag `array_children` (ObjectArray vs Object) et `data_col_name` (nom de la colonne JSONB brute, toujours `j2s_data`)
+- **`SuffixSchema`** / **`SiblingSchema`** : métadonnées pour StructuredPivot et SiblingCollapse. `SiblingSchema` contient le nom de la colonne clé (`key_col_name`), la forme des clés (`KeyShape`) et le flag `array_children` (ObjectArray vs Object) ; il n'y a pas de colonne JSONB brute
 
 ### `type_tracker.rs`
 
@@ -348,16 +351,16 @@ Observation mutable row-by-row pendant le streaming JSON.
 
 - **`SchemaObserver`** : accumule les observations dans un `IndexMap<String, TableEntry>` indexé par `path_key` (chemin JSON joint par `\x00`)
 - **`TableEntry`** (privé) : état d'observation d'une table (colonnes `IndexMap<String, TypeTracker>`, compteurs, type d'enfants)
-- **`observe_root()`** → **`observe_object()`** → **`observe_array()`** : traversée récursive — enregistre chaque champ JSON dans le `TypeTracker` correspondant
+- **`observe_root()`** : parcours d'un objet racine avec une pile explicite, sans récursion (pas de dépassement de pile sur une imbrication profonde) — un champ scalaire passe par `TableEntry::observe_field` (son `TypeTracker`), un tableau par `observe_array_field` (objets → table enfant, scalaires → colonne PG array), un objet est empilé comme table enfant
 - **`merge()`** : fusionne deux `SchemaObserver` (parallélisme de la Pass 1)
 
 ### `finalizer/`
 
 Transformations post-stream sur `Vec<TableSchema>` — après que l'observation est terminée.
 
-- **`SchemaFinalizer`** : configuration (`wide_column_threshold`, `sibling_threshold`, `jaccard_threshold`…)
+- **`SchemaFinalizer`** : configuration (`wide_column_threshold`, `sibling_threshold`, `sibling_jaccard`…)
 - **`run()`** : pipeline complet — construit les `TableSchema`, détecte les tables larges, applique les stratégies via `wide_strategies`, trie topologiquement, délègue la détection de sœurs à `cascading::finalize_cascading()`
-- **`build_entry_schema()`** : convertit un `TableEntry` en `TableSchema` avec résolution des types
+- **`build_base_schemas()`** : phase 1, une `TableSchema` par `TableEntry` (en parallèle, via `build_entry_schema_base()`), avec résolution des types et sans stratégie large
 - **`apply_column_limit_guard()`** : détecte les tables dépassant `PG_MAX_COLUMNS` (1 600) et applique Jsonb
 - **`exclude_absorbed_children()`** : supprime les tables enfants absorbées par une stratégie wide (Flatten, NormalizeDynamicKeys…)
 - **`OverflowWarning`** : type retourné quand une table est forcée en Jsonb par le garde-fou
@@ -366,7 +369,7 @@ Transformations post-stream sur `Vec<TableSchema>` — après que l'observation 
 
 Algorithme de détection et fusion des tables sœurs (sibling detection).
 
-- **`finalize_cascading()`** : détecte les tables sœurs candidate et les fusionne en `KeyedPivot` ou `MultiKeyedPivot`
+- **`finalize_cascading()`** : détecte les tables sœurs candidate et les fusionne en `SiblingCollapse` ou `SiblingCollapseMulti`
 - **`child_compatibility_score()`** : score de compatibilité structurelle entre deux tables sœurs (jaccard sur les colonnes)
 - **`pairwise_jaccard_min()`** : jaccard minimum parmi toutes les paires d'un groupe
 - **`build_parent_child_maps()`**, **`run_sibling_wave()`**, **`process_co_sibling_group()`** : helpers de l'algorithme de fusion par vagues
@@ -383,7 +386,7 @@ Enum `StrategyName` des heuristiques désactivables via `--disable-strategy`.
 
 Application des stratégies de stockage wide sur les `TableSchema`.
 
-- **`apply_wide_strategy_columns()`** : restructure les colonnes d'une table selon une `WideStrategy` (Pivot, Jsonb, StructuredPivot…)
+- **`apply_wide_strategy_columns()`** : restructure les colonnes d'une table selon une `InferredStrategy` (Pivot, Jsonb, StructuredPivot…)
 - **`apply_structured_pivot_columns()`** : colonnes pour StructuredPivot — `(name TEXT, value <type>, <suffix_col>...)`
 - **`apply_normalize_dynamic_keys()`** : collapse les sous-objets dynamiques d'une table en une seule table normalisée avec colonne d'ID
 - **`apply_flatten()`** : inline les colonnes scalaires d'un enfant dans le parent avec un préfixe
@@ -410,17 +413,18 @@ Façade publique (~100 lignes de code prod) qui délègue à `SchemaObserver`, `
 
 Sanitisation et déduplication des noms d'identifiants PostgreSQL.
 
-- **`NamingRegistry`** : mappe les chemins JSON vers des noms de tables PG uniques. Gère les truncations et les collisions via hash 7 hex (FNV).
+- **`NamingRegistry`** : mappe les chemins JSON vers des noms de tables PG uniques, de 53 octets au plus (`PG_TABLE_MAX_IDENT`) : un nom trop long perd d'abord les premiers segments de son chemin, un hash 7 hex (FNV) n'arrive qu'en dernier recours ou en cas de collision.
+- **`derived_table_name()`** / **`group_table_name()`** : nom d'une table dérivée d'une autre (`_pivot`, `_key`, table fusionnée de la cascade…) ou d'une table de groupe de colonnes, en 53 octets aussi
 - **`ColumnNameRegistry`** : détecte les collisions de noms de colonnes (plusieurs clés JSON → même identifiant SQL)
 - **`sanitize_identifier()`** : minuscules, non-alphanumériques → `_`, déduplication des `_`
-- **`truncate_to_pg_limit()`** : tronque à 63 bytes en préservant un hash d'unicité
+- **`truncate_to_pg_limit()`** : tronque à 63 octets en préservant un hash d'unicité ; sert aux noms de colonnes et aux noms de contraintes `pk_…` / `fk_…_parent` (#179)
 
 ### `config.rs`
 
 Parsing et application des surcharges manuelles depuis un fichier TOML.
 
-- **`SchemaConfig`** : structure parsée depuis le TOML (`HashMap<table_name, TableOverride>`)
-- **`TableOverride`** : strategy + suffix_columns + overrides de colonnes
+- **`SchemaConfig`** : structure parsée depuis le TOML. `tables` : une section par table (`table_name` → clés de la section : `strategy`, `suffix_columns`, `column_groups`, types de colonnes…, gardées en `toml::Value`) ; `group` : les groupes de fusion manuels
+- **`GroupConfig`** : un groupe de fusion (`strategy`, `members`)
 - **`apply_overrides()`** : applique les surcharges sur la liste de `TableSchema` finalisés
 - **`parse_pg_type()`** : parse les chaînes de type (`INTEGER`, `BIGINT`, `VARCHAR(255)`, etc.)
 
@@ -455,7 +459,7 @@ Tests d'intégration Rust qui testent des cas end-to-end sur une vraie base Post
 | Fichier | Couverture |
 |---|---|
 | `integration_schema.rs` | Inférence de schéma : tables, colonnes, types, normalisation |
-| `integration_strategies.rs` | Stratégies wide : AutoSplit, Pivot, Jsonb, StructuredPivot, KeyedPivot |
+| `integration_strategies.rs` | Stratégies wide : AutoSplit, Pivot, Jsonb, StructuredPivot, SiblingCollapse |
 | `integration_overrides.rs` | Surcharges TOML : types forcés, stratégies manuelles |
 | `integration_anomalies.rs` | Pipeline d'anomalies : détection, rapport, max-anomaly-rate |
 | `common/` | Helpers partagés (connexion DB, setup/teardown de schéma) |

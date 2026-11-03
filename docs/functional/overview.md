@@ -65,7 +65,8 @@ Une seule chaîne suffit à faire passer la colonne en texte : `1000 INTEGER + 3
 ### Nommage des tables
 
 - Noms normalisés : minuscules, caractères non-alphanumériques → `_`, underscores consécutifs fusionnés
-- Limite PostgreSQL de 63 octets : si dépassée, les derniers caractères sont remplacés par `_` + hash 7 hex du nom original (collision-safe)
+- Un nom de table tient en 53 octets, pour que les noms qui en dérivent (`pk_…`, `fk_…_parent`, `j2s_…_id`) restent sous la limite de 63 octets de PostgreSQL. Un nom trop long perd d'abord le début de son chemin (`openfoodfacts_products_ecoscore_extended_data_impact_likeliest_recipe` → `ecoscore_extended_data_impact_likeliest_recipe`) ; un hash 7 hex n'arrive qu'en dernier recours, ou quand deux chemins donneraient le même nom
+- Un nom de colonne tient en 63 octets : au-delà, ses derniers caractères sont remplacés par `_` + un hash 7 hex du nom d'origine
 - `NOT NULL` si aucun null observé en passe 1
 
 ### Performance d'insertion
