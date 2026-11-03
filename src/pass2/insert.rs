@@ -1213,6 +1213,79 @@ mod tests {
         assert!(empty.is_empty(), "tables without rows: {empty:?}");
     }
 
+    /// Under a `SiblingCollapseMulti` routing table (#193), a key with its own `ObjectArray` table, always an array of
+    /// objects (`tags`) or an object in one row and an array in the other (`links`, #169), gets one row per element; so
+    /// does an array under a sibling key, which `dispatch_child_routes` routes (`sizes`).
+    #[test]
+    fn an_array_of_objects_under_a_routing_table_reaches_its_table() {
+        let fixture = "multi_collapse_object_array.jsonl";
+        let path_map = pass1_path_map(fixture);
+        let by_name = |n: &str| path_map.values().find(|s| s.name == n).unwrap();
+        assert!(
+            matches!(
+                &*by_name("p_images").effective_strategy(),
+                InferredStrategy::SiblingCollapseMulti(_)
+            ),
+            "the fixture must reach a routing table"
+        );
+        for name in ["p_images_tags", "p_images_links"] {
+            let table = by_name(name);
+            assert_eq!(table.parent_table.as_deref(), Some("p_images"), "{name}");
+            assert!(
+                matches!(table.child_kind, Some(ChildKind::ObjectArray)),
+                "{name}"
+            );
+        }
+
+        let mut sinks: HashMap<String, CaptureSink> = path_map
+            .values()
+            .map(|s| (s.name.clone(), CaptureSink(Vec::new())))
+            .collect();
+        let mut recorder = Recorder::default();
+        let root = by_name("p");
+        let text = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(fixture),
+        )
+        .unwrap();
+        for line in text.lines() {
+            let obj: serde_json::Map<String, Value> = serde_json::from_str(line).unwrap();
+            let ctx = &mut InsertCtx {
+                sinks: &mut sinks,
+                anomalies: &mut recorder,
+            };
+            insert_object(&path_map, ctx, root, &obj, ID, None, None).unwrap();
+        }
+
+        assert_eq!(recorder.anomalies, []);
+        // (value, j2s_order) of each row
+        for (table, column, expected) in [
+            ("p_images_tags", "name", &["a 0", "b 1", "c 0"][..]),
+            ("p_images_links", "url", &["x 0", "y 0", "z 1"]),
+            (
+                "p_images_key_sizes",
+                "w",
+                &["100 0", "200 1", "300 0", "400 0"],
+            ),
+        ] {
+            let schema = by_name(table);
+            let position = |name: &str| schema.columns.iter().position(|c| c.name == name).unwrap();
+            let (value, order) = (position(column), position("j2s_order"));
+            let mut rows: Vec<String> = sinks[table]
+                .0
+                .iter()
+                .map(|r| {
+                    let text = String::from_utf8_lossy(r);
+                    let cells: Vec<&str> = text.trim_end_matches('\n').split('\t').collect();
+                    format!("{} {}", cells[value], cells[order])
+                })
+                .collect();
+            rows.sort();
+            assert_eq!(rows, expected, "{table}: value and j2s_order");
+        }
+    }
+
     /// `x` is an object in one row and an array of objects in the other (#169), in both orders: its table has a row
     /// for every element, and the lone object is an array of one element (`j2s_order` 0: the column is NOT NULL).
     #[test]
