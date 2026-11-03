@@ -261,6 +261,99 @@ async fn test_array_element_overflow_is_an_anomaly_not_a_copy_error() {
 }
 
 // ---------------------------------------------------------------------------
+// #83, point 2 — GeoJSON : `coordinates` vaut [x, y] (Point) ou des tableaux de tableaux (Polygon,
+// MultiPolygon), et `ALIASES` mêle chaînes et tableaux. Chaque cellule se relit à l'identique, dans
+// les deux ordres de lignes. Avant : un Point suffisait à typer la colonne en DOUBLE PRECISION[] et
+// chaque polygone devenait {NULL} ; un tableau parmi des chaînes devenait NULL (VARCHAR(n) trop court).
+// La géométrie `null` du fichier de l'issue est retirée : elle relève du point 3 (colonne fantôme).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_nested_arrays_are_kept_in_both_row_orders() {
+    use std::collections::BTreeMap;
+
+    use serde_json::Value;
+
+    let input = std::fs::read_to_string(common::fixture("geojson_mixed.jsonl")).unwrap();
+    let rows: Vec<Value> = input
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    for reversed in [false, true] {
+        let mut ordered: Vec<String> = rows.iter().map(ToString::to_string).collect();
+        if reversed {
+            ordered.reverse();
+        }
+        let file = tempfile::Builder::new()
+            .suffix(".jsonl")
+            .tempfile()
+            .unwrap();
+        std::fs::write(file.path(), ordered.join("\n")).unwrap();
+        let (path, rows) = (file.path().to_path_buf(), &rows);
+        common::with_schema_url(|client, schema, url| async move {
+            let p1 = pass1::runner::run(&path, &common::pass1_config("features"), None).unwrap();
+            db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+                .await
+                .unwrap();
+            let p2 = pass2::runner::run(
+                &path,
+                &p1.schemas,
+                &client,
+                &url,
+                &common::pass2_config("features", &schema),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // (object, field naming the row, array field)
+            for (object, key, field) in [
+                ("geometry", "type", "coordinates"),
+                ("properties", "NAME", "ALIASES"),
+            ] {
+                let table = p1
+                    .schemas
+                    .iter()
+                    .find(|s| s.find_by_original(field).is_some())
+                    .unwrap();
+                let sql = format!(
+                    "SELECT \"{}\", to_jsonb(\"{}\")::text FROM \"{schema}\".\"{}\"",
+                    table.find_by_original(key).unwrap().name,
+                    table.find_by_original(field).unwrap().name,
+                    table.name
+                );
+                let stored: BTreeMap<String, Option<Value>> = client
+                    .query(&sql, &[])
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|r| {
+                        let json: Option<String> = r.get(1);
+                        (r.get(0), json.map(|j| serde_json::from_str(&j).unwrap()))
+                    })
+                    .collect();
+                let expected: BTreeMap<String, Option<Value>> = rows
+                    .iter()
+                    .map(|row| {
+                        let obj = &row[object];
+                        (
+                            obj[key].as_str().unwrap().to_owned(),
+                            obj.get(field).cloned(),
+                        )
+                    })
+                    .collect();
+                assert_eq!(stored, expected, "{field}, reversed: {reversed}");
+            }
+            assert_eq!(
+                p2.anomaly_collector.total_anomalies(),
+                0,
+                "reversed: {reversed}"
+            );
+        })
+        .await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // #116 — formats incompatibles dans une colonne (UUID + dates, UUID + timestamps, dates + un
 // nombre) et dates qui n'existent pas (`2024-13-45`, `…T10:30 junk`) : la Pass 1 type ces colonnes
 // en texte, rien n'est perdu. Avant : DATE ou TIMESTAMP, et PostgreSQL arrêtait le COPY sur la
@@ -463,4 +556,77 @@ async fn test_key_seen_as_object_and_as_array_of_objects_keeps_every_element() {
             .await;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Éléments d'un tableau UUID[], DATE[] ou TIMESTAMP[] imposé (snapshot --schema-input périmé) qui ne
+// sont pas de ce format : NULL dans le tableau + une anomalie par cellule, le COPY continue, comme
+// pour un scalaire depuis #116. Avant : élément écrit sans vérification, et le COPY s'arrêtait.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_array_element_of_another_format_is_an_anomaly() {
+    use json2sql::schema::type_tracker::PgType;
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("anomalies_dates_array.jsonl");
+        let mut p1 = pass1::runner::run(&path, &common::pass1_config("events"), None).unwrap();
+        let events = p1.schemas.iter_mut().find(|s| s.name == "events").unwrap();
+        for (column, elem) in [
+            ("refs", PgType::Uuid),
+            ("days", PgType::Date),
+            ("ats", PgType::Timestamp),
+        ] {
+            events
+                .columns
+                .iter_mut()
+                .find(|c| c.name == column)
+                .unwrap()
+                .pg_type = PgType::Array(Box::new(elem));
+        }
+
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("events", &schema),
+            None,
+        )
+        .await
+        .expect("an element of another format must not abort the COPY");
+
+        // first row: one faulty element per column
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 3);
+        let cells: Vec<Vec<String>> = client
+            .query(
+                &format!(
+                    "SELECT \"refs\"::text, \"days\"::text, \"ats\"::text \
+                     FROM \"{schema}\".\"events\" ORDER BY \"id\""
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (0..3).map(|i| r.get(i)).collect())
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                [
+                    "{550e8400-e29b-41d4-a716-446655440000,NULL}",
+                    "{2024-01-15,NULL}",
+                    "{\"2024-01-15 10:30:00\",NULL}",
+                ],
+                [
+                    "{6ba7b810-9dad-11d1-80b4-00c04fd430c8}",
+                    "{2024-02-20}",
+                    "{\"2024-03-01 00:00:00\"}",
+                ],
+            ]
+        );
+    })
+    .await;
 }

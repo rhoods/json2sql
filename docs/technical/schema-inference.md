@@ -25,7 +25,9 @@ Chaque champ JSON observé dans la Pass 1 alimente un `TypeTracker` qui accumule
 | Chaîne ≤ `text_threshold` chars | VarChar(N) |
 | Chaîne > `text_threshold` chars | Text |
 | Objet `{}` | Object (→ table enfant) |
-| Tableau `[]` | Array (tableau d'objets → table enfant ; tableau de scalaires → colonne tableau) |
+| Tableau `[]` | Array (tableau d'objets → table enfant ; tableau de scalaires → colonne tableau ; tableau dont un élément est un tableau → colonne `JSONB[]`) |
+
+Un tableau dont au moins un élément est lui-même un tableau (`coordinates` d'un GeoJSON : `[x, y]` pour un point, des tableaux de tableaux pour un polygone) donne une colonne `JSONB[]`, quels que soient les autres éléments : chaque élément y garde son JSON, nombres et chaînes compris (#83). Le type ne dépend donc pas des lignes vues : sans cette règle, un seul point suffisait à typer la colonne en `DOUBLE PRECISION[]`, et chaque polygone devenait `NULL`.
 
 Un tableau qui mêle objets et scalaires (`[{"a":1},"x",2]`) est un tableau d'objets : seuls ses objets ont des lignes dans la table enfant. Ses scalaires n'ont pas de colonne ; la Pass 2 enregistre une anomalie par tableau, avec le premier scalaire comme valeur (#86). Si la table enfant est en stratégie `Jsonb`, chaque scalaire y est gardé comme blob. Si le même champ vaut ailleurs un tableau de scalaires, le parent a aussi une colonne tableau qui garde ces scalaires : pas d'anomalie dans ce cas.
 

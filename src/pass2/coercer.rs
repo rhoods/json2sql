@@ -11,7 +11,10 @@
 //! - fn `coerce` — dispatch principal selon le `PgType` cible (NULL court-circuité en amont).
 //! - fn `coerce_pg_array` — sérialise un tableau JSON en littéral `PostgreSQL` `{e1,e2,...}` ; un élément
 //!   non convertible devient `NULL`, le premier est rapporté (une anomalie par cellule, #84).
-//! - fn `coerce_pg_array_element` — représentation d'un élément dans le littéral, ou la raison de son rejet.
+//! - fn `coerce_pg_array_element` — représentation d'un élément dans le littéral, ou la raison de son rejet ;
+//!   dans un `JSONB[]`, le JSON de l'élément (#83).
+//! - fn `contains_null_byte` — vrai si une chaîne ou une clé d'objet de la valeur, à toute profondeur, contient un
+//!   octet nul.
 //! - fn `quote_array_text` — élément texte entre guillemets ; octet nul ou dépassement de `VARCHAR(n)` = rejet.
 //! - fn `coerce_integer` — coercition vers INTEGER, produit `Ok`/`Anomaly`.
 //! - fn `coerce_bigint` — coercition vers BIGINT, produit `Ok`/`Anomaly`.
@@ -146,9 +149,16 @@ fn coerce_pg_array_element(
     pg_type: &PgType,
 ) -> Result<String, (String, &'static str)> {
     match pg_type {
-        PgType::Integer | PgType::BigInt | PgType::DoublePrecision | PgType::Boolean => {
+        // UUIDs, dates and timestamps are checked as a scalar is (#116)
+        PgType::Integer
+        | PgType::BigInt
+        | PgType::DoublePrecision
+        | PgType::Boolean
+        | PgType::Uuid
+        | PgType::Date
+        | PgType::Timestamp => {
             match coerce(value, pg_type) {
-                CoerceResult::Ok(s) => Ok(s.as_str().to_owned()), // numeric/bool: ASCII-safe, bare in array literal
+                CoerceResult::Ok(s) => Ok(s.as_str().to_owned()), // ASCII, no `,{}"\`: bare in array literal
                 CoerceResult::Anomaly {
                     actual_value,
                     actual_type,
@@ -159,13 +169,26 @@ fn coerce_pg_array_element(
                 }
             }
         }
-        // Dates, UUIDs and timestamps must be JSON strings, as for a scalar; unlike a scalar
-        // (`coerce_formatted`), their format is not checked here.
-        PgType::Uuid | PgType::Date | PgType::Timestamp if !matches!(value, Value::String(_)) => {
-            Err((value.to_string(), json_type_name(value)))
-        }
         PgType::VarChar(max_len) => quote_array_text(value, Some(*max_len as usize)),
+        // JSONB[] (#83, point 2): the element is written as its JSON, a string with its quotes. jsonb refuses
+        // `\u0000`, the JSON of a null byte.
+        PgType::Jsonb if contains_null_byte(value) => {
+            Err((value.to_string(), "string_contains_null_byte"))
+        }
+        PgType::Jsonb => quote_array_text(&Value::String(value.to_string()), None),
         _ => quote_array_text(value, None),
+    }
+}
+
+/// True if a string or an object key of `value`, at any depth, holds a null byte.
+fn contains_null_byte(value: &Value) -> bool {
+    match value {
+        Value::String(s) => s.contains('\0'),
+        Value::Array(items) => items.iter().any(contains_null_byte),
+        Value::Object(map) => map
+            .iter()
+            .any(|(k, v)| k.contains('\0') || contains_null_byte(v)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
 
@@ -666,7 +689,7 @@ mod tests {
     fn test_pg_array_non_string_element_in_date_array_becomes_null() {
         let (literal, bad, kind) =
             coerce_partial(&json!(["2024-01-01", 5]), &array_of(PgType::Date));
-        assert_eq!(literal, r#"{"2024-01-01",NULL}"#);
+        assert_eq!(literal, "{2024-01-01,NULL}");
         assert_eq!((bad.as_str(), kind), ("5", "number"));
     }
 
@@ -701,11 +724,13 @@ mod tests {
         assert_eq!((literal.as_str(), kind), ("{NULL}", "string_too_long"));
     }
 
+    /// #83, point 2 : dès qu'un élément est un tableau, la colonne est `JSONB[]` et chaque élément y
+    /// garde son JSON, chaînes et nombres compris. Avant : `TEXT[]`, `VARCHAR(n)[]` ou `DOUBLE PRECISION[]`
+    /// selon les autres éléments, et l'élément imbriqué devenait NULL dans les deux derniers.
     #[test]
-    fn test_pg_array_nested_arrays_stay_json_text_with_the_inferred_type() {
+    fn test_pg_array_nested_arrays_are_jsonb_with_the_inferred_type() {
         use crate::schema::registry::{RegistryConfig, SchemaRegistry};
-        // Written with the type Pass 1 really infers, not a hand-built one. Arrays do not widen a
-        // VARCHAR: elements that are all arrays give TEXT[], strings mixed with arrays give VARCHAR(n)[].
+        // Written with the type Pass 1 really infers, not a hand-built one.
         let inferred = |row: &Value| {
             let mut reg = SchemaRegistry::new(RegistryConfig::default());
             reg.observe_root("t", row.as_object().unwrap());
@@ -715,24 +740,34 @@ mod tests {
                 .pg_type
                 .clone()
         };
-
-        // all arrays → TEXT[]: nested arrays stay JSON text (#83), no anomaly
-        let all_arrays = json!({"m": [["a"], ["b"]]});
-        let pg_type = inferred(&all_arrays);
-        assert_eq!(pg_type, array_of(PgType::Text));
+        // literals are COPY-escaped: `\"` is written `\\"`
+        for (row, literal) in [
+            (json!({"m": [["a"], ["b"]]}), r#"{"[\\"a\\"]","[\\"b\\"]"}"#),
+            (json!({"m": ["a", ["b"]]}), r#"{"\\"a\\"","[\\"b\\"]"}"#),
+            (
+                json!({"m": [2.35, [[0, 0], [1, 0]]]}),
+                r#"{"2.35","[[0,0],[1,0]]"}"#,
+            ),
+        ] {
+            let pg_type = inferred(&row);
+            assert_eq!(pg_type, array_of(PgType::Jsonb), "{row}");
+            assert_eq!(coerce_ok(&row["m"], &pg_type), literal, "{row}");
+        }
+        // a scalar occurrence of the field (#48) is a one-element array, its JSON kept as well
         assert_eq!(
-            coerce_ok(&all_arrays["m"], &pg_type),
-            r#"{"[\\"a\\"]","[\\"b\\"]"}"#
-        ); // COPY-escaped
-
-        // strings mixed with arrays → VARCHAR(2)[]: the nested array overflows, which used to abort the COPY
-        let mixed = json!({"m": ["a", ["b"]]});
-        let pg_type = inferred(&mixed);
-        assert_eq!(pg_type, array_of(PgType::VarChar(2)));
-        let (literal, _, kind) = coerce_partial(&mixed["m"], &pg_type);
-        assert_eq!(
-            (literal.as_str(), kind),
-            (r#"{"a",NULL}"#, "string_too_long")
+            coerce_ok(&json!("bio"), &array_of(PgType::Jsonb)),
+            r#"{"\\"bio\\""}"#
         );
+    }
+
+    /// jsonb refuse `\u0000`, l'écriture JSON d'un octet nul : l'élément qui en contient un (dans une
+    /// chaîne ou une clé d'objet, à n'importe quelle profondeur) devient NULL + anomalie, le COPY continue.
+    #[test]
+    fn test_pg_array_jsonb_element_with_null_byte_becomes_null() {
+        let arr = json!([["ok"], ["a\u{0}b"], [{"k\u{0}": 1}]]);
+        let (literal, bad, kind) = coerce_partial(&arr, &array_of(PgType::Jsonb));
+        assert_eq!(literal, r#"{"[\\"ok\\"]",NULL,NULL}"#);
+        assert_eq!(kind, "string_contains_null_byte");
+        assert!(bad.contains("a\\u0000b"), "first faulty element, got {bad}");
     }
 }
