@@ -28,7 +28,8 @@
 //! - fn `TypeTracker::string_pg_type` — résout `VarChar`/`Text` en tenant compte de la longueur
 //!   des représentations numériques si le champ est mixte string+nombre.
 //! - fn `TypeTracker::has_frequent_strings` — vrai si les chaînes JSON (dates comprises) atteignent
-//!   `RARE_STRING_RATE` des valeurs non nulles (sinon elles ne décident pas du type).
+//!   `RARE_STRING_RATE` des valeurs non nulles (sinon elles ne décident pas du type), sauf si ce ne sont
+//!   que des UUID, ou que des dates et timestamps, sans nombre ni booléen (ils gardent leur type).
 //! - fn `TypeTracker::to_pg_type` — résout le type PG final (dispatch + élargissement).
 //! - fn `TypeTracker::is_object_field` — vrai si le champ ne contient que des objets.
 //! - fn `TypeTracker::is_array_field` — vrai si le champ ne contient que des tableaux.
@@ -37,10 +38,14 @@
 //! - fn `TypeTracker::active_type_count` — nombre de types non-Null distincts observés.
 //! - fn `widen_pg_types` — type le plus large entre deux `PgType` (Text > `DoublePrecision` > `BigInt`).
 //! - fn `infer_number_type` — classifie un nombre JSON en `InferredType`.
-//! - fn `infer_string_type` — classifie une chaîne JSON en `InferredType`.
+//! - fn `infer_string_type` — classifie une chaîne JSON en `InferredType` ; la Pass 2 s'en sert aussi
+//!   pour vérifier les valeurs des colonnes UUID, DATE et TIMESTAMP.
 //! - fn `is_uuid` — détecteur de format UUID (longueur puis motif).
-//! - fn `is_timestamp` — détecteur de format timestamp.
-//! - fn `is_date_bytes` — détecteur de format date.
+//! - fn `is_timestamp` — timestamp complet : date, heure, puis secondes, fraction et fuseau facultatifs.
+//! - fn `is_zone` — fin d'un timestamp : rien, `Z` ou un décalage `±HH`, `±HHMM`, `±HH:MM`.
+//! - fn `at_most` — vrai si deux octets sont des chiffres ASCII dont la valeur ne dépasse pas un maximum.
+//! - fn `is_date_bytes` — date `AAAA-MM-JJ` sur les 10 premiers octets, qui existe dans le calendrier.
+//! - fn `two_digits` — valeur de deux chiffres ASCII.
 //! - fn `is_digit` — vrai si l'octet est un chiffre ASCII.
 
 use serde_json::Value;
@@ -272,27 +277,31 @@ impl TypeTracker {
         }
     }
 
-    /// True if Varchar/Text values were seen and JSON strings (dates, timestamps and UUIDs
-    /// included) make up at least `RARE_STRING_RATE` of the non-null values. Rarer strings don't
-    /// decide the type: in a numeric or boolean column, Pass 2 turns them into NULL + anomaly.
+    /// True if JSON strings (dates, timestamps and UUIDs included) make up at least `RARE_STRING_RATE`
+    /// of the non-null values. Rarer strings don't decide the type: in a numeric or boolean column,
+    /// Pass 2 turns them into NULL + anomaly. UUIDs alone, or dates and timestamps alone, with no
+    /// number or boolean, keep their own type; mixed with anything else they have no common type
+    /// (#116).
     fn has_frequent_strings(&self) -> bool {
         let count = |t: InferredType| self.type_counts[t as usize];
-        if count(InferredType::Varchar) + count(InferredType::Text) == 0 {
-            return false;
-        }
-        // Dates/UUIDs count as strings: a DATE column would send a rare "unknown" to COPY as is.
-        let strings: u64 = [
-            InferredType::Varchar,
-            InferredType::Text,
-            InferredType::Uuid,
-            InferredType::Date,
-            InferredType::Timestamp,
+        let plain = count(InferredType::Varchar) + count(InferredType::Text);
+        let uuids = count(InferredType::Uuid);
+        let dates = count(InferredType::Date) + count(InferredType::Timestamp);
+        let scalars: u64 = [
+            InferredType::Boolean,
+            InferredType::Integer,
+            InferredType::BigInt,
+            InferredType::Float,
         ]
         .into_iter()
         .map(count)
         .sum();
+        if plain == 0 && scalars == 0 && (uuids == 0 || dates == 0) {
+            return false;
+        }
+        let strings = plain + uuids + dates;
         let non_null = self.total_count - self.null_count;
-        strings as f64 >= RARE_STRING_RATE * non_null as f64
+        strings > 0 && strings as f64 >= RARE_STRING_RATE * non_null as f64
     }
 
     pub fn to_pg_type(&self) -> PgType {
@@ -420,8 +429,10 @@ fn infer_number_type(n: &serde_json::Number) -> InferredType {
 
 /// Regex-free heuristic type detection for strings.
 /// Dispatches on length first to eliminate impossible candidates in O(1).
+/// Pass 2 checks UUID, DATE and TIMESTAMP values with it: what it types so, `PostgreSQL` accepts.
 #[inline]
-fn infer_string_type(s: &str) -> InferredType {
+#[must_use]
+pub fn infer_string_type(s: &str) -> InferredType {
     let b = s.as_bytes();
     match b.len() {
         // UUID is exactly 36 bytes: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -441,7 +452,7 @@ fn infer_string_type(s: &str) -> InferredType {
             }
         }
         // Timestamp needs at least 16 bytes: YYYY-MM-DDTHH:MM
-        // (exclude 36 since we've already handled it above and it can't be a valid timestamp)
+        // (36 bytes is only checked as a UUID: a timestamp that long stays text)
         n if n >= 16 => {
             if is_timestamp(s) {
                 InferredType::Timestamp
@@ -471,33 +482,87 @@ fn is_uuid(s: &str) -> bool {
     true
 }
 
+/// The whole string is checked: a date, `T` or a space, `HH:MM`, optional `:SS` and `.fraction`, then
+/// optional `Z` or offset `±HH`, `±HHMM`, `±HH:MM`. Only forms `PostgreSQL` reads as TIMESTAMP (#116):
+/// no named zone, no `24:00`, no second 60, although it takes them.
 fn is_timestamp(s: &str) -> bool {
-    // Minimal check: YYYY-MM-DDTHH:MM or YYYY-MM-DD HH:MM
     let b = s.as_bytes();
-    if b.len() < 16 {
+    if b.len() < 16
+        || !is_date_bytes(b)
+        || !matches!(b[10], b'T' | b' ')
+        || b[13] != b':'
+        || !at_most(b[11], b[12], 23)
+        || !at_most(b[14], b[15], 59)
+    {
         return false;
     }
-    is_date_bytes(&b[..10])
-        && (b[10] == b'T' || b[10] == b' ')
-        && is_digit(b[11])
-        && is_digit(b[12])
-        && b[13] == b':'
-        && is_digit(b[14])
-        && is_digit(b[15])
+    let mut rest = &b[16..];
+    if let [b':', s1, s2, tail @ ..] = rest {
+        if !at_most(*s1, *s2, 59) {
+            return false;
+        }
+        rest = tail;
+        if let [b'.', fraction @ ..] = rest {
+            let digits = fraction.iter().take_while(|c| c.is_ascii_digit()).count();
+            if digits == 0 {
+                return false;
+            }
+            rest = &fraction[digits..];
+        }
+    }
+    is_zone(rest)
 }
 
+/// End of a timestamp: nothing, `Z`, or an offset `±HH`, `±HHMM`, `±HH:MM` up to ±15:59.
+const fn is_zone(b: &[u8]) -> bool {
+    match b {
+        [] | [b'Z'] => true,
+        [b'+' | b'-', h1, h2] => at_most(*h1, *h2, 15),
+        [b'+' | b'-', h1, h2, m1, m2] | [b'+' | b'-', h1, h2, b':', m1, m2] => {
+            at_most(*h1, *h2, 15) && at_most(*m1, *m2, 59)
+        }
+        _ => false,
+    }
+}
+
+/// True if the two bytes are ASCII digits whose value is at most `max`.
+const fn at_most(hi: u8, lo: u8, max: u16) -> bool {
+    matches!(two_digits(hi, lo), Some(v) if v <= max)
+}
+
+/// `YYYY-MM-DD` on the first 10 bytes, and a day of the calendar: `PostgreSQL` rejects month 13,
+/// April 31, February 29 of a common year and year 0 (#116).
 const fn is_date_bytes(b: &[u8]) -> bool {
-    b.len() >= 10
-        && is_digit(b[0])
-        && is_digit(b[1])
-        && is_digit(b[2])
-        && is_digit(b[3])
-        && b[4] == b'-'
-        && is_digit(b[5])
-        && is_digit(b[6])
-        && b[7] == b'-'
-        && is_digit(b[8])
-        && is_digit(b[9])
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    let (Some(century), Some(yy), Some(month), Some(day)) = (
+        two_digits(b[0], b[1]),
+        two_digits(b[2], b[3]),
+        two_digits(b[5], b[6]),
+        two_digits(b[8], b[9]),
+    ) else {
+        return false;
+    };
+    let year = century * 100 + yy;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1..=12 => 31,
+        _ => 0,
+    };
+    year > 0 && day >= 1 && day <= days_in_month
+}
+
+/// Value of two ASCII digits, or `None` if one is not a digit.
+const fn two_digits(hi: u8, lo: u8) -> Option<u16> {
+    if is_digit(hi) && is_digit(lo) {
+        Some((hi - b'0') as u16 * 10 + (lo - b'0') as u16)
+    } else {
+        None
+    }
 }
 
 #[inline]
@@ -725,8 +790,8 @@ mod tests {
         assert!(matches!(t.to_pg_type(), PgType::VarChar(_)));
     }
 
-    /// Dates + une chaîne rare : la colonne reste texte. En `DATE`, la chaîne irait telle
-    /// quelle au COPY (`coerce_date` ne vérifie pas le format) et `PostgreSQL` l'interromprait.
+    /// Dates + une chaîne rare : la colonne reste texte et garde la chaîne. En `DATE`, elle
+    /// deviendrait NULL + anomalie.
     #[test]
     fn test_rare_string_among_dates_still_varchar() {
         let mut t = TypeTracker::new(256);

@@ -119,8 +119,8 @@ Les types inférés, et le type PostgreSQL (`PgType`) qu'ils donnent quand ils s
 | `BigInt` | `BigInt` | un entier plus grand |
 | `Float` | `DoublePrecision` | un nombre à virgule, ou un entier au-delà de 64 bits |
 | `Uuid` | `Uuid` | une chaîne de 36 octets au format UUID (`infer_string_type`) |
-| `Date` | `Date` | une chaîne de 10 octets `AAAA-MM-JJ` |
-| `Timestamp` | `Timestamp` | une chaîne d'au moins 16 octets qui commence par une date et une heure |
+| `Date` | `Date` | une chaîne de 10 octets `AAAA-MM-JJ`, jour qui existe dans le calendrier (`2024-13-45` est une chaîne ordinaire) |
+| `Timestamp` | `Timestamp` | une date, `T` ou une espace, `HH:MM`, puis secondes, fraction, `Z` ou décalage `±HH:MM` facultatifs ; rien d'autre après |
 | `Varchar` | `VarChar(n)` ou `Text` | toute autre chaîne ; `Text` au-delà de `text_threshold` |
 | `Text` | `Text` | **jamais produit** : le choix `VarChar` / `Text` se fait sur la longueur, dans `TypeTracker::to_pg_type` |
 | `Object` | — | un objet : devient une table enfant, jamais une colonne |
@@ -167,6 +167,11 @@ Le worker de l'IHM (`json2sql-worker`) ne fait jamais de Pass 1 : il reçoit les
 - **Deux règles d'élargissement qui diffèrent.** Dans une colonne, `TypeTracker::to_pg_type` donne `Timestamp` pour
   dates + timestamps, `Integer` pour entiers + booléens (les booléens deviennent des anomalies). Entre deux `PgType`,
   `widen_pg_types` donne `Text` dans ces deux cas. Un nouveau type doit trouver sa place dans les deux.
+- **Les détecteurs de dates et d'UUID servent aussi en Pass 2** (#116). `coerce` n'écrit dans une colonne UUID, DATE
+  ou TIMESTAMP que ce que `infer_string_type` type ainsi ; le reste devient `NULL` + anomalie. Un détecteur élargi à
+  une forme que PostgreSQL refuse fait donc échouer le `COPY` ; un détecteur resserré fait passer des colonnes en
+  texte. Dans une colonne, UUID et dates n'ont pas de type commun : mêlés entre eux, ou à des nombres ou des booléens,
+  ils donnent du texte (`TypeTracker::has_frequent_strings`), sauf s'ils sont rares parmi les nombres.
 - **L'ordre des colonnes est l'ordre de première rencontre.** `TableEntry` range ses colonnes dans un `IndexMap`, et
   la finalisation garde cet ordre pour le DDL. En parallèle, les threads prennent les lignes au fil de l'eau (pas en
   tourniquet) et la fusion ajoute à la fin les colonnes inconnues : l'ordre des colonnes peut changer d'un run à
@@ -220,10 +225,11 @@ pas ; ce sont les recettes de #96 « Ajouter un signal ou une statistique en Pas
 - [ ] sa détection dans `infer_string_type` ou `infer_number_type` (attention au tri par longueur de chaîne : 36, 10,
   16 octets et plus) ;
 - [ ] sa place dans `TypeTracker::to_pg_type` et dans `widen_pg_types` ;
-- [ ] s'il se détecte sur une chaîne (`infer_string_type`) : l'ajouter à la liste écrite en dur de
-  `TypeTracker::has_frequent_strings` (#166). Sinon ses valeurs ne comptent pas dans la part des chaînes : mêlées à des
-  nombres et à quelques chaînes ordinaires, elles passent pour rares, la colonne reste numérique, et chacune devient
-  `NULL` + anomalie en Pass 2 ;
+- [ ] s'il se détecte sur une chaîne (`infer_string_type`) : l'ajouter à un des comptes écrits en dur de
+  `TypeTracker::has_frequent_strings` (#166, #116), avec les chaînes ordinaires, les UUID ou les dates. Sinon ses
+  valeurs ne comptent pas dans la part des chaînes : mêlées à des nombres et à quelques chaînes ordinaires, elles
+  passent pour rares, la colonne reste numérique, et chacune devient `NULL` + anomalie en Pass 2. S'il a son propre
+  `PgType`, `coerce` doit vérifier ses valeurs avec `infer_string_type`, comme pour les UUID et les dates ;
 - [ ] s'il faut un nouveau `PgType` : le compilateur signale `PgType::as_sql`, `coerce` et
   `prime_tracker_from_pg_type`, mais pas `widen_pg_types`, `coerce_pg_array_element` ni `parse_pg_type` (types des
   overrides TOML) ;
