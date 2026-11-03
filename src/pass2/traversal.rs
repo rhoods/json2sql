@@ -39,7 +39,8 @@
 //! - fn `insert_sibling_collapse_object` — une ligne par clé sibling.
 //! - fn `insert_sibling_collapse_array_of_objects` — variante tableau d'objets (avec `j2s_order`) ;
 //!   scalaires → anomalie.
-//! - fn `route_independent_child` — route une clé vers un enfant indépendant si présent.
+//! - fn `route_independent_child` — route une clé vers un enfant indépendant si présent : un objet, ou un tableau
+//!   comme `recurse_children` (#193).
 //! - fn `split_keys_by_group` — route les enfants indépendants, répartit les autres clés par groupe.
 //! - fn `group_path_segment` — segment de chemin de la table pivot d'un groupe.
 //! - fn `route_multi_collapse_children` — dispatch chaque clé vers son groupe pivot synthétique.
@@ -602,8 +603,8 @@ pub(super) fn insert_normalize_dynamic_keys<S: RowSink>(
     Ok(())
 }
 
-/// Route a key-value pair to an independent child schema if one exists.
-/// Returns `true` if routed (caller should skip group routing), `false` otherwise.
+/// Route a key-value pair to an independent child schema if one exists: an object as an object child, an array as
+/// `recurse_children` does (#193). Returns `true` if routed (caller should skip group routing), `false` otherwise.
 fn route_independent_child<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
@@ -619,11 +620,25 @@ fn route_independent_child<S: RowSink>(
     if child_schema.parent_table.as_deref() != Some(schema_name) {
         return Ok(false);
     }
-    let Value::Object(nested) = value else {
-        return Ok(false);
-    };
-    let ctx = &mut InsertCtx { sinks, anomalies };
-    insert_child_object(path_map, ctx, child_schema, nested, value, routing_id, None)?;
+    match value {
+        Value::Object(nested) => {
+            let ctx = &mut InsertCtx { sinks, anomalies };
+            insert_child_object(path_map, ctx, child_schema, nested, value, routing_id, None)?;
+        }
+        // The routing table has only generated columns: no array column keeps the scalars.
+        Value::Array(arr) => {
+            insert_array(
+                path_map,
+                sinks,
+                anomalies,
+                child_schema,
+                arr,
+                routing_id,
+                false,
+            )?;
+        }
+        _ => return Ok(false),
+    }
     Ok(true)
 }
 
