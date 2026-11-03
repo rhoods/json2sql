@@ -56,6 +56,8 @@ symbols:
   - dissolve_column_groups
   - exclude_absorbed_children
   - recurse_children
+  - write_keyed_route_row
+  - collect_surviving_route_targets
   - already_overridden
   - kept_toml_rebuild
   - absorbed_names
@@ -174,7 +176,7 @@ CLI : run_pipeline
     │     │    apply_strategy_override (normalize_dynamic_keys et flatten : DeferredNormalize / DeferredFlatten,
     │     │                             appliqués après la boucle sur tout le schéma)
     │     │    apply_suffix_columns_override, apply_column_type_overrides
-    │     ├─ apply_group_overrides ([group.*])
+    │     ├─ apply_group_overrides ([group.*]) : apply_keyed_pivot_merge, puis routes du parent vers le groupe
     │     ├─ apply_column_groups (column_groups)
     │     └─ exclude_absorbed_children
     ├─ save_schema_snapshot (--schema-output) : le schéma APRÈS le TOML
@@ -209,6 +211,20 @@ IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snap
   parent : la Pass 2 descend dans tout enfant présent dans le schéma (`recurse_children`). C'était le cas de l'IHM
   avant #130 (vérifié sur PostgreSQL, `test_ui_jsonb_on_root_does_not_duplicate_children`). L'IHM montre ces tables
   (`absorbed_names`) : badge « merged » dans Strategy, section « Removed with parent » dans Preview.
+- **Un groupe `keyed_pivot` n'est rempli que par les routes de son parent** (#171). `apply_keyed_pivot_merge`
+  remplace les membres par une seule table (chemin `[nom_du_groupe]`, colonne `key_id`) et note dans `child_routes`
+  du parent la clé JSON de chaque membre vers cette table : la Pass 2 y écrit une ligne par objet membre, avec sa clé
+  (`write_keyed_route_row`, voir [pass2.md](pass2.md)). Sans ces routes (avant #171), la table restait vide et chaque
+  objet membre laissait une anomalie « table » sur le parent. Une ligne du groupe ne garde que les colonnes de
+  l'objet : la fusion est refusée (`GroupMemberUnsupported`, les membres restent des tables séparées) pour un membre
+  qui n'est pas un objet du même parent que les autres, dont la stratégie n'est pas `Columns`, ou qui a ses propres
+  tables enfants. Fusionné, ce dernier perdait leurs données sans anomalie (vérifié : `home.geo` d'un membre `home`).
+  Un parent qui absorbe ses enfants (`Jsonb`, `Pivot`…) ne reçoit pas de route : le groupe part avec eux dans
+  `exclude_absorbed_children` ; une route le garderait, et la Pass 2 l'écrirait en plus du blob (vérifié en
+  `--dry-run`). **Limites**, déduites du code : un groupe nommé comme la clé d'un de ses membres (`[group.home]` pour
+  `people.home`) est pris pour une route directe, et ce membre retombe en anomalies ; un Jsonb posé ensuite par l'IHM
+  sur le parent garde ses routes, donc la table du groupe, écrite en plus du blob (`collect_surviving_route_targets`,
+  même trou que pour les tables routées de la cascade).
 - **Des clés TOML ignorées sans avertissement.** Les types forcés se mettent à plat dans `[table]` (`age = "BIGINT"`,
   comme `tests/fixtures/`). La forme `[table.columns]` des deux docs donne une clé `columns` dont la valeur est une
   table : `apply_column_type_overrides` saute toute valeur qui n'est pas une chaîne. Vérifié : aucun override, aucun
@@ -218,7 +234,7 @@ IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snap
   être configurée : `[group]` est lu comme les groupes de fusion (erreur de lecture du TOML, vérifié).
 - **Les docs annoncent ce que le TOML refuse.** `strategy = "ignore"` donne `UnknownStrategy` (vérifié) ; Skip n'existe
   que dans l'IHM. usage.md ne cite ni `normalize_dynamic_keys`, ni `flatten` (et ses clés `prefix`, `max_depth`,
-  `id_column`), ni `[group.*]`.
+  `id_column`).
 - **Les noms de stratégie sont des chaînes, en quatre copies** : `apply_strategy_override` (en minuscules, cas par
   défaut `UnknownStrategy`), `rebuilds_columns`, `conflicting_strategy_override` et `already_overridden`. Une valeur
   oubliée dans l'une d'elles ne casse rien à la compilation : la table n'est pas défaite de ses groupes de colonnes, le

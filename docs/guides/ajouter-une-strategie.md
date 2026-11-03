@@ -201,8 +201,10 @@ Le compilateur ne voit pas le reste :
   `AutoSplit` (`write_autosplit_rows`).
 - [ ] Pass 2, tableau d'objets : la fonction d'écriture reçoit `order`, l'index de l'élément, à écrire dans
   `j2s_order` (`push_generated_col_insert`). Seul un élément scalaire en `Jsonb` est traité à part par `insert_array`.
-- [ ] Pass 2, cible d'une route par clé (#173) : `write_keyed_route_row` écrit la ligne d'une clé routée (`fr` →
-  `…_selected_key`) si la cible est `SiblingCollapse` ou `NormalizeDynamicKeys`, avec un cas par défaut pour le reste.
+- [ ] Pass 2, cible d'une route par clé (#173, et membre d'un groupe TOML, #171) : `write_keyed_route_row`, appelée
+  par `dispatch_child_routes` et `recurse_children`, écrit la ligne d'une clé routée (`fr` → `…_selected_key`,
+  `home` → la table du groupe) si la cible est `SiblingCollapse` ou `NormalizeDynamicKeys`, avec un cas par défaut
+  pour le reste.
   Une stratégie qui écrit une ligne par clé y a sa place ; sinon, sur une telle cible (après un override), la valeur
   passe par `insert_child_object`, qui la lit comme un objet de clés sœurs : colonnes en anomalie, sous-clés prises
   pour des clés de ligne.

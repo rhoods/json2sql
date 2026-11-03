@@ -117,6 +117,7 @@ run_pipeline (worker, IHM) ─┴─► run_interruptible
       │          ├─ write_row_of : une ligne, dans l'ordre de schema.columns
       │          ├─ write_group_rows, write_autosplit_rows
       │          └─ recurse_children : pour chaque champ objet / tableau
+      │               ├─ route vers la clé d'une ligne (membre d'un groupe TOML) → write_keyed_route_row
       │               ├─ objet  → insert_child_object (répartit selon effective_strategy)
       │               └─ tableau → insert_array (un insert_child_object par élément objet, scalaires → anomalie)
       ├─ run_flusher : COPY FROM STDIN par lots, parents avant enfants au drain final
@@ -145,9 +146,11 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   pointer plusieurs clés (`fr`, `en`…) vers une même table dont le chemin finit par « key » (`…_selected_key`) : la
   clé routée y est la clé de la ligne, pas le nom JSON de la table. `dispatch_child_routes` le reconnaît au dernier
   segment du chemin de la cible, différent de la clé, et `write_keyed_route_row` écrit une ligne `SiblingCollapse` ou
-  `NormalizeDynamicKeys` avec cette clé. Passée à `insert_child_object`, la valeur serait lue comme un objet de clés
-  sœurs : colonnes en anomalie, sous-clés prises pour des clés de ligne. Une clé de ligne nommée « key » serait prise
-  pour une route directe.
+  `NormalizeDynamicKeys` avec cette clé. Un groupe TOML `keyed_pivot` (#171) pose le même genre de route sur le parent
+  de ses membres (`home`, `work` → la table du groupe) : `recurse_children` fait donc le même test avant
+  l'aiguillage. Passée à `insert_child_object`, la valeur serait lue comme un objet de clés sœurs : colonnes en
+  anomalie, sous-clés prises pour des clés de ligne. Une clé de ligne nommée « key » serait prise pour une route
+  directe, de même qu'un groupe nommé comme la clé d'un de ses membres.
 - **Une clé sans table laisse une anomalie, sauf abandon voulu** (#167). `recurse_children` cherche d'abord le champ
   dans `child_routes` (un enfant que la cascade a rattaché sans fusion garde son propre chemin : sur OFF,
   `nutriscore.2023.data.components` sous la fusion `nutriscore.data`, #180), puis son chemin dans `path_map` ; absent,

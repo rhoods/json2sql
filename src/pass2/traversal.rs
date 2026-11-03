@@ -29,8 +29,8 @@
 //! Routing générique :
 //! - fn `dispatch_child_routes` — route les sous-objets/arrays de `schema.child_routes`
 //!   vers leurs tables cibles (post-cascade merge) ; cible absente → anomalie, sauf `Skip`.
-//! - fn `write_keyed_route_row` — route réécrite par la post-passe keyed-pivot : la clé routée est la clé
-//!   de la ligne cible (#173).
+//! - fn `write_keyed_route_row` — route réécrite par la post-passe keyed-pivot (#173), ou route d'un membre de
+//!   groupe TOML vers la table du groupe (#171) : la clé routée est la clé de la ligne cible.
 //!
 //! `SiblingCollapse` (simple + multi) :
 //! - struct `SiblingCollapseRowInput` — paramètres empaquetés d'une ligne keyed-pivot à écrire.
@@ -367,9 +367,10 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
     Ok(())
 }
 
-/// A route the keyed post-pass rewrote (#173): `sub_key` is not the JSON key of `target` but the
-/// key of one of its rows (`fr` → `selected_key`, whose path ends in `key`). Writes that row and
-/// returns `true`; `false` for a direct route, or a target that does not write one row per key.
+/// A route the keyed post-pass rewrote (#173), or the route of a TOML group member to the group table (#171):
+/// `sub_key` is not the JSON key of `target` but the key of one of its rows (`fr` → `selected_key`, whose path ends
+/// in `key`; `home` → the group table). Writes that row and returns `true`; `false` for a direct route, or a target
+/// that does not write one row per key.
 #[allow(clippy::too_many_lines)] // one row: route check, strategy's key column, then the write (#173)
 pub(super) fn write_keyed_route_row<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
@@ -380,8 +381,8 @@ pub(super) fn write_keyed_route_row<S: RowSink>(
     sub_value: &Value,
     parent_id: Uuid,
 ) -> Result<bool> {
-    // shortcut: a row key spelled like the target's last path segment ("key") reads as a direct
-    // route; mark keyed routes in the schema if such a key shows up.
+    // shortcut: a row key spelled like the target's last path segment ("key", or the name of a TOML group)
+    // reads as a direct route; mark keyed routes in the schema if such a key shows up.
     if target.path.last().is_some_and(|last| last == sub_key) {
         return Ok(false);
     }
