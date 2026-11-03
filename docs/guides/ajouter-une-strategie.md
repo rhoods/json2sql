@@ -1,7 +1,7 @@
 ---
 type: recette
 sujet: Ajouter une stratégie de matérialisation
-verified_at: 5fc70fc
+verified_at: bb6a711
 files:
   - src/schema/table_schema.rs
   - src/schema/strategies.rs
@@ -71,6 +71,7 @@ symbols:
   - insert_array
   - dispatch_child_routes
   - route_independent_child
+  - write_keyed_route_row
   - should_skip_parent
   - refused_at_root
   - push_generated_col_insert
@@ -200,6 +201,11 @@ Le compilateur ne voit pas le reste :
   `AutoSplit` (`write_autosplit_rows`).
 - [ ] Pass 2, tableau d'objets : la fonction d'écriture reçoit `order`, l'index de l'élément, à écrire dans
   `j2s_order` (`push_generated_col_insert`). Seul un élément scalaire en `Jsonb` est traité à part par `insert_array`.
+- [ ] Pass 2, cible d'une route par clé (#173) : `write_keyed_route_row` écrit la ligne d'une clé routée (`fr` →
+  `…_selected_key`) si la cible est `SiblingCollapse` ou `NormalizeDynamicKeys`, avec un cas par défaut pour le reste.
+  Une stratégie qui écrit une ligne par clé y a sa place ; sinon, sur une telle cible (après un override), la valeur
+  passe par `insert_child_object`, qui la lit comme un objet de clés sœurs : colonnes en anomalie, sous-clés prises
+  pour des clés de ligne.
 - [ ] Racine : une stratégie qui écrit une ligne par clé n'a pas de ligne parente à laquelle relier ces lignes. La
   détection (`should_skip_parent` pour `SiblingCollapse`), l'override de l'IHM (`apply_user_overrides`) et le TOML
   (`refused_at_root`) la refusent sur la racine : à étendre à la nouvelle stratégie si elle en fait autant.

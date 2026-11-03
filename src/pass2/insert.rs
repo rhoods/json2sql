@@ -1126,4 +1126,37 @@ mod tests {
         assert_eq!(rows(&data.name), 3, "one data row per year");
         assert_eq!(rows(&components.name), 1, "2023 only");
     }
+
+    /// Every table of `keyed_route_selected_images` receives rows (#182): the cascade no longer
+    /// merges the `SiblingCollapseMulti` pivots of `sizes` into tables no JSON key reaches.
+    #[test]
+    fn every_table_of_the_selected_images_fixture_receives_rows() {
+        let path_map = pass1_path_map("keyed_route_selected_images.jsonl");
+        let mut sinks: HashMap<String, CaptureSink> = path_map
+            .values()
+            .map(|s| (s.name.clone(), CaptureSink(Vec::new())))
+            .collect();
+        let mut recorder = Recorder::default();
+        let root = path_map.values().find(|s| s.path == ["p"]).unwrap();
+        let text = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/keyed_route_selected_images.jsonl"),
+        )
+        .unwrap();
+        for line in text.lines() {
+            let obj: serde_json::Map<String, Value> = serde_json::from_str(line).unwrap();
+            let ctx = &mut InsertCtx {
+                sinks: &mut sinks,
+                anomalies: &mut recorder,
+            };
+            insert_object(&path_map, ctx, root, &obj, ID, None, None).unwrap();
+        }
+        let mut empty: Vec<&String> = sinks
+            .iter()
+            .filter(|(_, s)| s.0.is_empty())
+            .map(|(n, _)| n)
+            .collect();
+        empty.sort();
+        assert!(empty.is_empty(), "tables without rows: {empty:?}");
+    }
 }

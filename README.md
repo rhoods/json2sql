@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS "public"."products_stores" (       -- tableau d'objet
 
 ## Fonctionnement
 
-- **Pass 1** : scan complet du fichier pour inférer le schéma. Le type retenu est le plus large observé (`INTEGER` → `BIGINT` → `DOUBLE PRECISION` → texte), pas le plus fréquent.
+- **Pass 1** : scan complet du fichier pour inférer le schéma. Le type retenu est le plus large observé (`INTEGER` → `BIGINT` → `DOUBLE PRECISION` → texte), pas le plus fréquent ; des chaînes très rares (moins de 0,1 % des valeurs) ne décident pas du type.
 - **Pass 2** : pipeline *diskless*. N workers parsent le JSON (`simd_json`) et forment les lignes COPY en mémoire ; un flusher les envoie à PostgreSQL au fil de l'eau. Aucun fichier temporaire, RAM bornée par contre-pression.
 - **Tables larges** : détection automatique de structures à clés dynamiques (pivot EAV, fusion de tables sœurs, JSONB, *AutoSplit*), surchargeable par un fichier TOML.
 - **Anomalies** : une valeur non convertible vers le type inféré est insérée en `NULL` et tracée dans un rapport JSON/CSV ; `--max-anomaly-rate` fait échouer l'import au-delà d'un seuil.
