@@ -433,6 +433,7 @@ fn child_table<'a>(
 }
 
 /// Recurse into child fields of `obj`, routing each to the appropriate insertion function.
+#[allow(clippy::too_many_lines)] // one loop: table lookup, keyed route first, then dispatch by value type (#171)
 pub(super) fn recurse_children<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,

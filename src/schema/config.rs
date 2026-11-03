@@ -822,6 +822,7 @@ fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> 
     merged
 }
 
+#[allow(clippy::too_many_lines)] // one merge: member guard, merged table, then the parent's routes (#171)
 fn apply_keyed_pivot_merge(
     schemas: &mut Vec<TableSchema>,
     group_name: &str,
