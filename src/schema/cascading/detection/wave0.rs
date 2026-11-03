@@ -8,6 +8,7 @@
 //! - fn `build_sibling_ctx` — construit le contexte de détection pour un parent.
 //! - fn `should_skip_parent` — filtre les parents non éligibles.
 //! - fn `collect_sibling_collapses` — collecte les collapses détectés sur tous les parents éligibles.
+//! - fn `rename_shared_pivots` — renomme (hash) une table pivot dont un autre parent de la vague a déjà pris le nom.
 //! - fn `detect_homogeneous_collapse` — dispatch pour un groupe de clés homogènes.
 //! - fn `detect_mixed_collapse` — dispatch pour un groupe mixte numérique/texte.
 //! - fn `filter_significant_siblings` — exclut les tables de routing pures.
@@ -636,7 +637,30 @@ pub(super) fn collect_sibling_collapses(
         };
         collapses.extend(detect(schemas, &ctx, obj_map, arr_map));
     }
+    rename_shared_pivots(schemas, &mut collapses);
     collapses
+}
+
+/// Each parent picks its pivot names against the tables already there, not against the other parents of the wave:
+/// two long parents that differ only by the first words `derived_table_name` drops pick the same name, and the
+/// second table was dropped (#136). Its name gets a hash of its raw name, like a cascade table; its path stays.
+fn rename_shared_pivots(schemas: &[TableSchema], collapses: &mut [Collapse]) {
+    let mut chosen = std::collections::HashSet::new();
+    for c in collapses.iter_mut() {
+        let CollapseKind::Multi { groups } = &mut c.kind else {
+            continue;
+        };
+        let parent = &schemas[c.parent_idx].name;
+        for g in groups {
+            if chosen.contains(&g.pivot_table_name) {
+                g.pivot_table_name = crate::schema::naming::unique_derived_table_name(
+                    &format!("{parent}_{}", g.path_segment),
+                    |n| chosen.contains(n) || schemas.iter().any(|s| s.name == n),
+                );
+            }
+            chosen.insert(g.pivot_table_name.clone());
+        }
+    }
 }
 
 #[cfg(test)]
