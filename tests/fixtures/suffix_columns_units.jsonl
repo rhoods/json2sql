@@ -1,0 +1,3 @@
+{"id": 1, "nutriments": {"energy_100g": 250, "energy_unit": "kcal", "fat_100g": 3.5, "fat_unit": "g", "sodium_100g": 120, "sodium_unit": "mg", "vitamin-d_100g": 2.5, "vitamin-d_unit": "µg"}}
+{"id": 2, "nutriments": {"energy_100g": 1046, "energy_unit": "kJ", "fat_100g": 0.2, "fat_unit": "g", "sodium_100g": 0.4, "sodium_unit": "g"}}
+{"id": 3, "nutriments": {"energy_100g": 99, "energy_unit": "kcal", "fat_100g": 12, "fat_unit": "g", "sodium_100g": 5, "sodium_unit": "mg"}}

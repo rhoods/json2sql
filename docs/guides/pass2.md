@@ -138,7 +138,9 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   sont échangées **sans erreur**.
 - **Un seul aiguillage par stratégie** (#172). Un objet enfant, un élément de tableau d'objets et une cible de
   routage (`dispatch_child_routes`, `route_independent_child`) passent tous par `insert_child_object`, qui choisit
-  l'écriture selon `effective_strategy` et transmet `order` (l'index de l'élément, pour `j2s_order`). Une table
+  l'écriture selon `effective_strategy` et transmet `order` (l'index de l'élément, pour `j2s_order`). Un objet seul
+  dans une table `ObjectArray` (sa clé vaut ailleurs un tableau d'objets) y est un tableau d'un élément : `order` 0,
+  car `j2s_order` est NOT NULL (#169). Une table
   `Pivot` ou `SiblingCollapse` atteinte autrement serait écrite comme une table `Columns` : ses colonnes ne
   correspondraient pas à l'objet, et les enfants qu'elle absorbe seraient perdus. La racine n'y passe pas : elle ne
   prend jamais une stratégie qui écrit une ligne par clé (elle n'a pas de ligne parente à laquelle relier ces
@@ -176,7 +178,9 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   anomalie par tableau** (#86), avec le premier comme valeur, sauf en stratégie `Jsonb`, où chacun devient un blob.
   Exception : si le parent a une colonne tableau pour ce champ (le champ vaut ailleurs un tableau de scalaires),
   c'est elle qui garde les scalaires, et il n'y a pas d'anomalie. Un tableau de scalaires seul n'y passe pas : c'est
-  une colonne tableau, convertie par `coerce`.
+  une colonne tableau, convertie par `coerce`. Sous une table `Object` (snapshot enregistré avant #169, où une clé
+  vue d'abord comme objet gardait ce genre), un tableau n'a pas de table où aller : une anomalie pour le tableau
+  entier, sauf s'il est vide ou que le parent garde ses scalaires.
 - **Une valeur qui ne se convertit pas devient `NULL` et une anomalie** (`CoerceResult`), jamais une erreur : le
   `COPY` ne doit pas échouer sur une donnée. Une erreur de `COPY` est donc un bug de schéma ou d'écriture, pas de
   donnée. Une colonne UUID, DATE ou TIMESTAMP ne reçoit que ce que la Pass 1 type ainsi (`infer_string_type`) ;

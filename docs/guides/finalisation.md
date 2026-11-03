@@ -134,7 +134,7 @@ Les genres de table enfant (champ `child_kind`, vide pour la racine) :
 | `ChildKind` | Vient de | Conséquences |
 |---|---|---|
 | `Object` | un objet imbriqué | pas de `j2s_order` |
-| `ObjectArray` | un tableau d'objets | une colonne `j2s_order` (`TableSchema::has_order_column`) |
+| `ObjectArray` | un tableau d'objets, même si la clé vaut ailleurs un objet (#169) | une colonne `j2s_order` (`TableSchema::has_order_column`) |
 
 ## 2. Flux
 

@@ -2139,4 +2139,45 @@ mod tests {
             .expect("ObjectArray child table");
         assert_eq!(child.child_kind, Some(ChildKind::ObjectArray));
     }
+
+    /// A key seen both as an object and as an array of objects is an array of objects, whatever the order (#169): the
+    /// first form seen used to win, and an `Object` table has no room for the elements of an array.
+    #[test]
+    fn a_key_seen_as_object_and_as_array_of_objects_is_an_object_array() {
+        let object = json!({"id": 1, "x": {"a": 1}});
+        let array = json!({"id": 2, "x": [{"a": 2}, {"a": 3}]});
+        for rows in [[&object, &array], [&array, &object]] {
+            let mut reg = SchemaRegistry::new(RegistryConfig::default());
+            for row in rows {
+                reg.observe_root("p", make_root(row));
+            }
+            let schemas = reg.finalize();
+            let x = schemas.iter().find(|s| s.name == "p_x").unwrap();
+            assert_eq!(x.child_kind, Some(ChildKind::ObjectArray), "{rows:?}");
+            assert!(x.has_order_column(), "{rows:?}");
+        }
+    }
+
+    /// Parallel Pass 1 (#169): a worker that saw only the object and one that saw only the array give the array form,
+    /// whichever is merged into the other.
+    #[test]
+    fn merging_workers_keeps_the_array_form_of_a_key_in_both_directions() {
+        let observe = |row: &Value| {
+            let mut reg = SchemaRegistry::new(RegistryConfig::default());
+            reg.observe_root("p", make_root(row));
+            reg
+        };
+        let (object, array) = (json!({"x": {"a": 1}}), json!({"x": [{"a": 2}]}));
+        for (first, second) in [(&object, &array), (&array, &object)] {
+            let mut merged = observe(first);
+            merged.merge(observe(second));
+            let schemas = merged.finalize();
+            let x = schemas.iter().find(|s| s.name == "p_x").unwrap();
+            assert_eq!(
+                x.child_kind,
+                Some(ChildKind::ObjectArray),
+                "{first} merged with {second}"
+            );
+        }
+    }
 }

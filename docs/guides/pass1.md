@@ -176,8 +176,8 @@ Le worker de l'IHM (`json2sql-worker`) ne fait jamais de Pass 1 : il reçoit les
 - **L'ordre des colonnes est l'ordre de première rencontre.** `TableEntry` range ses colonnes dans un `IndexMap`, et
   la finalisation garde cet ordre pour le DDL. En parallèle, les threads prennent les lignes au fil de l'eau (pas en
   tourniquet) et la fusion ajoute à la fin les colonnes inconnues : l'ordre des colonnes peut changer d'un run à
-  l'autre. De même, une table vue tantôt comme objet, tantôt comme tableau d'objets prend le genre de la première
-  occurrence. Les tests de parité (`tests/integration_schema.rs`) cherchent les colonnes par nom et ne voient pas ces
+  l'autre. Le genre d'une table, lui, ne dépend ni de l'ordre ni de la fusion : une clé vue tantôt comme objet,
+  tantôt comme tableau d'objets devient un tableau d'objets (`ensure_table_key`, `TableEntry::merge`, #169). Les tests de parité (`tests/integration_schema.rs`) cherchent les colonnes par nom et ne voient pas ces
   écarts.
 - **L'échantillon n'est pas pris pareil dans les deux modes.** `scan_json_rows` garde la ligne réécrite en JSON
   compact, `read_and_dispatch` les octets bruts du fichier. Le budget en octets de `RowSampler` est donc atteint plus
