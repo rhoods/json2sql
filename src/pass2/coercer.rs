@@ -593,6 +593,43 @@ mod tests {
         );
     }
 
+    /// #116 : une colonne UUID, DATE ou TIMESTAMP ne reçoit que les formats que la Pass 1 type ainsi
+    /// (une date ou un timestamp pour DATE et TIMESTAMP) ; le reste devient NULL + anomalie au lieu
+    /// d'arrêter le COPY.
+    #[test]
+    fn test_uuid_date_timestamp_check_the_format() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        for (value, pg_type) in [
+            (uuid, PgType::Uuid),
+            ("2024-01-15", PgType::Date),
+            ("2024-01-15T10:30:00Z", PgType::Date),
+            ("2024-01-15T10:30:00Z", PgType::Timestamp),
+            ("2024-01-15", PgType::Timestamp),
+        ] {
+            assert_eq!(coerce_ok(&json!(value), &pg_type), value, "{pg_type:?}");
+        }
+        for (value, pg_type) in [
+            ("2024-01-15", PgType::Uuid),
+            ("not-a-uuid", PgType::Uuid),
+            (uuid, PgType::Date),
+            (uuid, PgType::Timestamp),
+            ("2024-13-45", PgType::Date),
+            ("2024-01-15T10:30 junk", PgType::Timestamp),
+            ("2024\x00-01-15", PgType::Date),
+        ] {
+            assert!(
+                matches!(
+                    coerce(&json!(value), &pg_type),
+                    CoerceResult::Anomaly {
+                        actual_type: "string_invalid_format",
+                        ..
+                    }
+                ),
+                "{value:?} → {pg_type:?}"
+            );
+        }
+    }
+
     // ── issue #48 : occurrence scalaire dans une colonne PG array → tableau à un élément ──
 
     fn coerce_ok(value: &Value, pg_type: &PgType) -> String {

@@ -259,3 +259,150 @@ async fn test_array_element_overflow_is_an_anomaly_not_a_copy_error() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// #116 — formats incompatibles dans une colonne (UUID + dates, UUID + timestamps, dates + un
+// nombre) et dates qui n'existent pas (`2024-13-45`, `…T10:30 junk`) : la Pass 1 type ces colonnes
+// en texte, rien n'est perdu. Avant : DATE ou TIMESTAMP, et PostgreSQL arrêtait le COPY sur la
+// première valeur refusée (ou INTEGER, et chaque date devenait NULL + anomalie).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_incompatible_date_formats_are_text_not_a_copy_error() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("anomalies_dates.jsonl");
+        let p1 = pass1::runner::run(&path, &common::pass1_config("events"), None).unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("events", &schema),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+        let cells: Vec<Vec<String>> = client
+            .query(
+                &format!(
+                    "SELECT \"ref\", \"at_ref\", \"day\", \"at\", \"code\" \
+                     FROM \"{schema}\".\"events\" ORDER BY \"id\""
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (0..5).map(|i| r.get(i)).collect())
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                [
+                    "550e8400-e29b-41d4-a716-446655440000",
+                    "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+                    "2024-01-15",
+                    "2024-01-15T10:30:00Z",
+                    "42",
+                ],
+                [
+                    "2024-02-20",
+                    "2024-02-20T08:00:00+02:00",
+                    "2024-13-45",
+                    "2024-01-15T10:30 junk",
+                    "2024-02-20",
+                ],
+                [
+                    "2024-03-01",
+                    "2024-03-01 12:00",
+                    "2024-03-01",
+                    "2024-03-01T08:00:00.5Z",
+                    "2024-03-01",
+                ],
+            ]
+        );
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// #116 — colonne UUID, DATE ou TIMESTAMP imposée (snapshot --schema-input, surcharge de type) qui
+// reçoit une valeur d'un autre format : NULL + une anomalie par cellule, le COPY continue. Une
+// colonne DATE garde la date d'un timestamp, comme PostgreSQL. Avant : le COPY s'arrêtait.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_value_of_another_format_in_a_typed_column_is_an_anomaly() {
+    use json2sql::schema::type_tracker::PgType;
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("anomalies_dates.jsonl");
+        let mut p1 = pass1::runner::run(&path, &common::pass1_config("events"), None).unwrap();
+        let events = p1.schemas.iter_mut().find(|s| s.name == "events").unwrap();
+        for (column, pg_type) in [
+            ("ref", PgType::Uuid),
+            ("at_ref", PgType::Date),
+            ("day", PgType::Date),
+            ("at", PgType::Timestamp),
+        ] {
+            events
+                .columns
+                .iter_mut()
+                .find(|c| c.name == column)
+                .unwrap()
+                .pg_type = pg_type;
+        }
+
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("events", &schema),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // ref: the two dates; at_ref: the UUID; day: 2024-13-45; at: the trailing junk
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 5);
+        let cells: Vec<Vec<Option<String>>> = client
+            .query(
+                &format!(
+                    "SELECT \"ref\"::text, \"at_ref\"::text, \"day\"::text, \"at\"::text \
+                     FROM \"{schema}\".\"events\" ORDER BY \"id\""
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (0..4).map(|i| r.get(i)).collect())
+            .collect();
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(
+            cells,
+            [
+                [
+                    some("550e8400-e29b-41d4-a716-446655440000"),
+                    None,
+                    some("2024-01-15"),
+                    some("2024-01-15 10:30:00"),
+                ],
+                [None, some("2024-02-20"), None, None],
+                [
+                    None,
+                    some("2024-03-01"),
+                    some("2024-03-01"),
+                    some("2024-03-01 08:00:00.5"),
+                ],
+            ]
+        );
+    })
+    .await;
+}

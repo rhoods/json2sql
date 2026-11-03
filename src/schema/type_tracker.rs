@@ -737,6 +737,109 @@ mod tests {
         assert!(matches!(t.to_pg_type(), PgType::VarChar(_)));
     }
 
+    // --- #116 : formats sans type commun, dates qui n'existent pas ---
+
+    /// UUID + dates (ou timestamps) n'ont pas de type `PostgreSQL` commun : la colonne passe en texte.
+    /// Avant : DATE (ou TIMESTAMP), et le COPY s'arrêtait sur le premier UUID.
+    #[test]
+    fn test_uuid_with_dates_is_varchar() {
+        for other in ["2024-01-15", "2024-01-15T10:30:00Z"] {
+            let mut t = TypeTracker::new(256);
+            t.observe(&json!("550e8400-e29b-41d4-a716-446655440000"));
+            t.observe(&json!(other));
+            assert_eq!(t.to_pg_type(), PgType::VarChar(44), "{other}"); // ceil(36 * 1.2)
+        }
+    }
+
+    /// Dates + timestamps restent compatibles : TIMESTAMP (`PostgreSQL` lit une date comme minuit).
+    #[test]
+    fn test_dates_with_timestamps_stay_timestamp() {
+        let mut t = TypeTracker::new(256);
+        t.observe(&json!("2024-01-15"));
+        t.observe(&json!("2024-01-15T10:30:00Z"));
+        assert_eq!(t.to_pg_type(), PgType::Timestamp);
+    }
+
+    /// Des dates fréquentes avec un nombre ou un booléen : texte. Avant : INTEGER ou BOOLEAN, et
+    /// chaque date devenait NULL + anomalie.
+    #[test]
+    fn test_frequent_dates_with_a_number_or_bool_are_varchar() {
+        for other in [json!(42), json!(true)] {
+            let mut t = TypeTracker::new(256);
+            for _ in 0..10_000 {
+                t.observe(&json!("2024-01-15"));
+            }
+            t.observe(&other);
+            assert!(matches!(t.to_pg_type(), PgType::VarChar(_)), "{other}");
+        }
+    }
+
+    /// Une date rare parmi des entiers ne décide pas du type, comme toute chaîne rare.
+    #[test]
+    fn test_rare_date_among_integers_keeps_integer() {
+        let mut t = TypeTracker::new(256);
+        for i in 0..10_000 {
+            t.observe(&json!(i));
+        }
+        t.observe(&json!("2024-01-15"));
+        assert_eq!(t.to_pg_type(), PgType::Integer);
+    }
+
+    /// Une date est un jour du calendrier : `PostgreSQL` refuse le mois 13, le 31 avril, le 29 février
+    /// d'une année non bissextile et l'année 0.
+    #[test]
+    fn test_date_must_exist_in_the_calendar() {
+        for ok in ["2024-02-29", "2000-02-29", "0001-01-01", "9999-12-31"] {
+            assert_eq!(infer_string_type(ok), InferredType::Date, "{ok}");
+        }
+        for bad in [
+            "2024-13-45",
+            "2024-00-10",
+            "2024-01-00",
+            "2024-04-31",
+            "2023-02-29",
+            "1900-02-29",
+            "0000-01-01",
+        ] {
+            assert_eq!(infer_string_type(bad), InferredType::Varchar, "{bad}");
+        }
+    }
+
+    /// Un timestamp est vérifié jusqu'au bout. Accepté : `T` ou espace, secondes et fraction
+    /// facultatives, `Z` ou décalage `±HH`, `±HHMM`, `±HH:MM`. Refusé : ce que `PostgreSQL` refuse,
+    /// et les fuseaux nommés (`UTC`), `24:00` et la seconde 60, qu'il accepte.
+    #[test]
+    fn test_timestamp_is_checked_to_the_end() {
+        for ok in [
+            "2024-01-15T10:30",
+            "2024-01-15 10:30",
+            "2024-01-15T10:30:00",
+            "2024-01-15T10:30:00Z",
+            "2024-01-15T10:30:00.123456789Z",
+            "2024-01-15T10:30:00+02",
+            "2024-01-15T10:30:00+0200",
+            "2024-01-15T10:30:00-05:30",
+            "2024-01-15T10:30+15:59",
+        ] {
+            assert_eq!(infer_string_type(ok), InferredType::Timestamp, "{ok}");
+        }
+        for bad in [
+            "2024-01-15T10:30 junk",
+            "2024-13-15T10:30",
+            "2024-01-15T25:00",
+            "2024-01-15T24:00",
+            "2024-01-15T10:61",
+            "2024-01-15T10:30:60",
+            "2024-01-15T10:30:00.",
+            "2024-01-15T10:30:00+16:00",
+            "2024-01-15T10:30:00+02:60",
+            "2024-01-15T10:30:00 UTC",
+            "2024-01-15T10:30:00Z ",
+        ] {
+            assert_eq!(infer_string_type(bad), InferredType::Varchar, "{bad}");
+        }
+    }
+
     /// Parity test: observing on two separate trackers then merging must equal
     /// observing all values on a single tracker.
     #[test]
