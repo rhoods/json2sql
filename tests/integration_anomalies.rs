@@ -630,3 +630,47 @@ async fn test_array_element_of_another_format_is_an_anomaly() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// #194 — timestamps avec décalage horaire : chaque valeur garde son instant. Avant : colonne TIMESTAMP,
+// PostgreSQL ignorait le décalage, et 10:30Z, 10:30+02:00 et 10:30-05:00 valaient tous 10:30:00,
+// sans anomalie.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_timestamp_offsets_keep_the_instant() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("timestamps_offsets.jsonl");
+        let p1 = pass1::runner::run(&path, &common::pass1_config("events"), None).unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("events", &schema),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+        let epochs: Vec<i64> = client
+            .query(
+                &format!(
+                    "SELECT extract(epoch FROM \"at\")::bigint \
+                     FROM \"{schema}\".\"events\" ORDER BY \"id\""
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        // seconds since 1970-01-01 UTC: 10:30, 08:30 and 15:30 UTC on 2024-01-15
+        assert_eq!(epochs, [1_705_314_600, 1_705_307_400, 1_705_332_600]);
+    })
+    .await;
+}
