@@ -746,6 +746,25 @@ mod tests {
         assert_eq!(t.to_pg_type(), PgType::VarChar(36));
     }
 
+    /// #195 : un booléen parmi des chaînes courtes est écrit `true` ou `false`, que la colonne doit pouvoir tenir.
+    /// Avant : 30 "no", un "yes" et un `false` donnaient `VARCHAR(4)`, et `false` devenait NULL + anomalie.
+    #[test]
+    fn test_mixed_string_bool_varchar_holds_false() {
+        use crate::pass2::coercer::{coerce, CoerceResult};
+        let mut t = TypeTracker::new(256);
+        for _ in 0..30 {
+            t.observe(&json!("no"));
+        }
+        t.observe(&json!("yes"));
+        t.observe(&json!(false));
+        // effective_max = max(3, 5) = 5 → ceil(5 * 1.2) = 6
+        assert_eq!(t.to_pg_type(), PgType::VarChar(6));
+        assert!(matches!(
+            coerce(&json!(false), &t.to_pg_type()),
+            CoerceResult::Ok(_)
+        ));
+    }
+
     // --- Chaînes rares : ignorées pour le typage sous RARE_STRING_RATE ---
 
     /// Cas `OpenFoodFacts` : une chaîne parmi des milliers de flottants ne passe plus la colonne en texte.
