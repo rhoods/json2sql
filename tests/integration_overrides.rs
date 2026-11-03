@@ -300,3 +300,73 @@ async fn test_ui_jsonb_on_root_does_not_duplicate_children() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// [issue #171] Groupe TOML keyed_pivot : people_home et people_work fusionnées dans
+// people_addresses. Chaque objet home / work donne une ligne du groupe, avec sa clé et
+// sa personne. Avant #171, la Pass 2 cherchait people.home et people.work par leur
+// chemin : table du groupe vide, une anomalie « table » par objet sur people.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_toml_group_keyed_pivot_fills_the_group_table() {
+    use json2sql::schema::config::apply_overrides_complete;
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("group_keyed_pivot.jsonl");
+        let mut p1 = pass1::runner::run(&path, &common::pass1_config("people"), None).unwrap();
+        let config = SchemaConfig::from_file(&common::fixture("group_keyed_pivot.toml")).unwrap();
+        assert_eq!(
+            apply_overrides_complete(&mut p1.schemas, &config).unwrap(),
+            []
+        );
+
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("people", &schema),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let anomalies: Vec<(String, String, String)> = p2
+            .anomaly_collector
+            .summaries()
+            .into_iter()
+            .map(|s| (s.table, s.column, s.expected_type))
+            .collect();
+        assert_eq!(anomalies, [], "home and work have the group table");
+        let rows: Vec<(String, String, String, i64)> = client
+            .query(
+                &format!(
+                    "SELECT p.name, g.key_id, g.city, g.floor::bigint \
+                     FROM \"{schema}\".\"people_addresses\" g \
+                     JOIN \"{schema}\".\"people\" p ON g.j2s_people_id = p.j2s_id \
+                     ORDER BY p.name, g.key_id"
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+            .collect();
+        let expected = [
+            ("Alice", "home", "Paris", 3),
+            ("Alice", "work", "Lyon", 7),
+            ("Bob", "home", "Nantes", 1),
+            ("Bob", "work", "Lille", 2),
+            ("Carol", "home", "Rennes", 5),
+        ]
+        .map(|(n, k, c, f)| (n.to_string(), k.to_string(), c.to_string(), f));
+        assert_eq!(
+            rows, expected,
+            "one row per home / work object, keyed by its member"
+        );
+    })
+    .await;
+}

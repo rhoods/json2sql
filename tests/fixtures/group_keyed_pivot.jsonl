@@ -1,0 +1,3 @@
+{"id": 1, "name": "Alice", "home": {"city": "Paris", "floor": 3}, "work": {"city": "Lyon", "floor": 7}}
+{"id": 2, "name": "Bob", "home": {"city": "Nantes", "floor": 1}, "work": {"city": "Lille", "floor": 2}}
+{"id": 3, "name": "Carol", "home": {"city": "Rennes", "floor": 5}}

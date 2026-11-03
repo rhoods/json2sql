@@ -129,6 +129,7 @@ Ce que chaque avertissement laisse de côté. Tous sont des avertissements : rie
 | `UnknownStrategy` | une valeur de `strategy` inconnue, dont `ignore` | la stratégie |
 | `UnknownGroupStrategy` | `[group.g]` avec une autre stratégie que `keyed_pivot` | le groupe |
 | `GroupMergeFailed` | moins de deux membres trouvés | la fusion |
+| `GroupMemberUnsupported` | un membre qu'une ligne du groupe ne peut pas garder : pas un objet du même parent que les autres, colonnes reconstruites par une stratégie, ou tables enfants à lui (#171) | la fusion (les membres restent des tables séparées) |
 | `InvalidOverride` | `columns` ou `suffix_columns` sur une table dont la stratégie inférée n'est pas `Columns` | l'override |
 | `AlreadyOverridden` | `strategy` ou `suffix_columns` sur une table qui a déjà un autre override (IHM, ou TOML gardé par le snapshot) ; le même override est ignoré sans avertissement (#129) | `strategy` et `suffix_columns` |
 | `ConflictingOverride` | `strategy` (reconnue, autre que `structured_pivot`) avec `suffix_columns` | `strategy` |

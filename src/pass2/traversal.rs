@@ -371,7 +371,7 @@ pub(super) fn dispatch_child_routes<S: RowSink>(
 /// key of one of its rows (`fr` → `selected_key`, whose path ends in `key`). Writes that row and
 /// returns `true`; `false` for a direct route, or a target that does not write one row per key.
 #[allow(clippy::too_many_lines)] // one row: route check, strategy's key column, then the write (#173)
-fn write_keyed_route_row<S: RowSink>(
+pub(super) fn write_keyed_route_row<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
