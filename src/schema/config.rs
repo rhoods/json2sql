@@ -30,7 +30,8 @@
 //! - fn `override_column_type` — change le type d'une colonne, ou dit pourquoi c'est impossible.
 //! - fn `apply_group_overrides` — applique les groupes de fusion (`[group.*]`, stratégie `keyed_pivot`).
 //! - fn `build_merged_keyed_pivot_schema` — construit le schéma fusionné (colonnes union + clé `key_id`).
-//! - fn `apply_keyed_pivot_merge` — fusionne N tables membres en une seule `SiblingCollapse`.
+//! - fn `apply_keyed_pivot_merge` — fusionne N tables membres en une seule `SiblingCollapse`, routée depuis leur parent
+//!   (#171) ; refuse un membre qu'une ligne du groupe ne peut pas garder.
 //! - fn `already_overridden` — une table qui a déjà un override (IHM, ou TOML gardé par le snapshot) ignore
 //!   `strategy`/`suffix_columns` : sans bruit si c'est le même, avec `AlreadyOverridden` sinon (#129).
 //! - fn `rebuilds_columns` — vrai si les overrides d'une table reconstruisent ou déplacent ses colonnes (`pivot`, `jsonb`, `normalize_dynamic_keys`, `flatten`, `suffix_columns`).
@@ -67,7 +68,7 @@ use crate::schema::column_groups::{
 use crate::schema::finalizer::apply_structured_pivot_split;
 use crate::schema::suffix_detector::{build_suffix_schema_from_list, declared_suffixes};
 use crate::schema::table_schema::{
-    ColumnSchema, InferredStrategy, KeyShape, SiblingSchema, TableSchema, UserOverride,
+    ChildKind, ColumnSchema, InferredStrategy, KeyShape, SiblingSchema, TableSchema, UserOverride,
 };
 use crate::schema::type_tracker::PgType;
 use crate::schema::wide_strategies::{
@@ -147,6 +148,12 @@ pub enum ConfigWarning {
         group: String,
         found: usize,
         expected: usize,
+    },
+    /// A `keyed_pivot` member that one row of the group can not hold (#171): not an object of the same parent as the
+    /// other members, columns rebuilt by a strategy, or child tables of its own. The merge is ignored.
+    GroupMemberUnsupported {
+        group: String,
+        member: String,
     },
     /// Override to `to_strategy` is incompatible with the table's current column layout
     /// (inferred as `from_strategy`). Column names were lost during finalization and cannot
@@ -250,6 +257,8 @@ impl ConfigWarning {
                 format!("schema-config: unknown group strategy '{strategy}' for group '{group}', ignored"),
             Self::GroupMergeFailed { group, found, expected } =>
                 format!("group '{group}': {found}/{expected} member(s) found, merge ignored"),
+            Self::GroupMemberUnsupported { group, member } =>
+                format!("group '{group}': member '{member}' must be an object of the same parent as the others, in columns, without child tables — merge ignored"),
             Self::InvalidOverride { table, from_strategy, to_strategy } =>
                 format!("schema-config: cannot override '{table}' from {from_strategy} to {to_strategy} — column names are lost after finalization, ignored"),
             Self::ConflictingOverride { table, ignored_strategy } =>
@@ -813,6 +822,7 @@ fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> 
     merged
 }
 
+#[allow(clippy::too_many_lines)] // one merge: member guard, merged table, then the parent's routes (#171)
 fn apply_keyed_pivot_merge(
     schemas: &mut Vec<TableSchema>,
     group_name: &str,
@@ -832,6 +842,22 @@ fn apply_keyed_pivot_merge(
     }
     indices.sort_unstable();
     let insert_pos = indices[0];
+    let parent = schemas[insert_pos].parent_table.clone();
+    // Une ligne du groupe ne garde que les colonnes d'un objet : un tableau, un autre parent, des colonnes reconstruites
+    // ou des tables enfants seraient perdus (#171). Les membres restent alors séparés.
+    if let Some(m) = indices.iter().map(|&i| &schemas[i]).find(|m| {
+        m.child_kind != Some(ChildKind::Object)
+            || m.parent_table != parent
+            || !matches!(*m.effective_strategy(), InferredStrategy::Columns)
+            || schemas
+                .iter()
+                .any(|s| s.parent_table.as_ref() == Some(&m.name))
+    }) {
+        return Some(ConfigWarning::GroupMemberUnsupported {
+            group: group_name.to_string(),
+            member: m.name.clone(),
+        });
+    }
 
     // Cloner les membres avant toute mutation
     let cloned: Vec<TableSchema> = indices.iter().map(|&i| schemas[i].clone()).collect();
@@ -840,6 +866,16 @@ fn apply_keyed_pivot_merge(
     // Retirer les membres du plus grand index au plus petit pour éviter le décalage
     for &i in indices.iter().rev() {
         schemas.remove(i);
+    }
+    // Le parent route la clé JSON de chaque membre vers le groupe : la Pass 2 y écrit une ligne de cette clé (#171).
+    // Un parent qui absorbe ses enfants (Jsonb, Pivot…) garde leurs données : sans route, le groupe part avec eux.
+    if let Some(p) = schemas
+        .iter_mut()
+        .find(|s| Some(&s.name) == parent.as_ref() && !s.absorbs_children())
+    {
+        for key in cloned.iter().filter_map(|m| m.path.last()) {
+            p.child_routes.insert(key.clone(), group_name.to_string());
+        }
     }
     schemas.insert(insert_pos, merged);
 
@@ -2161,25 +2197,81 @@ mod tests {
         );
     }
 
+    /// The object `root.<key>` (table `root_<key>`): a member a `keyed_pivot` group takes (#171).
+    fn object_child(key: &str) -> TableSchema {
+        let mut t = TableSchema::new(
+            format!("root_{key}"),
+            vec!["root".to_string(), key.to_string()],
+            1,
+        );
+        t.parent_table = Some("root".to_string());
+        t.child_kind = Some(ChildKind::Object);
+        t
+    }
+
+    const MERGED_AB: &str =
+        "[group.merged]\nstrategy = \"keyed_pivot\"\nmembers = [\"root_a\", \"root_b\"]\n";
+
     #[test]
     fn apply_group_overrides_valid_merge_no_warnings() {
-        let mut schemas = vec![simple_table("a"), simple_table("b")];
-        let mut group = HashMap::new();
-        group.insert(
-            "merged".to_string(),
-            GroupConfig {
-                strategy: "keyed_pivot".to_string(),
-                members: vec!["a".to_string(), "b".to_string()],
-            },
-        );
-        let config = SchemaConfig {
-            tables: HashMap::new(),
-            group,
-        };
+        let mut schemas = vec![simple_table("root"), object_child("a"), object_child("b")];
+        let config: SchemaConfig = toml::from_str(MERGED_AB).unwrap();
         let warnings = apply_group_overrides(&mut schemas, &config);
         assert_eq!(warnings, []);
-        assert_eq!(schemas.len(), 1);
-        assert_eq!(schemas[0].name, "merged");
+        assert_eq!(schemas.len(), 2);
+        assert_eq!(schemas[1].name, "merged");
+        let routes = |key: &str| schemas[0].child_routes.get(key).map(String::as_str);
+        assert_eq!(
+            (routes("a"), routes("b")),
+            (Some("merged"), Some("merged")),
+            "root routes a and b to the group (#171)"
+        );
+    }
+
+    /// Under a parent that absorbs its children, the group gets no route and leaves with them, as before #171: a route
+    /// would keep it, and Pass 2 would write its rows on top of the parent's blob (#130).
+    #[test]
+    fn a_keyed_pivot_group_under_a_jsonb_parent_leaves_with_its_children() {
+        let mut schemas = vec![simple_table("root"), object_child("a"), object_child("b")];
+        let text = format!("[root]\nstrategy = \"jsonb\"\n{MERGED_AB}");
+        let config: SchemaConfig = toml::from_str(&text).unwrap();
+        assert_eq!(apply_overrides_complete(&mut schemas, &config).unwrap(), []);
+        let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["root"]);
+    }
+
+    /// A member a row of the group can not hold leaves the group unmerged (#171): an array, another parent, columns
+    /// rebuilt by a strategy, or a child table the row would drop without a trace.
+    #[test]
+    fn a_keyed_pivot_member_a_row_cannot_hold_leaves_the_group_unmerged() {
+        let cases: [fn(&mut Vec<TableSchema>); 4] = [
+            |s| s[2].child_kind = Some(ChildKind::ObjectArray),
+            |s| s[2].parent_table = Some("other".to_string()),
+            |s| s[2].inferred_strategy = InferredStrategy::Pivot,
+            |s| {
+                let mut c = simple_table("root_b_c");
+                c.parent_table = Some("root_b".to_string());
+                s.push(c);
+            },
+        ];
+        let config: SchemaConfig = toml::from_str(MERGED_AB).unwrap();
+        for (i, case) in cases.iter().enumerate() {
+            let mut schemas = vec![simple_table("root"), object_child("a"), object_child("b")];
+            case(&mut schemas);
+            let names = |s: &[TableSchema]| s.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+            let before = names(&schemas);
+            let warnings = apply_group_overrides(&mut schemas, &config);
+            assert_eq!(
+                warnings,
+                [ConfigWarning::GroupMemberUnsupported {
+                    group: "merged".to_string(),
+                    member: "root_b".to_string(),
+                }],
+                "case {i}"
+            );
+            assert_eq!(names(&schemas), before, "case {i}: members kept");
+            assert!(schemas[0].child_routes.is_empty(), "case {i}: no route");
+        }
     }
 
     #[test]

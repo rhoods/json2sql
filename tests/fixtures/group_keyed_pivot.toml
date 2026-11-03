@@ -1,0 +1,3 @@
+[group.people_addresses]
+strategy = "keyed_pivot"
+members = ["people_home", "people_work"]

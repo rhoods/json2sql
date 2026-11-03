@@ -310,6 +310,30 @@ Au lieu d'écrire les groupes, on peut laisser json2sql les trouver dans les nom
 - **Signaux de données** : chaque Pass 1 garde un échantillon des lignes, au plus 20 000 et 256 Mo, une ligne tous les `taille / 20 000` octets, le même quel que soit le nombre de workers. Il en tire, pour chaque table large, la présence et les valeurs de ses colonnes, et les range dans le snapshot (champ optionnel `samples`, lu sans erreur par une version antérieure qui l'ignore ; environ 10 Mo de plus sur le snapshot d'OFF). Avec ces signaux, la stratégie applique les fusions que les données confirment, comme `--suggest-groups`, sans relire le fichier. Une table dont les colonnes ont changé depuis la Pass 1 (un `flatten` du TOML) ou un snapshot plus ancien se contente des noms.
 - **Candidats à confirmer** : une colonne laissée dans la table que les données rapprochent nettement d'un groupe (le groupe est rempli avec elle bien plus souvent que la richesse des fiches ne l'explique : lift moyen d'au moins 2, avec 30 % d'avance sur le groupe suivant, sur au moins 1 % des lignes) est signalée, jamais déplacée : dans le rapport `--suggest-groups`, en commentaire sous son groupe dans le TOML (`# might join …, to confirm`), et dans l'aperçu de l'écran Strategy (« might join, to confirm »). Sur OFF complet il y en a 13 (`manufacturing_places`, vitamines et minéraux vers `additives`…), certains discutables : c'est une indication.
 
+### Fusionner des tables sœurs (`[group.*]`)
+
+Une section `[group.<nom>]` remplace plusieurs tables d'objets frères par une seule table `<nom>`, avec une ligne par
+objet :
+
+```toml
+[group.people_addresses]
+strategy = "keyed_pivot"                 # seule stratégie de groupe
+members = ["people_home", "people_work"]
+```
+
+- Avec `{"home": {"city": "Paris"}, "work": {"city": "Lyon"}}` dans une ligne de `people`, la table
+  `people_addresses` reçoit deux lignes : la colonne `key_id` donne la clé JSON du membre (`home`, `work`), la clé
+  étrangère pointe vers la ligne de `people`, et les autres colonnes sont l'union de celles des membres.
+- Les membres sont des noms de tables PostgreSQL. Ce doivent être des objets (pas des tableaux) de la même table
+  parente, en stratégie `columns`, sans tables enfants à eux (objet ou tableau imbriqué). Sinon, ou si moins de deux
+  membres sont trouvés, la fusion est ignorée avec un avertissement, et les membres restent des tables séparées.
+- Sous une table parente en `jsonb` ou `pivot`, le groupe disparaît avec les autres tables enfants : la table parente
+  garde déjà leurs données.
+- Ne nommez pas le groupe comme la clé JSON d'un de ses membres (`[group.home]`) : ce membre ne serait pas importé et
+  laisserait des anomalies.
+- Les groupes sont appliqués après les surcharges de chaque table et avant `column_groups`. L'IHM ne lit pas le TOML ;
+  un snapshot écrit par `--schema-output` garde la table fusionnée.
+
 ### Stratégies disponibles
 
 Exemples de schémas SQL avec et sans chaque stratégie : [strategies.md](strategies.md).

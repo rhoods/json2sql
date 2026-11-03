@@ -17,7 +17,8 @@
 //!   (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`, `NormalizeDynamicKeys`, ou insertion standard récursive) ;
 //!   seul aiguillage pour un objet enfant, un élément de tableau et une cible de routage (#172).
 //! - fn `recurse_children` — parcourt les champs de l'objet, route chaque enfant (objet/array) vers
-//!   `insert_child_object`/`insert_array` ; sans table → `record_missing_table` (#167).
+//!   `insert_child_object`/`insert_array`, ou une ligne de sa route par clé (membre d'un groupe TOML, #171) ;
+//!   sans table → `record_missing_table` (#167).
 //! - fn `child_table` — table d'un champ : sa route d'abord (enfant rattaché sans fusion, #180), puis son chemin.
 //! - fn `write_row_of` — écrit la ligne d'une table pour un objet : colonnes générées puis colonnes de données.
 //! - fn `write_group_rows` — écrit les lignes des tables de groupes de colonnes d'une table (une par groupe qui a au moins une valeur).
@@ -49,7 +50,7 @@ use super::traversal::{
     insert_array, insert_jsonb_object, insert_normalize_dynamic_keys, insert_pivot_object,
     insert_sibling_collapse_object, insert_structured_pivot_object, keeps_scalars_in_array_column,
     push_coerced, push_coerced_as, push_text, record_missing_table, route_multi_collapse_children,
-    write_row,
+    write_keyed_route_row, write_row,
 };
 
 /// Mutable context for the recursive insert pass.
@@ -432,6 +433,7 @@ fn child_table<'a>(
 }
 
 /// Recurse into child fields of `obj`, routing each to the appropriate insertion function.
+#[allow(clippy::too_many_lines)] // one loop: table lookup, keyed route first, then dispatch by value type (#171)
 pub(super) fn recurse_children<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
@@ -441,31 +443,39 @@ pub(super) fn recurse_children<S: RowSink, A: AnomalyCollect>(
 ) -> Result<()> {
     let parent_path_key = schema.path.join(&PATH_SEP.to_string());
     for (field, value) in obj {
-        let child = || child_table(path_map, schema, &parent_path_key, field);
+        if !matches!(value, Value::Object(_) | Value::Array(_)) {
+            continue; // scalar — already handled as a column above
+        }
+        let Some(child_schema) = child_table(path_map, schema, &parent_path_key, field) else {
+            record_missing_table(path_map, ctx.anomalies, schema, field, row_id, value)?;
+            continue;
+        };
+        // A member of a TOML group is routed to the group table, where its key is the key of one row (#171).
+        if write_keyed_route_row(
+            path_map,
+            ctx.sinks,
+            ctx.anomalies,
+            child_schema,
+            field,
+            value,
+            row_id,
+        )? {
+            continue;
+        }
         match value {
             Value::Object(nested) => {
-                if let Some(child_schema) = child() {
-                    insert_child_object(path_map, ctx, child_schema, nested, value, row_id, None)?;
-                } else {
-                    record_missing_table(path_map, ctx.anomalies, schema, field, row_id, value)?;
-                }
+                insert_child_object(path_map, ctx, child_schema, nested, value, row_id, None)?;
             }
-            Value::Array(arr) => {
-                if let Some(child_schema) = child() {
-                    insert_array(
-                        path_map,
-                        ctx.sinks,
-                        ctx.anomalies,
-                        child_schema,
-                        arr,
-                        row_id,
-                        keeps_scalars_in_array_column(schema, field),
-                    )?;
-                } else {
-                    record_missing_table(path_map, ctx.anomalies, schema, field, row_id, value)?;
-                }
-            }
-            _ => {} // scalar — already handled as a column above
+            Value::Array(arr) => insert_array(
+                path_map,
+                ctx.sinks,
+                ctx.anomalies,
+                child_schema,
+                arr,
+                row_id,
+                keeps_scalars_in_array_column(schema, field),
+            )?,
+            _ => {}
         }
     }
     Ok(())
