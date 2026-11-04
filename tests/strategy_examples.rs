@@ -399,6 +399,41 @@ fn e_siblings_with_a_key_field_get_a_j2s_key_column() {
     assert!(run.ddl.contains("\"j2s_key\" TEXT"), "{}", run.ddl);
 }
 
+// ---------------------------------------------------------------------------
+// E, normalize. `normalize_dynamic_keys` n'existe plus (T5c) : la fusion automatique des objets frères fait le même
+// travail, sous-objets compris. Le TOML qui le demande reçoit un avertissement et la table reste celle de la fusion
+// `sibling` (avant : `url` et `w` perdus, #201 ; `meta` perdu, #202).
+// ---------------------------------------------------------------------------
+#[test]
+fn e_normalize_dynamic_keys_is_gone_and_sibling_keeps_everything() {
+    let rows: Vec<Value> = (0..2)
+        .map(|i| {
+            let images = object(
+                [format!("img_{i}a"), format!("img_{i}b")],
+                |_| json!({"url": "a.jpg", "w": 800, "meta": {"cam": "x", "iso": 100}}),
+            );
+            json!({"id": i, "images": images})
+        })
+        .collect();
+    let toml =
+        "[products_images]\nstrategy = \"normalize_dynamic_keys\"\nid_column = \"image_id\"\n";
+    let run = dry_run("products", &rows, &[], Some(toml));
+    assert_eq!(
+        run.shape(),
+        expected(&[
+            ("products", &["id"]),
+            ("products_images", &["key", "url", "w"]),
+            ("products_images_meta", &["cam", "iso"]),
+        ])
+    );
+    assert!(
+        run.stderr.contains("'normalize_dynamic_keys'")
+            && run.stderr.contains("--sibling-threshold"),
+        "{}",
+        run.stderr
+    );
+}
+
 /// F. 50 lignes d'une grille dense : 7 nutriments × (`n`, `n_points`, `n_value`), toujours remplis.
 fn nutrient_scores() -> Vec<Value> {
     let nutrients = [

@@ -167,9 +167,7 @@ mod tests {
     use crate::schema::finalizer::*;
     use crate::schema::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
     use crate::schema::type_tracker::PgType;
-    use crate::schema::wide_strategies::{
-        apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys,
-    };
+    use crate::schema::wide_strategies::{apply_flatten, apply_jsonb_flatten};
     use serde_json::json;
 
     fn make_root(value: &Value) -> &serde_json::Map<String, Value> {
@@ -663,7 +661,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // apply_normalize_dynamic_keys / apply_flatten / apply_jsonb_flatten
+    // apply_flatten / apply_jsonb_flatten
     // -------------------------------------------------------------------------
 
     fn make_parent_child(parent_name: &str, child_name: &str) -> Vec<TableSchema> {
@@ -702,32 +700,6 @@ mod tests {
         });
 
         vec![parent, child]
-    }
-
-    #[test]
-    fn test_apply_normalize_table_not_found_returns_err() {
-        let mut schemas = make_parent_child("users", "en");
-        let result = apply_normalize_dynamic_keys(&mut schemas, "nonexistent", "lang".to_string());
-        assert!(result.is_err(), "should return Err when table not found");
-    }
-
-    #[test]
-    fn test_apply_normalize_no_children_returns_err() {
-        let mut schemas = make_parent_child("users", "en");
-        // Remove the child — users has no Object children
-        schemas.retain(|s| s.name != "en");
-        let result = apply_normalize_dynamic_keys(&mut schemas, "users", "lang".to_string());
-        assert!(
-            result.is_err(),
-            "should return Err when no Object children found"
-        );
-    }
-
-    #[test]
-    fn test_apply_normalize_success() {
-        let mut schemas = make_parent_child("users", "en");
-        let result = apply_normalize_dynamic_keys(&mut schemas, "users", "lang".to_string());
-        assert!(result.is_ok());
     }
 
     #[test]

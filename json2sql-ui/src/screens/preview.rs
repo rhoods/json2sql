@@ -92,7 +92,6 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                 UserOverride::Skip                              => matches!(orig.inferred_strategy, InferredStrategy::Ignore),
                 UserOverride::JsonbFlatten                      => matches!(orig.inferred_strategy, InferredStrategy::JsonbFlatten),
                 UserOverride::Flatten { prefix, max_depth }     => matches!(&orig.inferred_strategy, InferredStrategy::Flatten { prefix: p, max_depth: d } if p == prefix && d == max_depth),
-                UserOverride::NormalizeDynamicKeys { id_column } => matches!(&orig.inferred_strategy, InferredStrategy::NormalizeDynamicKeys { id_column: c } if c == id_column),
             };
             if matches_inferred { return None; }
             let (_from_cls, from_lbl) = strategy_badge(&orig.inferred_strategy);

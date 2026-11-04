@@ -10,10 +10,9 @@
 //! - fn `SchemaConfig::from_file` — charge et parse le fichier TOML.
 //! - enum `ConfigWarning` — warning non-fatal (table/colonne/type/stratégie/groupe inconnu).
 //! - fn `ConfigWarning::to_message` — message lisible pour chaque variante de warning.
-//! - struct `DeferredNormalize` — override `normalize_dynamic_keys` en attente (mutation globale).
 //! - struct `DeferredFlatten` — override `flatten` en attente (mutation globale).
 //! - fn `apply_overrides` — point d'entrée par table : dispatch strategy/`suffix_columns`/types,
-//!   reporte `normalize_dynamic_keys`/`flatten` en différé (nécessitent une mutation globale).
+//!   reporte `flatten` en différé (nécessitent une mutation globale).
 //! - fn `flatten_refusal` — pourquoi une table ne peut pas être aplatie (`FlattenRefused`) : racine, tableau d'objets,
 //!   stratégie autre que `Columns`, tables, routes ou colonnes aplaties à elle, qui seraient perdues (#170).
 //! - fn `toml_str` — helper de lecture d'une clé TOML en `String`.
@@ -21,7 +20,7 @@
 //! - fn `conflicting_strategy_override` — détecte un conflit `strategy` vs `suffix_columns`
 //!   (#31, `suffix_columns` gagne toujours).
 //! - fn `apply_strategy_override` — applique la clé `strategy` (`pivot`/`jsonb`/`columns`/`structured_pivot`/
-//!   `normalize_dynamic_keys`/`flatten`).
+//!   `flatten`).
 //! - fn `refused_at_root` — vrai si la stratégie demande à la racine une ligne par clé (#172).
 //! - fn `suffix_list_of` — les `suffix_columns` d'une table dans la config.
 //! - fn `apply_suffix_columns_override` — applique `suffix_columns` : la grille part dans un compagnon `_pivot` (#163).
@@ -36,7 +35,7 @@
 //!   (#171) ; refuse un membre qu'une ligne du groupe ne peut pas garder.
 //! - fn `already_overridden` — une table qui a déjà un override (IHM, ou TOML gardé par le snapshot) ignore
 //!   `strategy`/`suffix_columns` : sans bruit si c'est le même, avec `AlreadyOverridden` sinon (#129).
-//! - fn `rebuilds_columns` — vrai si les overrides d'une table reconstruisent ou déplacent ses colonnes (`pivot`, `jsonb`, `normalize_dynamic_keys`, `flatten`, `suffix_columns`).
+//! - fn `rebuilds_columns` — vrai si les overrides d'une table reconstruisent ou déplacent ses colonnes (`pivot`, `jsonb`, `flatten`, `suffix_columns`).
 //! - fn `apply_overrides_complete` — enchaîne overrides + groupes de fusion + groupes de colonnes + `exclude_absorbed_children`.
 //! - struct `SkipCascadeWarning` — table retirée par `Skip` ayant entraîné de vrais enfants en cascade.
 //! - fn `apply_user_overrides` — applique les overrides IHM (`Pivot`/`Jsonb`/`Skip`) après chargement
@@ -75,7 +74,7 @@ use crate::schema::table_schema::{
 };
 use crate::schema::type_tracker::PgType;
 use crate::schema::wide_strategies::{
-    apply_flatten, apply_normalize_dynamic_keys, apply_wide_strategy_columns, build_union_columns,
+    apply_flatten, apply_wide_strategy_columns, build_union_columns,
 };
 
 /// TOML config file for manual type overrides.
@@ -143,6 +142,11 @@ pub enum ConfigWarning {
         table: String,
         strategy: String,
     },
+    /// A `strategy` value that no longer exists (#200): the table keeps the schema the detection gave it.
+    RemovedStrategy {
+        table: String,
+        strategy: String,
+    },
     UnknownGroupStrategy {
         group: String,
         strategy: String,
@@ -179,7 +183,7 @@ pub enum ConfigWarning {
         column: String,
         type_str: String,
     },
-    /// `strategy` asks the root table for a strategy that writes one row per key (`pivot`, `normalize_dynamic_keys`):
+    /// `strategy` asks the root table for a strategy that writes one row per key (`pivot`):
     /// the root has no parent row to tie those rows to, so they could not be traced back to their line (#172).
     RootOverride {
         table: String,
@@ -262,6 +266,10 @@ impl ConfigWarning {
                 format!("schema-config: unknown type '{type_str}' for '{table}.{column}', ignored"),
             Self::UnknownStrategy { table, strategy } =>
                 format!("schema-config: unknown strategy '{strategy}' for '{table}', ignored"),
+            Self::RemovedStrategy { table, strategy } => format!(
+                "schema-config: strategy '{strategy}' for '{table}' no longer exists, ignored: objects under dynamic \
+                 keys are fused automatically (sibling); tune it with --sibling-threshold / --sibling-jaccard"
+            ),
             Self::UnknownGroupStrategy { group, strategy } =>
                 format!("schema-config: unknown group strategy '{strategy}' for group '{group}', ignored"),
             Self::GroupMergeFailed { group, found, expected } =>
@@ -302,10 +310,6 @@ impl ConfigWarning {
     }
 }
 
-struct DeferredNormalize {
-    table_name: String,
-    id_column: String,
-}
 struct DeferredFlatten {
     table_name: String,
     prefix: String,
@@ -322,7 +326,6 @@ pub fn apply_overrides(
     config: &SchemaConfig,
 ) -> crate::error::Result<Vec<ConfigWarning>> {
     let mut warnings: Vec<ConfigWarning> = Vec::new();
-    let mut deferred_normalize: Vec<DeferredNormalize> = Vec::new();
     let mut deferred_flatten: Vec<DeferredFlatten> = Vec::new();
     // `suffix_columns` creates a `_pivot` companion: its name must be unique among all tables.
     let mut existing_names: HashSet<String> = schemas.iter().map(|s| s.name.clone()).collect();
@@ -367,7 +370,6 @@ pub fn apply_overrides(
                         schema,
                         table_name,
                         col_overrides,
-                        &mut deferred_normalize,
                         &mut deferred_flatten,
                     )),
                 }
@@ -394,21 +396,6 @@ pub fn apply_overrides(
     }
 
     schemas.extend(companions);
-    for op in deferred_normalize {
-        let original = schemas
-            .iter()
-            .find(|s| s.name == op.table_name)
-            .map(|s| s.inferred_strategy.clone());
-        apply_normalize_dynamic_keys(schemas, &op.table_name, op.id_column.clone())?;
-        if let Some(s) = schemas.iter_mut().find(|s| s.name == op.table_name) {
-            if let Some(orig) = original {
-                s.inferred_strategy = orig;
-            }
-            s.set_toml_override(Some(UserOverride::NormalizeDynamicKeys {
-                id_column: op.id_column.into(),
-            }));
-        }
-    }
     // Checked once the other overrides are applied, in the order of the TOML: the tables a flatten would lose are the
     // ones left by then (#170). shortcut: a refused table has already given back its column groups (nothing is lost);
     // move the check before `dissolve_column_groups` if they must stay.
@@ -479,10 +466,6 @@ fn already_overridden(
             (UserOverride::Pivot, Some("pivot"))
                 | (UserOverride::Jsonb, Some("jsonb"))
                 | (UserOverride::Columns, Some("columns"))
-                | (
-                    UserOverride::NormalizeDynamicKeys { .. },
-                    Some("normalize_dynamic_keys")
-                )
         );
     let warning = (!same).then(|| ConfigWarning::AlreadyOverridden {
         table: table_name.to_string(),
@@ -498,12 +481,8 @@ fn already_overridden(
 /// True when `strategy` asks the root `schema` for one row per key, which has no parent row to be tied to (#172).
 fn refused_at_root(schema: &TableSchema, col_overrides: &HashMap<String, toml::Value>) -> bool {
     schema.parent_table.is_none()
-        && toml_str(col_overrides, "strategy").is_some_and(|s| {
-            matches!(
-                s.to_lowercase().as_str(),
-                "pivot" | "normalize_dynamic_keys"
-            )
-        })
+        && toml_str(col_overrides, "strategy")
+            .is_some_and(|s| matches!(s.to_lowercase().as_str(), "pivot"))
 }
 
 /// True when the overrides of a table rebuild its columns or take them to another table (`pivot`, `jsonb`,
@@ -511,12 +490,8 @@ fn refused_at_root(schema: &TableSchema, col_overrides: &HashMap<String, toml::V
 /// first, or the columns now in the group tables would be missing from the result (#78).
 fn rebuilds_columns(col_overrides: &HashMap<String, toml::Value>) -> bool {
     has_nonempty_suffix_columns(col_overrides)
-        || toml_str(col_overrides, "strategy").is_some_and(|s| {
-            matches!(
-                s.to_lowercase().as_str(),
-                "pivot" | "jsonb" | "normalize_dynamic_keys" | "flatten"
-            )
-        })
+        || toml_str(col_overrides, "strategy")
+            .is_some_and(|s| matches!(s.to_lowercase().as_str(), "pivot" | "jsonb" | "flatten"))
 }
 
 fn toml_str(map: &HashMap<String, toml::Value>, key: &str) -> Option<String> {
@@ -546,7 +521,7 @@ fn conflicting_strategy_override(col_overrides: &HashMap<String, toml::Value>) -
     }
     let strategy_str = toml_str(col_overrides, "strategy")?;
     match strategy_str.to_lowercase().as_str() {
-        "pivot" | "jsonb" | "columns" | "normalize_dynamic_keys" | "flatten" => Some(strategy_str),
+        "pivot" | "jsonb" | "columns" | "flatten" => Some(strategy_str),
         _ => None,
     }
 }
@@ -556,7 +531,6 @@ fn apply_strategy_override(
     schema: &mut TableSchema,
     table_name: &str,
     col_overrides: &HashMap<String, toml::Value>,
-    deferred_normalize: &mut Vec<DeferredNormalize>,
     deferred_flatten: &mut Vec<DeferredFlatten>,
 ) -> Vec<ConfigWarning> {
     let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") else {
@@ -596,13 +570,12 @@ fn apply_strategy_override(
         // set here because `UserOverride` has no `StructuredPivot` variant — effective_strategy()
         // still resolves correctly by falling through to inferred_strategy. Verified in #28.
         "structured_pivot" => {}
+        // Removed (#200): the sibling fusion does the same, sub-objects and the table's own fields included.
         "normalize_dynamic_keys" => {
-            let id_col =
-                toml_str(col_overrides, "id_column").unwrap_or_else(|| "key_id".to_string());
-            deferred_normalize.push(DeferredNormalize {
-                table_name: table_name.to_string(),
-                id_column: id_col,
-            });
+            return vec![ConfigWarning::RemovedStrategy {
+                table: table_name.to_string(),
+                strategy: strategy_str.to_lowercase(),
+            }]
         }
         "flatten" => {
             let prefix =
@@ -1011,10 +984,7 @@ fn apply_single_user_override(s: &mut TableSchema, ov: &UserOverride) {
                 s.set_ui_override(Some(UserOverride::Columns));
             }
         }
-        UserOverride::Skip
-        | UserOverride::JsonbFlatten
-        | UserOverride::Flatten { .. }
-        | UserOverride::NormalizeDynamicKeys { .. } => {}
+        UserOverride::Skip | UserOverride::JsonbFlatten | UserOverride::Flatten { .. } => {}
     }
 }
 
@@ -1023,12 +993,9 @@ fn apply_single_user_override(s: &mut TableSchema, ov: &UserOverride) {
 fn kept_toml_rebuild(s: &mut TableSchema, ov: &UserOverride) -> bool {
     // The same override keeps the columns; Jsonb rebuilds them right from any columns; Pivot or Columns would read
     // key/value or data as the table's own columns, so the TOML one stays (`load` may have set `ui_override`: cleared).
-    let rebuilt_by_toml = s.toml_override().filter(|t| {
-        matches!(
-            t,
-            UserOverride::Pivot | UserOverride::Jsonb | UserOverride::NormalizeDynamicKeys { .. }
-        )
-    });
+    let rebuilt_by_toml = s
+        .toml_override()
+        .filter(|t| matches!(t, UserOverride::Pivot | UserOverride::Jsonb));
     if let Some(toml) = rebuilt_by_toml.cloned() {
         if &toml == ov {
             s.set_ui_override(Some(ov.clone()));
@@ -1684,59 +1651,6 @@ mod tests {
         assert_eq!(*schemas[0].effective_strategy(), InferredStrategy::Jsonb);
     }
 
-    #[test]
-    fn toml_normalize_dynamic_keys_sets_toml_override_and_preserves_inferred() {
-        use crate::schema::table_schema::{ChildKind, ColumnSchema};
-        let mut parent = child_table("images");
-        parent.inferred_strategy = InferredStrategy::Columns;
-        parent
-            .columns
-            .push(ColumnSchema::generated("j2s_id", PgType::BigInt));
-        // NormalizeDynamicKeys requires at least one Object child
-        let mut child = TableSchema::new(
-            "images_12584".to_string(),
-            vec!["images".to_string(), "12584".to_string()],
-            1,
-        );
-        child.parent_table = Some("images".to_string());
-        child.child_kind = Some(ChildKind::Object);
-        let mut schemas = vec![parent, child];
-        let mut cols = HashMap::new();
-        cols.insert(
-            "strategy".to_string(),
-            toml::Value::String("normalize_dynamic_keys".to_string()),
-        );
-        cols.insert(
-            "id_column".to_string(),
-            toml::Value::String("image_id".to_string()),
-        );
-        let mut tables = HashMap::new();
-        tables.insert("images".to_string(), cols);
-        let config = SchemaConfig {
-            tables,
-            group: HashMap::new(),
-        };
-        apply_overrides(&mut schemas, &config).unwrap();
-        let images = schemas.iter().find(|s| s.name == "images").unwrap();
-        assert_eq!(
-            images.inferred_strategy,
-            InferredStrategy::Columns,
-            "inferred_strategy must not be mutated"
-        );
-        assert_eq!(
-            images.toml_override(),
-            Some(&UserOverride::NormalizeDynamicKeys {
-                id_column: "image_id".into()
-            })
-        );
-        assert_eq!(
-            *images.effective_strategy(),
-            InferredStrategy::NormalizeDynamicKeys {
-                id_column: "image_id".into()
-            }
-        );
-    }
-
     // --- Guard 1: strategy + suffix_columns conflict (#31) ---
 
     fn cols_with_strategy_and_suffix(strategy: &str) -> HashMap<String, toml::Value> {
@@ -1860,53 +1774,6 @@ mod tests {
             "a non-string strategy value is a no-op, not a real conflict"
         );
         assert!(has_structured_companion(&schemas, &schemas[0].name));
-    }
-
-    #[test]
-    fn toml_normalize_dynamic_keys_with_suffix_columns_ignores_strategy() {
-        use crate::schema::table_schema::{ChildKind, ColumnSchema};
-        let mut parent = child_table("images");
-        parent
-            .columns
-            .push(ColumnSchema::generated("j2s_id", PgType::BigInt));
-        let mut child = TableSchema::new(
-            "images_12584".to_string(),
-            vec!["images".to_string(), "12584".to_string()],
-            1,
-        );
-        child.parent_table = Some("images".to_string());
-        child.child_kind = Some(ChildKind::Object);
-        let mut schemas = vec![parent, child];
-        let mut cols = cols_with_strategy_and_suffix("normalize_dynamic_keys");
-        cols.insert(
-            "id_column".to_string(),
-            toml::Value::String("image_id".to_string()),
-        );
-        let mut tables = HashMap::new();
-        tables.insert("images".to_string(), cols);
-        let config = SchemaConfig {
-            tables,
-            group: HashMap::new(),
-        };
-
-        let warnings = apply_overrides(&mut schemas, &config).unwrap();
-
-        assert_eq!(
-            warnings,
-            vec![ConfigWarning::ConflictingOverride {
-                table: "images".to_string(),
-                ignored_strategy: "normalize_dynamic_keys".to_string(),
-            }]
-        );
-        let images = schemas.iter().find(|s| s.name == "images").unwrap();
-        assert_eq!(
-            images.toml_override(),
-            None,
-            "the deferred normalize_dynamic_keys must not be scheduled"
-        );
-        assert!(has_structured_companion(&schemas, "images"));
-        // Parent, its original child and the `_pivot` companion. No derived "_by_key" table was created.
-        assert_eq!(schemas.len(), 3);
     }
 
     #[test]
@@ -2668,7 +2535,7 @@ mod tests {
     }
 
     #[test]
-    fn flattening_or_normalizing_a_split_table_keeps_the_columns_that_were_moved() {
+    fn flattening_a_split_table_keeps_the_columns_that_were_moved() {
         let mut parent = simple_table("root");
         parent
             .columns
@@ -2751,38 +2618,6 @@ mod tests {
                 "{order:?}"
             );
         }
-    }
-
-    #[test]
-    fn normalizing_the_dynamic_keys_of_a_split_table_does_not_take_its_group_tables_for_keys() {
-        let mut real_child = simple_table("items_a");
-        real_child.parent_table = Some("items".to_string());
-        real_child.child_kind = Some(crate::schema::table_schema::ChildKind::Object);
-        real_child.path = vec!["items".to_string(), "a".to_string()];
-        real_child
-            .columns
-            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
-        real_child.columns.push(ColumnSchema {
-            name: "q1".to_string(),
-            original_name: "q1".to_string(),
-            pg_type: PgType::Text,
-            not_null: false,
-            is_generated: false,
-            is_parent_fk: false,
-        });
-        let mut schemas = vec![splittable("items"), real_child];
-        apply_overrides_complete(&mut schemas, &toml::from_str(TWO_GROUPS).unwrap()).unwrap();
-        assert_eq!(schemas.len(), 4);
-        let normalize: SchemaConfig =
-            toml::from_str("[items]\nstrategy = \"normalize_dynamic_keys\"\n").unwrap();
-        apply_overrides_complete(&mut schemas, &normalize).unwrap();
-        let names: Vec<&str> = schemas[0].columns.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["j2s_id", "key_id", "q1"],
-            "only the real child gives columns"
-        );
-        assert_eq!(schemas[0].column_groups.len(), 0);
     }
 
     #[test]
@@ -3100,25 +2935,41 @@ mod tests {
 
     #[test]
     fn a_toml_strategy_of_one_row_per_key_on_the_root_is_ignored_with_a_warning() {
-        for strategy in ["pivot", "normalize_dynamic_keys"] {
-            let mut schemas = vec![root_with_a_column()];
-            let warnings =
-                apply_overrides(&mut schemas, &toml_config("root", toml_strategy(strategy)))
-                    .unwrap();
-            assert_eq!(
-                warnings,
-                vec![ConfigWarning::RootOverride {
-                    table: "root".to_string(),
-                    strategy: strategy.to_string(),
-                }]
-            );
-            assert_eq!(schemas[0].toml_override(), None, "{strategy}");
-            assert_eq!(
-                data_columns_of(&schemas[0]),
-                data_columns_of(&root_with_a_column()),
-                "{strategy}"
-            );
-        }
+        let mut schemas = vec![root_with_a_column()];
+        let warnings =
+            apply_overrides(&mut schemas, &toml_config("root", toml_strategy("pivot"))).unwrap();
+        assert_eq!(
+            warnings,
+            vec![ConfigWarning::RootOverride {
+                table: "root".to_string(),
+                strategy: "pivot".to_string(),
+            }]
+        );
+        assert_eq!(schemas[0].toml_override(), None);
+        assert_eq!(
+            data_columns_of(&schemas[0]),
+            data_columns_of(&root_with_a_column())
+        );
+    }
+
+    #[test]
+    fn normalize_dynamic_keys_is_removed_and_leaves_the_table_as_it_is() {
+        // #200: the sibling fusion does the same; the TOML value gets a warning, the schema does not change.
+        let mut schemas = vec![simple_table("items")];
+        let before = data_columns_of(&schemas[0]);
+        let config: SchemaConfig =
+            toml::from_str("[items]\nstrategy = \"normalize_dynamic_keys\"\nid_column = \"k\"\n")
+                .unwrap();
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert_eq!(
+            warnings,
+            [ConfigWarning::RemovedStrategy {
+                table: "items".to_string(),
+                strategy: "normalize_dynamic_keys".to_string(),
+            }]
+        );
+        assert_eq!(data_columns_of(&schemas[0]), before);
+        assert_eq!(schemas[0].toml_override(), None);
     }
 
     fn toml_config(table: &str, keys: HashMap<String, toml::Value>) -> SchemaConfig {

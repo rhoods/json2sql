@@ -34,7 +34,6 @@ symbols:
   - apply_keyed_pivot_merge
   - rebuilds_columns
   - conflicting_strategy_override
-  - DeferredNormalize
   - DeferredFlatten
   - apply_user_overrides
   - apply_single_user_override
@@ -52,7 +51,6 @@ symbols:
   - apply_wide_strategy_columns
   - apply_flatten
   - flatten_refusal
-  - apply_normalize_dynamic_keys
   - apply_jsonb_flatten
   - apply_column_groups
   - dissolve_column_groups
@@ -131,6 +129,7 @@ Ce que chaque avertissement laisse de côté. Tous sont des avertissements : rie
 | `UnknownColumn` | une clé non réservée qui n'est pas une colonne | cette clé |
 | `UnknownType` | une chaîne que `parse_pg_type` ne reconnaît pas (dont `JSONB`) | ce type |
 | `UnknownStrategy` | une valeur de `strategy` inconnue, dont `ignore` | la stratégie |
+| `RemovedStrategy` | `strategy = "normalize_dynamic_keys"`, retirée (#200) : la fusion `sibling` automatique fait le même travail | la stratégie |
 | `UnknownGroupStrategy` | `[group.g]` avec une autre stratégie que `keyed_pivot` | le groupe |
 | `GroupMergeFailed` | moins de deux membres trouvés | la fusion |
 | `GroupMemberUnsupported` | un membre qu'une ligne du groupe ne peut pas garder : pas un objet du même parent que les autres, colonnes reconstruites par une stratégie, ou tables enfants à lui (#171) | la fusion (les membres restent des tables séparées) |
@@ -138,7 +137,7 @@ Ce que chaque avertissement laisse de côté. Tous sont des avertissements : rie
 | `AlreadyOverridden` | `strategy` ou `suffix_columns` sur une table qui a déjà un autre override (IHM, ou TOML gardé par le snapshot) ; le même override est ignoré sans avertissement (#129) | `strategy` et `suffix_columns` |
 | `ConflictingOverride` | `strategy` (reconnue, autre que `structured_pivot`) avec `suffix_columns` | `strategy` |
 | `ArrayColumnOverride` | un type forcé sur une colonne tableau (#84) | ce type |
-| `RootOverride` | `strategy = "pivot"` ou `"normalize_dynamic_keys"` sur la table racine, qui n'a pas de ligne parente (#172) | la stratégie |
+| `RootOverride` | `strategy = "pivot"` sur la table racine, qui n'a pas de ligne parente (#172) | la stratégie |
 | `ColumnGroupsMalformed` | `column_groups` qui n'est pas une table de listes | les groupes de la table |
 | `ColumnGroupMalformed` | un groupe qui n'est pas une liste de noms | ce groupe |
 | `ColumnGroupUnknownColumn` | une colonne absente | ce groupe |
@@ -160,7 +159,6 @@ Les overrides de stratégie, qui les pose et ce qu'en fait `apply_single_user_ov
 | `Skip` | IHM seulement (le TOML refuse `ignore`) | rien : `compute_skip_cascade` retire la table, son compagnon `_wide` et ses enfants |
 | `JsonbFlatten` | `apply_jsonb_flatten`, qui n'a pas d'appelant hors tests | **rien** |
 | `Flatten` | personne : le TOML `flatten` passe par `apply_flatten`, qui retire l'enfant | **rien** |
-| `NormalizeDynamicKeys` | TOML (`toml_override`, après `apply_normalize_dynamic_keys`) | **rien** |
 
 ## 2. Flux
 
@@ -176,7 +174,7 @@ CLI : run_pipeline
     │     ├─ apply_overrides, table par table :
     │     │    already_overridden : une table qui a déjà un override saute strategy et suffix_columns
     │     │    dissolve_column_groups si rebuilds_columns
-    │     │    apply_strategy_override (normalize_dynamic_keys et flatten : DeferredNormalize / DeferredFlatten,
+    │     │    apply_strategy_override (flatten : DeferredFlatten,
     │     │                             appliqués après la boucle sur tout le schéma)
     │     │    apply_suffix_columns_override, apply_column_type_overrides
     │     ├─ apply_group_overrides ([group.*]) : apply_keyed_pivot_merge, puis routes du parent vers le groupe
@@ -278,7 +276,7 @@ Les endroits prévus sont listés au § 1. Trois changements demandent des étap
 **Nouvelle valeur de `strategy`.**
 
 - [ ] son cas dans `apply_strategy_override` ; si elle a besoin de tout le schéma, la reporter après la boucle comme
-  `DeferredNormalize` ;
+  `DeferredFlatten` ;
 - [ ] si elle reconstruit ou déplace des colonnes : l'ajouter à `rebuilds_columns` ; si elle contredit
   `suffix_columns` : à `conflicting_strategy_override` ;
 - [ ] décider si elle pose `toml_override` (`TableSchema::set_toml_override`) et si elle remet `inferred_strategy` ;

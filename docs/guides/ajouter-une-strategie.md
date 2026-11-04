@@ -60,7 +60,6 @@ symbols:
   - apply_group_columns
   - build_effective_schemas
   - DeferredFlatten
-  - DeferredNormalize
   - format_version
   - COLUMN_GROUPS_FORMAT_VERSION
   - insert_object
@@ -120,7 +119,6 @@ Les stratégies existantes, par origine :
 | `SiblingCollapseMulti` | phase 2 | — | `sibling` |
 | `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (`split` est obligatoire) |
 | `Ignore` | jamais : projection de `UserOverride::Skip` | IHM (`Skip`) | — |
-| `NormalizeDynamicKeys` | jamais | TOML `normalize_dynamic_keys` | — |
 | `Flatten` | jamais | TOML `flatten` | — |
 | `JsonbFlatten` | jamais | aucun chemin trouvé (voir § 6) | — |
 
@@ -203,7 +201,7 @@ Le compilateur ne voit pas le reste :
   `j2s_order` (`push_generated_col_insert`). Seul un élément scalaire en `Jsonb` est traité à part par `insert_array`.
 - [ ] Pass 2, cible d'une route par clé (#173, et membre d'un groupe TOML, #171) : `write_keyed_route_row`, appelée
   par `dispatch_child_routes` et `recurse_children`, écrit la ligne d'une clé routée (`fr` → `…_selected_key`,
-  `home` → la table du groupe) si la cible est `SiblingCollapse` ou `NormalizeDynamicKeys`, avec un cas par défaut
+  `home` → la table du groupe) si la cible est `SiblingCollapse`, avec un cas par défaut
   pour le reste.
   Une stratégie qui écrit une ligne par clé y a sa place ; sinon, sur une telle cible (après un override), la valeur
   passe par `insert_child_object`, qui la lit comme un objet de clés sœurs : colonnes en anomalie, sous-clés prises
@@ -233,7 +231,7 @@ Le compilateur ne voit pas le reste :
   `pivot` et `jsonb` (`apply_strategy_override`, `apply_single_user_override`) sauvegardent la valeur avant l'appel et
   la restaurent après ; faire de même.
 - [ ] Si l'application touche d'autres tables que la table visée (comme `flatten`) : passer par le mécanisme différé
-  d'`apply_overrides` (`DeferredFlatten`, `DeferredNormalize`).
+  d'`apply_overrides` (`DeferredFlatten`).
 - [ ] Si la stratégie reconstruit les colonnes : `apply_user_overrides` dissout les groupes de colonnes pour `Pivot` et
   `Jsonb` (`dissolve_column_groups`). Ajouter la variante si besoin.
 - [ ] IHM : les boutons de `StrategyScreen`, écrits à la main override par override (actions en masse comprises), et

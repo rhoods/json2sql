@@ -15,7 +15,7 @@
 //! - fn `write_root_jsonb` — cas spécial racine en stratégie Jsonb : écrit le blob JSON puis recurse ; octet nul →
 //!   `NULL` + anomalie, comme `push_jsonb_col` (#192).
 //! - fn `insert_child_object` — dispatch un objet vers la fonction d'insertion selon son `InferredStrategy`
-//!   (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`, `NormalizeDynamicKeys`, ou insertion standard récursive) ;
+//!   (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`, ou insertion standard récursive) ;
 //!   seul aiguillage pour un objet enfant, un élément de tableau et une cible de routage (#172) ; un objet seul dans
 //!   une table `ObjectArray` y est un tableau d'un élément, `j2s_order` 0 (#169).
 //! - fn `recurse_children` — parcourt les champs de l'objet, route chaque enfant (objet/array) vers
@@ -53,10 +53,10 @@ use crate::schema::table_schema::{InferredStrategy, TableSchema};
 use crate::schema::PATH_SEP;
 
 use super::traversal::{
-    insert_array, insert_jsonb_object, insert_normalize_dynamic_keys, insert_pivot_object,
-    insert_sibling_collapse_object, insert_structured_pivot_object, keeps_scalars_in_array_column,
-    push_coerced, push_coerced_as, push_text, record_missing_table, route_multi_collapse_children,
-    write_keyed_route_row, write_row,
+    insert_array, insert_jsonb_object, insert_pivot_object, insert_sibling_collapse_object,
+    insert_structured_pivot_object, keeps_scalars_in_array_column, push_coerced, push_coerced_as,
+    push_text, record_missing_table, route_multi_collapse_children, write_keyed_route_row,
+    write_row,
 };
 
 /// Mutable context for the recursive insert pass.
@@ -337,15 +337,6 @@ pub(super) fn insert_child_object<S: RowSink, A: AnomalyCollect>(
             parent_id,
             order,
             sibling_schema,
-        ),
-        InferredStrategy::NormalizeDynamicKeys { id_column } => insert_normalize_dynamic_keys(
-            sinks,
-            anomalies,
-            child_schema,
-            nested,
-            parent_id,
-            order,
-            id_column,
         ),
         // insert_object writes the routing row of a SiblingCollapseMulti table, with its order, then routes its keys.
         InferredStrategy::SiblingCollapseMulti(_)

@@ -26,22 +26,6 @@ fn schema_ui_override_flatten() -> TableSchema {
     s
 }
 
-fn schema_ui_override_normalize_dynamic_keys() -> TableSchema {
-    let mut s = TableSchema::new("images".to_string(), vec!["images".to_string()], 1);
-    s.set_ui_override(Some(UserOverride::NormalizeDynamicKeys {
-        id_column: "image_id".into(),
-    }));
-    s
-}
-
-fn schema_toml_override_normalize_dynamic_keys() -> TableSchema {
-    let mut s = TableSchema::new("images".to_string(), vec!["images".to_string()], 1);
-    s.set_toml_override(Some(UserOverride::NormalizeDynamicKeys {
-        id_column: "image_id".into(),
-    }));
-    s
-}
-
 /// Simulates the Pass 2 hot path: `effective_strategy()` called once per row.
 fn call_per_row(schema: &TableSchema, rows: u64) {
     for _ in 0..rows {
@@ -61,16 +45,6 @@ fn bench_effective_strategy(c: &mut Criterion) {
     let ui_flatten = schema_ui_override_flatten();
     group.bench_function("ui_override_flatten", |b| {
         b.iter(|| call_per_row(&ui_flatten, 1_000));
-    });
-
-    let ui_normalize = schema_ui_override_normalize_dynamic_keys();
-    group.bench_function("ui_override_normalize_dynamic_keys", |b| {
-        b.iter(|| call_per_row(&ui_normalize, 1_000));
-    });
-
-    let toml_normalize = schema_toml_override_normalize_dynamic_keys();
-    group.bench_function("toml_override_normalize_dynamic_keys", |b| {
-        b.iter(|| call_per_row(&toml_normalize, 1_000));
     });
 
     group.finish();

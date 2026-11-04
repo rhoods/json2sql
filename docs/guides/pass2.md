@@ -74,7 +74,6 @@ symbols:
   - PgType
   - insert_sibling_collapse_object
   - insert_sibling_collapse_array_of_objects
-  - insert_normalize_dynamic_keys
   - insert_structured_pivot_object
   - dispatch_child_routes
   - write_keyed_route_row
@@ -152,8 +151,8 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
 - **Une route par clé écrit une seule ligne, sans passer par l'aiguillage** (#173). La post-passe keyed-pivot fait
   pointer plusieurs clés (`fr`, `en`…) vers une même table dont le chemin finit par « key » (`…_selected_key`) : la
   clé routée y est la clé de la ligne, pas le nom JSON de la table. `dispatch_child_routes` le reconnaît au dernier
-  segment du chemin de la cible, différent de la clé, et `write_keyed_route_row` écrit une ligne `SiblingCollapse` ou
-  `NormalizeDynamicKeys` avec cette clé. Un groupe TOML `keyed_pivot` (#171) pose le même genre de route sur le parent
+  segment du chemin de la cible, différent de la clé, et `write_keyed_route_row` écrit une ligne `SiblingCollapse`
+  avec cette clé. Un groupe TOML `keyed_pivot` (#171) pose le même genre de route sur le parent
   de ses membres (`home`, `work` → la table du groupe) : `recurse_children` fait donc le même test avant
   l'aiguillage. Passée à `insert_child_object`, la valeur serait lue comme un objet de clés sœurs : colonnes en
   anomalie, sous-clés prises pour des clés de ligne. Une clé de ligne nommée « key » serait prise pour une route

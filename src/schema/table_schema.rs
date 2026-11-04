@@ -21,7 +21,6 @@
 //! | `AutoSplit` | inferred | root table with bi-modal key frequency | main table + `_wide` companion |
 //! | `Ignore` | internal | set from a user `Skip` override | excluded from schema (rare `AutoSplit` keys are dropped by `AutoSplit` itself) |
 //! | `Skip` | user | user wants table removed | table excluded from DDL and Pass 2 |
-//! | `NormalizeDynamicKeys` | TOML-only | arbitrary JSON keys → row IDs | key becomes a column |
 //! | `Flatten` | TOML-only | inline child fields into parent | child table removed |
 //! | `JsonbFlatten` | TOML-only | store child as JSONB on parent | child table removed |
 //!
@@ -353,38 +352,6 @@ pub enum InferredStrategy {
     /// No DDL produced — the table or key is silently omitted from the schema.
     Ignore,
 
-    /// Normalize dynamic keys: each JSON key in the object becomes a row, with the key stored
-    /// as a typed ID column. Child object fields become regular columns (union across all keys).
-    ///
-    /// Applied manually via the IHM (not auto-inferred). Similar to `SiblingCollapse` but triggered
-    /// by the user, not by sibling detection.
-    ///
-    /// JSON input — arbitrary numeric IDs as keys, each with the same nested fields:
-    /// ```text
-    /// { "images": {
-    ///     "12584": {"url":"a.jpg","w":100},
-    ///     "99001": {"url":"b.jpg","w":80 }
-    /// } }
-    /// ```
-    ///
-    /// DDL — child tables collapsed into the parent, ID becomes a column:
-    /// ```text
-    /// CREATE TABLE images (
-    ///     j2s_parent_id  BIGINT,
-    ///     image_id       TEXT NOT NULL, -- the original JSON key ("12584", "99001")
-    ///     url            TEXT,
-    ///     w              INTEGER
-    /// );
-    /// -- 2 rows: ("12584","a.jpg",100), ("99001","b.jpg",80)
-    /// ```
-    NormalizeDynamicKeys {
-        /// Name of the column that will hold the original JSON key (e.g. `"image_id"`).
-        ///
-        /// `Arc<str>` for the same reason as `Flatten::prefix` — cheap to clone in the
-        /// Pass 2 hot path.
-        id_column: Arc<str>,
-    },
-
     /// Flatten nested object: inlines the child's scalar fields as columns in the parent table.
     ///
     /// Applied manually via the IHM. The child table is removed from the schema.
@@ -456,8 +423,6 @@ pub enum UserOverride {
     JsonbFlatten,
     /// Inline child's scalar fields as prefixed columns on the parent.
     Flatten { prefix: Arc<str>, max_depth: u8 },
-    /// Normalize dynamic keys: each JSON key becomes a row with the key as a typed ID column.
-    NormalizeDynamicKeys { id_column: Arc<str> },
 }
 
 impl From<&UserOverride> for InferredStrategy {
@@ -471,9 +436,6 @@ impl From<&UserOverride> for InferredStrategy {
             UserOverride::Flatten { prefix, max_depth } => Self::Flatten {
                 prefix: prefix.clone(),
                 max_depth: *max_depth,
-            },
-            UserOverride::NormalizeDynamicKeys { id_column } => Self::NormalizeDynamicKeys {
-                id_column: id_column.clone(),
             },
         }
     }
@@ -635,7 +597,7 @@ impl TableSchema {
 
     /// Returns the effective strategy applying priority: `ui_override` > `toml_override` > `inferred_strategy`.
     ///
-    /// `Flatten`/`NormalizeDynamicKeys` carry their `String` payload as `Arc<str>`, so the
+    /// `Flatten` carries its `String` payload as `Arc<str>`, so the
     /// `Cow::Owned` clone below is a refcount bump, not a heap allocation — cheap enough to
     /// compute fresh on every call in the Pass 2 hot path, with no cache to keep in sync.
     #[must_use]
@@ -749,7 +711,7 @@ impl InferredStrategy {
     /// Returns true if child tables should be excluded from the schema because their
     /// data is absorbed into this table's wide column (Pivot / Jsonb / etc.).
     /// `AutoSplit` does NOT absorb children — they remain as separate tables.
-    /// `NormalizeDynamicKeys` and Flatten absorb their child tables.
+    /// Flatten absorbs its child tables.
     #[must_use]
     pub const fn absorbs_children(&self) -> bool {
         matches!(
@@ -758,7 +720,6 @@ impl InferredStrategy {
                 | Self::Jsonb
                 | Self::StructuredPivot(_)
                 | Self::SiblingCollapse(_)
-                | Self::NormalizeDynamicKeys { .. }
                 | Self::Flatten { .. }
                 | Self::JsonbFlatten
         )
@@ -865,9 +826,6 @@ mod tests {
                 prefix: "p_".into(),
                 max_depth: 1,
             },
-            UserOverride::NormalizeDynamicKeys {
-                id_column: "key_id".into(),
-            },
         ];
         for v in variants {
             let json = serde_json::to_string(&v).unwrap();
@@ -919,19 +877,6 @@ mod tests {
             InferredStrategy::Flatten {
                 prefix: "img_".into(),
                 max_depth: 2
-            }
-        );
-    }
-
-    #[test]
-    fn from_user_override_normalize_dynamic_keys() {
-        let ov = UserOverride::NormalizeDynamicKeys {
-            id_column: "image_id".into(),
-        };
-        assert_eq!(
-            InferredStrategy::from(&ov),
-            InferredStrategy::NormalizeDynamicKeys {
-                id_column: "image_id".into()
             }
         );
     }
@@ -1037,24 +982,24 @@ mod tests {
             Some(UserOverride::Jsonb),
             Some(UserOverride::Columns),
         ];
+        let inferred = InferredStrategy::Flatten {
+            prefix: "k".into(),
+            max_depth: 1,
+        };
 
         for ui in &overrides {
             for toml in &overrides {
                 // Two independent schemas to cover both mutation orders (ui-then-toml and
                 // toml-then-ui).
                 let mut ui_then_toml = make_schema("t");
-                ui_then_toml.inferred_strategy = InferredStrategy::NormalizeDynamicKeys {
-                    id_column: "k".into(),
-                };
+                ui_then_toml.inferred_strategy = inferred.clone();
                 ui_then_toml.set_ui_override(ui.clone());
                 assert_expected_effective_strategy(&ui_then_toml, ui.as_ref(), None);
                 ui_then_toml.set_toml_override(toml.clone());
                 assert_expected_effective_strategy(&ui_then_toml, ui.as_ref(), toml.as_ref());
 
                 let mut toml_then_ui = make_schema("t");
-                toml_then_ui.inferred_strategy = InferredStrategy::NormalizeDynamicKeys {
-                    id_column: "k".into(),
-                };
+                toml_then_ui.inferred_strategy = inferred.clone();
                 toml_then_ui.set_toml_override(toml.clone());
                 assert_expected_effective_strategy(&toml_then_ui, None, toml.as_ref());
                 toml_then_ui.set_ui_override(ui.clone());
