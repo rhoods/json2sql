@@ -298,6 +298,10 @@ strategy = "flatten"
 prefix = "brand_"
 ```
 
+Seul un objet simple s'aplatit : une table en `Columns`, sans tables filles. Un tableau d'objets, une table pivot ou
+JSONB, ou un objet qui contient d'autres objets ou tableaux d'objets restent des tables, avec un avertissement
+(`cannot be flattened`) : les aplatir perdrait des données.
+
 Sans : voir `products` et `products_brand` dans l'exemple par défaut. Avec, la table `products_brand` disparaît :
 
 ```sql

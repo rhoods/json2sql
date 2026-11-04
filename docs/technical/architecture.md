@@ -389,7 +389,7 @@ Application des stratégies de stockage wide sur les `TableSchema`.
 - **`apply_wide_strategy_columns()`** : restructure les colonnes d'une table selon une `InferredStrategy` (Pivot, Jsonb, StructuredPivot…)
 - **`apply_structured_pivot_columns()`** : colonnes pour StructuredPivot — `(name TEXT, value <type>, <suffix_col>...)`
 - **`apply_normalize_dynamic_keys()`** : collapse les sous-objets dynamiques d'une table en une seule table normalisée avec colonne d'ID
-- **`apply_flatten()`** : inline les colonnes scalaires d'un enfant dans le parent avec un préfixe
+- **`apply_flatten()`** : inline les colonnes scalaires d'un enfant dans le parent avec un préfixe ; le TOML ne l'appelle que pour un objet en `Columns` sans tables, routes ni colonnes aplaties à lui (`flatten_refusal` dans `config.rs`, avertissement `FlattenRefused`, #170)
 - **`apply_jsonb_flatten()`** : inline un enfant comme une seule colonne JSONB sur le parent
 - **`build_union_columns()`** : union des colonnes de plusieurs tables sœurs (plus large type par colonne)
 - **`classify_key_shape()`** / **`suggest_wide_strategy()`** : classification des clés et sélection automatique de la stratégie
