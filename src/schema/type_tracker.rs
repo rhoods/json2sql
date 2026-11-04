@@ -26,7 +26,7 @@
 //! - fn `TypeTracker::anomaly_rate` — fraction de valeurs différant du type dominant.
 //! - fn `TypeTracker::is_not_null` — vrai si aucune valeur nulle observée.
 //! - fn `TypeTracker::string_pg_type` — résout `VarChar`/`Text` en tenant compte de la longueur
-//!   des représentations numériques si le champ est mixte string+nombre.
+//!   des nombres et des booléens écrits en texte si le champ en mêle aux chaînes (#195).
 //! - fn `TypeTracker::has_frequent_strings` — vrai si les chaînes JSON (dates comprises) atteignent
 //!   `RARE_STRING_RATE` des valeurs non nulles (sinon elles ne décident pas du type), sauf si ce ne sont
 //!   que des UUID, ou que des dates et timestamps, sans nombre ni booléen (ils gardent leur type).
@@ -45,6 +45,8 @@
 //! - fn `is_zone` — fin d'un timestamp : rien, `Z` ou un décalage `±HH`, `±HHMM`, `±HH:MM`.
 //! - fn `at_most` — vrai si deux octets sont des chiffres ASCII dont la valeur ne dépasse pas un maximum.
 //! - fn `is_date_bytes` — date `AAAA-MM-JJ` sur les 10 premiers octets, qui existe dans le calendrier.
+//! - fn `days_in_month` — nombre de jours d'un mois, années bissextiles comprises ; la Pass 2 s'en sert pour
+//!   passer un timestamp en UTC (#194).
 //! - fn `two_digits` — valeur de deux chiffres ASCII.
 //! - fn `is_digit` — vrai si l'octet est un chiffre ASCII.
 
@@ -256,20 +258,23 @@ impl TypeTracker {
     /// Resolve to the final `PostgreSQL` type.
     /// Merging rules: the "widest" type wins.
     #[must_use]
-    fn string_pg_type(&self, has_float: bool, has_bigint: bool, has_int: bool) -> PgType {
-        // max_len tracks observed string lengths only. For mixed string+numeric fields,
-        // pass2 also formats numbers as strings — use conservative upper bounds so VarChar
+    fn string_pg_type(&self) -> PgType {
+        let has = |t: InferredType| self.type_counts[t as usize] > 0;
+        // max_len tracks observed string lengths only. For fields mixing strings with numbers or
+        // booleans, pass2 also writes those as strings — use conservative upper bounds so VarChar
         // is always wide enough without false positives in the anomaly detector.
-        let num_repr_len = if has_float {
+        let num_repr_len = if has(InferredType::Float) {
             25u32
-        } else if has_bigint {
+        } else if has(InferredType::BigInt) {
             20u32
-        } else if has_int {
+        } else if has(InferredType::Integer) {
             11u32
         } else {
             0u32
         };
-        let effective_max = self.max_len.max(num_repr_len);
+        // `false`, the longer boolean (#195)
+        let bool_repr_len = if has(InferredType::Boolean) { 5 } else { 0 };
+        let effective_max = self.max_len.max(num_repr_len).max(bool_repr_len);
         if effective_max > self.text_threshold {
             PgType::Text
         } else {
@@ -308,11 +313,7 @@ impl TypeTracker {
         let has = |t: InferredType| self.type_counts[t as usize] > 0;
 
         if self.has_frequent_strings() {
-            return self.string_pg_type(
-                has(InferredType::Float),
-                has(InferredType::BigInt),
-                has(InferredType::Integer),
-            );
+            return self.string_pg_type();
         }
 
         // Numeric widening: float > bigint > int
@@ -545,15 +546,19 @@ const fn is_date_bytes(b: &[u8]) -> bool {
         return false;
     };
     let year = century * 100 + yy;
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let days_in_month = match month {
+    year > 0 && day >= 1 && day <= days_in_month(year, month)
+}
+
+/// Number of days of `month` (1 to 12) in `year`, with Gregorian leap years; 0 for any other month.
+pub const fn days_in_month(year: u16, month: u16) -> u16 {
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    match month {
         2 if leap => 29,
         2 => 28,
         4 | 6 | 9 | 11 => 30,
         1..=12 => 31,
         _ => 0,
-    };
-    year > 0 && day >= 1 && day <= days_in_month
+    }
 }
 
 /// Value of two ASCII digits, or `None` if one is not a digit.
@@ -738,6 +743,25 @@ mod tests {
         t.observe(&json!(3.14));
         // effective_max = max(30, 25) = 30 → ceil(30 * 1.2) = 36
         assert_eq!(t.to_pg_type(), PgType::VarChar(36));
+    }
+
+    /// #195 : un booléen parmi des chaînes courtes est écrit `true` ou `false`, que la colonne doit pouvoir tenir.
+    /// Avant : 30 "no", un "yes" et un `false` donnaient `VARCHAR(4)`, et `false` devenait NULL + anomalie.
+    #[test]
+    fn test_mixed_string_bool_varchar_holds_false() {
+        use crate::pass2::coercer::{coerce, CoerceResult};
+        let mut t = TypeTracker::new(256);
+        for _ in 0..30 {
+            t.observe(&json!("no"));
+        }
+        t.observe(&json!("yes"));
+        t.observe(&json!(false));
+        // effective_max = max(3, 5) = 5 → ceil(5 * 1.2) = 6
+        assert_eq!(t.to_pg_type(), PgType::VarChar(6));
+        assert!(matches!(
+            coerce(&json!(false), &t.to_pg_type()),
+            CoerceResult::Ok(_)
+        ));
     }
 
     // --- Chaînes rares : ignorées pour le typage sous RARE_STRING_RATE ---

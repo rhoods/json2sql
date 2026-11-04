@@ -27,6 +27,8 @@ Chaque champ JSON observé dans la Pass 1 alimente un `TypeTracker` qui accumule
 | Objet `{}` | Object (→ table enfant) |
 | Tableau `[]` | Array (tableau d'objets → table enfant ; tableau de scalaires → colonne tableau ; tableau dont un élément est un tableau → colonne `JSONB[]`) |
 
+Dans une colonne `TIMESTAMP`, une valeur avec décalage (`±HH`, `±HHMM`, `±HH:MM`) est écrite en heure UTC en Pass 2 : PostgreSQL ignorerait le décalage, et `10:30+02:00` comme `10:30-05:00` vaudraient `10:30` (#194). `Z`, une heure sans fuseau et une date sont écrites telles quelles ; une colonne qui mêle heures sans fuseau et heures avec décalage mêle donc des heures écrites et des heures UTC. Le décalage d'origine n'est pas gardé (un `TIMESTAMPTZ` ne le garderait pas non plus : seul l'instant est stocké).
+
 Un tableau dont au moins un élément est lui-même un tableau (`coordinates` d'un GeoJSON : `[x, y]` pour un point, des tableaux de tableaux pour un polygone) donne une colonne `JSONB[]`, quels que soient les autres éléments : chaque élément y garde son JSON, nombres et chaînes compris (#83). Le type ne dépend donc pas des lignes vues : sans cette règle, un seul point suffisait à typer la colonne en `DOUBLE PRECISION[]`, et chaque polygone devenait `NULL`.
 
 Un tableau qui mêle objets et scalaires (`[{"a":1},"x",2]`) est un tableau d'objets : seuls ses objets ont des lignes dans la table enfant. Ses scalaires n'ont pas de colonne ; la Pass 2 enregistre une anomalie par tableau, avec le premier scalaire comme valeur (#86). Si la table enfant est en stratégie `Jsonb`, chaque scalaire y est gardé comme blob. Si le même champ vaut ailleurs un tableau de scalaires, le parent a aussi une colonne tableau qui garde ces scalaires : pas d'anomalie dans ce cas.
@@ -37,7 +39,7 @@ Une clé qui vaut tantôt un objet, tantôt un tableau d'objets donne une table 
 
 Le type retenu est le **plus large** parmi ceux observés, pas le plus fréquent, à une exception près : les **chaînes rares**. Si les chaînes JSON représentent moins de 0,1 % des valeurs non nulles de la colonne (`RARE_STRING_RATE`, les `null` ne comptent pas), elles sont ignorées pour le typage, et la Pass 2 les signale comme anomalies (voir plus bas). Les dates, timestamps et UUID comptent comme des chaînes dès qu'ils sont mêlés à autre chose : des chaînes ordinaires, des nombres, des booléens, et, pour les UUID, des dates ou des timestamps, avec lesquels ils n'ont pas de type commun (#116). Mêlés entre eux, dates et timestamps donnent `TIMESTAMP`. La règle ne joue donc que pour une colonne numérique ou booléenne : une colonne `DATE` avec un `"unknown"` rare passe en `VARCHAR`, de même qu'une colonne de dates avec quelques nombres (avant #116, elle devenait `INTEGER` et toutes ses dates passaient en `NULL`). Ordre de priorité :
 
-1. **Des chaînes, au moins 0,1 % des valeurs non nulles** → `VARCHAR(N)` ou `TEXT` (N tient compte de la représentation texte des nombres éventuellement mélangés)
+1. **Des chaînes, au moins 0,1 % des valeurs non nulles** → `VARCHAR(N)` ou `TEXT` (N tient compte de la représentation texte des nombres et des booléens éventuellement mélangés : un `false` tient aussi parmi des chaînes très courtes, #195)
 2. Sinon **numérique** : `DOUBLE PRECISION` > `BIGINT` > `INTEGER`
 3. Sinon : `BOOLEAN` > `TIMESTAMP` > `DATE` > `UUID`
 4. Aucun type observé (que des `null`) → `TEXT`

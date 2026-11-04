@@ -22,6 +22,9 @@
 //! - fn `coerce_bool` — coercition vers BOOLEAN, produit `Ok`/`Anomaly`.
 //! - fn `coerce_formatted` — coercition vers UUID, DATE ou TIMESTAMP : seule une chaîne que la Pass 1
 //!   type ainsi passe (#116), produit `Ok`/`Anomaly`.
+//! - fn `to_utc` — timestamp avec décalage `±HH`, `±HHMM` ou `±HH:MM` réécrit en heure UTC pour une colonne TIMESTAMP,
+//!   où `PostgreSQL` ignorerait le décalage (#194) ; `None` sans décalage.
+//! - fn `shift_day` — date décalée d'un jour au plus, en avant ou en arrière (fin de mois, d'année, 29 février).
 //! - fn `coerce_text` — coercition vers TEXT/VARCHAR/JSONB, produit `Ok`/`Anomaly`.
 //! - fn `format_float` — formate un f64 fini en chaîne, `None` si NaN/infini.
 //! - fn `json_type_name` — nom du type JSON pour les messages d'anomalie.
@@ -29,7 +32,7 @@
 use serde_json::Value;
 
 use crate::db::copy_text::{escape_copy_text, CopyEscaped};
-use crate::schema::type_tracker::{infer_string_type, InferredType, PgType};
+use crate::schema::type_tracker::{days_in_month, infer_string_type, InferredType, PgType};
 
 /// Result of attempting to coerce a JSON value to a `PgType`.
 pub enum CoerceResult {
@@ -66,9 +69,16 @@ pub fn coerce(value: &Value, pg_type: &PgType) -> CoerceResult {
         PgType::DoublePrecision => coerce_float(value),
         PgType::Boolean => coerce_bool(value),
         PgType::Uuid => coerce_formatted(value, &[InferredType::Uuid]),
-        // PostgreSQL reads a date as midnight, and keeps the day of a timestamp in a DATE
-        PgType::Date | PgType::Timestamp => {
-            coerce_formatted(value, &[InferredType::Date, InferredType::Timestamp])
+        // PostgreSQL keeps the day of a timestamp in a DATE, as written
+        PgType::Date => coerce_formatted(value, &[InferredType::Date, InferredType::Timestamp]),
+        // PostgreSQL reads a date as midnight, and ignores the offset of a timestamp: written in UTC (#194)
+        PgType::Timestamp => {
+            match coerce_formatted(value, &[InferredType::Date, InferredType::Timestamp]) {
+                CoerceResult::Ok(s) => {
+                    CoerceResult::Ok(to_utc(s.as_str()).map_or(s, CopyEscaped::from_safe_ascii))
+                }
+                other => other,
+            }
         }
         PgType::VarChar(max_len) => {
             let result = coerce_text(value);
@@ -374,6 +384,53 @@ fn coerce_formatted(value: &Value, formats: &[InferredType]) -> CoerceResult {
     }
 }
 
+/// A timestamp with an offset `±HH`, `±HHMM` or `±HH:MM`, rewritten as its UTC time: `PostgreSQL` drops the offset of
+/// a TIMESTAMP value, and 10:30+02:00 would be stored as 10:30 (#194). Seconds and their fraction stay as written.
+/// `None` without an offset, `Z` included: the value is written as is. `s` is a date or a timestamp that
+/// `infer_string_type` accepted.
+fn to_utc(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    // past the dashes of the date, the first sign starts the offset
+    let zone = 16 + b.get(16..)?.iter().position(|c| matches!(c, b'+' | b'-'))?;
+    let num = |i: usize| u16::from(b[i] - b'0') * 10 + u16::from(b[i + 1] - b'0');
+    let offset_minutes = if b.len() - zone > 3 {
+        num(b.len() - 2)
+    } else {
+        0
+    };
+    let offset = i32::from(num(zone + 1) * 60 + offset_minutes);
+    let local = i32::from(num(11) * 60 + num(14));
+    let utc = if b[zone] == b'+' {
+        local - offset
+    } else {
+        local + offset
+    };
+    let date = (num(0) * 100 + num(2), num(5), num(8));
+    let (year, month, day) = shift_day(date, utc.div_euclid(1440));
+    // PostgreSQL has no year 0: the day before 0001-01-01 is 0001-12-31 BC
+    let (year, era) = if year == 0 { (1, " BC") } else { (year, "") };
+    let minutes = utc.rem_euclid(1440);
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}{}{era}",
+        minutes / 60,
+        minutes % 60,
+        &s[16..zone]
+    ))
+}
+
+/// The `(year, month, day)` date moved by `shift` days: -1, 0 or 1, since an offset is under 16 hours.
+const fn shift_day((year, month, day): (u16, u16, u16), shift: i32) -> (u16, u16, u16) {
+    match shift {
+        1 if day < days_in_month(year, month) => (year, month, day + 1),
+        1 if month < 12 => (year, month + 1, 1),
+        1 => (year + 1, 1, 1),
+        -1 if day > 1 => (year, month, day - 1),
+        -1 if month > 1 => (year, month - 1, days_in_month(year, month - 1)),
+        -1 => (year - 1, 12, 31),
+        _ => (year, month, day),
+    }
+}
+
 fn coerce_text(value: &Value) -> CoerceResult {
     match value {
         Value::String(s) => escape_copy_text(s).map_or_else(
@@ -622,6 +679,33 @@ mod tests {
                 "{value:?} → {pg_type:?}"
             );
         }
+    }
+
+    /// #194 : `PostgreSQL` ignore le décalage d'une valeur TIMESTAMP ; une valeur qui en a un est écrite en heure UTC,
+    /// secondes et fraction comprises. `Z`, une heure sans fuseau et une date sont écrites telles quelles, et une
+    /// colonne DATE garde le jour écrit, comme `PostgreSQL`.
+    #[test]
+    fn test_timestamp_with_an_offset_is_written_in_utc() {
+        for (value, written) in [
+            ("2024-01-15T10:30:00+02:00", "2024-01-15T08:30:00"),
+            ("2024-01-15T10:30:00.5-0530", "2024-01-15T16:00:00.5"),
+            ("2024-01-15T23:30-05", "2024-01-16T04:30"),
+            ("0001-01-01T00:30:00+01:00", "0001-12-31T23:30:00 BC"),
+            ("2024-01-15T10:30:00Z", "2024-01-15T10:30:00Z"),
+            ("2024-01-15 10:30", "2024-01-15 10:30"),
+            ("2024-01-15", "2024-01-15"),
+        ] {
+            assert_eq!(coerce_ok(&json!(value), &PgType::Timestamp), written);
+        }
+        assert_eq!(
+            coerce_ok(
+                &json!(["2024-01-15T10:30+02", null]),
+                &array_of(PgType::Timestamp)
+            ),
+            "{2024-01-15T08:30,NULL}"
+        );
+        let late = "2024-01-15T23:30:00-05:00";
+        assert_eq!(coerce_ok(&json!(late), &PgType::Date), late);
     }
 
     // ── issue #48 : occurrence scalaire dans une colonne PG array → tableau à un élément ──

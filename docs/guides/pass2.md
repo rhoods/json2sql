@@ -58,6 +58,7 @@ symbols:
   - coerce
   - CoerceResult
   - infer_string_type
+  - to_utc
   - AnomalyCollect
   - AnomalyProxy
   - AnomalyCollector
@@ -189,7 +190,11 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   `COPY` ne doit pas échouer sur une donnée. Une erreur de `COPY` est donc un bug de schéma ou d'écriture, pas de
   donnée. Une colonne UUID, DATE ou TIMESTAMP ne reçoit que ce que la Pass 1 type ainsi (`infer_string_type`) ;
   une autre chaîne laisse une anomalie `string_invalid_format` (#116). Les éléments d'un tableau de ces types sont
-  vérifiés de la même façon : un élément d'un autre format devient `NULL` dans le tableau, une anomalie par cellule. Chaque ligne compte aussi dans le total de sa table (`inc_total`), dénominateur du taux d'anomalies.
+  vérifiés de la même façon : un élément d'un autre format devient `NULL` dans le tableau, une anomalie par cellule.
+  PostgreSQL ignore le décalage horaire d'une valeur TIMESTAMP : une valeur avec décalage (`±HH`, `±HHMM`, `±HH:MM`)
+  est donc écrite en heure UTC (`to_utc`, #194), dans une colonne comme dans un tableau ; `Z`, une heure sans fuseau
+  et une date restent telles qu'écrites. Une colonne qui mêle heures sans fuseau et heures avec décalage mêle ainsi
+  des heures écrites et des heures UTC. Une colonne DATE garde le jour écrit, décalage compris. Chaque ligne compte aussi dans le total de sa table (`inc_total`), dénominateur du taux d'anomalies.
 - **Un blob `jsonb` ne contient jamais d'octet nul** (#192). Dans le JSON, l'octet nul s'écrit `\u0000`, que le type
   `jsonb` refuse : le `COPY` échouerait, et tout l'import avec. `push_jsonb_col` (colonne `JSONB`, table enfant en
   `Jsonb`) et `write_root_jsonb` (racine en `Jsonb`) cherchent donc l'octet nul dans les chaînes et les clés de la

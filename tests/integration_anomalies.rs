@@ -707,3 +707,117 @@ async fn test_array_element_of_another_format_is_an_anomaly() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// #194 — timestamps avec décalage horaire : chaque valeur garde son instant. Avant : colonne TIMESTAMP,
+// PostgreSQL ignorait le décalage, et 10:30Z, 10:30+02:00 et 10:30-05:00 valaient tous 10:30:00,
+// sans anomalie.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_timestamp_offsets_keep_the_instant() {
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("timestamps_offsets.jsonl");
+        let p1 = pass1::runner::run(&path, &common::pass1_config("events"), None).unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("events", &schema),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+        let epochs: Vec<i64> = client
+            .query(
+                &format!(
+                    "SELECT extract(epoch FROM \"at\")::bigint \
+                     FROM \"{schema}\".\"events\" ORDER BY \"id\""
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        // seconds since 1970-01-01 UTC: 10:30, 08:30 and 15:30 UTC on 2024-01-15
+        assert_eq!(epochs, [1_705_314_600, 1_705_307_400, 1_705_332_600]);
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// #194 — bords du passage en UTC, dans une colonne TIMESTAMP et dans un TIMESTAMP[] : chaque valeur vaut
+// l'instant que PostgreSQL lit lui-même dans la chaîne d'origine en TIMESTAMPTZ, ramené en UTC.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_timestamp_offsets_in_utc_match_postgresql() {
+    const INPUTS: [&str; 15] = [
+        "2024-01-15T23:30:00-05:00", // next day
+        "2024-01-31T20:00:00-05:00", // next month
+        "2024-12-31T22:00:00-03:00", // next year
+        "2024-02-28T23:00:00-02:00", // to a leap day
+        "2024-03-01T00:30:00+01:00", // back to a leap day
+        "2023-03-01T00:30:00+01:00", // back to February 28
+        "2024-01-01T01:00:00+02:00", // previous year
+        "2024-01-15T10:30+15:59",    // no seconds, largest offset
+        "2024-01-15T10:30:00+02",
+        "2024-01-15T10:30:00-0530",
+        "2024-01-15 10:30:00.5+05:45",
+        "2024-01-15T10:30:00.123456789+02:00",
+        "0001-01-01T00:30:00+01:00", // to 1 BC: PostgreSQL has no year 0
+        "9999-12-31T23:00:00-05:00", // to year 10000
+        "2024-01-15T10:30:00Z",
+    ];
+    let lines: Vec<String> = (0_i32..)
+        .zip(INPUTS)
+        .map(|(id, at)| serde_json::json!({"id": id, "at": at, "ats": [at]}).to_string())
+        .collect();
+    let file = tempfile::Builder::new()
+        .suffix(".jsonl")
+        .tempfile()
+        .unwrap();
+    std::fs::write(file.path(), lines.join("\n")).unwrap();
+    let path = file.path().to_path_buf();
+    common::with_schema_url(|client, schema, url| async move {
+        let p1 = pass1::runner::run(&path, &common::pass1_config("events"), None).unwrap();
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("events", &schema),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
+        for (id, input) in (0_i32..).zip(INPUTS) {
+            let row = client
+                .query_one(
+                    &format!(
+                        "SELECT \"at\"::text, \"ats\"[1]::text, \
+                         ($1::text::timestamptz AT TIME ZONE 'UTC')::text \
+                         FROM \"{schema}\".\"events\" WHERE \"id\" = $2"
+                    ),
+                    &[&input, &id],
+                )
+                .await
+                .unwrap();
+            let (at, elem, expected): (String, String, String) =
+                (row.get(0), row.get(1), row.get(2));
+            assert_eq!((&at, &elem), (&expected, &expected), "{input}");
+        }
+    })
+    .await;
+}

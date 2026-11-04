@@ -55,7 +55,7 @@ int + bigint      → BIGINT
 string courte     → VARCHAR(max_len × 1.2)   si max_len ≤ seuil (défaut 256)
 string longue     → TEXT
 ISO date          → DATE
-ISO timestamp     → TIMESTAMP
+ISO timestamp     → TIMESTAMP           (heure avec décalage ±HH:MM écrite en UTC)
 UUID (36 chars)   → UUID
 bool              → BOOLEAN
 ```
