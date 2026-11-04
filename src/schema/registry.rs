@@ -42,7 +42,6 @@ pub struct RegistryConfig {
     pub sibling_threshold: usize,
     pub sibling_jaccard: f64,
     pub stable_threshold: f64,
-    pub rare_threshold: f64,
     pub disabled_strategies: HashSet<StrategyName>,
 }
 
@@ -54,7 +53,6 @@ impl Default for RegistryConfig {
             sibling_threshold: 3,
             sibling_jaccard: 0.5,
             stable_threshold: 0.10,
-            rare_threshold: 0.001,
             disabled_strategies: HashSet::new(),
         }
     }
@@ -69,7 +67,6 @@ pub struct SchemaRegistry {
     sibling_threshold: usize,
     sibling_jaccard: f64,
     stable_threshold: f64,
-    rare_threshold: f64,
     disabled_strategies: HashSet<StrategyName>,
     column_collisions: Vec<ColumnCollision>,
 }
@@ -84,7 +81,6 @@ impl SchemaRegistry {
             sibling_threshold: config.sibling_threshold,
             sibling_jaccard: config.sibling_jaccard,
             stable_threshold: config.stable_threshold,
-            rare_threshold: config.rare_threshold,
             disabled_strategies: config.disabled_strategies,
             column_collisions: Vec::new(),
         }
@@ -125,7 +121,6 @@ impl SchemaRegistry {
             self.sibling_threshold,
             self.sibling_jaccard,
             self.stable_threshold,
-            self.rare_threshold,
             self.disabled_strategies.clone(),
             apply_pg_guard,
         );
@@ -941,15 +936,8 @@ mod tests {
         use indexmap::IndexMap;
         use std::collections::HashSet;
 
-        let finalizer = SchemaFinalizer::new(
-            256,
-            3,
-            0.5,
-            0.10,
-            0.001,
-            HashSet::<StrategyName>::new(),
-            true,
-        );
+        let finalizer =
+            SchemaFinalizer::new(256, 3, 0.5, 0.10, HashSet::<StrategyName>::new(), true);
         let mut naming = NamingRegistry::default();
         let (schemas, _collisions, warnings) = finalizer.run(&IndexMap::new(), &mut naming);
         // Empty input: no schemas, no warnings.
@@ -966,15 +954,8 @@ mod tests {
 
         // Guard disabled: run() must not produce OverflowWarnings even for wide tables.
         // (The actual wide-table conversion is tested via apply_column_limit_guard directly.)
-        let finalizer = SchemaFinalizer::new(
-            256,
-            3,
-            0.5,
-            0.10,
-            0.001,
-            HashSet::<StrategyName>::new(),
-            false,
-        );
+        let finalizer =
+            SchemaFinalizer::new(256, 3, 0.5, 0.10, HashSet::<StrategyName>::new(), false);
         let mut naming = NamingRegistry::default();
         let (_schemas, _collisions, warnings) = finalizer.run(&IndexMap::new(), &mut naming);
         assert!(warnings.is_empty());
@@ -992,7 +973,6 @@ mod tests {
         let mut parent = make_wide_schema("products", None, 1601);
         parent.inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.5,
-            rare_threshold: 0.01,
             medium_keys: std::collections::HashSet::new(),
             wide_table_name: "products_wide".to_string(),
         };
@@ -1787,6 +1767,30 @@ mod tests {
         assert!(
             !medium_keys.contains("pure") && !medium_keys.contains("mixed"),
             "array fields leaked into medium_keys: {medium_keys:?}"
+        );
+    }
+
+    #[test]
+    fn autosplit_keeps_a_key_seen_in_one_row_out_of_two_thousand() {
+        // #200 T2: no key is dropped any more, however rare: it goes to the companion with the medium ones.
+        // 20 medium keys at 5 % each keep the root unstable, so that it is split (AutoSplit).
+        let mut reg = pg_array_reg(2);
+        for i in 0..2000 {
+            let mut v = json!({"id": i, "child": {"x": i}});
+            v[format!("m{}", i % 20)] = json!(i);
+            if i == 0 {
+                v["rare"] = json!("x");
+            }
+            reg.observe_root("root", make_root(&v));
+        }
+        let schemas = reg.finalize();
+        let root = schemas.iter().find(|s| s.name == "root").unwrap();
+        let InferredStrategy::AutoSplit { medium_keys, .. } = &root.inferred_strategy else {
+            panic!("root must be AutoSplit, got {:?}", root.inferred_strategy);
+        };
+        assert!(
+            medium_keys.contains("rare"),
+            "rare key dropped: {medium_keys:?}"
         );
     }
 

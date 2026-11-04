@@ -697,7 +697,6 @@ mod tests {
         );
         parent.inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.1,
-            rare_threshold: 0.001,
             medium_keys: ["fat", "fat_100g", "fat_prepared_100g", "salt_100g"]
                 .map(str::to_string)
                 .into(),

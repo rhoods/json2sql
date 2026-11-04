@@ -52,9 +52,7 @@ CREATE TABLE IF NOT EXISTS "public"."products_stores" (       -- tableau d'objet
 - **Tables larges** : détection automatique de structures à clés dynamiques (pivot EAV, fusion de tables sœurs, JSONB, *AutoSplit*), surchargeable par un fichier TOML.
 - **Anomalies** : une valeur non convertible vers le type inféré est insérée en `NULL` et tracée dans un rapport JSON/CSV ; `--max-anomaly-rate` fait échouer l'import au-delà d'un seuil.
 
-Sur l'export OpenFoodFacts (base ouverte de produits alimentaires), la table racine expose 189 881 clés distinctes : *AutoSplit* en garde 125 en colonnes, 184 dans une table EAV `_wide` et écarte les 189 572 restantes (voir ci-dessous).
-
-> ⚠️ **Clés rares non importées.** Sur une table très large, *AutoSplit* écarte les clés présentes dans moins de `--rare-threshold` des lignes (défaut 0,1 %). Elles sont listées dans un `WARNING` sur stderr. Pour tout conserver : `--rare-threshold 0`.
+Sur l'export OpenFoodFacts (base ouverte de produits alimentaires), la table racine expose 189 881 clés distinctes : *AutoSplit* en garde 125 en colonnes et range toutes les autres dans une table EAV `_wide` (clé, valeur) : aucune clé n'est écartée.
 
 ## Installation
 

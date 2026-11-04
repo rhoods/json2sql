@@ -162,8 +162,6 @@ pub const PASS1_SIBLING_THRESHOLD: usize = 3;
 pub const PASS1_SIBLING_JACCARD: f64 = 0.5;
 /// Frequency threshold above which a key is considered "stable" (kept as a column).
 pub const PASS1_STABLE_THRESHOLD: f64 = 0.10;
-/// Frequency threshold below which a key is considered "rare" (excluded entirely).
-pub const PASS1_RARE_THRESHOLD: f64 = 0.001;
 
 // ---------------------------------------------------------------------------
 // Pass 1 progress (fed by ProgressEvent stream)

@@ -15,7 +15,7 @@ Rappel des colonnes générées :
 
 Les stratégies `sibling`, `pivot` et `structured_pivot` sont détectées automatiquement (désactivables avec
 `--disable-strategy`, ou dans Setup > Strategy selection). `AutoSplit` dépend des seuils `--wide-column-threshold`,
-`--stable-threshold` et `--rare-threshold`. Les autres se demandent : dans le TOML `--schema-config` (`strategy = …`),
+et `--stable-threshold`. Les autres se demandent : dans le TOML `--schema-config` (`strategy = …`),
 dans l'écran Strategy de l'IHM, ou avec `--group-columns` pour les groupes de colonnes.
 
 ---
@@ -253,7 +253,7 @@ Pour une table où quelques clés sont toujours là et beaucoup d'autres n'appar
 ```bash
 json2sql --input tests/fixtures/auto_split.jsonl --table products --dry-run    # sans
 json2sql --input tests/fixtures/auto_split.jsonl --table products --dry-run \
-  --wide-column-threshold 3 --stable-threshold 0.80 --rare-threshold 0.30     # avec
+  --wide-column-threshold 3 --stable-threshold 0.80                             # avec
 ```
 
 Sans :
@@ -269,8 +269,8 @@ CREATE TABLE products (
 );
 ```
 
-Avec : les clés présentes dans au moins 80 % des lignes restent des colonnes ; celles entre 30 et 80 % vont dans
-`products_wide` ; celles sous 30 % (`rare_key`) sont écartées.
+Avec : les clés présentes dans au moins 80 % des lignes restent des colonnes ; toutes les autres vont dans
+`products_wide`, même `rare_key`, vue dans une seule ligne : aucune clé n'est écartée.
 
 ```sql
 CREATE TABLE products (
@@ -281,8 +281,8 @@ CREATE TABLE products (
 CREATE TABLE products_wide (
     j2s_id UUID NOT NULL,
     j2s_products_id UUID NOT NULL,
-    key TEXT,          -- 'tag_a', 'tag_b'
-    value VARCHAR(3)
+    key TEXT,          -- 'tag_a', 'tag_b', 'rare_key'
+    value TEXT
 );
 ```
 

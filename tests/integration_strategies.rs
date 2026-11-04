@@ -584,10 +584,10 @@ async fn test_structured_pivot_strategy() {
 // Colonnes scalaires :
 //   - id, name         → stables (5/5 = 100% ≥ 80%)
 //   - tag_a, tag_b     → medium  (3/5 = 60%, entre 30% et 80%)
-//   - rare_key         → rare    (1/5 = 20% < 30%) → ignoré
-// Après AutoSplit (wide_column_threshold=3, stable=0.80, rare=0.30) :
+//   - rare_key         → rare    (1/5 = 20%) → dans products_wide aussi : aucune clé n'est jetée (#200)
+// Après AutoSplit (wide_column_threshold=3, stable=0.80) :
 //   - products     : j2s_id, id, name seulement (colonnes stables)
-//   - products_wide : EAV (key, value) pour tag_a/tag_b — 6 lignes
+//   - products_wide : EAV (key, value) pour tag_a/tag_b/rare_key — 7 lignes
 //   - products_details : color TEXT — 5 lignes
 // ---------------------------------------------------------------------------
 #[tokio::test]
@@ -595,7 +595,7 @@ async fn test_auto_split_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("auto_split.jsonl");
         // wide_column_threshold=3 : 5 colonnes scalaires > 3 → wide
-        // stable_threshold=0.80, rare_threshold=0.30
+        // stable_threshold=0.80
         let p1 = pass1::runner::run(
             &path,
             &pass1::runner::Pass1Config {
@@ -603,7 +603,6 @@ async fn test_auto_split_strategy() {
                 registry: RegistryConfig {
                     wide_column_threshold: 3,
                     stable_threshold: 0.80,
-                    rare_threshold: 0.30,
                     ..Default::default()
                 },
                 num_workers: None,
@@ -668,8 +667,8 @@ async fn test_auto_split_strategy() {
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(), 5);
         assert_eq!(*p2.rows_per_table.get("products_details").unwrap(), 5);
-        // Widget+Gadget+Doohickey × 2 medium keys (tag_a, tag_b) = 6
-        assert_eq!(*p2.rows_per_table.get("products_wide").unwrap(), 6);
+        // Widget+Gadget+Doohickey × 2 medium keys (tag_a, tag_b) + Whatsit × rare_key = 7
+        assert_eq!(*p2.rows_per_table.get("products_wide").unwrap(), 7);
         assert_eq!(common::row_count(&client, &schema, "products").await, 5);
         assert_eq!(
             common::row_count(&client, &schema, "products_details").await,
@@ -677,7 +676,7 @@ async fn test_auto_split_strategy() {
         );
         assert_eq!(
             common::row_count(&client, &schema, "products_wide").await,
-            6
+            7
         );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
@@ -723,11 +722,12 @@ async fn test_auto_split_strategy() {
             "Thingamajig ne doit pas avoir de lignes dans products_wide"
         );
 
-        // rare_key (Whatsit) ne doit pas apparaître dans products_wide
+        // rare_key (Whatsit) est gardée dans products_wide, avec sa valeur
         let rare_key_count: i64 = client
             .query_one(
                 &format!(
-                    "SELECT COUNT(*) FROM \"{schema}\".\"products_wide\" WHERE key = 'rare_key'"
+                    "SELECT COUNT(*) FROM \"{schema}\".\"products_wide\" \
+                     WHERE key = 'rare_key' AND value = 'rare_value'"
                 ),
                 &[],
             )
@@ -735,8 +735,8 @@ async fn test_auto_split_strategy() {
             .unwrap()
             .get(0);
         assert_eq!(
-            rare_key_count, 0,
-            "rare_key ne doit pas être écrit dans products_wide"
+            rare_key_count, 1,
+            "rare_key doit être écrite dans products_wide"
         );
     })
     .await;
@@ -1673,7 +1673,7 @@ fn test_disable_structured_pivot_gives_pivot_integration() {
 // Fixture : racine `produits` (id, name — stables, reste en Columns), enfant
 // `nutriments` (ChildKind::Object) avec 2 clés stables (calcium, iron,
 // présentes dans les 10 lignes) et 3 clés rares (selenium/iodine/zinc,
-// chacune présente dans 1 seule ligne sur 10 → sous rare_threshold=0.15).
+// chacune présente dans 1 seule ligne sur 10).
 //
 // Design attendu (voir issue #45, section "Design final validé") :
 //   - `produits` reste Columns (2 colonnes stables, aucun split — ratio
@@ -1684,8 +1684,7 @@ fn test_disable_structured_pivot_gives_pivot_integration() {
 //     compagnon.
 //   - `produits_nutriments_pivot` (compagnon) : (key, value) EAV, FK vers
 //     l'identité — TOUTES les clés y arrivent, y compris les rares (aucune
-//     ne doit être droppée silencieusement comme le ferait l'ancien
-//     mécanisme AutoSplit `collect_medium_keys`).
+//     ne doit être droppée silencieusement).
 //
 // État avant les tâches 3/4 : ce test est ROUGE — `apply_non_autosplit_strategy`
 // pivote aujourd'hui `produits_nutriments` sur place (une seule table, pas de
@@ -1704,7 +1703,6 @@ async fn test_pivot_identity_companion_split_no_real_child() {
                 registry: RegistryConfig {
                     wide_column_threshold: 1,
                     stable_threshold: 0.5,
-                    rare_threshold: 0.15,
                     ..Default::default()
                 },
                 num_workers: None,
@@ -1970,7 +1968,6 @@ async fn test_pivot_split_with_real_object_array_child() {
                 registry: RegistryConfig {
                     wide_column_threshold: 1,
                     stable_threshold: 0.5,
-                    rare_threshold: 0.15,
                     ..Default::default()
                 },
                 num_workers: None,

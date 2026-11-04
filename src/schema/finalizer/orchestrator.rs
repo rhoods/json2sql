@@ -27,7 +27,6 @@ pub struct SchemaFinalizer {
     pub(crate) sibling_threshold: usize,
     pub(crate) sibling_jaccard: f64,
     pub(crate) stable_threshold: f64,
-    pub(crate) rare_threshold: f64,
     pub(crate) disabled_strategies: HashSet<StrategyName>,
     /// When `true`, `run()` applies the PG column-limit guard and returns `OverflowWarning`s.
     /// Set to `false` for inspect mode (no guard, raw schema).
@@ -41,7 +40,6 @@ impl SchemaFinalizer {
         sibling_threshold: usize,
         sibling_jaccard: f64,
         stable_threshold: f64,
-        rare_threshold: f64,
         disabled_strategies: HashSet<StrategyName>,
         apply_pg_guard: bool,
     ) -> Self {
@@ -50,7 +48,6 @@ impl SchemaFinalizer {
             sibling_threshold,
             sibling_jaccard,
             stable_threshold,
-            rare_threshold,
             disabled_strategies,
             apply_pg_guard,
         }

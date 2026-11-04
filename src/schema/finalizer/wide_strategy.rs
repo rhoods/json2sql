@@ -23,8 +23,8 @@
 //!   `apply_autosplit_strategy` et `apply_pivot_split`, qui diffèrent seulement par la
 //!   politique de rétention et le jeu de clés envoyé en compagnon).
 //! - fn `is_pg_array` — vrai pour une colonne PG array, jamais envoyée en compagnon EAV (#48).
-//! - fn `collect_medium_keys` — sélectionne les clés de fréquence moyenne (`AutoSplit` racine
-//!   uniquement).
+//! - fn `collect_medium_keys` — les clés scalaires sous le seuil de stabilité, toutes envoyées au compagnon
+//!   (`AutoSplit` racine uniquement ; aucune n'est jetée, #200).
 //! - fn `infer_medium_value_type` — détermine le type de valeur commun d'un jeu de clés.
 //! - fn `build_finalizer_config` — assemble la config figée passée à ces fonctions.
 //! - struct `FinalizerConfig` — config figée (seuils + stratégies désactivées) pour cette phase.
@@ -96,7 +96,6 @@ pub(super) fn build_finalizer_config(finalizer: &SchemaFinalizer) -> FinalizerCo
     FinalizerConfig {
         wide_column_threshold: finalizer.wide_column_threshold,
         stable_threshold: finalizer.stable_threshold,
-        rare_threshold: finalizer.rare_threshold,
         disable_pivot: finalizer.disabled_strategies.contains(&StrategyName::Pivot),
         disable_structured_pivot: finalizer
             .disabled_strategies
@@ -107,7 +106,6 @@ pub(super) fn build_finalizer_config(finalizer: &SchemaFinalizer) -> FinalizerCo
 pub(super) struct FinalizerConfig {
     wide_column_threshold: usize,
     stable_threshold: f64,
-    rare_threshold: f64,
     disable_pivot: bool,
     disable_structured_pivot: bool,
 }
@@ -207,12 +205,11 @@ fn apply_non_autosplit_strategy(
         let n = suffix_schema.suffix_cols.len();
         let strategy = format!("StructuredPivot ({n} suffixes, split identité/compagnon)");
         stats.log(&schema.name, &strategy);
-        let thresholds = (config.stable_threshold, config.rare_threshold);
         return Some(apply_structured_pivot_split(
             schema,
             suffix_schema,
             grid_keys,
-            thresholds,
+            config.stable_threshold,
             existing_names,
         ));
     }
@@ -236,13 +233,13 @@ fn apply_non_autosplit_strategy(
 /// row per base) and return it. `schema` keeps its name and every other column (scalars outside
 /// the grid, PG arrays) and becomes the identity table: `AutoSplit` with the grid keys as
 /// `medium_keys`, so its real children are still written through `recurse_children` (#163).
-/// Shared by the detection (Phase 3) and the TOML `suffix_columns` override; `thresholds` are the
-/// (stable, rare) thresholds recorded on the `AutoSplit` strategy.
+/// Shared by the detection (Phase 3) and the TOML `suffix_columns` override; `stable_threshold` is
+/// recorded on the `AutoSplit` strategy.
 pub fn apply_structured_pivot_split(
     schema: &mut TableSchema,
     suffix_schema: SuffixSchema,
     grid_keys: std::collections::HashSet<String>,
-    thresholds: (f64, f64),
+    stable_threshold: f64,
     existing_names: &std::collections::HashSet<String>,
 ) -> TableSchema {
     schema
@@ -259,8 +256,7 @@ pub fn apply_structured_pivot_split(
     let companion =
         structured_pivot_companion(schema, companion_name.clone(), suffix_schema, has_bare_keys);
     schema.inferred_strategy = InferredStrategy::AutoSplit {
-        stable_threshold: thresholds.0,
-        rare_threshold: thresholds.1,
+        stable_threshold,
         medium_keys: grid_keys,
         wide_table_name: companion_name,
     };
@@ -321,12 +317,11 @@ const fn is_pg_array(col: &ColumnSchema) -> bool {
     matches!(col.pg_type, PgType::Array(_))
 }
 
-/// Apply the P5 `AutoSplit` strategy: retain stable columns on the main table,
-/// build a companion `_wide` EAV table for medium-frequency keys.
+/// The scalar keys of an `AutoSplit` table below `stable_threshold`: they all go to the `_wide` companion,
+/// however rare (#200).
 fn collect_medium_keys(
     entry: &TableEntry,
     row_count: f64,
-    rare_threshold: f64,
     stable_threshold: f64,
 ) -> std::collections::HashSet<String> {
     entry
@@ -335,10 +330,7 @@ fn collect_medium_keys(
         .filter(|(k, t)| {
             !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k)
         })
-        .filter(|(_, t)| {
-            let freq = t.total_count as f64 / row_count;
-            freq >= rare_threshold && freq < stable_threshold
-        })
+        .filter(|(_, t)| (t.total_count as f64 / row_count) < stable_threshold)
         .map(|(k, _)| k.clone())
         .collect()
 }
@@ -354,46 +346,6 @@ fn infer_medium_value_type(
             Some(acc.map_or_else(|| t.to_pg_type(), |a| widen_pg_types(a, &t.to_pg_type())))
         })
         .unwrap_or(PgType::Text)
-}
-
-/// Rare keys are dropped by `AutoSplit` (data loss): name them on stderr so the drop is never silent.
-fn warn_rare_keys(
-    entry: &TableEntry,
-    row_count: f64,
-    rare_threshold: f64,
-    table: &str,
-    wide_name: &str,
-) {
-    let mut rare_keys: Vec<&str> = entry
-        .columns
-        .iter()
-        .filter(|(k, t)| {
-            !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k)
-        })
-        .filter(|(_, t)| (t.total_count as f64 / row_count) < rare_threshold)
-        .map(|(k, _)| k.as_str())
-        .collect();
-    if rare_keys.is_empty() {
-        return;
-    }
-    rare_keys.sort_unstable();
-    let shown = rare_keys
-        .iter()
-        .take(10)
-        .copied()
-        .collect::<Vec<_>>()
-        .join(", ");
-    let more = rare_keys.len().saturating_sub(10);
-    let more = if more > 0 {
-        format!(" (+{more} more)")
-    } else {
-        String::new()
-    };
-    eprintln!(
-        "  WARNING: {} rare key(s) in '{table}' are NOT imported (frequency < --rare-threshold {rare_threshold}): \
-        {shown}{more}. Use --rare-threshold 0 to keep them in '{wide_name}'.",
-        rare_keys.len(),
-    );
 }
 
 /// Name of the `AutoSplit` companion: `{base}_wide`, without doubling an existing `_wide`
@@ -415,7 +367,7 @@ fn apply_autosplit_strategy(
     stats: &WideStats,
 ) -> TableSchema {
     let (row_count, stable) = (stats.row_count, config.stable_threshold);
-    let medium_keys = collect_medium_keys(entry, row_count, config.rare_threshold, stable);
+    let medium_keys = collect_medium_keys(entry, row_count, stable);
     // pg-array columns are kept unconditionally: their tracker counts elements, not occurrences,
     // and the scalar EAV companion cannot hold them (issue #48).
     schema.columns.retain(|c| {
@@ -426,24 +378,13 @@ fn apply_autosplit_strategy(
                 .get(&c.original_name)
                 .is_some_and(|t| t.total_count as f64 / row_count >= stable)
     });
-    // Scalars only, like `scalar_col_count`: the kept pg-array columns would otherwise hide rare keys.
+    // Scalars only, like `scalar_col_count`: the kept pg-array columns are not stable keys.
     let stable_col_count = schema.data_columns().filter(|c| !is_pg_array(c)).count();
-    let rare_count = stats
-        .scalar_col_count
-        .saturating_sub(stable_col_count)
-        .saturating_sub(medium_keys.len());
     let wide_name = autosplit_wide_name(&schema.name);
     let medium = medium_keys.len();
     stats.log(
         &schema.name,
-        &format!("AutoSplit ({stable_col_count} stable cols, {medium} medium → {wide_name}, {rare_count} rare dropped)"),
-    );
-    warn_rare_keys(
-        entry,
-        row_count,
-        config.rare_threshold,
-        &schema.name,
-        &wide_name,
+        &format!("AutoSplit ({stable_col_count} stable cols, {medium} medium → {wide_name})"),
     );
     let value_type = infer_medium_value_type(entry, &medium_keys);
     build_wide_pivot_schema(schema, wide_name, value_type, medium_keys, config)
@@ -475,7 +416,6 @@ fn build_wide_pivot_schema(
     wide_schema.inferred_strategy = InferredStrategy::Pivot;
     schema.inferred_strategy = InferredStrategy::AutoSplit {
         stable_threshold: config.stable_threshold,
-        rare_threshold: config.rare_threshold,
         medium_keys,
         wide_table_name: wide_name,
     };
@@ -504,7 +444,6 @@ mod tests {
         FinalizerConfig {
             wide_column_threshold: 2,
             stable_threshold: 0.1,
-            rare_threshold: 0.001,
             disable_pivot: false,
             disable_structured_pivot: false,
         }

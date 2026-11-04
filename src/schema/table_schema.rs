@@ -307,14 +307,13 @@ pub enum InferredStrategy {
     SiblingCollapseMulti(Vec<SiblingGroup>),
 
     /// Root table split: bi-modal key frequency → main table (stable columns) + `{name}_wide`
-    /// EAV companion (medium-frequency keys). Rare keys are dropped entirely.
+    /// EAV companion (every other scalar key, however rare: none is dropped, #200).
     ///
     /// Trigger: root table (no parent) with > `wide_column_threshold` distinct keys (default
     /// **100**) AND object children, where key frequencies form two clusters: many always-present
     /// keys + many rarely-present keys.
-    /// - freq ≥ `stable_threshold`                        → regular column on main table
-    /// - `rare_threshold` ≤ freq < `stable_threshold`    → EAV row in `{name}_wide`
-    /// - freq < `rare_threshold`                          → dropped (WARNING on stderr listing the keys)
+    /// - freq ≥ `stable_threshold` → regular column on main table
+    /// - freq < `stable_threshold` → EAV row in `{name}_wide`
     ///
     /// JSON input (1000 products; "name" in 100% rows, "desc" in 60%, "`promo_code`" in 0.3%):
     /// ```text
@@ -332,28 +331,24 @@ pub enum InferredStrategy {
     ///     desc    TEXT    -- 60% frequency  → stable column (above stable_threshold)
     /// );
     ///
-    /// -- Companion: medium-frequency keys stored as EAV rows
+    /// -- Companion: the other keys stored as EAV rows
     /// CREATE TABLE products_wide (
     ///     j2s_anchor  UUID,        -- FK to products.j2s_id
     ///     key         TEXT NOT NULL,
     ///     value       TEXT
     /// );
-    /// -- "promo_code" dropped: 0.3% < rare_threshold → not imported (stderr warning only)
+    /// -- 1 row: ('promo_code', 'SAVE10')
     /// ```
     AutoSplit {
         stable_threshold: f64,
-        rare_threshold: f64,
-        /// Pre-computed set of medium-frequency keys written to the _wide table in Pass 2.
+        /// Pre-computed set of the keys written to the _wide table in Pass 2.
         medium_keys: std::collections::HashSet<String>,
         /// `PostgreSQL` name of the companion wide table, e.g. "`products_wide`".
         wide_table_name: String,
     },
 
-    /// Key appears in fewer than `rare_threshold` of rows — excluded from all schemas and data.
-    ///
-    /// Applied during `finalize()` before column building. No table or column is produced.
-    /// The dropped key is recorded in the anomaly report so the user knows data was omitted.
-    /// Also used internally to mark sibling tables absorbed by `SiblingCollapse`/`SiblingCollapseMulti`.
+    /// A table left out of the import: a sibling table absorbed by `SiblingCollapse`/`SiblingCollapseMulti`,
+    /// or a table the user Skip-ped.
     ///
     /// No DDL produced — the table or key is silently omitted from the schema.
     Ignore,

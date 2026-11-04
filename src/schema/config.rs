@@ -661,10 +661,9 @@ fn apply_suffix_columns_override(
     }
     let (suffix_schema, grid) = build_suffix_schema_from_list(&suffix_list, &type_map_of(schema));
     eprintln!("  Override strategy: {table_name} → StructuredPivot (suffixes: {suffix_list:?})");
-    let defaults = crate::schema::registry::RegistryConfig::default();
-    let thresholds = (defaults.stable_threshold, defaults.rare_threshold);
+    let stable = crate::schema::registry::RegistryConfig::default().stable_threshold;
     let companion =
-        apply_structured_pivot_split(schema, suffix_schema, grid, thresholds, existing_names);
+        apply_structured_pivot_split(schema, suffix_schema, grid, stable, existing_names);
     (vec![], Some(companion))
 }
 
@@ -2869,7 +2868,6 @@ mod tests {
         let mut t = simple_table("products");
         t.inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.8,
-            rare_threshold: 0.01,
             medium_keys: std::collections::HashSet::default(),
             wide_table_name: "products_wide".to_string(),
         };
@@ -2943,7 +2941,6 @@ mod tests {
         let mut t = simple_table("products");
         t.inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.8,
-            rare_threshold: 0.01,
             medium_keys: std::collections::HashSet::default(),
             wide_table_name: "products_wide".to_string(),
         };

@@ -301,7 +301,7 @@ Un essai `UNLOGGED` puis `SET LOGGED` a été retiré : la réécriture dans le 
 
 **`insert_object()`** (dans `insert.rs`) : écrit la ligne d'un objet dans sa table (`write_row_of`), avec ses colonnes générées (UUID, FK parent, `j2s_order`) — sauf pour une racine en `Jsonb`, dont `write_root_jsonb()` écrit le blob — puis :
   - `SiblingCollapseMulti` : la ligne écrite sert de ligne de routage, et `route_multi_collapse_children()` répartit les clés (rien d'autre n'est fait) ;
-  - `AutoSplit` : les clés médiums vont dans la table compagnon `_wide` (EAV, `write_autosplit_rows`) ; les clés rares (`< --rare-threshold`) ne sont **pas importées** — voir [schema-inference.md](schema-inference.md) ;
+  - `AutoSplit` : les clés qui ne sont pas des colonnes vont dans la table compagnon `_wide` (EAV, `write_autosplit_rows`), même les plus rares — voir [schema-inference.md](schema-inference.md) ;
   - enfin `recurse_children()` parcourt les champs objet et tableau.
 
 **Un seul aiguillage par stratégie** (#172) : `insert_child_object()` choisit l'écriture de `traversal.rs` selon `effective_strategy()` (sinon `insert_object()`). Un objet enfant (`recurse_children()`), un élément de tableau d'objets (`insert_array()`, avec l'index de l'élément pour `j2s_order` ; un objet seul dans une table `ObjectArray` prend 0, #169) et une cible de routage (`dispatch_child_routes()`, `route_independent_child()`) y passent tous. La racine n'y passe pas : elle ne prend jamais une stratégie qui écrit une ligne par clé (`Pivot`, `SiblingCollapse`, `NormalizeDynamicKeys`), faute de ligne parente à laquelle relier ces lignes ; la détection et les overrides (IHM et TOML) la refusent. Exception : une route que la post-passe keyed-pivot a réécrite (clé `fr` → table dont le chemin finit par `key`, #173), ou la route d'un membre de groupe TOML vers la table du groupe (clé `home`, #171), écrit directement une ligne dont la clé est la clé routée (`write_keyed_route_row()`), depuis `dispatch_child_routes()` comme depuis `recurse_children()`.
@@ -327,9 +327,9 @@ Définit les types de données fondamentaux du schéma :
   - `StructuredPivot(SuffixSchema)` : pivot par pattern de suffixes
   - `SiblingCollapse(SiblingSchema)` : fusion de tables sœurs en une table, une ligne par clé
   - `SiblingCollapseMulti(Vec<SiblingGroup>)` : fusion de tables sœurs en une table pivot par forme de clé
-  - `AutoSplit { stable_threshold, rare_threshold, medium_keys, wide_table_name }` : tri par fréquence
+  - `AutoSplit { stable_threshold, medium_keys, wide_table_name }` : tri par fréquence
   - `NormalizeDynamicKeys { id_column }`, `Flatten { prefix, max_depth }`, `JsonbFlatten` : surcharges (TOML ou IHM)
-  - `Ignore` : clé supprimée ; marque aussi les tables absorbées par une fusion de tables sœurs
+  - `Ignore` : table retirée de l'import (tables absorbées par une fusion de tables sœurs, `Skip`)
 - **`UserOverride`** : choix de l'IHM (`Columns`, `Pivot`, `Jsonb`, `Skip`, `JsonbFlatten`, `Flatten`, `NormalizeDynamicKeys`), prioritaire sur `InferredStrategy` ; `TableSchema::effective_strategy` donne la stratégie retenue
 - **`ColumnSchema`** : définition d'une colonne (nom PG, nom original, type, nullable, is_generated)
 - **`TableSchema`** : définition complète d'une table (nom, chemin JSON, colonnes, parent, profondeur, stratégie)

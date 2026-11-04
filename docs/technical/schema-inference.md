@@ -100,23 +100,22 @@ Une table dense gardée en `Columns` (ou en `AutoSplit`) peut ensuite être déc
 ## 5. AutoSplit pour la table racine
 
 **Fichier :** `src/schema/registry.rs` — branche [3c]
-**Paramètres CLI :** `--stable-threshold` (défaut : 0.10), `--rare-threshold` (défaut : 0.001)
+**Paramètre CLI :** `--stable-threshold` (défaut : 0.10)
 
-S'applique uniquement à la **table racine** qui possède des tables enfants (objets imbriqués). La table racine est classifiée en trois zones selon la fréquence d'apparition de chaque clé :
+S'applique uniquement à la **table racine** qui possède des tables enfants (objets imbriqués). Chaque clé de la table racine va dans l'une des deux zones, selon sa fréquence d'apparition :
 
 | Zone | Critère | Destination |
 |---|---|---|
 | **Stable** | fréquence ≥ `stable_threshold` | colonne dans la table principale |
-| **Médium** | fréquence entre `rare_threshold` et `stable_threshold` | ligne dans la table `{nom}_wide` (EAV : `key`, `value`) |
-| **Rare** | fréquence < `rare_threshold` | **non importée** (ni schéma, ni données) — un `WARNING` sur stderr liste les clés concernées |
+| **Autre** | fréquence < `stable_threshold`, même une seule ligne | ligne dans la table `{nom}_wide` (EAV : `key`, `value`) |
 
 La table `_wide` est une table EAV synthétique générée automatiquement avec les colonnes `j2s_id`, `j2s_parent_id`, `j2s_order`, `key`, `value`. Elle est liée à la table principale via une clé étrangère.
 
-Les colonnes tableau ne sont ni médiums ni rares : elles restent dans la table principale.
+Les colonnes tableau restent toujours dans la table principale.
 
-**Exemple OpenFoodFacts :** 189 881 clés observées → 125 stables, 184 médiums, 189 572 rares supprimées.
+**Exemple OpenFoodFacts :** 189 881 clés observées → 125 stables, les 189 756 autres dans `{nom}_wide`.
 
-> ⚠️ **Perte de données volontaire.** Les clés rares sont écartées pour éviter une table EAV de centaines de milliers de clés quasi vides. Pour tout conserver, passer `--rare-threshold 0` : toutes les clés non stables vont alors dans `{nom}_wide`.
+> Aucune clé n'est écartée (#200) : jusqu'à la version précédente, les clés présentes dans moins de `--rare-threshold` des lignes (0,1 % par défaut) n'étaient pas importées. L'option n'existe plus ; un script qui la passe échoue au lancement.
 
 ---
 

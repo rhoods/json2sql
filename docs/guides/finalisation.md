@@ -231,8 +231,8 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
 - **Un chemin non pré-enregistré n'est vu qu'en debug.** `NamingRegistry::table_name_lookup_from_dot_key` a un
   `debug_assert` ; en release, il recalcule un nom qui peut différer de celui du registre (sans troncature à 53, sans
   suffixe d'unicité).
-- **Les seuils arrivent par position.** `SchemaFinalizer::new` prend trois `f64` voisins (`sibling_jaccard`,
-  `stable_threshold`, `rare_threshold`) : les intervertir compile (#112).
+- **Les seuils arrivent par position.** `SchemaFinalizer::new` prend deux `f64` voisins (`sibling_jaccard`,
+  `stable_threshold`) : les intervertir compile (#112).
 
 ## 4. Points d'extension
 

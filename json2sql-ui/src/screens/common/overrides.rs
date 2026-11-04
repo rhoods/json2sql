@@ -349,7 +349,6 @@ mod tests {
         let mut main = make_table("events", None);
         main.inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.8,
-            rare_threshold: 0.1,
             medium_keys: std::collections::HashSet::new(),
             wide_table_name: "events_wide".to_string(),
         };

@@ -216,11 +216,11 @@ fn c_wide_root_without_object_child_becomes_one_jsonb_column() {
 }
 
 // ---------------------------------------------------------------------------
-// C, avec l'objet `meta`. Aujourd'hui : AutoSplit, les 60 clés moyennes dans `events_wide`, les 30 rares jetées.
-// Cible (T2) : rien n'est jeté : les 30 clés rares vont aussi dans `events_wide`, plus d'avertissement.
+// C, avec l'objet `meta` : AutoSplit. Les 60 clés moyennes et les 30 clés vues une seule fois vont dans
+// `events_wide` : rien n'est jeté (T2).
 // ---------------------------------------------------------------------------
 #[test]
-fn c_wide_root_with_object_child_is_split_and_drops_rare_keys() {
+fn c_wide_root_with_object_child_is_split_and_keeps_rare_keys() {
     let run = dry_run("events", &events(true), &[], None);
     assert_eq!(
         run.shape(),
@@ -232,8 +232,7 @@ fn c_wide_root_with_object_child_is_split_and_drops_rare_keys() {
     );
     assert_eq!(run.type_of("events_wide", "value"), "TEXT");
     assert!(
-        run.stderr
-            .contains("30 rare key(s) in 'events' are NOT imported"),
+        run.stderr.contains("90 medium → events_wide") && !run.stderr.contains("NOT imported"),
         "{}",
         run.stderr
     );

@@ -752,7 +752,6 @@ mod tests {
         let mut schemas = vec![items()];
         schemas[0].inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.1,
-            rare_threshold: 0.001,
             medium_keys: std::collections::HashSet::new(),
             wide_table_name: "items_wide".to_string(),
         };
