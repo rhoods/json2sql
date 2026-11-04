@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Pass 2, parcours du JSON et insertion dans PostgreSQL
-verified_at: 0bf8661
+verified_at: db4ec51
 files:
   - src/pass2/
   - src/db/copy_sink.rs
