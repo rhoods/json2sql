@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, "feature/**"]
   pull_request:
-    branches: [master]
+    # feature/**: integration branches that gather the PRs of one large feature before it reaches master (#200).
+    branches: [master, "feature/**"]
 
 # A new push on the same PR/branch cancels the run still in progress.
 concurrency:
