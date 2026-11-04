@@ -760,7 +760,7 @@ fn record_dropped_scalar(
 
 /// One anomaly for an object or array under `parent` whose key has no table to go to (#167), unless it is dropped on
 /// purpose: empty, kept by the parent (its `Jsonb` blob, a column of the same name on it or on one of its column
-/// groups, a flattened child) or Skip-ed by the user.
+/// groups, the object of a flattened child) or Skip-ed by the user.
 pub(super) fn record_missing_table(
     path_map: &HashMap<String, TableSchema>,
     anomalies: &mut impl AnomalyCollect,
@@ -774,9 +774,11 @@ pub(super) fn record_missing_table(
         Value::Array(a) => a.is_empty(),
         _ => true,
     };
-    // Column groups take their columns and flatten sources from the parent (#78): they keep the field too.
+    // Column groups take their columns and flatten sources from the parent (#78): they keep the field too. The columns
+    // of a flattened child are read from an object only (`column_value`): an array under its key is lost (#170).
     let keeps = |t: &TableSchema| {
-        t.find_by_original(field).is_some() || t.flatten_sources.values().any(|f| f == field)
+        t.find_by_original(field).is_some()
+            || (value.is_object() && t.flatten_sources.values().any(|f| f == field))
     };
     if empty
         || matches!(*parent.effective_strategy(), InferredStrategy::Jsonb)
@@ -1988,6 +1990,11 @@ mod tests {
         assert_eq!(record(&parent, "lost", "[]"), 0, "tableau vide");
         assert_eq!(record(&parent, "tags", r#"["x"]"#), 0, "colonne tableau");
         assert_eq!(record(&parent, "n", r#"{"k": 1}"#), 0, "enfant aplati");
+        assert_eq!(
+            record(&parent, "n", r#"[{"k": 1}]"#),
+            1,
+            "tableau sous un enfant aplati : ses colonnes ne lisent qu'un objet (#170)"
+        );
         assert_eq!(record(&parent, "gone", r#"{"k": 1}"#), 0, "enfant Skip-é");
         parent.inferred_strategy = InferredStrategy::Jsonb;
         assert_eq!(record(&parent, "lost", r#"{"k": 1}"#), 0, "blob Jsonb");

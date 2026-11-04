@@ -51,6 +51,7 @@ symbols:
   - TableSchema::set_ui_override
   - apply_wide_strategy_columns
   - apply_flatten
+  - flatten_refusal
   - apply_normalize_dynamic_keys
   - apply_jsonb_flatten
   - apply_column_groups
@@ -147,6 +148,7 @@ Ce que chaque avertissement laisse de côté. Tous sont des avertissements : rie
 | `ColumnGroupNameTaken` | un nom de table déjà pris | ce groupe |
 | `ColumnGroupParentStrategy` | une table ni `Columns` ni `AutoSplit` | les groupes de la table |
 | `ColumnGroupEmptiesParent` | des groupes qui videraient la table | les groupes de la table |
+| `FlattenRefused` | `strategy = "flatten"` sur la racine, un tableau d'objets, une table qui n'est pas en `Columns` (Pivot, Jsonb, `AutoSplit`…), ou qui a des tables, des routes ou des colonnes aplaties à elle (#170) | le flatten (la table reste telle quelle) |
 
 Les overrides de stratégie, qui les pose et ce qu'en fait `apply_single_user_override` (chemin IHM et snapshot) :
 
@@ -232,6 +234,16 @@ IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snap
   Avant #117 la longueur était oubliée : `unit` sortait en `VARCHAR(1)`, et la Pass 2 mettait à `NULL` toute unité de
   plus d'une lettre (vérifié sur 20 000 lignes OFF : 148 035 unités perdues sur 286 615). Les colonnes tableau PG et
   `JSONB` restent sur la table d'identité : la Pass 2 n'envoie au pivot que des valeurs simples (ni objets ni tableaux).
+- **`flatten` n'aplatit qu'un objet simple (#170).** `apply_flatten` copie les colonnes de l'enfant dans le parent,
+  qui les lit dans l'objet de sa clé, puis retire l'enfant et toutes les tables sous lui. Avant #170, un tableau
+  d'objets donnait une colonne toujours `NULL`, une table `Jsonb` une colonne `data` `NULL`, et les tables filles de
+  l'enfant disparaissaient avec leurs données, sans anomalie (vérifié sur PostgreSQL). `flatten_refusal` refuse donc
+  (`FlattenRefused`, la table reste) : la racine, un tableau d'objets (dont une clé tantôt objet, tantôt tableau,
+  #169), une stratégie autre que `Columns`, des tables enfants (compagnons `_wide` / `_pivot` compris), des routes ou
+  des colonnes déjà aplaties. Le refus est vérifié dans la boucle différée, après les autres overrides : aplatir
+  `t_n` et son enfant `t_n_sub` donne le même résultat dans les deux ordres du TOML (`t_n_sub` dans `t_n`, `t_n`
+  refusée). **Limite** : une table refusée a déjà rendu ses groupes de colonnes (`dissolve_column_groups` passe avant),
+  sans perte. L'IHM ne propose pas `Flatten`.
 - **Des clés TOML ignorées sans avertissement.** Les types forcés se mettent à plat dans `[table]` (`age = "BIGINT"`,
   comme `tests/fixtures/`). La forme `[table.columns]` des deux docs donne une clé `columns` dont la valeur est une
   table : `apply_column_type_overrides` saute toute valeur qui n'est pas une chaîne. Vérifié : aucun override, aucun

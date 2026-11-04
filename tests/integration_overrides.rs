@@ -2,7 +2,7 @@
 mod common;
 
 use json2sql::schema::config::{apply_overrides, SchemaConfig};
-use json2sql::schema::table_schema::InferredStrategy;
+use json2sql::schema::table_schema::{InferredStrategy, TableSchema};
 use json2sql::{db, pass1, pass2};
 
 // ---------------------------------------------------------------------------
@@ -454,6 +454,256 @@ async fn test_toml_suffix_columns_keep_every_unit() {
         ]
         .map(|(id, name, unit)| (id, name.to_string(), Some(unit.to_string())));
         assert_eq!(rows, expected, "one row per nutrient, with its unit");
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// [issue #170] `flatten` ne remonte dans le parent que les champs simples d'un objet.
+// Avant #170, il s'appliquait aussi à un tableau d'objets (la colonne restait NULL),
+// à une table Jsonb (colonne `data` NULL) et à un objet qui a ses propres tables
+// (supprimées avec leurs données), sans aucune anomalie. Ces flatten sont refusés
+// avec un avertissement qui nomme la cause : la table enfant reste telle quelle.
+// ---------------------------------------------------------------------------
+
+/// Pass 1 of `fixture` from the root `root`, `prepare`, the TOML `config`, then the import into `schema`: the messages
+/// of the TOML warnings, the schemas imported, and (table, column, count) of each anomaly summary.
+async fn import_with_toml(
+    client: &tokio_postgres::Client,
+    (schema, url): (&str, &str),
+    (fixture, root): (&str, &str),
+    prepare: impl FnOnce(&mut Vec<TableSchema>),
+    config: &str,
+) -> (Vec<String>, Vec<TableSchema>, Vec<(String, String, u64)>) {
+    use json2sql::schema::config::apply_overrides_complete;
+    let path = common::fixture(fixture);
+    let mut p1 = pass1::runner::run(&path, &common::pass1_config(root), None).unwrap();
+    prepare(&mut p1.schemas);
+    let config: SchemaConfig = toml::from_str(config).unwrap();
+    let warnings = apply_overrides_complete(&mut p1.schemas, &config)
+        .unwrap()
+        .iter()
+        .map(json2sql::schema::config::ConfigWarning::to_message)
+        .collect();
+    db::ddl::create_tables_no_constraints(client, &p1.schemas, schema, false, None)
+        .await
+        .unwrap();
+    let p2 = pass2::runner::run(
+        &path,
+        &p1.schemas,
+        client,
+        url,
+        &common::pass2_config(root, schema),
+        None,
+    )
+    .await
+    .unwrap();
+    let anomalies = p2
+        .anomaly_collector
+        .summaries()
+        .into_iter()
+        .map(|s| (s.table, s.column, s.anomaly_count))
+        .collect();
+    (warnings, p1.schemas, anomalies)
+}
+
+/// The single text column of each row of `sql`, sorted.
+async fn sorted_strings(client: &tokio_postgres::Client, sql: &str) -> Vec<String> {
+    let mut rows: Vec<String> = client
+        .query(sql, &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    rows.sort();
+    rows
+}
+
+#[tokio::test]
+async fn test_toml_flatten_is_refused_when_the_child_would_lose_data() {
+    common::with_schema_url(|client, schema, url| async move {
+        let (warnings, schemas, anomalies) = import_with_toml(
+            &client,
+            (&schema, &url),
+            ("flatten_refused.jsonl", "t"),
+            |_| {},
+            "[t_brand]\nstrategy = \"flatten\"\n\
+             [t_nutrients]\nstrategy = \"flatten\"\n\
+             [t_items]\nstrategy = \"flatten\"\n",
+        )
+        .await;
+
+        assert_eq!(warnings.len(), 2, "t_nutrients and t_items: {warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("'t_nutrients'") && w.contains("t_nutrients_sub")),
+            "the warning names the table the flatten would remove: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("'t_items'")),
+            "an array of objects is refused: {warnings:?}"
+        );
+        let mut names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["t", "t_items", "t_nutrients", "t_nutrients_sub"],
+            "only the plain object t_brand is flattened"
+        );
+        assert_eq!(anomalies, [], "nothing is lost");
+        let s = &schema;
+        assert_eq!(
+            sorted_strings(
+                &client,
+                &format!("SELECT id || ':' || t_brand_name FROM \"{s}\".t")
+            )
+            .await,
+            ["1:Alpen", "2:Lacto"]
+        );
+        assert_eq!(
+            sorted_strings(
+                &client,
+                &format!(
+                    "SELECT t.id || ':' || n.kcal || ':' || x.x FROM \"{s}\".t \
+                     JOIN \"{s}\".t_nutrients n ON n.j2s_t_id = t.j2s_id \
+                     JOIN \"{s}\".t_nutrients_sub x ON x.j2s_t_nutrients_id = n.j2s_id"
+                )
+            )
+            .await,
+            ["1:10:1", "2:20:2"],
+            "nutrients.sub.x is kept with nutrients"
+        );
+        assert_eq!(
+            sorted_strings(
+                &client,
+                &format!(
+                    "SELECT t.id || ':' || i.a FROM \"{s}\".t \
+                     JOIN \"{s}\".t_items i ON i.j2s_t_id = t.j2s_id"
+                )
+            )
+            .await,
+            ["1:1", "1:2", "2:3"],
+            "every element of items is kept"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_toml_flatten_of_a_key_seen_as_object_and_array_keeps_every_element() {
+    common::with_schema_url(|client, schema, url| async move {
+        let (warnings, _, anomalies) = import_with_toml(
+            &client,
+            (&schema, &url),
+            ("object_or_array.jsonl", "t"),
+            |_| {},
+            "[t_x]\nstrategy = \"flatten\"\n",
+        )
+        .await;
+
+        assert_eq!(
+            warnings.len(),
+            1,
+            "t_x is an array of objects (#169): {warnings:?}"
+        );
+        assert!(warnings[0].contains("'t_x'"), "{warnings:?}");
+        assert_eq!(anomalies, []);
+        let s = &schema;
+        assert_eq!(
+            sorted_strings(
+                &client,
+                &format!(
+                    "SELECT t.id || ':' || x.j2s_order || ':' || x.a FROM \"{s}\".t \
+                     JOIN \"{s}\".t_x x ON x.j2s_t_id = t.j2s_id"
+                )
+            )
+            .await,
+            ["1:0:1", "2:0:2", "2:1:3"],
+            "the object of line 1 and both elements of line 2"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_toml_flatten_of_an_object_reports_the_arrays_it_cannot_hold() {
+    use json2sql::schema::table_schema::ChildKind;
+    common::with_schema_url(|client, schema, url| async move {
+        // A snapshot saved before #169 keeps `Object` for a key first seen as an object: the flatten is accepted,
+        // and the array of line 2 has no column to go to.
+        let old_snapshot = |schemas: &mut Vec<TableSchema>| {
+            let t_x = schemas.iter_mut().find(|s| s.name == "t_x").unwrap();
+            t_x.child_kind = Some(ChildKind::Object);
+        };
+        let (warnings, _, anomalies) = import_with_toml(
+            &client,
+            (&schema, &url),
+            ("object_or_array.jsonl", "t"),
+            old_snapshot,
+            "[t_x]\nstrategy = \"flatten\"\n",
+        )
+        .await;
+
+        assert_eq!(warnings, Vec::<String>::new());
+        let s = &schema;
+        assert_eq!(
+            sorted_strings(
+                &client,
+                &format!("SELECT id || ':' || coalesce(t_x_a::text, '-') FROM \"{s}\".t")
+            )
+            .await,
+            ["1:1", "2:-"]
+        );
+        assert_eq!(
+            anomalies,
+            [("t".to_string(), "x".to_string(), 1)],
+            "one anomaly for the array, not a silent NULL"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_toml_flatten_of_a_jsonb_child_keeps_its_blob() {
+    use json2sql::schema::wide_strategies::apply_wide_strategy_columns;
+    common::with_schema_url(|client, schema, url| async move {
+        // `attrs` as Pass 1 infers a wide object of mixed types: one `data` column, not one per key.
+        let jsonb = |schemas: &mut Vec<TableSchema>| {
+            let attrs = schemas
+                .iter_mut()
+                .find(|s| s.name == "products_attrs")
+                .unwrap();
+            apply_wide_strategy_columns(attrs, InferredStrategy::Jsonb);
+        };
+        let (warnings, schemas, anomalies) = import_with_toml(
+            &client,
+            (&schema, &url),
+            ("wide_jsonb.jsonl", "products"),
+            jsonb,
+            "[products_attrs]\nstrategy = \"flatten\"\n",
+        )
+        .await;
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("'products_attrs'") && warnings[0].contains("Jsonb"),
+            "{warnings:?}"
+        );
+        assert!(schemas.iter().any(|s| s.name == "products_attrs"));
+        assert_eq!(anomalies, []);
+        let keys: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT count(*) FROM \"{schema}\".products_attrs a, jsonb_object_keys(a.data)"
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(keys, 8, "the 8 values of attrs are in their blobs");
     })
     .await;
 }
