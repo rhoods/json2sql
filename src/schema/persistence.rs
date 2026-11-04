@@ -10,8 +10,9 @@
 //! - fn `write_snapshot` — sérialise et écrit sur disque (écriture atomique via `.tmp` + rename si demandé).
 //! - fn `save` — construit un `SchemaSnapshot` sans overrides et l'écrit (non atomique).
 //! - fn `save_with_overrides` — idem, avec les overrides de stratégie utilisateur (écriture atomique).
-//! - fn `parse_snapshot` — désérialise un snapshot ; une table de jonction `ScalarArray` d'avant #84 donne
-//!   un message dédié (relancer la Pass 1) au lieu de l'erreur serde brute.
+//! - fn `parse_snapshot` — désérialise un snapshot ; une table de jonction `ScalarArray` d'avant #84, ou une
+//!   stratégie `NormalizeDynamicKeys` / `JsonbFlatten` d'avant #200, donne un message dédié (relancer la Pass 1)
+//!   au lieu de l'erreur serde brute.
 //! - fn `load` — lit et désérialise un snapshot ; rejette les versions incompatibles (v1) ; migre
 //!   les `strategy_overrides` racine legacy vers `ui_override` par table (sans écraser l'existant).
 
@@ -153,9 +154,9 @@ pub fn save_with_overrides(
 }
 
 /// Deserialize a snapshot. One made before #84 can hold junction tables for arrays of scalars
-/// (`child_kind` = `ScalarArray`), a variant that no longer exists: it gets its own message.
-/// Recognised from the serde error itself — grepping the file would also hit a column that
-/// happens to be named like that.
+/// (`child_kind` = `ScalarArray`), one made before #200 a `NormalizeDynamicKeys` or `JsonbFlatten`
+/// strategy: variants that no longer exist, each with its own message. Recognised from the serde
+/// error itself — grepping the file would also hit a column that happens to be named like that.
 fn parse_snapshot(data: &[u8]) -> Result<SchemaSnapshot> {
     serde_json::from_slice(data).map_err(|e| {
         if e.to_string().contains("unknown variant `ScalarArray`") {
@@ -163,6 +164,14 @@ fn parse_snapshot(data: &[u8]) -> Result<SchemaSnapshot> {
                 "Schema snapshot uses junction tables for arrays of scalars, which json2sql no longer \
                  generates (they are now array columns). Please re-run Pass 1 to regenerate it.".to_string()
             );
+        }
+        for removed in ["NormalizeDynamicKeys", "JsonbFlatten"] {
+            if e.to_string().contains(&format!("unknown variant `{removed}`")) {
+                return J2sError::InvalidInput(format!(
+                    "Schema snapshot uses the {removed} strategy, which json2sql no longer has (#200: objects \
+                     under dynamic keys are fused automatically). Please re-run Pass 1 to regenerate it."
+                ));
+            }
         }
         J2sError::InvalidInput(format!("Schema deserialization failed: {e}"))
     })
@@ -329,6 +338,30 @@ mod tests {
             !msg.contains("unknown variant"),
             "the raw serde error must not leak: {msg}"
         );
+    }
+
+    #[test]
+    fn load_refuses_a_snapshot_with_a_strategy_removed_by_200() {
+        use crate::schema::table_schema::ChildKind;
+        // #200 removed NormalizeDynamicKeys and JsonbFlatten: an older snapshot that holds one is refused with a
+        // message, not a raw serde error.
+        for removed in [
+            r#"{"NormalizeDynamicKeys":{"id_column":"k"}}"#,
+            r#""JsonbFlatten""#,
+        ] {
+            let json = snapshot_json_with_child(ChildKind::Object);
+            let json = json.replacen(
+                r#""inferred_strategy":"Columns""#,
+                &format!(r#""inferred_strategy":{removed}"#),
+                1,
+            );
+            assert!(json.contains(removed), "test setup: {removed}");
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tmp.path(), json).unwrap();
+            let msg = load(tmp.path()).err().expect("refused").to_string();
+            assert!(msg.contains("re-run Pass 1"), "{removed}: {msg}");
+            assert!(!msg.contains("unknown variant"), "{removed}: {msg}");
+        }
     }
 
     #[test]
