@@ -14,6 +14,8 @@
 //! - struct `DeferredFlatten` — override `flatten` en attente (mutation globale).
 //! - fn `apply_overrides` — point d'entrée par table : dispatch strategy/`suffix_columns`/types,
 //!   reporte `normalize_dynamic_keys`/`flatten` en différé (nécessitent une mutation globale).
+//! - fn `flatten_refusal` — pourquoi une table ne peut pas être aplatie (`FlattenRefused`) : racine, tableau d'objets,
+//!   stratégie autre que `Columns`, tables, routes ou colonnes aplaties à elle, qui seraient perdues (#170).
 //! - fn `toml_str` — helper de lecture d'une clé TOML en `String`.
 //! - fn `has_nonempty_suffix_columns` — vrai si `suffix_columns` est un array TOML non vide.
 //! - fn `conflicting_strategy_override` — détecte un conflit `strategy` vs `suffix_columns`
@@ -64,7 +66,7 @@ use serde::Deserialize;
 
 use crate::error::{J2sError, Result};
 use crate::schema::column_groups::{
-    apply_column_groups, dissolve_column_groups, prune_missing_groups,
+    apply_column_groups, dissolve_column_groups, prune_missing_groups, strategy_name,
 };
 use crate::schema::finalizer::apply_structured_pivot_split;
 use crate::schema::suffix_detector::{build_suffix_schema_from_list, declared_suffixes};
@@ -240,6 +242,12 @@ pub enum ConfigWarning {
     ColumnGroupEmptiesParent {
         table: String,
     },
+    /// `flatten` keeps only the scalar fields of one object (#170): `reason` says what of the table it would lose (an
+    /// array of objects, columns that are not its fields, tables of its own…). The table stays as it is.
+    FlattenRefused {
+        table: String,
+        reason: String,
+    },
 }
 
 impl ConfigWarning {
@@ -288,6 +296,8 @@ impl ConfigWarning {
                 format!("schema-config: table '{table}' is {strategy}: only Columns and AutoSplit tables can be split, its column groups are ignored"),
             Self::ColumnGroupEmptiesParent { table } =>
                 format!("schema-config: the column groups of '{table}' would take all its data columns, they are ignored"),
+            Self::FlattenRefused { table, reason } =>
+                format!("schema-config: '{table}' cannot be flattened, {reason}: it stays a table of its own"),
         }
     }
 }
@@ -399,10 +409,48 @@ pub fn apply_overrides(
             }));
         }
     }
+    // Checked once the other overrides are applied, in the order of the TOML: the tables a flatten would lose are the
+    // ones left by then (#170). shortcut: a refused table has already given back its column groups (nothing is lost);
+    // move the check before `dissolve_column_groups` if they must stay.
     for op in deferred_flatten {
-        apply_flatten(schemas, &op.table_name, &op.prefix, op.max_depth)?;
+        match flatten_refusal(schemas, &op.table_name) {
+            Some(refused) => warnings.push(refused),
+            None => apply_flatten(schemas, &op.table_name, &op.prefix, op.max_depth)?,
+        }
     }
     Ok(warnings)
+}
+
+/// Why `table` can not be flattened, if it can not (#170). `apply_flatten` copies its columns into its parent, which
+/// reads them from the object of its key, and removes the table and every table under it: an array of objects, columns
+/// that are not the object's own fields (Pivot, Jsonb…), tables, routes or flattened columns of its own would be lost
+/// without an anomaly.
+fn flatten_refusal(schemas: &[TableSchema], table: &str) -> Option<ConfigWarning> {
+    let child = schemas.iter().find(|s| s.name == table)?;
+    let own_tables: Vec<&str> = schemas
+        .iter()
+        .filter(|s| s.parent_table.as_deref() == Some(table))
+        .map(|s| s.name.as_str())
+        .collect();
+    let reason = if child.parent_table.is_none() {
+        "it is the root table".to_string()
+    } else if child.child_kind == Some(ChildKind::ObjectArray) {
+        "it is an array of objects".to_string()
+    } else if !matches!(*child.effective_strategy(), InferredStrategy::Columns) {
+        format!("its strategy is {}, not Columns", strategy_name(child))
+    } else if !own_tables.is_empty() {
+        format!("its own tables would be lost ({})", own_tables.join(", "))
+    } else if !child.child_routes.is_empty() {
+        "it routes keys to other tables".to_string()
+    } else if !child.flatten_sources.is_empty() {
+        "it already has flattened columns".to_string()
+    } else {
+        return None;
+    };
+    Some(ConfigWarning::FlattenRefused {
+        table: table.to_string(),
+        reason,
+    })
 }
 
 /// #129: the table already has an override, the IHM's first (as in `effective_strategy`), then one of an earlier run

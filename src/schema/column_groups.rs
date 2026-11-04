@@ -477,7 +477,7 @@ fn split_off(schemas: &mut Vec<TableSchema>, parent_at: usize, name: String, col
 }
 
 /// The name of the strategy of a table without its details: `Pivot`, `SiblingCollapse`...
-fn strategy_name(table: &TableSchema) -> String {
+pub(super) fn strategy_name(table: &TableSchema) -> String {
     let debug = format!("{:?}", *table.effective_strategy());
     debug
         .split(['(', ' ', '{'])
