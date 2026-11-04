@@ -114,11 +114,11 @@ Les stratégies existantes, par origine :
 |---|---|---|---|
 | `Columns` | par défaut | TOML `columns` | — |
 | `Pivot` | phase 3 (`suggest_wide_strategy`) | TOML `pivot`, IHM | `pivot` (donne `Jsonb` à la place) |
-| `Jsonb` | phase 3 (valeurs hétérogènes), phase 4 (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
+| `Jsonb` | phase 3 avec `--disable-strategy pivot` seulement, phase 4 (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
 | `StructuredPivot` | phase 3 (suffixes) | TOML `suffix_columns` | `structured_pivot` |
 | `SiblingCollapse` | phase 2 (`finalize_cascading`) | TOML `[group.*]` | `sibling` |
 | `SiblingCollapseMulti` | phase 2 | — | `sibling` |
-| `AutoSplit` | phase 3 (racine, fréquences bimodales) | — | non (`split` est obligatoire) |
+| `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (`split` est obligatoire) |
 | `Ignore` | jamais : projection de `UserOverride::Skip` | IHM (`Skip`) | — |
 | `NormalizeDynamicKeys` | jamais | TOML `normalize_dynamic_keys` | — |
 | `Flatten` | jamais | TOML `flatten` | — |

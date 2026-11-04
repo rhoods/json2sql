@@ -26,6 +26,8 @@
 //! - fn `write_group_rows` — écrit les lignes des tables de groupes de colonnes d'une table (une par groupe qui a au moins une valeur).
 //! - fn `column_value` — valeur JSON d'une colonne de données dans l'objet de sa table (via le champ d'origine si elle vient d'un `Flatten`).
 //! - fn `write_wide_row` — écrit une ligne EAV (clé, valeur) de la table wide compagnon.
+//! - fn `is_scalar` — vrai pour une valeur qui peut aller dans un compagnon (ni objet ni tableau).
+//! - fn `written_as_column` — vrai pour une clé écrite en colonne de la table ou d'un de ses groupes.
 //! - fn `write_autosplit_rows` — écrit les paires clé/valeur de fréquence moyenne en lignes EAV
 //!   dans la table wide compagnon (stratégie `AutoSplit`), ou la grille de suffixes en lignes par
 //!   base quand le compagnon est un `StructuredPivot` (#163).
@@ -395,10 +397,10 @@ fn write_wide_row<S: RowSink, A: AnomalyCollect>(
     write_row(ctx.sinks, ctx.anomalies, wide_table_name, wb)
 }
 
-/// Write medium-frequency key-value pairs as EAV rows in the `AutoSplit` companion wide table,
-/// or as one row per base when the companion is a `StructuredPivot` (#163). Stable keys were
-/// already written as schema columns; rare keys are skipped entirely, and so are objects and
-/// arrays, which are not companion values (#69).
+/// Write the keys of an `AutoSplit` table that are not columns as EAV rows in its companion wide table,
+/// or the keys of the grid as one row per base when the companion is a `StructuredPivot` (#163). Stable keys were
+/// already written as schema columns; objects and arrays are not companion values (#69). An EAV companion takes
+/// every other scalar, even one Pass 1 never saw (an older snapshot, a newer file): nothing is lost (#200).
 fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
@@ -415,25 +417,48 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     else {
         return Ok(());
     };
-    let medium = obj.iter().filter(|(k, v)| {
-        medium_keys.contains(k.as_str()) && !matches!(v, Value::Object(_) | Value::Array(_))
-    });
     // The companion is missing only when the user Skip-ed it alone: its keys are dropped on purpose (#167).
     let Some(companion) = path_map.get(wide_table_name.as_str()) else {
         return Ok(());
     };
     if let InferredStrategy::StructuredPivot(ss) = &*companion.effective_strategy() {
+        let grid = obj
+            .iter()
+            .filter(|(k, v)| medium_keys.contains(k.as_str()) && is_scalar(v));
         return insert_structured_pivot_object(
             ctx.sinks,
             ctx.anomalies,
             companion,
-            medium,
+            grid,
             row_id,
             None,
             ss,
         );
     }
-    write_eav_rows(ctx, companion, wide_table_name, medium, row_id)
+    let not_columns = obj
+        .iter()
+        .filter(|(k, v)| is_scalar(v) && !written_as_column(path_map, schema, k));
+    write_eav_rows(ctx, companion, wide_table_name, not_columns, row_id)
+}
+
+/// Objects and arrays have their own tables: they are never companion values (#69).
+const fn is_scalar(v: &Value) -> bool {
+    !matches!(v, Value::Object(_) | Value::Array(_))
+}
+
+/// True when `key` is a column of `schema` or of one of its column groups: written there, not in the companion.
+fn written_as_column(
+    path_map: &HashMap<String, TableSchema>,
+    schema: &TableSchema,
+    key: &str,
+) -> bool {
+    let has = |t: &TableSchema| t.find_by_original(key).is_some();
+    has(schema)
+        || schema
+            .column_groups
+            .iter()
+            .filter_map(|g| path_map.get(g.as_str()))
+            .any(has)
 }
 
 /// One EAV row (`key`, `value`) per medium key of the `AutoSplit` companion `wide_table_name`.
@@ -730,6 +755,47 @@ mod tests {
             recorder.anomalies,
             [("t".to_string(), "salt_100g".to_string(), id)]
         );
+    }
+
+    /// `t` (`a` TEXT) split by frequency: `m` goes to the key/value companion `t_wide` (`key`, `value` TEXT).
+    fn eav_split_table() -> HashMap<String, TableSchema> {
+        let mut parent = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        parent
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        parent.columns.push(column("a", "a", PgType::Text));
+        parent.inferred_strategy = InferredStrategy::AutoSplit {
+            stable_threshold: 0.1,
+            medium_keys: ["m".to_string()].into(),
+            wide_table_name: "t_wide".to_string(),
+        };
+        let mut wide = TableSchema::new("t_wide".to_string(), vec!["t_wide".to_string()], 1);
+        wide.parent_table = Some("t".to_string());
+        wide.columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        wide.columns.push(ColumnSchema::parent_fk("t"));
+        wide.columns.push(column("key", "key", PgType::Text));
+        wide.columns.push(column("value", "value", PgType::Text));
+        wide.inferred_strategy = InferredStrategy::Pivot;
+        HashMap::from([("t".to_string(), parent), ("t_wide".to_string(), wide)])
+    }
+
+    #[test]
+    fn a_key_unknown_to_pass_1_goes_to_the_key_value_companion() {
+        // An older snapshot, or a newer file: `unseen` is neither a column nor a medium key (#200).
+        let mut recorder = Recorder::default();
+        let rows = write(
+            &eav_split_table(),
+            r#"{"a": "A", "m": "1", "unseen": "2"}"#,
+            &mut recorder,
+        );
+        let mut keys: Vec<(&str, &str)> = rows["t_wide"]
+            .iter()
+            .map(|r| (r[2].as_str(), r[3].as_str()))
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, [("m", "1"), ("unseen", "2")]);
+        assert_eq!(recorder.anomalies, Vec::new());
     }
 
     #[test]

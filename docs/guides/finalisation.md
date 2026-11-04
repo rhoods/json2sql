@@ -68,7 +68,7 @@ symbols:
   - unique_cluster_suffix
   - pick_unique_suffix
   - rename_shared_pivots
-  - unique_pivot_name
+  - unique_companion_name
   - classify_key_shape
   - build_union_columns
   - apply_wide_table_strategies
@@ -150,7 +150,8 @@ SchemaRegistry::finalize_with_pg_guard (voir pass1.md)
    ├─ doublons de nom retirés, tri par profondeur puis chemin JSON
    ├─ phase 3  apply_wide_table_strategies : par TableEntry, si la table est encore Columns
    │           apply_wide_strategy → AutoSplit (racine) ou apply_non_autosplit_strategy
-   │           (apply_structured_pivot_split, apply_pivot_split, Jsonb) ; compagnons _wide / _pivot
+   │           (apply_structured_pivot_split, apply_pivot_split si un seul type, sinon AutoSplit) ;
+   │           compagnons _wide / _pivot
    │           ajoutés à la fin
    └─ phase 4  apply_column_limit_guard (si apply_pg_guard), puis exclude_absorbed_children
 → (Vec<TableSchema>, Vec<ColumnCollision>, Vec<OverflowWarning>)
@@ -171,7 +172,7 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
   l'annonce par un `WARNING` (et un `debug_assert` en test, #180). Sur OFF, avant #180, `nutriscore.<année>.data`
   écrivait ainsi dans la table du champ racine `nutriscore_data`. Les noms synthétiques se rendent donc uniques à leur
   création : `unique_cluster_suffix` (phase 2, et la passe keyed-pivot), `pick_unique_suffix` (`make_subgroup`),
-  `unique_derived_table_name` (tables fusionnées de `cascade.rs`), `unique_pivot_name` (phase 3). Unique aussi
+  `unique_derived_table_name` (tables fusionnées de `cascade.rs`), `unique_companion_name` (phase 3, compagnons `_pivot` et `_wide`). Unique aussi
   contre les tables créées plus tôt dans la même vague (#136) : deux parents longs qui ne diffèrent que par les
   premiers mots que `derived_table_name` retire tirent le même nom de table pivot. La vague 0 choisit les noms de
   tous ses parents avant d'en créer une seule : `rename_shared_pivots` donne ensuite un hash du nom brut au doublon,
@@ -248,7 +249,7 @@ Les endroits prévus sont listés au § 1. Trois changements demandent des étap
 
 **Nouvelle table créée par la finalisation** (une table qui ne vient pas d'un chemin observé).
 
-- [ ] un nom unique contre toutes les tables déjà connues (`unique_cluster_suffix`, `unique_pivot_name`), y compris
+- [ ] un nom unique contre toutes les tables déjà connues (`unique_cluster_suffix`, `unique_companion_name`), y compris
   celles créées plus tôt dans la même vague (§ 3), sinon le dédoublonnage la retire ;
 - [ ] un nom passé par `derived_table_name` (53 octets au plus), et la colonne parente par `ColumnSchema::parent_fk` ;
 - [ ] `parent_table`, `child_kind`, `depth` et `path` remplis : la Pass 2 retrouve la table par son chemin ;

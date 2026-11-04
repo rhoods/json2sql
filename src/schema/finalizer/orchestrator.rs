@@ -102,13 +102,7 @@ impl SchemaFinalizer {
 
         // Phase 3 — per-table: apply wide-table strategies (Pivot, Jsonb, StructuredPivot, AutoSplit)
         // to remaining tables after fusion is complete.
-        apply_wide_table_strategies(
-            &mut schemas,
-            tables,
-            naming,
-            &config,
-            &tables_with_object_children,
-        );
+        apply_wide_table_strategies(&mut schemas, tables, naming, &config);
 
         // Phase 4 — cleanup: column limit guard and absorbed child exclusion.
         let overflow_warnings = if self.apply_pg_guard {

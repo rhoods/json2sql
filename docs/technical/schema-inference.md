@@ -97,12 +97,12 @@ Une table dense gardée en `Columns` (ou en `AutoSplit`) peut ensuite être déc
 
 ---
 
-## 5. AutoSplit pour la table racine
+## 5. AutoSplit : les clés fréquentes en colonnes, les autres en clé/valeur
 
-**Fichier :** `src/schema/registry.rs` — branche [3c]
+**Fichier :** `src/schema/finalizer/wide_strategy.rs` — `apply_autosplit_strategy()`
 **Paramètre CLI :** `--stable-threshold` (défaut : 0.10)
 
-S'applique uniquement à la **table racine** qui possède des tables enfants (objets imbriqués). Chaque clé de la table racine va dans l'une des deux zones, selon sa fréquence d'apparition :
+S'applique à une table large et creuse (§ 4) : toujours à la **table racine**, dont les lignes sont les enregistrements du fichier et les clés des champs, et à une **table enfant** dont les valeurs mélangent plusieurs types (§ 8). Chaque clé va dans l'une des deux zones, selon sa fréquence d'apparition :
 
 | Zone | Critère | Destination |
 |---|---|---|
@@ -125,7 +125,7 @@ Les colonnes tableau restent toujours dans la table principale.
 
 Pour les tables larges non-racines dont les colonnes suivent un pattern `{base}_{suffixe}` (ex. `calcium_100g`, `calcium_unit`, `calcium_serving`), un pivot structuré est auto-détecté.
 
-La table n'est pas vidée : seules les clés de la grille (clés suffixées et clés nues qui en sont les bases) partent dans un compagnon `{table}_pivot` (`unique_pivot_name`), une ligne par base. La table garde son nom, ses scalaires hors grille, ses colonnes PG array et ses vraies tables filles ; elle prend `AutoSplit` avec les clés de la grille en `medium_keys` et le compagnon en `wide_table_name`, comme le split Pivot (§ 8). En Pass 2, `write_autosplit_rows` voit que le compagnon est un `StructuredPivot` et regroupe les clés par base (#163).
+La table n'est pas vidée : seules les clés de la grille (clés suffixées et clés nues qui en sont les bases) partent dans un compagnon `{table}_pivot` (`unique_companion_name`), une ligne par base. La table garde son nom, ses scalaires hors grille, ses colonnes PG array et ses vraies tables filles ; elle prend `AutoSplit` avec les clés de la grille en `medium_keys` et le compagnon en `wide_table_name`, comme le split Pivot (§ 8). En Pass 2, `write_autosplit_rows` voit que le compagnon est un `StructuredPivot` et regroupe les clés par base (#163).
 
 ### Algorithme
 
@@ -182,16 +182,16 @@ Quand les tables sœurs sont elles-mêmes des conteneurs purs (ex. `genome → c
 
 ## 8. Stratégies wide alternatives (Pivot, Jsonb)
 
-**Fichier :** `src/schema/registry.rs` — `suggest_wide_strategy()`
+**Fichier :** `src/schema/wide_strategies.rs` — `suggest_wide_strategy()`
 
-Pour les tables larges non-racines qui ne correspondent ni à un StructuredPivot ni à un AutoSplit, deux stratégies sont proposées :
+Une table enfant large et creuse qui n'est pas une grille de suffixes (§ 7) est coupée selon les types de ses valeurs :
 
 | Stratégie | Critère | Stockage |
 |---|---|---|
-| **Pivot** | colonnes de types homogènes | table EAV `(parent_id, key, value)` |
-| **Jsonb** | colonnes hétérogènes ou objet complexe | colonne JSONB unique dans la table parent |
+| **Pivot** | toutes les valeurs d'un seul type : les clés sont des données (devises, langues…) | toutes les clés dans le compagnon `{nom}_pivot` (EAV : `key`, `value`) |
+| **AutoSplit** | types mélangés : les clés sont des champs | clés fréquentes en colonnes, les autres dans `{nom}_wide` (§ 5) |
 
-Ces stratégies peuvent être forcées dans le TOML de config.
+JSONB n'est plus choisi automatiquement (#200), sauf avec `--disable-strategy pivot` et au-delà de 1 600 colonnes ; il se demande dans le TOML (`strategy = "jsonb"`), comme `pivot`.
 
 ---
 

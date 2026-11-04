@@ -2189,20 +2189,15 @@ async fn test_pivot_split_object_array_parent_with_real_grandchild() {
 }
 
 // ---------------------------------------------------------------------------
-// [issue #45, tâche 11] `ObjectArray` hétérogène → Jsonb (Problème 2b).
+// [issue #45, tâche 11 ; #200, T3] `ObjectArray` large aux types mélangés.
 //
-// Ferme la boucle des tâches 3/9/10 : une table `ObjectArray`-parent dont les clés
-// sont hétérogènes (int + string + bool → plusieurs catégories de type,
-// `suggest_wide_strategy` choisit Jsonb au lieu de Pivot) doit produire un DDL à
-// 4 colonnes (j2s_id, parent_fk, j2s_order, data JSONB), un blob round-trip
-// correct par élément, et `j2s_order` peuplé selon la position dans l'array.
-//
-// Avant #45 : `avis` restait bloquée en `Columns` (tâche 3) ; même une fois
-// éligible, `insert_array` aurait écrit `NULL` dans `data` pour chaque élément
-// (tâche 10, confirmé par test unitaire rouge).
+// Une table `ObjectArray`-parent dont les clés sont hétérogènes (int + string + bool) passe
+// par le split par fréquence (#200) : ici toutes ses clés sont présentes dans chaque élément,
+// donc rien ne part en clé/valeur et elle garde ses colonnes typées, avec `j2s_order`
+// peuplé selon la position dans l'array. (Avant #200 : un blob JSONB par élément.)
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn test_object_array_heterogeneous_jsonb_end_to_end() {
+async fn test_object_array_heterogeneous_keeps_typed_columns_end_to_end() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("wide_object_array_jsonb.jsonl");
         let p1 = pass1::runner::run(
@@ -2226,20 +2221,17 @@ async fn test_object_array_heterogeneous_jsonb_end_to_end() {
             .expect("produits_avis manquant");
         assert_eq!(
             avis.inferred_strategy,
-            InferredStrategy::Jsonb,
-            "score/comment/verified hétérogènes → Jsonb attendu"
+            InferredStrategy::Columns,
+            "toutes les clés sont fréquentes : rien pour un compagnon, la table reste en colonnes"
         );
-        assert_eq!(avis.data_columns().count(), 1, "une seule colonne data");
-        assert!(avis.find_by_original("data").is_some());
-        // DDL : j2s_id, j2s_produits_id, j2s_order, data — 4 colonnes au total.
-        assert_eq!(
-            avis.columns.len(),
-            4,
-            "j2s_id + parent_fk + j2s_order + data"
+        assert_eq!(avis.data_columns().count(), 3, "score, comment, verified");
+        assert!(
+            !p1.schemas.iter().any(|s| s.name == "produits_avis_wide"),
+            "pas de compagnon vide"
         );
         assert!(
             avis.columns.iter().any(|c| c.original_name == "j2s_order"),
-            "j2s_order doit être présent sur une table ObjectArray, même en Jsonb"
+            "j2s_order doit être présent sur une table ObjectArray"
         );
 
         let schemas = p1.schemas.clone();
@@ -2272,9 +2264,9 @@ async fn test_object_array_heterogeneous_jsonb_end_to_end() {
             .query(
                 &format!(
                     "SELECT a.j2s_order, \
-                        a.data->>'score'    AS score, \
-                        a.data->>'comment'  AS comment, \
-                        a.data->>'verified' AS verified \
+                        a.score::text    AS score, \
+                        a.comment        AS comment, \
+                        a.verified::text AS verified \
                  FROM \"{schema}\".\"produits_avis\" a \
                  JOIN \"{schema}\".\"produits\" p ON a.j2s_produits_id = p.j2s_id \
                  WHERE p.name = 'P2' ORDER BY a.j2s_order",

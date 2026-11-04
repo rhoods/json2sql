@@ -293,8 +293,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_object_jsonb_heterogeneous() {
-        // Mixed types (string + numeric) → should get InferredStrategy::Jsonb
+    fn test_wide_object_heterogeneous_without_rare_key_stays_columns() {
+        // Mixed types (string + numeric) → split by frequency (#200); on one row every key is frequent:
+        // nothing would go to the companion, so the table stays Columns, with no empty `_wide`.
         let mut reg = SchemaRegistry::new(RegistryConfig {
             wide_column_threshold: 2,
             ..Default::default()
@@ -313,10 +314,9 @@ mod tests {
         let meta = schemas.iter().find(|s| s.name == "item_meta");
         assert!(meta.is_some(), "meta table should exist");
         let m = meta.unwrap();
-        assert_eq!(m.inferred_strategy, InferredStrategy::Jsonb);
-        // Should have j2s_id, j2s_parent_id, data
-        assert!(m.find_by_original("data").is_some());
-        assert_eq!(m.data_columns().count(), 1);
+        assert_eq!(m.inferred_strategy, InferredStrategy::Columns);
+        assert_eq!(m.data_columns().count(), 3);
+        assert!(!schemas.iter().any(|s| s.name == "item_meta_wide"));
     }
 
     #[test]
@@ -1757,11 +1757,20 @@ mod tests {
         ] {
             reg.observe_root("root", make_root(&v));
         }
+        // 9 more rows, 4 of them with a rare key (1 row out of 12): the root has keys for its `_wide` companion.
+        for i in 4..13 {
+            let mut v = json!({"id": i, "n1": i, "n2": i, "child": {"x": i}, "pure": ["e"]});
+            if i < 8 {
+                v[format!("r{i}")] = json!(i);
+            }
+            reg.observe_root("root", make_root(&v));
+        }
         let schemas = reg.finalize();
         let root = schemas.iter().find(|s| s.name == "root").unwrap();
         let InferredStrategy::AutoSplit { medium_keys, .. } = &root.inferred_strategy else {
             panic!("root must be AutoSplit, got {:?}", root.inferred_strategy);
         };
+        assert!(medium_keys.contains("r4"), "{medium_keys:?}");
         assert_single_array_col(root, "pure");
         assert_single_array_col(root, "mixed");
         assert!(
@@ -2031,7 +2040,8 @@ mod tests {
     fn pg_array_mixed_field_scalar_side_does_not_count_as_stable() {
         // 11 scalars (5 stable, 6 rare) + 2 mixed fields that are scalar on 38 rows out of 40.
         // Counting the mixed fields' scalar side gave 7/13 = 54 % stable → kept as Columns;
-        // judged on the 11 scalars alone it is 5/11 = 45 % → split, the arrays staying on the identity table.
+        // judged on the 11 scalars alone it is 5/11 = 45 % → split by frequency (the root, #200): the 6 rare
+        // scalars go to the companion, the 5 stable ones and the arrays stay.
         let mut reg = pg_array_reg(10);
         observe_rows(&mut reg, "root", 40, |i| {
             let mut obj = serde_json::Map::new();
@@ -2054,15 +2064,18 @@ mod tests {
         let schemas = reg.finalize();
         let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(
-            names.contains(&"root_pivot"),
-            "the 11 scalars must go to a companion, got {names:?}"
+            names.contains(&"root_wide"),
+            "the 6 rare scalars must go to a companion, got {names:?}"
         );
         let root = schemas.iter().find(|s| s.name == "root").unwrap();
-        assert_eq!(root.data_columns().count(), 2);
-        assert!(
-            root.data_columns()
-                .all(|c| matches!(c.pg_type, PgType::Array(_))),
-            "identity keeps only the arrays"
+        let arrays = root
+            .data_columns()
+            .filter(|c| matches!(c.pg_type, PgType::Array(_)))
+            .count();
+        assert_eq!(
+            (root.data_columns().count(), arrays),
+            (7, 2),
+            "5 stable scalars + the 2 arrays"
         );
     }
 

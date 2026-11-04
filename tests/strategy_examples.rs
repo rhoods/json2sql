@@ -160,11 +160,10 @@ fn a_dynamic_keys_of_one_type_all_go_to_key_value() {
 
 // ---------------------------------------------------------------------------
 // B. Un objet enfant large aux types mélangés : `color` partout, et 4 attributs sur 80 par ligne.
-// Aujourd'hui : types mélangés → tout l'objet dans une colonne JSONB, `color` compris.
-// Cible (T3) : `products_attrs (color)` + `products_attrs_wide (key, value)`.
+// Types mélangés → split (T3) : `color`, fréquente, reste une colonne ; les attributs vont en clé/valeur.
 // ---------------------------------------------------------------------------
 #[test]
-fn b_wide_child_of_mixed_types_becomes_one_jsonb_column() {
+fn b_wide_child_of_mixed_types_keeps_frequent_keys_as_columns() {
     let rows: Vec<Value> = (0..300)
         .map(|i| {
             let mut attrs = object((0..4).map(|k| format!("attr_{}", (i * 4 + k) % 80)), |k| {
@@ -177,9 +176,13 @@ fn b_wide_child_of_mixed_types_becomes_one_jsonb_column() {
     let run = dry_run("products", &rows, &[], None);
     assert_eq!(
         run.shape(),
-        expected(&[("products", &["sku"]), ("products_attrs", &["data"])])
+        expected(&[
+            ("products", &["sku"]),
+            ("products_attrs", &["color"]),
+            ("products_attrs_wide", &["key", "value"]),
+        ])
     );
-    assert_eq!(run.type_of("products_attrs", "data"), "JSONB");
+    assert_eq!(run.type_of("products_attrs_wide", "value"), "TEXT");
 }
 
 /// C. 1001 événements : `id`, `ts`, `type` partout, 2 clés moyennes sur 60 par ligne (≈ 3 %), et 30 clés vues
@@ -205,14 +208,24 @@ fn events(meta: bool) -> Vec<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// C, sans objet enfant. Aujourd'hui : la racine large aux types mélangés part entière en JSONB, même `id`.
-// Cible (T2, T3) : comme avec un objet enfant, `events (id, ts, type)` + `events_wide`, avec les 90 clés.
+// C, sans objet enfant : la racine suit toujours la fréquence (T3), comme avec un objet enfant :
+// `events (id, ts, type)` + `events_wide`, avec les 90 autres clés.
 // ---------------------------------------------------------------------------
 #[test]
-fn c_wide_root_without_object_child_becomes_one_jsonb_column() {
+fn c_wide_root_without_object_child_is_split_like_with_one() {
     let run = dry_run("events", &events(false), &[], None);
-    assert_eq!(run.shape(), expected(&[("events", &["data"])]));
-    assert_eq!(run.type_of("events", "data"), "JSONB");
+    assert_eq!(
+        run.shape(),
+        expected(&[
+            ("events", &["id", "ts", "type"]),
+            ("events_wide", &["key", "value"]),
+        ])
+    );
+    assert!(
+        run.stderr.contains("90 medium → events_wide"),
+        "{}",
+        run.stderr
+    );
 }
 
 // ---------------------------------------------------------------------------
