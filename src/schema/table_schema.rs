@@ -21,9 +21,7 @@
 //! | `AutoSplit` | inferred | root table with bi-modal key frequency | main table + `_wide` companion |
 //! | `Ignore` | internal | set from a user `Skip` override | excluded from schema (rare `AutoSplit` keys are dropped by `AutoSplit` itself) |
 //! | `Skip` | user | user wants table removed | table excluded from DDL and Pass 2 |
-//! | `NormalizeDynamicKeys` | TOML-only | arbitrary JSON keys → row IDs | key becomes a column |
 //! | `Flatten` | TOML-only | inline child fields into parent | child table removed |
-//! | `JsonbFlatten` | TOML-only | store child as JSONB on parent | child table removed |
 //!
 //! See each variant's doc comment for a concrete JSON → SQL example.
 //!
@@ -307,14 +305,13 @@ pub enum InferredStrategy {
     SiblingCollapseMulti(Vec<SiblingGroup>),
 
     /// Root table split: bi-modal key frequency → main table (stable columns) + `{name}_wide`
-    /// EAV companion (medium-frequency keys). Rare keys are dropped entirely.
+    /// EAV companion (every other scalar key, however rare: none is dropped, #200).
     ///
     /// Trigger: root table (no parent) with > `wide_column_threshold` distinct keys (default
     /// **100**) AND object children, where key frequencies form two clusters: many always-present
     /// keys + many rarely-present keys.
-    /// - freq ≥ `stable_threshold`                        → regular column on main table
-    /// - `rare_threshold` ≤ freq < `stable_threshold`    → EAV row in `{name}_wide`
-    /// - freq < `rare_threshold`                          → dropped (WARNING on stderr listing the keys)
+    /// - freq ≥ `stable_threshold` → regular column on main table
+    /// - freq < `stable_threshold` → EAV row in `{name}_wide`
     ///
     /// JSON input (1000 products; "name" in 100% rows, "desc" in 60%, "`promo_code`" in 0.3%):
     /// ```text
@@ -332,63 +329,27 @@ pub enum InferredStrategy {
     ///     desc    TEXT    -- 60% frequency  → stable column (above stable_threshold)
     /// );
     ///
-    /// -- Companion: medium-frequency keys stored as EAV rows
+    /// -- Companion: the other keys stored as EAV rows
     /// CREATE TABLE products_wide (
     ///     j2s_anchor  UUID,        -- FK to products.j2s_id
     ///     key         TEXT NOT NULL,
     ///     value       TEXT
     /// );
-    /// -- "promo_code" dropped: 0.3% < rare_threshold → not imported (stderr warning only)
+    /// -- 1 row: ('promo_code', 'SAVE10')
     /// ```
     AutoSplit {
         stable_threshold: f64,
-        rare_threshold: f64,
-        /// Pre-computed set of medium-frequency keys written to the _wide table in Pass 2.
+        /// Pre-computed set of the keys written to the _wide table in Pass 2.
         medium_keys: std::collections::HashSet<String>,
         /// `PostgreSQL` name of the companion wide table, e.g. "`products_wide`".
         wide_table_name: String,
     },
 
-    /// Key appears in fewer than `rare_threshold` of rows — excluded from all schemas and data.
-    ///
-    /// Applied during `finalize()` before column building. No table or column is produced.
-    /// The dropped key is recorded in the anomaly report so the user knows data was omitted.
-    /// Also used internally to mark sibling tables absorbed by `SiblingCollapse`/`SiblingCollapseMulti`.
+    /// A table left out of the import: a sibling table absorbed by `SiblingCollapse`/`SiblingCollapseMulti`,
+    /// or a table the user Skip-ped.
     ///
     /// No DDL produced — the table or key is silently omitted from the schema.
     Ignore,
-
-    /// Normalize dynamic keys: each JSON key in the object becomes a row, with the key stored
-    /// as a typed ID column. Child object fields become regular columns (union across all keys).
-    ///
-    /// Applied manually via the IHM (not auto-inferred). Similar to `SiblingCollapse` but triggered
-    /// by the user, not by sibling detection.
-    ///
-    /// JSON input — arbitrary numeric IDs as keys, each with the same nested fields:
-    /// ```text
-    /// { "images": {
-    ///     "12584": {"url":"a.jpg","w":100},
-    ///     "99001": {"url":"b.jpg","w":80 }
-    /// } }
-    /// ```
-    ///
-    /// DDL — child tables collapsed into the parent, ID becomes a column:
-    /// ```text
-    /// CREATE TABLE images (
-    ///     j2s_parent_id  BIGINT,
-    ///     image_id       TEXT NOT NULL, -- the original JSON key ("12584", "99001")
-    ///     url            TEXT,
-    ///     w              INTEGER
-    /// );
-    /// -- 2 rows: ("12584","a.jpg",100), ("99001","b.jpg",80)
-    /// ```
-    NormalizeDynamicKeys {
-        /// Name of the column that will hold the original JSON key (e.g. `"image_id"`).
-        ///
-        /// `Arc<str>` for the same reason as `Flatten::prefix` — cheap to clone in the
-        /// Pass 2 hot path.
-        id_column: Arc<str>,
-    },
 
     /// Flatten nested object: inlines the child's scalar fields as columns in the parent table.
     ///
@@ -418,25 +379,6 @@ pub enum InferredStrategy {
         /// Maximum nesting depth to flatten. Currently only depth = 1 is implemented.
         max_depth: u8,
     },
-
-    /// Store the child object or array as a `JSONB` column directly on the parent table.
-    ///
-    /// Applied manually via the IHM. The child table is removed from the schema.
-    /// One-to-one child → single JSONB object; one-to-many child → JSONB array.
-    ///
-    /// JSON input — child array that should stay inline rather than become a separate table:
-    /// `[{"name":"Nutella","tags":["chocolate","spread","jar"]}, ...]`
-    ///
-    /// DDL — child table `products_tags` is removed, the array lands as a JSONB column:
-    /// ```text
-    /// CREATE TABLE products (
-    ///     j2s_id  BIGINT PRIMARY KEY,
-    ///     name    TEXT,
-    ///     tags    JSONB   -- stored as '["chocolate","spread","jar"]'
-    /// );
-    /// -- 1 row: ("Nutella",'["chocolate","spread","jar"]')
-    /// ```
-    JsonbFlatten,
 }
 
 /// User-facing override for a table's materialization strategy.
@@ -457,12 +399,8 @@ pub enum UserOverride {
     /// variant was renamed.
     #[serde(alias = "Ignore")]
     Skip,
-    /// Inline child as a JSONB column on the parent — IHM override only.
-    JsonbFlatten,
     /// Inline child's scalar fields as prefixed columns on the parent.
     Flatten { prefix: Arc<str>, max_depth: u8 },
-    /// Normalize dynamic keys: each JSON key becomes a row with the key as a typed ID column.
-    NormalizeDynamicKeys { id_column: Arc<str> },
 }
 
 impl From<&UserOverride> for InferredStrategy {
@@ -472,13 +410,9 @@ impl From<&UserOverride> for InferredStrategy {
             UserOverride::Pivot => Self::Pivot,
             UserOverride::Jsonb => Self::Jsonb,
             UserOverride::Skip => Self::Ignore,
-            UserOverride::JsonbFlatten => Self::JsonbFlatten,
             UserOverride::Flatten { prefix, max_depth } => Self::Flatten {
                 prefix: prefix.clone(),
                 max_depth: *max_depth,
-            },
-            UserOverride::NormalizeDynamicKeys { id_column } => Self::NormalizeDynamicKeys {
-                id_column: id_column.clone(),
             },
         }
     }
@@ -640,7 +574,7 @@ impl TableSchema {
 
     /// Returns the effective strategy applying priority: `ui_override` > `toml_override` > `inferred_strategy`.
     ///
-    /// `Flatten`/`NormalizeDynamicKeys` carry their `String` payload as `Arc<str>`, so the
+    /// `Flatten` carries its `String` payload as `Arc<str>`, so the
     /// `Cow::Owned` clone below is a refcount bump, not a heap allocation — cheap enough to
     /// compute fresh on every call in the Pass 2 hot path, with no cache to keep in sync.
     #[must_use]
@@ -754,7 +688,7 @@ impl InferredStrategy {
     /// Returns true if child tables should be excluded from the schema because their
     /// data is absorbed into this table's wide column (Pivot / Jsonb / etc.).
     /// `AutoSplit` does NOT absorb children — they remain as separate tables.
-    /// `NormalizeDynamicKeys` and Flatten absorb their child tables.
+    /// Flatten absorbs its child tables.
     #[must_use]
     pub const fn absorbs_children(&self) -> bool {
         matches!(
@@ -763,9 +697,7 @@ impl InferredStrategy {
                 | Self::Jsonb
                 | Self::StructuredPivot(_)
                 | Self::SiblingCollapse(_)
-                | Self::NormalizeDynamicKeys { .. }
                 | Self::Flatten { .. }
-                | Self::JsonbFlatten
         )
         // SiblingCollapseMulti: absorption handled via SiblingGroup.absorbed_names,
         // not through this flag — the parent itself absorbs nothing directly.
@@ -865,13 +797,9 @@ mod tests {
             UserOverride::Pivot,
             UserOverride::Jsonb,
             UserOverride::Skip,
-            UserOverride::JsonbFlatten,
             UserOverride::Flatten {
                 prefix: "p_".into(),
                 max_depth: 1,
-            },
-            UserOverride::NormalizeDynamicKeys {
-                id_column: "key_id".into(),
             },
         ];
         for v in variants {
@@ -906,14 +834,6 @@ mod tests {
     }
 
     #[test]
-    fn from_user_override_jsonb_flatten() {
-        assert_eq!(
-            InferredStrategy::from(&UserOverride::JsonbFlatten),
-            InferredStrategy::JsonbFlatten
-        );
-    }
-
-    #[test]
     fn from_user_override_flatten() {
         let ov = UserOverride::Flatten {
             prefix: "img_".into(),
@@ -924,19 +844,6 @@ mod tests {
             InferredStrategy::Flatten {
                 prefix: "img_".into(),
                 max_depth: 2
-            }
-        );
-    }
-
-    #[test]
-    fn from_user_override_normalize_dynamic_keys() {
-        let ov = UserOverride::NormalizeDynamicKeys {
-            id_column: "image_id".into(),
-        };
-        assert_eq!(
-            InferredStrategy::from(&ov),
-            InferredStrategy::NormalizeDynamicKeys {
-                id_column: "image_id".into()
             }
         );
     }
@@ -969,8 +876,8 @@ mod tests {
     fn effective_strategy_ui_overrides_inferred_without_toml() {
         let mut s = make_schema("t");
         s.inferred_strategy = InferredStrategy::Columns;
-        s.ui_override = Some(UserOverride::JsonbFlatten);
-        assert_eq!(*s.effective_strategy(), InferredStrategy::JsonbFlatten);
+        s.ui_override = Some(UserOverride::Jsonb);
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Jsonb);
     }
 
     #[test]
@@ -1042,24 +949,24 @@ mod tests {
             Some(UserOverride::Jsonb),
             Some(UserOverride::Columns),
         ];
+        let inferred = InferredStrategy::Flatten {
+            prefix: "k".into(),
+            max_depth: 1,
+        };
 
         for ui in &overrides {
             for toml in &overrides {
                 // Two independent schemas to cover both mutation orders (ui-then-toml and
                 // toml-then-ui).
                 let mut ui_then_toml = make_schema("t");
-                ui_then_toml.inferred_strategy = InferredStrategy::NormalizeDynamicKeys {
-                    id_column: "k".into(),
-                };
+                ui_then_toml.inferred_strategy = inferred.clone();
                 ui_then_toml.set_ui_override(ui.clone());
                 assert_expected_effective_strategy(&ui_then_toml, ui.as_ref(), None);
                 ui_then_toml.set_toml_override(toml.clone());
                 assert_expected_effective_strategy(&ui_then_toml, ui.as_ref(), toml.as_ref());
 
                 let mut toml_then_ui = make_schema("t");
-                toml_then_ui.inferred_strategy = InferredStrategy::NormalizeDynamicKeys {
-                    id_column: "k".into(),
-                };
+                toml_then_ui.inferred_strategy = inferred.clone();
                 toml_then_ui.set_toml_override(toml.clone());
                 assert_expected_effective_strategy(&toml_then_ui, None, toml.as_ref());
                 toml_then_ui.set_ui_override(ui.clone());
@@ -1117,17 +1024,6 @@ mod tests {
         assert!(
             s.absorbs_children(),
             "Flatten (inferred) must absorb children"
-        );
-    }
-
-    #[test]
-    fn table_schema_absorbs_children_via_ui_override_jsonb_flatten() {
-        let mut s = make_schema("t");
-        s.inferred_strategy = InferredStrategy::Columns;
-        s.ui_override = Some(UserOverride::JsonbFlatten);
-        assert!(
-            s.absorbs_children(),
-            "JsonbFlatten ui_override must absorb children"
         );
     }
 

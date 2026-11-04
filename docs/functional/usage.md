@@ -213,12 +213,11 @@ SELECT name, cardinality(tags) AS n, tags[1] AS premier FROM products;
 | `--text-threshold` | 256 | Longueur max avant TEXT (sinon VARCHAR) |
 | `--wide-column-threshold` | 15 | Seuil de détection des tables larges, compté en colonnes **scalaires** : les colonnes tableau ne comptent pas |
 | `--stable-threshold` | 0.10 | Fréquence min pour colonne stable (AutoSplit) |
-| `--rare-threshold` | 0.001 | Fréquence sous laquelle une clé n'est **pas importée** (AutoSplit). `0` = tout conserver |
 | `--sibling-threshold` | 2 | Nb min de tables sœurs pour fusion |
 | `--sibling-jaccard` | 0.8 | Similarité min des colonnes sœurs |
 | `--depth-limit` | aucun | Avertissement si imbrication dépasse N niveaux |
 | `--workers` | 1 | Threads de la Pass 1 (inférence parallèle) |
-| `--disable-strategy` | aucun | Désactive une stratégie d'inférence optionnelle. Répétable. Valeurs : `sibling`, `pivot`, `structured_pivot`. La stratégie `split` (wide-table) est obligatoire et ne peut pas être désactivée. |
+| `--disable-strategy` | aucun | Désactive une stratégie d'inférence optionnelle. Répétable. Valeurs : `sibling`, `structured_pivot`. Le split des tables larges (`split`, dont `pivot` fait partie) est obligatoire et ne peut pas être désactivé ; pour garder une table en JSONB, `strategy = "jsonb"` dans le TOML. |
 
 ### Paramètres de chargement
 
@@ -354,7 +353,6 @@ json2sql \
   --db-url $DATABASE_URL \
   --wide-column-threshold 50 \
   --stable-threshold 0.10 \
-  --rare-threshold 0.001 \
   --schema-config openfoodfacts.toml \
   --drop-existing \
   --parallel 4
@@ -375,7 +373,7 @@ strategy = "jsonb"
 strategy = "jsonb"
 ```
 
-Résultat : 125 colonnes stables dans la table principale, 184 clés médium dans `_wide` (EAV), 189 572 clés rares **non importées** (listées dans un `WARNING` sur stderr ; `--rare-threshold 0` pour tout garder).
+Résultat : 125 colonnes stables dans la table principale ; toutes les autres clés vont dans `_wide` (EAV), aucune n'est écartée.
 
 ---
 

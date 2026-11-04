@@ -90,8 +90,6 @@ pub struct PipelineConfig {
     pub sibling_jaccard: f64,
     /// Minimum key frequency to keep a column in the main table (`AutoSplit`).
     pub stable_threshold: f64,
-    /// Keys below this frequency are dropped entirely.
-    pub rare_threshold: f64,
     /// Number of Pass 1 worker threads (1 = sequential).
     pub num_workers: usize,
     /// Strategies to disable during Pass 1.
@@ -340,7 +338,6 @@ fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Res
             sibling_threshold: cfg.sibling_threshold,
             sibling_jaccard: cfg.sibling_jaccard,
             stable_threshold: cfg.stable_threshold,
-            rare_threshold: cfg.rare_threshold,
             disabled_strategies: cfg.disabled_strategies.clone(),
         },
         num_workers: None,
@@ -733,7 +730,6 @@ mod tests {
             sibling_threshold: 3,
             sibling_jaccard: 0.8,
             stable_threshold: 0.8,
-            rare_threshold: 0.01,
             num_workers: 1,
             disabled_strategies: std::collections::HashSet::new(),
             parallel: 1,

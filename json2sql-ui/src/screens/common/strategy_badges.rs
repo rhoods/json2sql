@@ -13,13 +13,11 @@ pub const fn strategy_label(s: &InferredStrategy) -> &'static str {
         InferredStrategy::Columns => "DEFAULT",
         InferredStrategy::Pivot => "PIVOT",
         InferredStrategy::Jsonb => "JSONB SÉP.",
-        InferredStrategy::JsonbFlatten => "JSONB INLINE",
         InferredStrategy::StructuredPivot(_) => "STRUCT PIVOT",
         InferredStrategy::SiblingCollapse(_) => "SIBLING COLLAPSE",
         InferredStrategy::SiblingCollapseMulti(_) => "SIBLING COLLAPSE MULTI",
         InferredStrategy::AutoSplit { .. } => "AUTO SPLIT",
         InferredStrategy::Ignore => "SKIP",
-        InferredStrategy::NormalizeDynamicKeys { .. } => "NORMALIZE",
         InferredStrategy::Flatten { .. } => "FLATTEN",
     }
 }
@@ -29,9 +27,7 @@ pub const fn strategy_badge(s: &InferredStrategy) -> (&'static str, &'static str
     match s {
         InferredStrategy::Columns => ("default", "default"),
         InferredStrategy::Jsonb => ("jsonb", "jsonb"),
-        InferredStrategy::JsonbFlatten => ("jsonbi", "flatten"),
         InferredStrategy::Pivot => ("pivot", "pivot"),
-        InferredStrategy::NormalizeDynamicKeys { .. } => ("normalize", "normalize"),
         InferredStrategy::Ignore => ("skip", "skip"),
         InferredStrategy::Flatten { .. } => ("flatten", "flatten"),
         InferredStrategy::StructuredPivot(_) => ("pivot", "struct pivot"),
@@ -47,9 +43,7 @@ pub const fn user_override_badge(o: &UserOverride) -> (&'static str, &'static st
         UserOverride::Pivot => ("pivot", "pivot"),
         UserOverride::Jsonb => ("jsonb", "jsonb"),
         UserOverride::Skip => ("skip", "skip"),
-        UserOverride::JsonbFlatten => ("jsonb", "jsonb flatten"),
         UserOverride::Flatten { .. } => ("flatten", "flatten"),
-        UserOverride::NormalizeDynamicKeys { .. } => ("normalize", "normalize"),
     }
 }
 

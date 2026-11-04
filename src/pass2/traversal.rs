@@ -46,9 +46,6 @@
 //! - fn `route_multi_collapse_children` — dispatch chaque clé vers son groupe pivot synthétique.
 //! - fn `find_group_for_key` — résout le groupe cible d'une clé (match exact puis heuristique numérique).
 //!
-//! `NormalizeDynamicKeys` :
-//! - fn `insert_normalize_dynamic_keys` — une ligne par clé dynamique.
-//!
 //! Tableaux :
 //! - fn `keeps_scalars_in_array_column` — le parent garde-t-il les scalaires du champ dans une colonne tableau.
 //! - fn `record_dropped_scalar` — anomalie pour une valeur non objet là où un objet est attendu, sans table où aller (#86, #162, #169).
@@ -395,11 +392,13 @@ pub(super) fn write_keyed_route_row<S: RowSink>(
         return Ok(false);
     }
     let strategy = target.effective_strategy();
-    let (key_col_name, routes_children) = match &*strategy {
-        InferredStrategy::SiblingCollapse(s) if !s.array_children => (&s.key_col_name[..], true),
-        InferredStrategy::NormalizeDynamicKeys { id_column } => (&id_column[..], false),
-        _ => return Ok(false),
+    let InferredStrategy::SiblingCollapse(sibling) = &*strategy else {
+        return Ok(false);
     };
+    if sibling.array_children {
+        return Ok(false);
+    }
+    let key_col_name = &sibling.key_col_name[..];
     let Value::Object(child_obj) = sub_value else {
         if !sub_value.is_null() {
             record_dropped_scalar(anomalies, &target.name, sub_key, parent_id, sub_value)?;
@@ -414,17 +413,11 @@ pub(super) fn write_keyed_route_row<S: RowSink>(
         order: None,
         key_col_name,
     };
-    if routes_children {
-        write_sibling_row(path_map, sinks, anomalies, target, &row)?;
-    } else {
-        let mut builder = RowBuilder::new();
-        write_keyed_pivot_columns(&mut builder, anomalies, target, &row)?;
-        write_row(sinks, anomalies, &target.name, builder)?;
-    }
+    write_sibling_row(path_map, sinks, anomalies, target, &row)?;
     Ok(true)
 }
 
-/// One keyed-pivot row to write: a `SiblingCollapse` key, or a `NormalizeDynamicKeys` key.
+/// One keyed-pivot row to write: a `SiblingCollapse` key.
 struct SiblingCollapseRowInput<'a> {
     key: &'a str,
     child_obj: &'a serde_json::Map<String, Value>,
@@ -566,39 +559,6 @@ pub(super) fn insert_sibling_collapse_array_of_objects<S: RowSink>(
             };
             write_sibling_row(path_map, sinks, anomalies, schema, &row)?;
         }
-    }
-    Ok(())
-}
-
-/// Insert one row per key for a `NormalizeDynamicKeys` table.
-/// Columns: `j2s_id`, `j2s_parent_id`, {`id_column`} TEXT, <union data cols...>
-pub(super) fn insert_normalize_dynamic_keys<S: RowSink>(
-    sinks: &mut HashMap<String, S>,
-    anomalies: &mut impl AnomalyCollect,
-    schema: &TableSchema,
-    obj: &serde_json::Map<String, Value>,
-    parent_id: Uuid,
-    order: Option<i64>,
-    id_column: &str,
-) -> Result<()> {
-    for (key, value) in obj {
-        let Value::Object(child_obj) = value else {
-            if !value.is_null() {
-                record_dropped_scalar(anomalies, &schema.name, key, parent_id, value)?;
-            }
-            continue;
-        };
-        let row = SiblingCollapseRowInput {
-            key,
-            child_obj,
-            parent_id,
-            row_id: Uuid::now_v7(),
-            order,
-            key_col_name: id_column,
-        };
-        let mut builder = RowBuilder::new();
-        write_keyed_pivot_columns(&mut builder, anomalies, schema, &row)?;
-        write_row(sinks, anomalies, &schema.name, builder)?;
     }
     Ok(())
 }
@@ -753,7 +713,7 @@ pub(super) fn keeps_scalars_in_array_column(parent: &TableSchema, field: &str) -
 
 /// One anomaly for a non-object value where an object is expected: the scalars of an
 /// `ObjectArray` (first one as the value, #86), a scalar under a `SiblingCollapse` /
-/// `NormalizeDynamicKeys` key (#162), or an array under an `Object` table (#169). These tables
+/// routed key (#162), or an array under an `Object` table (#169). These tables
 /// only have columns for object fields.
 fn record_dropped_scalar(
     anomalies: &mut impl AnomalyCollect,
@@ -1533,33 +1493,6 @@ mod tests {
             dummy_parent_id(),
             None,
             &ss,
-        )
-        .unwrap();
-
-        assert_eq!(sinks["items"].0.len(), 1, "seul l'objet a une ligne");
-        assert_eq!(
-            anomalies.records,
-            vec![("items".to_string(), "de".to_string())],
-            "le scalaire laisse une anomalie, null n'en laisse pas (#162)"
-        );
-    }
-
-    #[test]
-    fn normalize_dynamic_keys_scalar_value_records_anomaly() {
-        let (schema, _) = make_sibling_collapse_schema("items", "root", "key", &["a"]);
-        let mut sinks = make_sinks(&["items"]);
-        let mut anomalies = CountingAnomaly::default();
-        let obj: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(r#"{"fr": {"a": "1"}, "de": "inconnu", "it": null}"#).unwrap();
-
-        super::insert_normalize_dynamic_keys(
-            &mut sinks,
-            &mut anomalies,
-            &schema,
-            &obj,
-            dummy_parent_id(),
-            None,
-            "key",
         )
         .unwrap();
 
@@ -2363,55 +2296,11 @@ mod tests {
         assert_eq!(&fields[2..], ["0", "k", "v"]);
     }
 
-    #[test]
-    fn a_routed_table_in_normalize_dynamic_keys_gets_one_row_per_key() {
-        let (mut target, _) = make_sibling_collapse_schema("images", "root", "code", &["a"]);
-        target.inferred_strategy = InferredStrategy::NormalizeDynamicKeys {
-            id_column: "code".into(),
-        };
-        target.path = vec!["root".to_string(), "sub".to_string()];
-        let mut parent = TableSchema::new("root".to_string(), vec!["root".to_string()], 0);
-        parent
-            .child_routes
-            .insert("sub".to_string(), "images".to_string());
-        let path_map = HashMap::from([("images".to_string(), target)]);
-        let mut sinks = make_sinks(&["images"]);
-        let mut anomalies = CountingAnomaly::default();
-        let obj: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(r#"{"sub": {"x": {"a": "1"}, "y": {"a": "2"}}}"#).unwrap();
-
-        super::dispatch_child_routes(
-            &path_map,
-            &mut sinks,
-            &mut anomalies,
-            &parent,
-            &obj,
-            dummy_parent_id(),
-        )
-        .unwrap();
-
-        let got: Vec<(String, String)> = sinks["images"]
-            .0
-            .iter()
-            .map(|r| {
-                let f = parse_fields(r);
-                (f[2].to_string(), f[3].to_string())
-            })
-            .collect();
-        assert_eq!(
-            got,
-            vec![("x".into(), "1".into()), ("y".into(), "2".into())]
-        );
-    }
-
     /// A route the keyed post-pass rewrote (#173): the routed key is the key of the row, a
     /// scalar under it is reported, not lost.
     #[test]
     fn a_keyed_route_writes_one_row_keyed_by_the_routed_key() {
         let (mut target, _) = make_sibling_collapse_schema("images", "root", "code", &["a"]);
-        target.inferred_strategy = InferredStrategy::NormalizeDynamicKeys {
-            id_column: "code".into(),
-        };
         target.path = vec!["root".to_string(), "key".to_string()];
         let mut parent = TableSchema::new("root".to_string(), vec!["root".to_string()], 0);
         for key in ["x", "y", "z"] {

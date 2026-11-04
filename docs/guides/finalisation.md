@@ -20,6 +20,7 @@ symbols:
   - SchemaFinalizer
   - SchemaFinalizer::new
   - SchemaFinalizer::run
+  - key_column_name
   - TableEntry
   - NamingRegistry
   - NamingRegistry::table_name_from_dot_key
@@ -68,7 +69,7 @@ symbols:
   - unique_cluster_suffix
   - pick_unique_suffix
   - rename_shared_pivots
-  - unique_pivot_name
+  - unique_companion_name
   - classify_key_shape
   - build_union_columns
   - apply_wide_table_strategies
@@ -120,14 +121,16 @@ dans `table_schema.rs`, est le modèle que lisent ensuite les overrides, le DDL,
 | Nouveau champ de `TableSchema` | `TableSchema`, `TableSchema::new` (§ 4) | oui pour `TableSchema::new`, non pour les snapshots |
 | Fusion manuelle depuis l'IHM | `build_sibling_collapse_from_siblings` (`cascading/merge.rs`) | non |
 
-Les formes de clé des tables sœurs, et la colonne clé qu'elles donnent :
+La colonne clé d'une table fusionnée s'appelle toujours `"key"`, ou `"j2s_key"` quand un champ des objets fusionnés
+s'appelle déjà `"key"` (`key_column_name`, #200). Les formes de clé des tables sœurs ne servent plus qu'aux journaux et
+à la coupure numérique / texte (`SiblingCollapseMulti`) :
 
-| `KeyShape` | Clés | Colonne clé |
-|---|---|---|
-| `Numeric` | entiers (`0`, `1`, `42`) | `key_id` |
-| `IsoLang` | codes de 2 ou 3 lettres (`fr`, `deu`) | `lang_code` |
-| `Slug` | autres chaînes (`en_glass`) | `"key"` |
-| `Mixed` | entiers et codes mêlés | `"key"` |
+| `KeyShape` | Clés |
+|---|---|
+| `Numeric` | entiers (`0`, `1`, `42`) |
+| `IsoLang` | codes de 2 ou 3 lettres (`fr`, `deu`) |
+| `Slug` | autres chaînes (`en_glass`) |
+| `Mixed` | entiers et codes mêlés |
 
 Les genres de table enfant (champ `child_kind`, vide pour la racine) :
 
@@ -150,7 +153,8 @@ SchemaRegistry::finalize_with_pg_guard (voir pass1.md)
    ├─ doublons de nom retirés, tri par profondeur puis chemin JSON
    ├─ phase 3  apply_wide_table_strategies : par TableEntry, si la table est encore Columns
    │           apply_wide_strategy → AutoSplit (racine) ou apply_non_autosplit_strategy
-   │           (apply_structured_pivot_split, apply_pivot_split, Jsonb) ; compagnons _wide / _pivot
+   │           (apply_structured_pivot_split, apply_pivot_split si un seul type, sinon AutoSplit) ;
+   │           compagnons _wide / _pivot
    │           ajoutés à la fin
    └─ phase 4  apply_column_limit_guard (si apply_pg_guard), puis exclude_absorbed_children
 → (Vec<TableSchema>, Vec<ColumnCollision>, Vec<OverflowWarning>)
@@ -171,7 +175,7 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
   l'annonce par un `WARNING` (et un `debug_assert` en test, #180). Sur OFF, avant #180, `nutriscore.<année>.data`
   écrivait ainsi dans la table du champ racine `nutriscore_data`. Les noms synthétiques se rendent donc uniques à leur
   création : `unique_cluster_suffix` (phase 2, et la passe keyed-pivot), `pick_unique_suffix` (`make_subgroup`),
-  `unique_derived_table_name` (tables fusionnées de `cascade.rs`), `unique_pivot_name` (phase 3). Unique aussi
+  `unique_derived_table_name` (tables fusionnées de `cascade.rs`), `unique_companion_name` (phase 3, compagnons `_pivot` et `_wide`). Unique aussi
   contre les tables créées plus tôt dans la même vague (#136) : deux parents longs qui ne diffèrent que par les
   premiers mots que `derived_table_name` retire tirent le même nom de table pivot. La vague 0 choisit les noms de
   tous ses parents avant d'en créer une seule : `rename_shared_pivots` donne ensuite un hash du nom brut au doublon,
@@ -231,8 +235,8 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
 - **Un chemin non pré-enregistré n'est vu qu'en debug.** `NamingRegistry::table_name_lookup_from_dot_key` a un
   `debug_assert` ; en release, il recalcule un nom qui peut différer de celui du registre (sans troncature à 53, sans
   suffixe d'unicité).
-- **Les seuils arrivent par position.** `SchemaFinalizer::new` prend trois `f64` voisins (`sibling_jaccard`,
-  `stable_threshold`, `rare_threshold`) : les intervertir compile (#112).
+- **Les seuils arrivent par position.** `SchemaFinalizer::new` prend deux `f64` voisins (`sibling_jaccard`,
+  `stable_threshold`) : les intervertir compile (#112).
 
 ## 4. Points d'extension
 
@@ -248,7 +252,7 @@ Les endroits prévus sont listés au § 1. Trois changements demandent des étap
 
 **Nouvelle table créée par la finalisation** (une table qui ne vient pas d'un chemin observé).
 
-- [ ] un nom unique contre toutes les tables déjà connues (`unique_cluster_suffix`, `unique_pivot_name`), y compris
+- [ ] un nom unique contre toutes les tables déjà connues (`unique_cluster_suffix`, `unique_companion_name`), y compris
   celles créées plus tôt dans la même vague (§ 3), sinon le dédoublonnage la retire ;
 - [ ] un nom passé par `derived_table_name` (53 octets au plus), et la colonne parente par `ColumnSchema::parent_fk` ;
 - [ ] `parent_table`, `child_kind`, `depth` et `path` remplis : la Pass 2 retrouve la table par son chemin ;
@@ -290,8 +294,8 @@ Vues en écrivant la fiche, pas tranchées. Déjà suivies ailleurs : réglages 
 finaliseur dans `registry.rs` (#113), décisions en `matches!` et effet de bord sur `inferred_strategy` (odeurs 3 et 8
 de la fiche des stratégies).
 
-1. **Colonne clé choisie en trois copies** (#135). `KeyShape` → `key_id` / `lang_code` / `"key"` est écrit trois fois avec un
-   cas par défaut. Une méthode de `KeyShape` sans cas par défaut ferait signaler une forme oubliée.
+1. **Colonne clé choisie en trois copies** (#135). (Une seule fonction, `key_column_name`, depuis #200 : la colonne
+   s'appelle toujours `"key"`.)
 2. **Colonne parente écrite à la main** (#147). #136 a mesuré la phase 2 contre PostgreSQL : aucun nom coupé (les
    noms passent par `derived_table_name`, 53 octets au plus, depuis #180 ; `pk_name` / `fk_name` coupent à 63 avec un
    hash, #179), mais deux tables pivot qui prenaient le même nom, corrigées (§ 3). Reste la colonne parente :

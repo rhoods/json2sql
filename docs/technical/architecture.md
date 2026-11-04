@@ -223,7 +223,6 @@ Les écritures propres à chaque stratégie (`InferredStrategy`), appelées par 
 - `insert_jsonb_object()` : l'objet entier sérialisé en JSONB, puis ses tables enfants ; un octet nul dans une chaîne ou une clé, que jsonb refuse, rend le blob `NULL` avec une anomalie (#192, comme `write_root_jsonb()` pour la racine)
 - `insert_structured_pivot_object()` : une ligne par base de la grille de suffixes `(name, value, suffixe1…)`
 - `insert_sibling_collapse_object()` / `insert_sibling_collapse_array_of_objects()` : tables sœurs fusionnées, une ligne par clé (et par élément quand les sœurs sont des tableaux d'objets)
-- `insert_normalize_dynamic_keys()` : une ligne par clé dynamique
 - `route_multi_collapse_children()` : `SiblingCollapseMulti`, répartit les clés entre les tables pivot de chaque groupe
 - `dispatch_child_routes()` / `route_independent_child()` : envoient un sous-objet ou un tableau vers sa table cible (après une fusion de tables sœurs ; sous une table de routage `SiblingCollapseMulti` pour le second, #193)
 - `insert_array()` : tableau d'objets, une ligne par élément objet (un tableau de scalaires n'y passe pas : c'est une colonne tableau, écrite avec les autres colonnes de sa table)
@@ -301,10 +300,10 @@ Un essai `UNLOGGED` puis `SET LOGGED` a été retiré : la réécriture dans le 
 
 **`insert_object()`** (dans `insert.rs`) : écrit la ligne d'un objet dans sa table (`write_row_of`), avec ses colonnes générées (UUID, FK parent, `j2s_order`) — sauf pour une racine en `Jsonb`, dont `write_root_jsonb()` écrit le blob — puis :
   - `SiblingCollapseMulti` : la ligne écrite sert de ligne de routage, et `route_multi_collapse_children()` répartit les clés (rien d'autre n'est fait) ;
-  - `AutoSplit` : les clés médiums vont dans la table compagnon `_wide` (EAV, `write_autosplit_rows`) ; les clés rares (`< --rare-threshold`) ne sont **pas importées** — voir [schema-inference.md](schema-inference.md) ;
+  - `AutoSplit` : les clés qui ne sont pas des colonnes vont dans la table compagnon `_wide` (EAV, `write_autosplit_rows`), même les plus rares — voir [schema-inference.md](schema-inference.md) ;
   - enfin `recurse_children()` parcourt les champs objet et tableau.
 
-**Un seul aiguillage par stratégie** (#172) : `insert_child_object()` choisit l'écriture de `traversal.rs` selon `effective_strategy()` (sinon `insert_object()`). Un objet enfant (`recurse_children()`), un élément de tableau d'objets (`insert_array()`, avec l'index de l'élément pour `j2s_order` ; un objet seul dans une table `ObjectArray` prend 0, #169) et une cible de routage (`dispatch_child_routes()`, `route_independent_child()`) y passent tous. La racine n'y passe pas : elle ne prend jamais une stratégie qui écrit une ligne par clé (`Pivot`, `SiblingCollapse`, `NormalizeDynamicKeys`), faute de ligne parente à laquelle relier ces lignes ; la détection et les overrides (IHM et TOML) la refusent. Exception : une route que la post-passe keyed-pivot a réécrite (clé `fr` → table dont le chemin finit par `key`, #173), ou la route d'un membre de groupe TOML vers la table du groupe (clé `home`, #171), écrit directement une ligne dont la clé est la clé routée (`write_keyed_route_row()`), depuis `dispatch_child_routes()` comme depuis `recurse_children()`.
+**Un seul aiguillage par stratégie** (#172) : `insert_child_object()` choisit l'écriture de `traversal.rs` selon `effective_strategy()` (sinon `insert_object()`). Un objet enfant (`recurse_children()`), un élément de tableau d'objets (`insert_array()`, avec l'index de l'élément pour `j2s_order` ; un objet seul dans une table `ObjectArray` prend 0, #169) et une cible de routage (`dispatch_child_routes()`, `route_independent_child()`) y passent tous. La racine n'y passe pas : elle ne prend jamais une stratégie qui écrit une ligne par clé (`Pivot`, `SiblingCollapse`), faute de ligne parente à laquelle relier ces lignes ; la détection et les overrides (IHM et TOML) la refusent. Exception : une route que la post-passe keyed-pivot a réécrite (clé `fr` → table dont le chemin finit par `key`, #173), ou la route d'un membre de groupe TOML vers la table du groupe (clé `home`, #171), écrit directement une ligne dont la clé est la clé routée (`write_keyed_route_row()`), depuis `dispatch_child_routes()` comme depuis `recurse_children()`.
 
 **Groupes de colonnes** (#78, dans `insert.rs`) : pour une table `Columns` ou `AutoSplit` qui a des tables de groupe, `insert_object()` écrit après la ligne de la table (`write_row_of`) une ligne par groupe (`write_group_rows`) : même `j2s_id` et même clé étrangère que la ligne d'origine, seulement si une colonne du groupe a une valeur (ni `null`, ni `""`, ni `[]`, ni `{}`). Les tables enfants ordinaires restent rattachées à la ligne d'origine.
 
@@ -327,10 +326,10 @@ Définit les types de données fondamentaux du schéma :
   - `StructuredPivot(SuffixSchema)` : pivot par pattern de suffixes
   - `SiblingCollapse(SiblingSchema)` : fusion de tables sœurs en une table, une ligne par clé
   - `SiblingCollapseMulti(Vec<SiblingGroup>)` : fusion de tables sœurs en une table pivot par forme de clé
-  - `AutoSplit { stable_threshold, rare_threshold, medium_keys, wide_table_name }` : tri par fréquence
-  - `NormalizeDynamicKeys { id_column }`, `Flatten { prefix, max_depth }`, `JsonbFlatten` : surcharges (TOML ou IHM)
-  - `Ignore` : clé supprimée ; marque aussi les tables absorbées par une fusion de tables sœurs
-- **`UserOverride`** : choix de l'IHM (`Columns`, `Pivot`, `Jsonb`, `Skip`, `JsonbFlatten`, `Flatten`, `NormalizeDynamicKeys`), prioritaire sur `InferredStrategy` ; `TableSchema::effective_strategy` donne la stratégie retenue
+  - `AutoSplit { stable_threshold, medium_keys, wide_table_name }` : tri par fréquence
+  - `Flatten { prefix, max_depth }` : surcharge (TOML)
+  - `Ignore` : table retirée de l'import (tables absorbées par une fusion de tables sœurs, `Skip`)
+- **`UserOverride`** : choix de l'IHM (`Columns`, `Pivot`, `Jsonb`, `Skip`, `Flatten`), prioritaire sur `InferredStrategy` ; `TableSchema::effective_strategy` donne la stratégie retenue
 - **`ColumnSchema`** : définition d'une colonne (nom PG, nom original, type, nullable, is_generated)
 - **`TableSchema`** : définition complète d'une table (nom, chemin JSON, colonnes, parent, profondeur, stratégie)
 - **`ChildKind`** : `Object`, `ObjectArray`
@@ -362,7 +361,7 @@ Transformations post-stream sur `Vec<TableSchema>` — après que l'observation 
 - **`run()`** : pipeline complet — construit les `TableSchema`, détecte les tables larges, applique les stratégies via `wide_strategies`, trie topologiquement, délègue la détection de sœurs à `cascading::finalize_cascading()`
 - **`build_base_schemas()`** : phase 1, une `TableSchema` par `TableEntry` (en parallèle, via `build_entry_schema_base()`), avec résolution des types et sans stratégie large
 - **`apply_column_limit_guard()`** : détecte les tables dépassant `PG_MAX_COLUMNS` (1 600) et applique Jsonb
-- **`exclude_absorbed_children()`** : supprime les tables enfants absorbées par une stratégie wide (Flatten, NormalizeDynamicKeys…)
+- **`exclude_absorbed_children()`** : supprime les tables enfants absorbées par une stratégie wide (Flatten, Pivot, Jsonb…)
 - **`OverflowWarning`** : type retourné quand une table est forcée en Jsonb par le garde-fou
 
 ### `cascading/`
@@ -388,9 +387,7 @@ Application des stratégies de stockage wide sur les `TableSchema`.
 
 - **`apply_wide_strategy_columns()`** : restructure les colonnes d'une table selon une `InferredStrategy` (Pivot, Jsonb, StructuredPivot…)
 - **`apply_structured_pivot_columns()`** : colonnes pour StructuredPivot — `(name TEXT, value <type>, <suffix_col>...)`
-- **`apply_normalize_dynamic_keys()`** : collapse les sous-objets dynamiques d'une table en une seule table normalisée avec colonne d'ID
 - **`apply_flatten()`** : inline les colonnes scalaires d'un enfant dans le parent avec un préfixe ; le TOML ne l'appelle que pour un objet en `Columns` sans tables, routes ni colonnes aplaties à lui (`flatten_refusal` dans `config.rs`, avertissement `FlattenRefused`, #170)
-- **`apply_jsonb_flatten()`** : inline un enfant comme une seule colonne JSONB sur le parent
 - **`build_union_columns()`** : union des colonnes de plusieurs tables sœurs (plus large type par colonne)
 - **`classify_key_shape()`** / **`suggest_wide_strategy()`** : classification des clés et sélection automatique de la stratégie
 

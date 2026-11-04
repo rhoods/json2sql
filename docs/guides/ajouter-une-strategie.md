@@ -60,7 +60,6 @@ symbols:
   - apply_group_columns
   - build_effective_schemas
   - DeferredFlatten
-  - DeferredNormalize
   - format_version
   - COLUMN_GROUPS_FORMAT_VERSION
   - insert_object
@@ -84,7 +83,6 @@ symbols:
   - PreviewScreen
   - StrategyScreen
   - SetupScreen
-  - apply_jsonb_flatten
   - apply_pivot_split
   - apply_structured_pivot_split
   - is_pg_array
@@ -113,16 +111,14 @@ Les stratégies existantes, par origine :
 | `InferredStrategy` | Détectée automatiquement | Réglable par l'utilisateur | Désactivable (`--disable-strategy`) |
 |---|---|---|---|
 | `Columns` | par défaut | TOML `columns` | — |
-| `Pivot` | phase 3 (`suggest_wide_strategy`) | TOML `pivot`, IHM | `pivot` (donne `Jsonb` à la place) |
-| `Jsonb` | phase 3 (valeurs hétérogènes), phase 4 (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
+| `Pivot` | phase 3 (`suggest_wide_strategy`, valeurs d'un seul type) | TOML `pivot`, IHM | non (partie du split, #200) |
+| `Jsonb` | phase 4 seulement (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
 | `StructuredPivot` | phase 3 (suffixes) | TOML `suffix_columns` | `structured_pivot` |
 | `SiblingCollapse` | phase 2 (`finalize_cascading`) | TOML `[group.*]` | `sibling` |
 | `SiblingCollapseMulti` | phase 2 | — | `sibling` |
-| `AutoSplit` | phase 3 (racine, fréquences bimodales) | — | non (`split` est obligatoire) |
+| `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (`split` est obligatoire) |
 | `Ignore` | jamais : projection de `UserOverride::Skip` | IHM (`Skip`) | — |
-| `NormalizeDynamicKeys` | jamais | TOML `normalize_dynamic_keys` | — |
 | `Flatten` | jamais | TOML `flatten` | — |
-| `JsonbFlatten` | jamais | aucun chemin trouvé (voir § 6) | — |
 
 Toute nouvelle stratégie passe par le **socle** (§ 4). Selon ses lignes dans ce tableau, ajoute ensuite :
 
@@ -203,7 +199,7 @@ Le compilateur ne voit pas le reste :
   `j2s_order` (`push_generated_col_insert`). Seul un élément scalaire en `Jsonb` est traité à part par `insert_array`.
 - [ ] Pass 2, cible d'une route par clé (#173, et membre d'un groupe TOML, #171) : `write_keyed_route_row`, appelée
   par `dispatch_child_routes` et `recurse_children`, écrit la ligne d'une clé routée (`fr` → `…_selected_key`,
-  `home` → la table du groupe) si la cible est `SiblingCollapse` ou `NormalizeDynamicKeys`, avec un cas par défaut
+  `home` → la table du groupe) si la cible est `SiblingCollapse`, avec un cas par défaut
   pour le reste.
   Une stratégie qui écrit une ligne par clé y a sa place ; sinon, sur une telle cible (après un override), la valeur
   passe par `insert_child_object`, qui la lit comme un objet de clés sœurs : colonnes en anomalie, sous-clés prises
@@ -233,7 +229,7 @@ Le compilateur ne voit pas le reste :
   `pivot` et `jsonb` (`apply_strategy_override`, `apply_single_user_override`) sauvegardent la valeur avant l'appel et
   la restaurent après ; faire de même.
 - [ ] Si l'application touche d'autres tables que la table visée (comme `flatten`) : passer par le mécanisme différé
-  d'`apply_overrides` (`DeferredFlatten`, `DeferredNormalize`).
+  d'`apply_overrides` (`DeferredFlatten`).
 - [ ] Si la stratégie reconstruit les colonnes : `apply_user_overrides` dissout les groupes de colonnes pour `Pivot` et
   `Jsonb` (`dissolve_column_groups`). Ajouter la variante si besoin.
 - [ ] IHM : les boutons de `StrategyScreen`, écrits à la main override par override (actions en masse comprises), et
@@ -304,9 +300,7 @@ Vues en écrivant la fiche, pas tranchées. Chacune peut devenir une issue de re
    désactivables dans `StrategyError` (deux fois), `src/cli.rs`, `usage.md` et `strategies.md`.
 5. **IHM écrite variante par variante.** Les interrupteurs de `SetupScreen` et les boutons de `StrategyScreen` sont
    recopiés pour chaque stratégie au lieu de parcourir `StrategyName::OPTIONAL`.
-6. **`JsonbFlatten` semble inatteignable.** Seule `apply_jsonb_flatten` le construit, et seuls des tests l'appellent :
-   ni la CLI, ni le TOML, ni l'IHM. Les docs se contredisent (« TOML-only » dans le tableau de `table_schema.rs`, « IHM
-   override only » sur la variante de `UserOverride`).
+6. **`JsonbFlatten` semblait inatteignable.** (Supprimé : aucun appelant hors des tests, #200.)
 7. **Docs existantes déjà décalées.** `architecture.md` décrit un enum `WideStrategy` (variantes `KeyedPivot`,
    `Ignore`…) qui n'existe plus : c'est `InferredStrategy`. `schema-inference.md` (§ 12) documente
    `strategy = "ignore"`, que le TOML rejette (`--dry-run` affiche « unknown strategy 'ignore' … ignored »).

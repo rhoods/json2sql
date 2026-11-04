@@ -8,6 +8,9 @@
 //! - fn `build_sibling_ctx` — construit le contexte de détection pour un parent.
 //! - fn `should_skip_parent` — filtre les parents non éligibles.
 //! - fn `collect_sibling_collapses` — collecte les collapses détectés sur tous les parents éligibles.
+//! - fn `detect_collapse` — le collapse d'un parent : clés mêlées, une seule table d'abord, sinon la détection mixte.
+//! - fn `single_collapse_of_alike_siblings` — une seule table pour des clés numériques et texte aux objets semblables
+//!   (#200) ; sinon la détection mixte décide.
 //! - fn `rename_shared_pivots` — renomme (hash) une table pivot dont un autre parent de la vague a déjà pris le nom.
 //! - fn `detect_homogeneous_collapse` — dispatch pour un groupe de clés homogènes.
 //! - fn `detect_mixed_collapse` — dispatch pour un groupe mixte numérique/texte.
@@ -31,7 +34,7 @@
 //! - fn `cluster_suffix` — suffixe voulu d'un cluster (préfixe commun des clés, sinon `cluster_{i}`).
 //! - fn `jaccard_ok` — assez de tables sœurs, assez semblables pour une table pivot.
 
-use super::super::super::table_schema::{ColumnSchema, InferredStrategy, KeyShape, TableSchema};
+use super::super::super::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
 use super::super::super::wide_strategies::{build_union_columns, classify_key_shape};
 use super::super::scoring::{
     child_compatibility_score, greedy_schema_clusters, pairwise_jaccard_min, siblings_key_prefix,
@@ -477,12 +480,8 @@ fn build_classic_keyed_pivot_collapse(
 ) -> Collapse {
     let keys = sibling_keys(schemas, &regular);
     let key_shape = classify_key_shape(&keys);
-    let key_col_name = match &key_shape {
-        KeyShape::Numeric => "key_id".to_string(),
-        KeyShape::IsoLang => "lang_code".to_string(),
-        _ => "key".to_string(),
-    };
     let union_cols = union_of(schemas, &regular);
+    let key_col_name = super::key_column_name(&union_cols);
     let examples = key_examples(&keys);
     Collapse {
         parent_idx: ctx.parent_idx,
@@ -521,19 +520,13 @@ pub(super) fn make_subgroup(
     let pivot_name = crate::schema::naming::derived_table_name(&format!("{parent_name}_{suffix}"));
     let sub_keys = sibling_keys(schemas, indices);
     let shape = classify_key_shape(&sub_keys);
-    let key_col = if key_is_numeric {
-        "key_id"
-    } else if shape == KeyShape::IsoLang {
-        "lang_code"
-    } else {
-        "key"
-    };
     let union_cols = union_of(schemas, indices);
+    let key_col = super::key_column_name(&union_cols);
     let absorbed = indices.iter().map(|&i| schemas[i].name.clone()).collect();
     SubgroupData {
         pivot_table_name: pivot_name,
         key_is_numeric,
-        key_col_name: key_col.to_string(),
+        key_col_name: key_col,
         key_shape: shape,
         union_cols,
         absorbed_names: absorbed,
@@ -630,15 +623,41 @@ pub(super) fn collect_sibling_collapses(
         ) else {
             continue;
         };
-        let detect = if is_mixed {
-            detect_mixed_collapse
-        } else {
-            detect_homogeneous_collapse
-        };
-        collapses.extend(detect(schemas, &ctx, obj_map, arr_map));
+        collapses.extend(detect_collapse(schemas, &ctx, is_mixed, obj_map, arr_map));
     }
     rename_shared_pivots(schemas, &mut collapses);
     collapses
+}
+
+/// The collapse of one parent: mixed numeric and text keys try one table first (#200), then the mixed detection.
+fn detect_collapse(
+    schemas: &[TableSchema],
+    ctx: &SiblingDetectCtx,
+    is_mixed: bool,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Option<Collapse> {
+    if !is_mixed {
+        return detect_homogeneous_collapse(schemas, ctx, obj_map, arr_map);
+    }
+    single_collapse_of_alike_siblings(schemas, ctx, obj_map, arr_map)
+        .or_else(|| detect_mixed_collapse(schemas, ctx, obj_map, arr_map))
+}
+
+/// Numeric and text keys whose objects are alike make one table, like keys of one shape: the split is decided by the
+/// objects, not by the shape of their keys (#200). Only for a parent with no data of its own, whose siblings fold into
+/// it (a single `SiblingCollapse` takes any key in Pass 2); otherwise `None`, and the mixed detection decides.
+fn single_collapse_of_alike_siblings(
+    schemas: &[TableSchema],
+    ctx: &SiblingDetectCtx,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Option<Collapse> {
+    if ctx.parent_has_data {
+        return None;
+    }
+    detect_homogeneous_collapse(schemas, ctx, obj_map, arr_map)
+        .filter(|c| matches!(c.kind, CollapseKind::Single { .. }))
 }
 
 /// Each parent picks its pivot names against the tables already there, not against the other parents of the wave:
@@ -787,7 +806,10 @@ mod tests {
             ..
         }) = result
         {
-            assert_eq!(key_col_name, "lang_code");
+            assert_eq!(
+                key_col_name, "key",
+                "the key column is `key` whatever the shape of the keys (#200)"
+            );
         } else {
             panic!("expected Single collapse");
         }
@@ -929,7 +951,7 @@ mod tests {
         ];
         let g = make_subgroup(&schemas, "p", &[0, 1, 2], true, "num");
         assert_eq!(g.pivot_table_name, "p_num");
-        assert_eq!(g.key_col_name, "key_id");
+        assert_eq!(g.key_col_name, "key", "numeric keys too (#200)");
         assert!(g.key_is_numeric);
         assert!(matches!(g.key_shape, KeyShape::Numeric));
     }
@@ -942,7 +964,7 @@ mod tests {
             make_child_with_key("p_de", "p", "de", &["label"]),
         ];
         let g = make_subgroup(&schemas, "p", &[0, 1, 2], false, "key");
-        assert_eq!(g.key_col_name, "lang_code");
+        assert_eq!(g.key_col_name, "key", "language codes too (#200)");
         assert!(matches!(g.key_shape, KeyShape::IsoLang));
     }
 

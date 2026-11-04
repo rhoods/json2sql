@@ -13,9 +13,10 @@ Rappel des colonnes générées :
 - `j2s_<parent>_id` : la ligne parente (clé étrangère) ;
 - `j2s_order` : la position de l'élément dans un tableau d'objets.
 
-Les stratégies `sibling`, `pivot` et `structured_pivot` sont détectées automatiquement (désactivables avec
-`--disable-strategy`, ou dans Setup > Strategy selection). `AutoSplit` dépend des seuils `--wide-column-threshold`,
-`--stable-threshold` et `--rare-threshold`. Les autres se demandent : dans le TOML `--schema-config` (`strategy = …`),
+Les stratégies `sibling`, `pivot` et `structured_pivot` sont détectées automatiquement ; `sibling` et
+`structured_pivot` se désactivent avec `--disable-strategy` ou dans Setup > Strategy selection. `pivot` et `AutoSplit`
+forment le split des tables larges, toujours appliqué, qui dépend des seuils `--wide-column-threshold` et
+`--stable-threshold`. Les autres se demandent : dans le TOML `--schema-config` (`strategy = …`),
 dans l'écran Strategy de l'IHM, ou avec `--group-columns` pour les groupes de colonnes.
 
 ---
@@ -253,7 +254,7 @@ Pour une table où quelques clés sont toujours là et beaucoup d'autres n'appar
 ```bash
 json2sql --input tests/fixtures/auto_split.jsonl --table products --dry-run    # sans
 json2sql --input tests/fixtures/auto_split.jsonl --table products --dry-run \
-  --wide-column-threshold 3 --stable-threshold 0.80 --rare-threshold 0.30     # avec
+  --wide-column-threshold 3 --stable-threshold 0.80                             # avec
 ```
 
 Sans :
@@ -269,8 +270,8 @@ CREATE TABLE products (
 );
 ```
 
-Avec : les clés présentes dans au moins 80 % des lignes restent des colonnes ; celles entre 30 et 80 % vont dans
-`products_wide` ; celles sous 30 % (`rare_key`) sont écartées.
+Avec : les clés présentes dans au moins 80 % des lignes restent des colonnes ; toutes les autres vont dans
+`products_wide`, même `rare_key`, vue dans une seule ligne : aucune clé n'est écartée.
 
 ```sql
 CREATE TABLE products (
@@ -281,8 +282,8 @@ CREATE TABLE products (
 CREATE TABLE products_wide (
     j2s_id UUID NOT NULL,
     j2s_products_id UUID NOT NULL,
-    key TEXT,          -- 'tag_a', 'tag_b'
-    value VARCHAR(3)
+    key TEXT,          -- 'tag_a', 'tag_b', 'rare_key'
+    value TEXT
 );
 ```
 
@@ -322,9 +323,10 @@ CREATE TABLE products (
 
 ---
 
-## `normalize_dynamic_keys` : des clés dynamiques qui portent des objets
+## Des clés dynamiques qui portent des objets : la fusion `sibling`
 
-Pour un objet dont les clés sont des identifiants et les valeurs des objets (`img_123`, `img_456`…).
+Pour un objet dont les clés sont des identifiants et les valeurs des objets (`img_123`, `img_456`…), la fusion
+`sibling` est automatique : une ligne par identifiant, qui devient la colonne `key`.
 
 ```json
 {"id": 1, "name": "Widget", "images": {"img_123": {"url": "http://a.com", "width": 800},
@@ -332,46 +334,22 @@ Pour un objet dont les clés sont des identifiants et les valeurs des objets (`i
 ```
 
 ```bash
-json2sql --input tests/fixtures/normalize_dynamic_keys.jsonl --table products --sibling-threshold 10 --dry-run   # sans
-json2sql --input tests/fixtures/normalize_dynamic_keys.jsonl --table products --sibling-threshold 10 \
-  --schema-config examples/strategies/normalize.toml --dry-run                                                 # avec
+json2sql --input tests/fixtures/normalize_dynamic_keys.jsonl --table products --dry-run
 ```
-
-```toml
-# normalize.toml
-[products_images]
-strategy = "normalize_dynamic_keys"
-id_column = "image_id"
-```
-
-Sans : une table par identifiant (`--sibling-threshold 10` empêche ici la fusion automatique `sibling`).
-
-```sql
-CREATE TABLE products_images (
-    j2s_id UUID NOT NULL,
-    j2s_products_id UUID NOT NULL
-);
-CREATE TABLE products_images_img_123 (
-    j2s_id UUID NOT NULL,
-    j2s_products_images_id UUID NOT NULL,
-    url VARCHAR(15),
-    width INTEGER
-);
-CREATE TABLE products_images_img_456 ( … mêmes colonnes … );
--- … une table par identifiant : img_001, img_002, img_789
-```
-
-Avec : une ligne par identifiant, qui devient une colonne.
 
 ```sql
 CREATE TABLE products_images (
     j2s_id UUID NOT NULL,
     j2s_products_id UUID NOT NULL,
-    image_id TEXT,     -- 'img_123', 'img_456'…
+    key TEXT,          -- 'img_123', 'img_456'…
     url VARCHAR(15),
     width INTEGER
 );
 ```
+
+L'ancienne stratégie TOML `normalize_dynamic_keys` n'existe plus (#200) : elle faisait la même chose, en perdant les
+sous-objets des objets et les champs propres de la table. Un TOML qui la demande reçoit un avertissement et garde le
+schéma de la fusion automatique ; pour régler celle-ci, `--sibling-threshold` et `--sibling-jaccard`.
 
 ---
 

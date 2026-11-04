@@ -94,7 +94,6 @@ async fn worker_e2e_small_import_streams_events_and_writes_result() {
                 sibling_threshold: 3,
                 sibling_jaccard: 0.5,
                 stable_threshold: 0.10,
-                rare_threshold: 0.001,
                 disabled_strategies: HashSet::new(),
             },
             num_workers: None,

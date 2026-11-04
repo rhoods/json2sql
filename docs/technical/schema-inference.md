@@ -97,26 +97,25 @@ Une table dense gardée en `Columns` (ou en `AutoSplit`) peut ensuite être déc
 
 ---
 
-## 5. AutoSplit pour la table racine
+## 5. AutoSplit : les clés fréquentes en colonnes, les autres en clé/valeur
 
-**Fichier :** `src/schema/registry.rs` — branche [3c]
-**Paramètres CLI :** `--stable-threshold` (défaut : 0.10), `--rare-threshold` (défaut : 0.001)
+**Fichier :** `src/schema/finalizer/wide_strategy.rs` — `apply_autosplit_strategy()`
+**Paramètre CLI :** `--stable-threshold` (défaut : 0.10)
 
-S'applique uniquement à la **table racine** qui possède des tables enfants (objets imbriqués). La table racine est classifiée en trois zones selon la fréquence d'apparition de chaque clé :
+S'applique à une table large et creuse (§ 4) : toujours à la **table racine**, dont les lignes sont les enregistrements du fichier et les clés des champs, et à une **table enfant** dont les valeurs mélangent plusieurs types (§ 8). Chaque clé va dans l'une des deux zones, selon sa fréquence d'apparition :
 
 | Zone | Critère | Destination |
 |---|---|---|
 | **Stable** | fréquence ≥ `stable_threshold` | colonne dans la table principale |
-| **Médium** | fréquence entre `rare_threshold` et `stable_threshold` | ligne dans la table `{nom}_wide` (EAV : `key`, `value`) |
-| **Rare** | fréquence < `rare_threshold` | **non importée** (ni schéma, ni données) — un `WARNING` sur stderr liste les clés concernées |
+| **Autre** | fréquence < `stable_threshold`, même une seule ligne | ligne dans la table `{nom}_wide` (EAV : `key`, `value`) |
 
 La table `_wide` est une table EAV synthétique générée automatiquement avec les colonnes `j2s_id`, `j2s_parent_id`, `j2s_order`, `key`, `value`. Elle est liée à la table principale via une clé étrangère.
 
-Les colonnes tableau ne sont ni médiums ni rares : elles restent dans la table principale.
+Les colonnes tableau restent toujours dans la table principale.
 
-**Exemple OpenFoodFacts :** 189 881 clés observées → 125 stables, 184 médiums, 189 572 rares supprimées.
+**Exemple OpenFoodFacts :** 189 881 clés observées → 125 stables, les 189 756 autres dans `{nom}_wide`.
 
-> ⚠️ **Perte de données volontaire.** Les clés rares sont écartées pour éviter une table EAV de centaines de milliers de clés quasi vides. Pour tout conserver, passer `--rare-threshold 0` : toutes les clés non stables vont alors dans `{nom}_wide`.
+> Aucune clé n'est écartée (#200) : jusqu'à la version précédente, les clés présentes dans moins de `--rare-threshold` des lignes (0,1 % par défaut) n'étaient pas importées. L'option n'existe plus ; un script qui la passe échoue au lancement.
 
 ---
 
@@ -126,7 +125,7 @@ Les colonnes tableau ne sont ni médiums ni rares : elles restent dans la table 
 
 Pour les tables larges non-racines dont les colonnes suivent un pattern `{base}_{suffixe}` (ex. `calcium_100g`, `calcium_unit`, `calcium_serving`), un pivot structuré est auto-détecté.
 
-La table n'est pas vidée : seules les clés de la grille (clés suffixées et clés nues qui en sont les bases) partent dans un compagnon `{table}_pivot` (`unique_pivot_name`), une ligne par base. La table garde son nom, ses scalaires hors grille, ses colonnes PG array et ses vraies tables filles ; elle prend `AutoSplit` avec les clés de la grille en `medium_keys` et le compagnon en `wide_table_name`, comme le split Pivot (§ 8). En Pass 2, `write_autosplit_rows` voit que le compagnon est un `StructuredPivot` et regroupe les clés par base (#163).
+La table n'est pas vidée : seules les clés de la grille (clés suffixées et clés nues qui en sont les bases) partent dans un compagnon `{table}_pivot` (`unique_companion_name`), une ligne par base. La table garde son nom, ses scalaires hors grille, ses colonnes PG array et ses vraies tables filles ; elle prend `AutoSplit` avec les clés de la grille en `medium_keys` et le compagnon en `wide_table_name`, comme le split Pivot (§ 8). En Pass 2, `write_autosplit_rows` voit que le compagnon est un `StructuredPivot` et regroupe les clés par base (#163).
 
 ### Algorithme
 
@@ -161,7 +160,7 @@ Quand une table parent a ≥ `sibling_threshold` tables enfants directes avec de
 
 Les tables sœurs sont supprimées. La table parent devient une table **KeyedPivot** avec :
 
-- Une colonne clé (`key`, `lang_code`, ou `key_id` selon la forme des clés)
+- Une colonne clé `key`, quelle que soit la forme des clés (`j2s_key` si un champ des sœurs s'appelle déjà `key`)
 - L'union des colonnes de données des sœurs (peut être vide si les sœurs sont des conteneurs purs)
 - Une colonne **`j2s_data JSONB`** contenant l'objet enfant brut (ou l'élément du tableau pour ObjectArray). Cette colonne est toujours présente et préserve la structure complète, y compris les données imbriquées qui ne seraient pas représentables en colonnes plates.
 - Pour les ObjectArray : une colonne `j2s_order BIGINT` pour conserver l'ordre des éléments
@@ -172,27 +171,30 @@ Quand les tables sœurs sont elles-mêmes des conteneurs purs (ex. `genome → c
 
 ### Types de clés détectés (`KeyShape`)
 
-| Forme | Exemple | Colonne générée |
-|---|---|---|
-| Numeric | `0`, `1`, `2` | `key_id` |
-| IsoLang | `fr`, `en`, `de` | `lang_code` |
-| Slug | `en:organic`, `fr:bio` | `key` |
-| Mixed | mélange | `key` |
+La forme des clés ne change pas le nom de la colonne clé (#200) : elle sert aux journaux et à la coupure des clés
+numériques et texte en deux tables.
+
+| Forme | Exemple |
+|---|---|
+| Numeric | `0`, `1`, `2` |
+| IsoLang | `fr`, `en`, `de` |
+| Slug | `en:organic`, `fr:bio` |
+| Mixed | mélange |
 
 ---
 
 ## 8. Stratégies wide alternatives (Pivot, Jsonb)
 
-**Fichier :** `src/schema/registry.rs` — `suggest_wide_strategy()`
+**Fichier :** `src/schema/wide_strategies.rs` — `suggest_wide_strategy()`
 
-Pour les tables larges non-racines qui ne correspondent ni à un StructuredPivot ni à un AutoSplit, deux stratégies sont proposées :
+Une table enfant large et creuse qui n'est pas une grille de suffixes (§ 7) est coupée selon les types de ses valeurs :
 
 | Stratégie | Critère | Stockage |
 |---|---|---|
-| **Pivot** | colonnes de types homogènes | table EAV `(parent_id, key, value)` |
-| **Jsonb** | colonnes hétérogènes ou objet complexe | colonne JSONB unique dans la table parent |
+| **Pivot** | toutes les valeurs d'un seul type : les clés sont des données (devises, langues…) | toutes les clés dans le compagnon `{nom}_pivot` (EAV : `key`, `value`) |
+| **AutoSplit** | types mélangés : les clés sont des champs | clés fréquentes en colonnes, les autres dans `{nom}_wide` (§ 5) |
 
-Ces stratégies peuvent être forcées dans le TOML de config.
+JSONB n'est plus choisi automatiquement (#200), sauf au-delà de 1 600 colonnes ; il se demande dans le TOML (`strategy = "jsonb"`), comme `pivot`.
 
 ---
 

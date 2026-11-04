@@ -157,15 +157,10 @@ pub struct Cli {
     pub sibling_jaccard: f64,
 
     /// Fraction of rows a key must appear in to be kept as a stable column in the main table
-    /// (`AutoSplit` strategy). Keys below this threshold but above --rare-threshold go to
-    /// the companion `{table}_wide` EAV table.
+    /// (`AutoSplit` strategy). Every other key goes to the companion `{table}_wide` EAV table:
+    /// none is dropped.
     #[arg(long, default_value_t = 0.10, value_name = "F")]
     pub stable_threshold: f64,
-
-    /// Fraction of rows below which a key is dropped entirely (`AutoSplit` + Ignore strategy).
-    /// Keys appearing in fewer rows than this fraction are excluded from all schemas and data.
-    #[arg(long, default_value_t = 0.001, value_name = "F")]
-    pub rare_threshold: f64,
 
     /// Number of worker threads for parallel Pass 1 schema inference (default: 1, sequential).
     /// Values > 1 distribute schema inference across N threads; useful for large files on multi-core machines.
@@ -173,8 +168,8 @@ pub struct Cli {
     pub workers: usize,
 
     /// Disable an optional inference strategy. Repeatable.
-    /// Valid values: sibling, pivot, `structured_pivot`.
-    /// Mandatory strategies (split) cannot be disabled — exits non-zero with explicit error.
+    /// Valid values: sibling, `structured_pivot`.
+    /// Mandatory strategies (split, pivot) cannot be disabled — exits non-zero with explicit error.
     #[arg(long = "disable-strategy", value_name = "STRATEGY")]
     pub disable_strategy: Vec<String>,
 
@@ -299,10 +294,10 @@ mod tests {
             "--disable-strategy",
             "sibling",
             "--disable-strategy",
-            "pivot",
+            "structured_pivot",
         ])
         .unwrap();
-        assert_eq!(cli.disable_strategy, vec!["sibling", "pivot"]);
+        assert_eq!(cli.disable_strategy, vec!["sibling", "structured_pivot"]);
     }
 
     #[test]

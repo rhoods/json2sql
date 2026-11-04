@@ -245,7 +245,7 @@ fn test_keyed_pivot_mixed_key_shapes() {
         "products_images doit avoir SiblingCollapseMulti"
     );
 
-    // Table pivot numérique : key_id + imgid + uploader
+    // Table pivot numérique : key + imgid + uploader
     let num_pivot = p1
         .schemas
         .iter()

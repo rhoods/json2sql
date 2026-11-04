@@ -13,7 +13,7 @@
 //! - fn `reparent_and_update_routes` — met à jour `child_routes` du parent.
 
 use super::super::super::table_schema::{
-    ChildKind, ColumnSchema, InferredStrategy, KeyShape, SiblingSchema, TableSchema,
+    ChildKind, ColumnSchema, InferredStrategy, SiblingSchema, TableSchema,
 };
 use super::super::super::type_tracker::PgType;
 use super::super::super::wide_strategies::{build_union_columns, classify_key_shape};
@@ -40,13 +40,9 @@ fn resolve_pivot_key_info(
         .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
         .collect();
     let key_shape = classify_key_shape(&keys);
-    let key_col_name = match &key_shape {
-        KeyShape::Numeric => "key_id".to_string(),
-        KeyShape::IsoLang => "lang_code".to_string(),
-        _ => "key".to_string(),
-    };
     let children_refs: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
     let union_cols = build_union_columns(&children_refs);
+    let key_col_name = super::key_column_name(&union_cols);
     let suffix = unique_cluster_suffix(parent_name, "key", schemas);
     let sub_pivot_name =
         crate::schema::naming::derived_table_name(&format!("{parent_name}_{suffix}"));

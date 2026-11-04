@@ -215,9 +215,9 @@ vide).
 - Le worker est cherché à côté de l'exécutable de l'IHM : sans `json2sql-worker` construit, l'import échoue au
   lancement.
 
-**Les tests de l'IHM ne tournent pas en CI.** `cargo test --lib --bins` à la racine ne teste que le paquet
-`json2sql`. La CI compile l'IHM avec clippy (`--workspace --all-targets`), sans lancer ses tests. Les lancer à la
-main (§ 5).
+**Les tests de l'IHM ne tournent en CI que sous Linux.** Le job « Unit tests » laisse l'IHM de côté (paquets système
+de Dioxus) ; c'est le job « Coverage » qui lance ses tests (`cargo llvm-cov --workspace --lib --bins`), et un test de
+l'IHM qui échoue fait échouer la CI (#144). Ailleurs, les lancer à la main (§ 5).
 
 ## 4. Points d'extension
 
@@ -287,7 +287,7 @@ Vues en écrivant la fiche, pas tranchées.
 4. **Un champ jamais écrit.** `config_warnings` de `SchemaState` est lu et remis à zéro, jamais rempli : la bannière
    des avertissements de config ne peut pas s'afficher. (`absorbed_names` est désormais calculé, #130.)
 5. **Hooks après un `return` anticipé** dans `PreviewScreen` (§ 3).
-6. **Les tests de l'IHM ne tournent pas en CI** (§ 3).
+6. **Les tests de l'IHM ne tournaient pas en CI** (§ 3). (Le job « Coverage » les lance désormais, #144.)
 7. **docs/ui/architecture.md décalé** : il décrit `state.rs`, `strategy_configurator.rs`, un enum `WideStrategy`,
    une fonction `theme::css()` et le sélecteur de répertoire temporaire, qui n'existent plus ; `UserOverride` y est
    absent.

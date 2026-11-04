@@ -390,7 +390,6 @@ button { font-family: inherit; }
 .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .badge.default  { color: var(--s-default); border-color: rgba(106,169,255,.4); background: rgba(106,169,255,.1); }
 .badge.jsonb    { color: var(--s-jsonb);   border-color: rgba(180,140,240,.4); background: rgba(180,140,240,.1); }
-.badge.jsonbi   { color: var(--s-jsonb);   border-color: rgba(180,140,240,.3); background: rgba(180,140,240,.05); }
 .badge.flatten  { color: var(--s-flatten); border-color: rgba(91,207,142,.4); background: rgba(91,207,142,.1); }
 .badge.normalize{ color: var(--s-norm);    border-color: rgba(240,176,114,.4); background: rgba(240,176,114,.12); }
 .badge.pivot    { color: var(--s-pivot);   border-color: rgba(240,176,114,.4); background: rgba(240,176,114,.12); }

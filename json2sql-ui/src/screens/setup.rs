@@ -685,28 +685,6 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                             }
                                         }
                                     }
-                                    // Pivot inference checkbox
-                                    {
-                                        let pivot_on = !state.read().project.disabled_strategies.contains(&StrategyName::Pivot);
-                                        rsx! {
-                                            label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
-                                                input {
-                                                    r#type: "checkbox",
-                                                    checked: pivot_on,
-                                                    onchange: move |e| {
-                                                        if e.value() == "true" {
-                                                            state.write().project.disabled_strategies.remove(&StrategyName::Pivot);
-                                                        } else {
-                                                            state.write().project.disabled_strategies.insert(StrategyName::Pivot);
-                                                        }
-                                                        crate::config::try_save(&state.read().project);
-                                                    },
-                                                }
-                                                span { "Pivot inference " }
-                                                span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(pivot)" }
-                                            }
-                                        }
-                                    }
                                     // Structured pivot checkbox
                                     {
                                         let sp_on = !state.read().project.disabled_strategies.contains(&StrategyName::StructuredPivot);
