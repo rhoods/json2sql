@@ -1215,7 +1215,8 @@ mod tests {
 
     /// Under a `SiblingCollapseMulti` routing table (#193), a key with its own `ObjectArray` table, always an array of
     /// objects (`tags`) or an object in one row and an array in the other (`links`, #169), gets one row per element; so
-    /// does an array under a sibling key, which `dispatch_child_routes` routes (`sizes`).
+    /// does an array under a sibling key, which `dispatch_child_routes` routes (`sizes`). The scalars of `labels` are
+    /// kept by its array column on the routing table: no anomaly on its table.
     #[test]
     fn an_array_of_objects_under_a_routing_table_reaches_its_table() {
         let fixture = "multi_collapse_object_array.jsonl";
@@ -1258,11 +1259,21 @@ mod tests {
             insert_object(&path_map, ctx, root, &obj, ID, None, None).unwrap();
         }
 
-        assert_eq!(recorder.anomalies, []);
+        let lost: Vec<(&str, &str)> = recorder
+            .anomalies
+            .iter()
+            .map(|(t, c, _)| (t.as_str(), c.as_str()))
+            .collect();
+        assert_eq!(
+            lost,
+            [("p_images", "labels")],
+            "only the object element of the labels column, which its table keeps"
+        );
         // (value, j2s_order) of each row
         for (table, column, expected) in [
             ("p_images_tags", "name", &["a 0", "b 1", "c 0"][..]),
             ("p_images_links", "url", &["x 0", "y 0", "z 1"]),
+            ("p_images_labels", "name", &["a 0"]),
             (
                 "p_images_key_sizes",
                 "w",

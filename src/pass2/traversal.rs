@@ -609,15 +609,16 @@ fn route_independent_child<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
-    schema_name: &str,
+    schema: &TableSchema,
+    key: &str,
     value: &Value,
-    child_path_key: &str,
     routing_id: Uuid,
 ) -> Result<bool> {
-    let Some(child_schema) = path_map.get(child_path_key) else {
+    let routing_path = schema.path.join(&PATH_SEP.to_string());
+    let Some(child_schema) = path_map.get(&format!("{routing_path}{PATH_SEP}{key}")) else {
         return Ok(false);
     };
-    if child_schema.parent_table.as_deref() != Some(schema_name) {
+    if child_schema.parent_table.as_deref() != Some(schema.name.as_str()) {
         return Ok(false);
     }
     match value {
@@ -625,8 +626,9 @@ fn route_independent_child<S: RowSink>(
             let ctx = &mut InsertCtx { sinks, anomalies };
             insert_child_object(path_map, ctx, child_schema, nested, value, routing_id, None)?;
         }
-        // The routing table has only generated columns: no array column keeps the scalars.
+        // The routing table may keep the scalars of the key in an array column, as any parent.
         Value::Array(arr) => {
+            let keeps = keeps_scalars_in_array_column(schema, key);
             insert_array(
                 path_map,
                 sinks,
@@ -634,7 +636,7 @@ fn route_independent_child<S: RowSink>(
                 child_schema,
                 arr,
                 routing_id,
-                false,
+                keeps,
             )?;
         }
         _ => return Ok(false),
@@ -653,19 +655,9 @@ fn split_keys_by_group<S: RowSink>(
     routing_id: Uuid,
     groups: &[SiblingGroup],
 ) -> Result<Vec<serde_json::Map<String, Value>>> {
-    let routing_path = schema.path.join(&PATH_SEP.to_string());
     let mut group_submaps = vec![serde_json::Map::new(); groups.len()];
     for (key, value) in obj {
-        let child_path_key = format!("{routing_path}{PATH_SEP}{key}");
-        if route_independent_child(
-            path_map,
-            sinks,
-            anomalies,
-            &schema.name,
-            value,
-            &child_path_key,
-            routing_id,
-        )? {
+        if route_independent_child(path_map, sinks, anomalies, schema, key, value, routing_id)? {
             continue;
         }
         if let Some(idx) = find_group_for_key(groups, key) {
