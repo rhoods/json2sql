@@ -202,6 +202,83 @@ async fn test_null_byte_anomaly() {
 }
 
 // ---------------------------------------------------------------------------
+// #192 — octet nul dans une table en stratégie Jsonb (`strategy = "jsonb"` du TOML, comme
+// `--schema-config`), enfant puis racine : le blob devient NULL + une anomalie, l'autre ligne est
+// gardée. Avant : jsonb refusait `\u0000`, le JSON de l'octet nul (22P05), et tout l'import échouait.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_null_byte_in_a_jsonb_table_is_an_anomaly_not_a_copy_error() {
+    use json2sql::schema::config::{apply_overrides_complete, SchemaConfig};
+    use serde_json::{json, Value};
+
+    for (table, kept) in [
+        ("t_meta", json!({"note": "ok", "x": 2})),
+        ("t", json!({"id": 2, "meta": {"note": "ok", "x": 2}})),
+    ] {
+        common::with_schema_url(|client, schema, url| async move {
+            let path = common::fixture("jsonb_null_byte.jsonl");
+            let mut p1 = pass1::runner::run(&path, &common::pass1_config("t"), None).unwrap();
+            let config: SchemaConfig =
+                toml::from_str(&format!("[{table}]\nstrategy = \"jsonb\"")).unwrap();
+            apply_overrides_complete(&mut p1.schemas, &config).unwrap();
+            db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+                .await
+                .unwrap();
+            let p2 = pass2::runner::run(
+                &path,
+                &p1.schemas,
+                &client,
+                &url,
+                &common::pass2_config("t", &schema),
+                None,
+            )
+            .await
+            .expect("a null byte must not abort the COPY");
+
+            assert_eq!(common::row_count(&client, &schema, "t").await, 2, "{table}");
+            let blobs: Vec<Option<Value>> = client
+                .query(
+                    &format!(
+                        "SELECT \"data\"::text FROM \"{schema}\".\"{table}\" \
+                         ORDER BY \"data\" IS NULL DESC"
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    let text: Option<String> = r.get(0);
+                    text.map(|t| serde_json::from_str(&t).unwrap())
+                })
+                .collect();
+            assert_eq!(blobs, [None, Some(kept)], "{table}");
+            let anomalies: Vec<(String, String, String, u64, String)> = p2
+                .anomaly_collector
+                .summaries()
+                .into_iter()
+                .map(|s| {
+                    let kind = s.examples[0].actual_type.clone();
+                    (s.table, s.column, s.expected_type, s.anomaly_count, kind)
+                })
+                .collect();
+            assert_eq!(
+                anomalies,
+                [(
+                    table.to_string(),
+                    "data".to_string(),
+                    "JSONB".to_string(),
+                    1,
+                    "string_contains_null_byte".to_string()
+                )],
+                "{table}"
+            );
+        })
+        .await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // #84 — élément de tableau PG plus long que le VARCHAR(n) de la colonne (snapshot périmé,
 // --schema-input) : l'élément devient NULL, UNE anomalie par cellule, et le COPY ne s'arrête pas
 // (avant : `value too long for type character varying(2)` faisait échouer tout l'import).
