@@ -33,6 +33,14 @@
 //! - fn `build_merged_keyed_pivot_schema` — construit le schéma fusionné (colonnes union + clé `key_id`).
 //! - fn `apply_keyed_pivot_merge` — fusionne N tables membres en une seule `SiblingCollapse`, routée depuis leur parent
 //!   (#171) ; refuse un membre qu'une ligne du groupe ne peut pas garder.
+//! - enum `TomlStrategy` — la valeur `strategy` d'une section, lue une fois (#132).
+//! - fn `TomlStrategy::name` — le nom TOML de la valeur.
+//! - fn `TomlStrategy::parse` — lit une valeur, quelle que soit sa casse ; une inconnue revient en chaîne.
+//! - fn `TomlStrategy::of` — la `strategy` d'une section, si c'est une chaîne.
+//! - fn `TomlStrategy::one_row_per_key` — une ligne par clé : refusée sur la racine (#172).
+//! - fn `TomlStrategy::rebuilds_columns` — reconstruit ou déplace les colonnes de la table (#78).
+//! - fn `TomlStrategy::conflicts_with_suffix_columns` — incompatible avec `suffix_columns` (#31).
+//! - fn `TomlStrategy::user_override` — l'override que la valeur pose sur la table, s'il y en a un.
 //! - fn `already_overridden` — une table qui a déjà un override (IHM, ou TOML gardé par le snapshot) ignore
 //!   `strategy`/`suffix_columns` : sans bruit si c'est le même, avec `AlreadyOverridden` sinon (#129).
 //! - fn `rebuilds_columns` — vrai si les overrides d'une table reconstruisent ou déplacent ses colonnes (`pivot`, `jsonb`, `flatten`, `suffix_columns`).
@@ -440,6 +448,107 @@ fn flatten_refusal(schemas: &[TableSchema], table: &str) -> Option<ConfigWarning
     })
 }
 
+/// The keys of a table section that are not column names (#132). `id_column` belonged to the removed
+/// `normalize_dynamic_keys` (#200): an older TOML that still has it is not taken for a column.
+const RESERVED_KEYS: [&str; 6] = [
+    "strategy",
+    "suffix_columns",
+    "id_column",
+    "prefix",
+    "max_depth",
+    "column_groups",
+];
+
+/// The `strategy` value of a table section, read once (#132): each rule below is a `match` with no default arm, so a new
+/// value does not compile until every rule says what it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TomlStrategy {
+    Pivot,
+    Jsonb,
+    Columns,
+    StructuredPivot,
+    Flatten,
+    /// Removed (#200): kept to give its own warning.
+    NormalizeDynamicKeys,
+}
+
+impl TomlStrategy {
+    const ALL: [Self; 6] = [
+        Self::Pivot,
+        Self::Jsonb,
+        Self::Columns,
+        Self::StructuredPivot,
+        Self::Flatten,
+        Self::NormalizeDynamicKeys,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Pivot => "pivot",
+            Self::Jsonb => "jsonb",
+            Self::Columns => "columns",
+            Self::StructuredPivot => "structured_pivot",
+            Self::Flatten => "flatten",
+            Self::NormalizeDynamicKeys => "normalize_dynamic_keys",
+        }
+    }
+
+    /// The value, whatever its case; an unknown one comes back lowercased, for its warning.
+    fn parse(value: &str) -> std::result::Result<Self, String> {
+        let value = value.to_lowercase();
+        Self::ALL
+            .into_iter()
+            .find(|s| s.name() == value)
+            .ok_or(value)
+    }
+
+    /// The `strategy` of a section, if it is a string.
+    fn of(
+        col_overrides: &HashMap<String, toml::Value>,
+    ) -> Option<std::result::Result<Self, String>> {
+        toml_str(col_overrides, "strategy").map(|s| Self::parse(&s))
+    }
+
+    /// Writes one row per key: refused on the root, which has no parent row to tie them to (#172).
+    const fn one_row_per_key(self) -> bool {
+        match self {
+            Self::Pivot => true,
+            Self::Jsonb
+            | Self::Columns
+            | Self::StructuredPivot
+            | Self::Flatten
+            | Self::NormalizeDynamicKeys => false,
+        }
+    }
+
+    /// Rebuilds the columns of the table or takes them to another table: a table split into column groups gets them
+    /// back first, or the columns now in the group tables would be missing from the result (#78).
+    const fn rebuilds_columns(self) -> bool {
+        match self {
+            Self::Pivot | Self::Jsonb | Self::Flatten => true,
+            Self::Columns | Self::StructuredPivot | Self::NormalizeDynamicKeys => false,
+        }
+    }
+
+    /// Cannot be combined with `suffix_columns`, which always wins (#31).
+    const fn conflicts_with_suffix_columns(self) -> bool {
+        match self {
+            Self::Pivot | Self::Jsonb | Self::Columns | Self::Flatten => true,
+            Self::StructuredPivot | Self::NormalizeDynamicKeys => false,
+        }
+    }
+
+    /// The override this value records on the table, when it records one.
+    const fn user_override(self) -> Option<UserOverride> {
+        match self {
+            Self::Pivot => Some(UserOverride::Pivot),
+            Self::Jsonb => Some(UserOverride::Jsonb),
+            Self::Columns => Some(UserOverride::Columns),
+            Self::StructuredPivot | Self::Flatten | Self::NormalizeDynamicKeys => None,
+        }
+    }
+}
+
 /// #129: the table already has an override, the IHM's first (as in `effective_strategy`), then one of an earlier run
 /// of the TOML that the snapshot kept; its columns are rebuilt, and a second override would rebuild them from the
 /// result. `Some` skips the `strategy` and `suffix_columns` keys: silently when they ask for the same override (a
@@ -459,14 +568,10 @@ fn already_overridden(
     if !suffix_columns && strategy.is_none() {
         return None;
     }
-    // shortcut: one more copy of the TOML strategy names, until #132 parses them into an enum once.
-    let same = !suffix_columns
-        && matches!(
-            (prev, strategy.as_deref()),
-            (UserOverride::Pivot, Some("pivot"))
-                | (UserOverride::Jsonb, Some("jsonb"))
-                | (UserOverride::Columns, Some("columns"))
-        );
+    let asked = TomlStrategy::of(col_overrides)
+        .and_then(std::result::Result::ok)
+        .and_then(TomlStrategy::user_override);
+    let same = !suffix_columns && asked.as_ref() == Some(prev);
     let warning = (!same).then(|| ConfigWarning::AlreadyOverridden {
         table: table_name.to_string(),
         by: format!("{by} {prev:?}"),
@@ -481,17 +586,14 @@ fn already_overridden(
 /// True when `strategy` asks the root `schema` for one row per key, which has no parent row to be tied to (#172).
 fn refused_at_root(schema: &TableSchema, col_overrides: &HashMap<String, toml::Value>) -> bool {
     schema.parent_table.is_none()
-        && toml_str(col_overrides, "strategy")
-            .is_some_and(|s| matches!(s.to_lowercase().as_str(), "pivot"))
+        && matches!(TomlStrategy::of(col_overrides), Some(Ok(s)) if s.one_row_per_key())
 }
 
-/// True when the overrides of a table rebuild its columns or take them to another table (`pivot`, `jsonb`,
-/// `normalize_dynamic_keys`, `flatten`, `suffix_columns`): a table that was split into column groups gets them back
-/// first, or the columns now in the group tables would be missing from the result (#78).
+/// True when the overrides of a table rebuild its columns or take them to another table (`suffix_columns`, or a
+/// `strategy` that does, `TomlStrategy::rebuilds_columns`).
 fn rebuilds_columns(col_overrides: &HashMap<String, toml::Value>) -> bool {
     has_nonempty_suffix_columns(col_overrides)
-        || toml_str(col_overrides, "strategy")
-            .is_some_and(|s| matches!(s.to_lowercase().as_str(), "pivot" | "jsonb" | "flatten"))
+        || matches!(TomlStrategy::of(col_overrides), Some(Ok(s)) if s.rebuilds_columns())
 }
 
 fn toml_str(map: &HashMap<String, toml::Value>, key: &str) -> Option<String> {
@@ -520,10 +622,9 @@ fn conflicting_strategy_override(col_overrides: &HashMap<String, toml::Value>) -
         return None;
     }
     let strategy_str = toml_str(col_overrides, "strategy")?;
-    match strategy_str.to_lowercase().as_str() {
-        "pivot" | "jsonb" | "columns" | "flatten" => Some(strategy_str),
-        _ => None,
-    }
+    TomlStrategy::parse(&strategy_str)
+        .is_ok_and(TomlStrategy::conflicts_with_suffix_columns)
+        .then_some(strategy_str)
 }
 
 #[allow(clippy::too_many_lines)] // exhaustive dispatch over all override strategy variants
@@ -542,23 +643,34 @@ fn apply_strategy_override(
             strategy: strategy_str.to_lowercase(),
         }];
     }
-    match strategy_str.to_lowercase().as_str() {
-        "pivot" => {
+    let strategy = match TomlStrategy::parse(strategy_str) {
+        Ok(strategy) => strategy,
+        Err(other) => {
+            return vec![ConfigWarning::UnknownStrategy {
+                table: table_name.to_string(),
+                strategy: other,
+            }]
+        }
+    };
+    match strategy {
+        TomlStrategy::Pivot => {
             let original = schema.inferred_strategy.clone();
             eprintln!("  Override strategy: {table_name} → Pivot");
             apply_wide_strategy_columns(schema, InferredStrategy::Pivot);
             schema.inferred_strategy = original;
             schema.set_toml_override(Some(UserOverride::Pivot));
         }
-        "jsonb" => {
+        TomlStrategy::Jsonb => {
             let original = schema.inferred_strategy.clone();
             eprintln!("  Override strategy: {table_name} → Jsonb");
             apply_wide_strategy_columns(schema, InferredStrategy::Jsonb);
             schema.inferred_strategy = original;
             schema.set_toml_override(Some(UserOverride::Jsonb));
         }
-        "columns" => {
-            if let Some(warning) = require_columns_strategy(schema, table_name, "columns") {
+        TomlStrategy::Columns => {
+            if let Some(warning) =
+                require_columns_strategy(schema, table_name, TomlStrategy::Columns.name())
+            {
                 return vec![warning];
             }
             eprintln!("  Override strategy: {table_name} → Columns (no-op, already inferred)");
@@ -569,15 +681,15 @@ fn apply_strategy_override(
         // sets schema.inferred_strategy = StructuredPivot(..) directly. `toml_override` is not
         // set here because `UserOverride` has no `StructuredPivot` variant — effective_strategy()
         // still resolves correctly by falling through to inferred_strategy. Verified in #28.
-        "structured_pivot" => {}
+        TomlStrategy::StructuredPivot => {}
         // Removed (#200): the sibling fusion does the same, sub-objects and the table's own fields included.
-        "normalize_dynamic_keys" => {
+        TomlStrategy::NormalizeDynamicKeys => {
             return vec![ConfigWarning::RemovedStrategy {
                 table: table_name.to_string(),
-                strategy: strategy_str.to_lowercase(),
+                strategy: strategy.name().to_string(),
             }]
         }
-        "flatten" => {
+        TomlStrategy::Flatten => {
             let prefix =
                 toml_str(col_overrides, "prefix").unwrap_or_else(|| format!("{table_name}_"));
             let max_depth = col_overrides
@@ -595,12 +707,6 @@ fn apply_strategy_override(
                 prefix,
                 max_depth,
             });
-        }
-        other => {
-            return vec![ConfigWarning::UnknownStrategy {
-                table: table_name.to_string(),
-                strategy: other.to_string(),
-            }]
         }
     }
     vec![]
@@ -629,7 +735,9 @@ fn apply_suffix_columns_override(
     let Some(suffix_list) = suffix_list_of(col_overrides) else {
         return (vec![], None);
     };
-    if let Some(warning) = require_columns_strategy(schema, table_name, "structured_pivot") {
+    if let Some(warning) =
+        require_columns_strategy(schema, table_name, TomlStrategy::StructuredPivot.name())
+    {
         return (vec![warning], None);
     }
     let (suffix_schema, grid) = build_suffix_schema_from_list(&suffix_list, &type_map_of(schema));
@@ -717,10 +825,7 @@ fn apply_column_type_overrides(
 ) -> Vec<ConfigWarning> {
     let mut warnings = Vec::new();
     for (col_name, value) in col_overrides {
-        if matches!(
-            col_name.as_str(),
-            "strategy" | "suffix_columns" | "id_column" | "prefix" | "max_depth" | "column_groups"
-        ) {
+        if RESERVED_KEYS.contains(&col_name.as_str()) {
             continue;
         }
         let toml::Value::String(type_str) = value else {
@@ -2970,6 +3075,16 @@ mod tests {
         );
         assert_eq!(data_columns_of(&schemas[0]), before);
         assert_eq!(schemas[0].toml_override(), None);
+    }
+
+    #[test]
+    fn every_toml_strategy_reads_back_from_its_name_whatever_the_case() {
+        // #132: the `strategy` values are read once, into one enum; an unknown one stays a string for its warning.
+        for s in TomlStrategy::ALL {
+            assert_eq!(TomlStrategy::parse(s.name()), Ok(s));
+            assert_eq!(TomlStrategy::parse(&s.name().to_uppercase()), Ok(s));
+        }
+        assert_eq!(TomlStrategy::parse("ignore"), Err("ignore".to_string()));
     }
 
     fn toml_config(table: &str, keys: HashMap<String, toml::Value>) -> SchemaConfig {

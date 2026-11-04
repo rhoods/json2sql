@@ -19,6 +19,7 @@ files:
   - tests/integration_overrides.rs
   - tests/fixtures/
 symbols:
+  - TomlStrategy
   - SchemaConfig
   - SchemaConfig::from_file
   - GroupConfig
@@ -110,7 +111,7 @@ Pass 1 pour le recharger sans relire le fichier : `--schema-output` / `--schema-
 
 | Changement | Où | Le compilateur aide ? |
 |---|---|---|
-| Nouvelle valeur de `strategy = …` | `apply_strategy_override`, `rebuilds_columns`, `conflicting_strategy_override` (§ 4) | **non** : chaînes, cas par défaut `UnknownStrategy` |
+| Nouvelle valeur de `strategy = …` | `TomlStrategy` (variante, `ALL`, `name`), puis `apply_strategy_override` (§ 4) | **oui** : chaque règle (`one_row_per_key`, `rebuilds_columns`, `conflicts_with_suffix_columns`, `user_override`) est un `match` sans cas par défaut (#132) |
 | Nouvelle clé d'une table (comme `prefix`) | sa lecture, et la liste des clés réservées d'`apply_column_type_overrides` (§ 3) | **non** |
 | Nouveau type forçable | `parse_pg_type` | **non** : cas par défaut `None` |
 | Nouvelle stratégie de groupe (`[group.*]`) | `apply_group_overrides` ; `keyed_pivot` passe par `apply_keyed_pivot_merge` | **non** |
@@ -321,7 +322,7 @@ TOML.
 Vues en écrivant la fiche, pas tranchées.
 
 1. **Une notion, quatre écritures** (odeurs 1 et 4 de #96, toujours vraies ; #132) : `InferredStrategy`, `UserOverride`,
-   `StrategyName`, et les chaînes TOML en quatre copies dans `config.rs` (dont `already_overridden`, #129).
+   `StrategyName`, et les valeurs du TOML. (Côté TOML, une seule écriture depuis #200 : l'enum `TomlStrategy`, #132.)
 2. **`inferred_strategy` écrit puis remis à la main** (odeur 8 de #96 ; laissé à #132 par #129) :
    `apply_wide_strategy_columns` le modifie, ses appelants le restaurent. Les gardes qui le lisent après un override se
    tromperaient ; `already_overridden` passe avant elles (§ 3).
