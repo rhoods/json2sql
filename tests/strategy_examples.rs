@@ -14,6 +14,7 @@ use serde_json::{json, Map, Value};
 /// Ce que donne un `--dry-run` : les colonnes de données de chaque table, avec leur type, et la sortie d'erreur.
 struct DryRun {
     tables: BTreeMap<String, Vec<(String, String)>>,
+    ddl: String,
     stderr: String,
 }
 
@@ -57,8 +58,10 @@ fn dry_run(table: &str, rows: &[Value], args: &[&str], toml: Option<&str>) -> Dr
     let out = cmd.output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "json2sql a échoué :\n{stderr}");
+    let ddl = String::from_utf8_lossy(&out.stdout).into_owned();
     DryRun {
-        tables: parse_ddl(&String::from_utf8_lossy(&out.stdout)),
+        tables: parse_ddl(&ddl),
+        ddl,
         stderr,
     }
 }
@@ -326,11 +329,11 @@ fn d_dense_table_stays_whole_and_group_columns_splits_it_by_name() {
 
 // ---------------------------------------------------------------------------
 // E. Objets frères sous des clés de 3 lettres (des devises).
-// Aujourd'hui : fusion `sibling`, colonne clé `lang_code` (toute clé de 2 ou 3 lettres passe pour une langue).
-// Cible (T5) : colonne clé `key`.
+// Fusion `sibling` : la colonne clé s'appelle `key`, quelle que soit la forme des clés (T5a ; avant :
+// `lang_code`, toute clé de 2 ou 3 lettres passant pour une langue).
 // ---------------------------------------------------------------------------
 #[test]
-fn e_sibling_objects_under_three_letter_keys_get_a_lang_code_column() {
+fn e_sibling_objects_under_three_letter_keys_get_a_key_column() {
     let rows: Vec<Value> = (0..20)
         .map(|i| {
             let prices = object(
@@ -345,15 +348,15 @@ fn e_sibling_objects_under_three_letter_keys_get_a_lang_code_column() {
         run.shape(),
         expected(&[
             ("products", &["sku"]),
-            ("products_prices", &["amount", "lang_code", "vat"]),
+            ("products_prices", &["amount", "key", "vat"]),
         ])
     );
 }
 
 // ---------------------------------------------------------------------------
 // E'. Objets frères identiques sous des clés numériques et texte.
-// Aujourd'hui : la forme des clés coupe la fusion en deux tables (`_num`, clé `key_id` ; `_key`, clé `key`).
-// Cible (T5) : une seule table `items_slots (key, url, w)`.
+// Aujourd'hui : la forme des clés coupe la fusion en deux tables (`_num`, `_key`), chacune avec une colonne `key`
+// (T5a ; avant : `key_id` pour `_num`). Cible (T5b) : une seule table `items_slots (key, url, w)`.
 // ---------------------------------------------------------------------------
 #[test]
 fn e_identical_siblings_are_split_by_the_shape_of_their_keys() {
@@ -373,9 +376,32 @@ fn e_identical_siblings_are_split_by_the_shape_of_their_keys() {
             ("items", &["id"]),
             ("items_slots", &[]),
             ("items_slots_key", &["key", "url", "w"]),
-            ("items_slots_num", &["key_id", "url", "w"]),
+            ("items_slots_num", &["key", "url", "w"]),
         ])
     );
+}
+
+// ---------------------------------------------------------------------------
+// E''. Objets frères dont un champ s'appelle déjà `key` : la colonne clé devient `j2s_key`, pas un second `key`
+// (deux colonnes du même nom : PostgreSQL refusait le CREATE TABLE).
+// ---------------------------------------------------------------------------
+#[test]
+fn e_siblings_with_a_key_field_get_a_j2s_key_column() {
+    let rows: Vec<Value> = (0..3)
+        .map(|i| {
+            let p = object(
+                ["alpha", "beta", "gamma"].map(String::from),
+                |_| json!({"key": "k", "v": i}),
+            );
+            json!({"id": i, "p": p})
+        })
+        .collect();
+    let run = dry_run("t", &rows, &[], None);
+    assert_eq!(
+        run.shape(),
+        expected(&[("t", &["id"]), ("t_p", &["key", "v"])])
+    );
+    assert!(run.ddl.contains("\"j2s_key\" TEXT"), "{}", run.ddl);
 }
 
 /// F. 50 lignes d'une grille dense : 7 nutriments × (`n`, `n_points`, `n_value`), toujours remplis.

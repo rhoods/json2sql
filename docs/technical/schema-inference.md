@@ -160,7 +160,7 @@ Quand une table parent a ≥ `sibling_threshold` tables enfants directes avec de
 
 Les tables sœurs sont supprimées. La table parent devient une table **KeyedPivot** avec :
 
-- Une colonne clé (`key`, `lang_code`, ou `key_id` selon la forme des clés)
+- Une colonne clé `key`, quelle que soit la forme des clés (`j2s_key` si un champ des sœurs s'appelle déjà `key`)
 - L'union des colonnes de données des sœurs (peut être vide si les sœurs sont des conteneurs purs)
 - Une colonne **`j2s_data JSONB`** contenant l'objet enfant brut (ou l'élément du tableau pour ObjectArray). Cette colonne est toujours présente et préserve la structure complète, y compris les données imbriquées qui ne seraient pas représentables en colonnes plates.
 - Pour les ObjectArray : une colonne `j2s_order BIGINT` pour conserver l'ordre des éléments
@@ -171,12 +171,15 @@ Quand les tables sœurs sont elles-mêmes des conteneurs purs (ex. `genome → c
 
 ### Types de clés détectés (`KeyShape`)
 
-| Forme | Exemple | Colonne générée |
-|---|---|---|
-| Numeric | `0`, `1`, `2` | `key_id` |
-| IsoLang | `fr`, `en`, `de` | `lang_code` |
-| Slug | `en:organic`, `fr:bio` | `key` |
-| Mixed | mélange | `key` |
+La forme des clés ne change pas le nom de la colonne clé (#200) : elle sert aux journaux et à la coupure des clés
+numériques et texte en deux tables.
+
+| Forme | Exemple |
+|---|---|
+| Numeric | `0`, `1`, `2` |
+| IsoLang | `fr`, `en`, `de` |
+| Slug | `en:organic`, `fr:bio` |
+| Mixed | mélange |
 
 ---
 

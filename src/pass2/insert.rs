@@ -1141,7 +1141,7 @@ mod tests {
         let selected = by_name("p_images_selected");
         let key_table = by_name("p_images_selected_key");
         assert!(
-            matches!(&*key_table.effective_strategy(), InferredStrategy::SiblingCollapse(s) if s.key_col_name == "lang_code"),
+            matches!(&*key_table.effective_strategy(), InferredStrategy::SiblingCollapse(s) if s.key_col_name == "key"),
             "the fixture must reach the keyed post-pass: {:?}",
             key_table.inferred_strategy
         );
@@ -1188,7 +1188,7 @@ mod tests {
         let key_rows = cells(&key_table.name);
         assert_eq!(key_rows.len(), 9, "3 image types × 3 lang codes");
         let (lang, imgid, rev) = (
-            col(key_table, "lang_code"),
+            col(key_table, "key"),
             col(key_table, "imgid"),
             col(key_table, "rev"),
         );

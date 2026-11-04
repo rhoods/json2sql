@@ -31,7 +31,7 @@
 //! - fn `cluster_suffix` — suffixe voulu d'un cluster (préfixe commun des clés, sinon `cluster_{i}`).
 //! - fn `jaccard_ok` — assez de tables sœurs, assez semblables pour une table pivot.
 
-use super::super::super::table_schema::{ColumnSchema, InferredStrategy, KeyShape, TableSchema};
+use super::super::super::table_schema::{ColumnSchema, InferredStrategy, TableSchema};
 use super::super::super::wide_strategies::{build_union_columns, classify_key_shape};
 use super::super::scoring::{
     child_compatibility_score, greedy_schema_clusters, pairwise_jaccard_min, siblings_key_prefix,
@@ -477,12 +477,8 @@ fn build_classic_keyed_pivot_collapse(
 ) -> Collapse {
     let keys = sibling_keys(schemas, &regular);
     let key_shape = classify_key_shape(&keys);
-    let key_col_name = match &key_shape {
-        KeyShape::Numeric => "key_id".to_string(),
-        KeyShape::IsoLang => "lang_code".to_string(),
-        _ => "key".to_string(),
-    };
     let union_cols = union_of(schemas, &regular);
+    let key_col_name = super::key_column_name(&union_cols);
     let examples = key_examples(&keys);
     Collapse {
         parent_idx: ctx.parent_idx,
@@ -521,19 +517,13 @@ pub(super) fn make_subgroup(
     let pivot_name = crate::schema::naming::derived_table_name(&format!("{parent_name}_{suffix}"));
     let sub_keys = sibling_keys(schemas, indices);
     let shape = classify_key_shape(&sub_keys);
-    let key_col = if key_is_numeric {
-        "key_id"
-    } else if shape == KeyShape::IsoLang {
-        "lang_code"
-    } else {
-        "key"
-    };
     let union_cols = union_of(schemas, indices);
+    let key_col = super::key_column_name(&union_cols);
     let absorbed = indices.iter().map(|&i| schemas[i].name.clone()).collect();
     SubgroupData {
         pivot_table_name: pivot_name,
         key_is_numeric,
-        key_col_name: key_col.to_string(),
+        key_col_name: key_col,
         key_shape: shape,
         union_cols,
         absorbed_names: absorbed,
@@ -787,7 +777,10 @@ mod tests {
             ..
         }) = result
         {
-            assert_eq!(key_col_name, "lang_code");
+            assert_eq!(
+                key_col_name, "key",
+                "the key column is `key` whatever the shape of the keys (#200)"
+            );
         } else {
             panic!("expected Single collapse");
         }
@@ -929,7 +922,7 @@ mod tests {
         ];
         let g = make_subgroup(&schemas, "p", &[0, 1, 2], true, "num");
         assert_eq!(g.pivot_table_name, "p_num");
-        assert_eq!(g.key_col_name, "key_id");
+        assert_eq!(g.key_col_name, "key", "numeric keys too (#200)");
         assert!(g.key_is_numeric);
         assert!(matches!(g.key_shape, KeyShape::Numeric));
     }
@@ -942,7 +935,7 @@ mod tests {
             make_child_with_key("p_de", "p", "de", &["label"]),
         ];
         let g = make_subgroup(&schemas, "p", &[0, 1, 2], false, "key");
-        assert_eq!(g.key_col_name, "lang_code");
+        assert_eq!(g.key_col_name, "key", "language codes too (#200)");
         assert!(matches!(g.key_shape, KeyShape::IsoLang));
     }
 

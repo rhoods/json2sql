@@ -11,6 +11,8 @@
 //! - struct `Collapse` — collapse à appliquer sur un parent (indices absorbés, kind, log).
 //! - struct `SiblingDetectCtx` — contexte de détection pour un parent (enfants, seuils, index numériques).
 //! - struct `CoSiblingGroup` — groupe de tables co-sibling produit par une vague de cascade.
+//! - fn `key_column_name` — nom de la colonne clé d'une table fusionnée : `key`, ou `j2s_key` si un champ s'appelle déjà
+//!   `key` (#200).
 //!
 //! Orchestration :
 //! - fn `finalize_cascading` — enchaîne wave 0, cascade waves 1+, wave 0-bis (tables
@@ -26,6 +28,13 @@ mod apply;
 mod cascade;
 mod keyed_pivot;
 mod wave0;
+
+/// Name of the key column of a fused table: `key` whatever the shape of the keys (#200), or `j2s_key` when one of the
+/// fused objects already has a `key` field — two columns of one name would make the `CREATE TABLE` fail.
+fn key_column_name(union_cols: &[ColumnSchema]) -> String {
+    let taken = union_cols.iter().any(|c| c.name == "key");
+    if taken { "j2s_key" } else { "key" }.to_string()
+}
 
 struct SubgroupData {
     pivot_table_name: String,

@@ -750,12 +750,12 @@ async fn test_auto_split_strategy() {
 //
 // Conditions auto-détection (sibling_threshold=3, jaccard=0.5) :
 //   - products_translations_fr/en/de → 3 siblings de même schéma (Jaccard=1.0)
-//   - products_translations fusionné → (j2s_id, j2s_products_id, lang_code, label, desc)
+//   - products_translations fusionné → (j2s_id, j2s_products_id, key, label, desc)
 //   - tables fr/en/de supprimées du schéma final
 //
 // Assertions :
 //   - 2 schemas (products + products_translations)
-//   - products_translations a SiblingCollapse, lang_code TEXT, label TEXT, desc TEXT
+//   - products_translations a SiblingCollapse, key TEXT, label TEXT, desc TEXT (colonne clé `key` : #200)
 //   - 2 lignes dans products, 6 dans products_translations
 //   - Widget/fr → label="Bonjour", desc="Rouge"
 //   - Gadget/de → desc="Blau"
@@ -798,8 +798,8 @@ async fn test_keyed_pivot_strategy() {
 
         let data_cols: Vec<_> = translations_schema.data_columns().collect();
         assert!(
-            data_cols.iter().any(|c| c.name == "lang_code"),
-            "colonne lang_code absente"
+            data_cols.iter().any(|c| c.name == "key"),
+            "colonne key absente"
         );
         assert!(
             data_cols.iter().any(|c| c.name == "label"),
@@ -858,7 +858,7 @@ async fn test_keyed_pivot_strategy() {
                     "SELECT t.label, t.desc \
                  FROM \"{schema}\".\"products_translations\" t \
                  JOIN \"{schema}\".\"products\" p ON t.j2s_products_id = p.j2s_id \
-                 WHERE p.name = 'Widget' AND t.lang_code = 'fr'",
+                 WHERE p.name = 'Widget' AND t.key = 'fr'",
                 ),
                 &[],
             )
@@ -873,7 +873,7 @@ async fn test_keyed_pivot_strategy() {
                 &format!(
                     "SELECT t.desc FROM \"{schema}\".\"products_translations\" t \
                  JOIN \"{schema}\".\"products\" p ON t.j2s_products_id = p.j2s_id \
-                 WHERE p.name = 'Gadget' AND t.lang_code = 'de'",
+                 WHERE p.name = 'Gadget' AND t.key = 'de'",
                 ),
                 &[],
             )

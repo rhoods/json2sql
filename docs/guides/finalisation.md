@@ -20,6 +20,7 @@ symbols:
   - SchemaFinalizer
   - SchemaFinalizer::new
   - SchemaFinalizer::run
+  - key_column_name
   - TableEntry
   - NamingRegistry
   - NamingRegistry::table_name_from_dot_key
@@ -120,14 +121,16 @@ dans `table_schema.rs`, est le modèle que lisent ensuite les overrides, le DDL,
 | Nouveau champ de `TableSchema` | `TableSchema`, `TableSchema::new` (§ 4) | oui pour `TableSchema::new`, non pour les snapshots |
 | Fusion manuelle depuis l'IHM | `build_sibling_collapse_from_siblings` (`cascading/merge.rs`) | non |
 
-Les formes de clé des tables sœurs, et la colonne clé qu'elles donnent :
+La colonne clé d'une table fusionnée s'appelle toujours `"key"`, ou `"j2s_key"` quand un champ des objets fusionnés
+s'appelle déjà `"key"` (`key_column_name`, #200). Les formes de clé des tables sœurs ne servent plus qu'aux journaux et
+à la coupure numérique / texte (`SiblingCollapseMulti`) :
 
-| `KeyShape` | Clés | Colonne clé |
-|---|---|---|
-| `Numeric` | entiers (`0`, `1`, `42`) | `key_id` |
-| `IsoLang` | codes de 2 ou 3 lettres (`fr`, `deu`) | `lang_code` |
-| `Slug` | autres chaînes (`en_glass`) | `"key"` |
-| `Mixed` | entiers et codes mêlés | `"key"` |
+| `KeyShape` | Clés |
+|---|---|
+| `Numeric` | entiers (`0`, `1`, `42`) |
+| `IsoLang` | codes de 2 ou 3 lettres (`fr`, `deu`) |
+| `Slug` | autres chaînes (`en_glass`) |
+| `Mixed` | entiers et codes mêlés |
 
 Les genres de table enfant (champ `child_kind`, vide pour la racine) :
 
@@ -291,8 +294,8 @@ Vues en écrivant la fiche, pas tranchées. Déjà suivies ailleurs : réglages 
 finaliseur dans `registry.rs` (#113), décisions en `matches!` et effet de bord sur `inferred_strategy` (odeurs 3 et 8
 de la fiche des stratégies).
 
-1. **Colonne clé choisie en trois copies** (#135). `KeyShape` → `key_id` / `lang_code` / `"key"` est écrit trois fois avec un
-   cas par défaut. Une méthode de `KeyShape` sans cas par défaut ferait signaler une forme oubliée.
+1. **Colonne clé choisie en trois copies** (#135). (Une seule fonction, `key_column_name`, depuis #200 : la colonne
+   s'appelle toujours `"key"`.)
 2. **Colonne parente écrite à la main** (#147). #136 a mesuré la phase 2 contre PostgreSQL : aucun nom coupé (les
    noms passent par `derived_table_name`, 53 octets au plus, depuis #180 ; `pk_name` / `fk_name` coupent à 63 avec un
    hash, #179), mais deux tables pivot qui prenaient le même nom, corrigées (§ 3). Reste la colonne parente :
