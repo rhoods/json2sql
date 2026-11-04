@@ -83,7 +83,7 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | `finalizer/` | `SchemaFinalizer` : transformations post-stream — construit les `TableSchema`, applique les stratégies, trie topologiquement — voir sous-section dédiée ci-dessous |
 | `cascading/` | Détection et fusion des tables sœurs (BFS cascade) — voir sous-section dédiée ci-dessous |
 | `grouping/` | Découpage thématique des tables larges (#78) : propose des groupes de colonnes qui deviendront des tables 1:1 — voir sous-section dédiée ci-dessous |
-| `wide_strategies.rs` | Fonctions d'application des stratégies wide : `apply_wide_strategy_columns`, `apply_flatten`, `apply_jsonb_flatten`, `build_union_columns`, `classify_key_shape` |
+| `wide_strategies.rs` | Fonctions d'application des stratégies wide : `apply_wide_strategy_columns`, `apply_flatten`, `build_union_columns`, `classify_key_shape` |
 | `strategies.rs` | `StrategyName` (enum des stratégies optionnelles désactivables : `Sibling`, `StructuredPivot`), `StrategyError`, `parse_disabled_strategies()`. Utilisé par `Pass1Config` et `SchemaRegistry` pour gater les stratégies via `--disable-strategy`. |
 | `inspector.rs` | Statistiques d'inspection : `collect_stats()` construit les `ColumnStats` (histogramme de types) pour le mode `--inspect` |
 | `registry.rs` | `SchemaRegistry` : façade publique (~100 lignes prod). Délègue à `observer`, `finalizer` et `inspector` |

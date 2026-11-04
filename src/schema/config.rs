@@ -984,7 +984,7 @@ fn apply_single_user_override(s: &mut TableSchema, ov: &UserOverride) {
                 s.set_ui_override(Some(UserOverride::Columns));
             }
         }
-        UserOverride::Skip | UserOverride::JsonbFlatten | UserOverride::Flatten { .. } => {}
+        UserOverride::Skip | UserOverride::Flatten { .. } => {}
     }
 }
 
@@ -1961,7 +1961,7 @@ mod tests {
     #[test]
     fn toml_suffix_columns_leave_a_jsonb_column_on_the_identity_table() {
         // Pass 2 sends only scalars to the pivot: in the grid, the objects of a JSONB column
-        // would be lost. Only `apply_jsonb_flatten` (no caller outside tests) makes one.
+        // would be lost. A column typed JSONB can come from a mixed-type key.
         let mut schemas = vec![nutrients_table(false)];
         schemas[0]
             .columns

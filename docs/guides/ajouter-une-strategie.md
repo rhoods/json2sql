@@ -83,7 +83,6 @@ symbols:
   - PreviewScreen
   - StrategyScreen
   - SetupScreen
-  - apply_jsonb_flatten
   - apply_pivot_split
   - apply_structured_pivot_split
   - is_pg_array
@@ -120,7 +119,6 @@ Les stratégies existantes, par origine :
 | `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (`split` est obligatoire) |
 | `Ignore` | jamais : projection de `UserOverride::Skip` | IHM (`Skip`) | — |
 | `Flatten` | jamais | TOML `flatten` | — |
-| `JsonbFlatten` | jamais | aucun chemin trouvé (voir § 6) | — |
 
 Toute nouvelle stratégie passe par le **socle** (§ 4). Selon ses lignes dans ce tableau, ajoute ensuite :
 
@@ -302,9 +300,7 @@ Vues en écrivant la fiche, pas tranchées. Chacune peut devenir une issue de re
    désactivables dans `StrategyError` (deux fois), `src/cli.rs`, `usage.md` et `strategies.md`.
 5. **IHM écrite variante par variante.** Les interrupteurs de `SetupScreen` et les boutons de `StrategyScreen` sont
    recopiés pour chaque stratégie au lieu de parcourir `StrategyName::OPTIONAL`.
-6. **`JsonbFlatten` semble inatteignable.** Seule `apply_jsonb_flatten` le construit, et seuls des tests l'appellent :
-   ni la CLI, ni le TOML, ni l'IHM. Les docs se contredisent (« TOML-only » dans le tableau de `table_schema.rs`, « IHM
-   override only » sur la variante de `UserOverride`).
+6. **`JsonbFlatten` semblait inatteignable.** (Supprimé : aucun appelant hors des tests, #200.)
 7. **Docs existantes déjà décalées.** `architecture.md` décrit un enum `WideStrategy` (variantes `KeyedPivot`,
    `Ignore`…) qui n'existe plus : c'est `InferredStrategy`. `schema-inference.md` (§ 12) documente
    `strategy = "ignore"`, que le TOML rejette (`--dry-run` affiche « unknown strategy 'ignore' … ignored »).

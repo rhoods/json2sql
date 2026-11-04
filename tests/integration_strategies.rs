@@ -5,7 +5,7 @@ use json2sql::schema::registry::RegistryConfig;
 use json2sql::schema::table_schema::{InferredStrategy, SiblingSchema, SuffixColumn, SuffixSchema};
 use json2sql::schema::type_tracker::PgType;
 use json2sql::schema::wide_strategies::{
-    apply_flatten, apply_jsonb_flatten, apply_structured_pivot_columns, apply_wide_strategy_columns,
+    apply_flatten, apply_structured_pivot_columns, apply_wide_strategy_columns,
 };
 use json2sql::{db, pass1, pass2};
 
@@ -966,73 +966,6 @@ async fn test_keyed_pivot_pure_container() {
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
     })
     .await;
-}
-
-// ---------------------------------------------------------------------------
-// InferredStrategy::JsonbFlatten : données enfant inlinées en JSONB dans le parent.
-// Fixture : 3 produits avec un objet enfant `dims` (width, height, depth).
-// Après apply_jsonb_flatten("products_dims") :
-//   - products_dims est supprimé des schémas
-//   - products gagne la colonne `products_dims JSONB`
-//   - Les données brutes sont stockées dans la colonne JSONB
-// ---------------------------------------------------------------------------
-#[tokio::test]
-async fn test_jsonb_flatten_strategy() {
-    common::with_schema_url(|client, schema, url| async move {
-        let path = common::fixture("flatten_nested.jsonl");
-        let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
-
-        assert_eq!(p1.schemas.len(), 2);
-        assert!(p1.schemas.iter().any(|s| s.name == "products_dims"));
-
-        let mut schemas = p1.schemas;
-        apply_jsonb_flatten(&mut schemas, "products_dims").unwrap();
-
-        // Child table removed
-        assert_eq!(schemas.len(), 1);
-        assert!(schemas.iter().all(|s| s.name != "products_dims"));
-
-        // Parent gains a JSONB column named after the child table
-        let products_schema = schemas.iter().find(|s| s.name == "products").unwrap();
-        let jsonb_col = products_schema.columns.iter().find(|c| c.name == "products_dims");
-        assert!(jsonb_col.is_some(), "products doit avoir une colonne products_dims JSONB");
-        assert_eq!(jsonb_col.unwrap().pg_type, PgType::Jsonb);
-
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
-
-        let dims_absent: i64 = client
-            .query_one("SELECT COUNT(*) FROM information_schema.tables \
-                 WHERE table_schema = $1 AND table_name = 'products_dims'", &[&schema])
-            .await.unwrap().get("count");
-        assert_eq!(dims_absent, 0, "products_dims ne doit pas être créé");
-
-        let jsonb_col_present: i64 = client
-            .query_one("SELECT COUNT(*) FROM information_schema.columns \
-                 WHERE table_schema = $1 AND table_name = 'products' AND column_name = 'products_dims'",
-                 &[&schema])
-            .await.unwrap().get("count");
-        assert_eq!(jsonb_col_present, 1, "products doit avoir une colonne products_dims");
-
-        pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None).await.unwrap();
-
-        // Widget : dims = {"width": 10, "height": 20, "depth": 5}
-        let widget = client.query_one(
-            &format!("SELECT products_dims::text FROM \"{schema}\".\"products\" WHERE id = 1"),
-            &[],
-        ).await.unwrap();
-        let dims: serde_json::Value = serde_json::from_str(widget.get::<_, &str>("products_dims")).unwrap();
-        assert_eq!(dims["width"], serde_json::json!(10));
-        assert_eq!(dims["height"], serde_json::json!(20));
-
-        // Doohickey : dims partial (no depth)
-        let doohickey = client.query_one(
-            &format!("SELECT products_dims::text FROM \"{schema}\".\"products\" WHERE id = 3"),
-            &[],
-        ).await.unwrap();
-        let dims3: serde_json::Value = serde_json::from_str(doohickey.get::<_, &str>("products_dims")).unwrap();
-        assert_eq!(dims3["width"], serde_json::json!(5));
-        assert!(dims3.get("depth").is_none() || dims3["depth"].is_null());
-    }).await;
 }
 
 // ---------------------------------------------------------------------------

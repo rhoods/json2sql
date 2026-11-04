@@ -164,7 +164,7 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   (type attendu `table`) sur la table parente. Elle se tait quand rien n'est perdu ou que l'abandon est voulu : valeur
   vide (`{}`, `[]`), parent en `Jsonb` (le blob garde tout), colonne du même nom ou objet d'un enfant aplati
   (`flatten_sources` ; un tableau sous sa clé laisse une anomalie, ses colonnes ne lisent qu'un objet, #170),
-  sur le parent ou sur l'une de ses tables de groupe (colonne tableau, `JsonbFlatten`, type mixte), ou enfant retiré
+  sur le parent ou sur l'une de ses tables de groupe (colonne tableau, type mixte), ou enfant retiré
   par un `Skip` (`skipped_children`, rempli par `apply_user_overrides` et gardé dans le snapshot ; il y note aussi
   les clés de `child_routes` qui menaient à la table retirée). Même règle pour la table pivot d'un groupe
   `SiblingCollapseMulti` absente (`route_multi_collapse_children`) et pour une cible de `child_routes` absente

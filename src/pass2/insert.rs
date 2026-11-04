@@ -343,8 +343,7 @@ pub(super) fn insert_child_object<S: RowSink, A: AnomalyCollect>(
         | InferredStrategy::Columns
         | InferredStrategy::AutoSplit { .. }
         | InferredStrategy::Ignore
-        | InferredStrategy::Flatten { .. }
-        | InferredStrategy::JsonbFlatten => insert_object(
+        | InferredStrategy::Flatten { .. } => insert_object(
             path_map,
             ctx,
             child_schema,

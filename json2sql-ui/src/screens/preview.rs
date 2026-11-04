@@ -90,7 +90,6 @@ pub fn PreviewScreen(mut state: Signal<AppState>) -> Element {
                 UserOverride::Pivot                              => matches!(orig.inferred_strategy, InferredStrategy::Pivot),
                 UserOverride::Jsonb                             => matches!(orig.inferred_strategy, InferredStrategy::Jsonb),
                 UserOverride::Skip                              => matches!(orig.inferred_strategy, InferredStrategy::Ignore),
-                UserOverride::JsonbFlatten                      => matches!(orig.inferred_strategy, InferredStrategy::JsonbFlatten),
                 UserOverride::Flatten { prefix, max_depth }     => matches!(&orig.inferred_strategy, InferredStrategy::Flatten { prefix: p, max_depth: d } if p == prefix && d == max_depth),
             };
             if matches_inferred { return None; }

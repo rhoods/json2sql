@@ -51,7 +51,6 @@ symbols:
   - apply_wide_strategy_columns
   - apply_flatten
   - flatten_refusal
-  - apply_jsonb_flatten
   - apply_column_groups
   - dissolve_column_groups
   - exclude_absorbed_children
@@ -157,7 +156,6 @@ Les overrides de stratégie, qui les pose et ce qu'en fait `apply_single_user_ov
 | `Pivot` | TOML et IHM | reconstruit les colonnes (`apply_wide_strategy_columns`), remet la stratégie inférée ; refusé si le TOML les a déjà reconstruites autrement, gardées si c'est le même |
 | `Jsonb` | TOML et IHM | reconstruit les colonnes, même déjà reconstruites par le TOML ; gardées si c'est le même |
 | `Skip` | IHM seulement (le TOML refuse `ignore`) | rien : `compute_skip_cascade` retire la table, son compagnon `_wide` et ses enfants |
-| `JsonbFlatten` | `apply_jsonb_flatten`, qui n'a pas d'appelant hors tests | **rien** |
 | `Flatten` | personne : le TOML `flatten` passe par `apply_flatten`, qui retire l'enfant | **rien** |
 
 ## 2. Flux
@@ -329,8 +327,8 @@ Vues en écrivant la fiche, pas tranchées.
    tromperaient ; `already_overridden` passe avant elles (§ 3).
 3. **Le snapshot est relu champ par champ** dans deux lecteurs, dont l'un perd déjà `overflow_warnings` (#133 ; le bug lui-même relève de la carte IHM, #100).
 4. **Code sans effet** : `save` et `save_with_overrides` ne servent qu'aux tests (#133) ; `config_warnings` de l'état de
-   l'IHM n'est jamais rempli, sa bannière ne s'affiche jamais ; `JsonbFlatten` et `Flatten` ne sont jamais posés
-   comme `UserOverride` (odeur 6 de #96).
+   l'IHM n'est jamais rempli, sa bannière ne s'affiche jamais ; `Flatten` n'est jamais posé
+   comme `UserOverride` (odeur 6 de #96 ; `JsonbFlatten` supprimé, #200).
 5. **Docs décalées** (odeur 7 de #96, élargie ; #131) : `[table.columns]` et `ignore` dans usage.md et schema-inference.md ;
    clés absentes d'usage.md ; l'en-tête de `config.rs` parle d'« erreur » pour une table ou une colonne inconnue (ce
    sont des avertissements).

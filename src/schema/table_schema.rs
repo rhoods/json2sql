@@ -22,7 +22,6 @@
 //! | `Ignore` | internal | set from a user `Skip` override | excluded from schema (rare `AutoSplit` keys are dropped by `AutoSplit` itself) |
 //! | `Skip` | user | user wants table removed | table excluded from DDL and Pass 2 |
 //! | `Flatten` | TOML-only | inline child fields into parent | child table removed |
-//! | `JsonbFlatten` | TOML-only | store child as JSONB on parent | child table removed |
 //!
 //! See each variant's doc comment for a concrete JSON → SQL example.
 //!
@@ -380,25 +379,6 @@ pub enum InferredStrategy {
         /// Maximum nesting depth to flatten. Currently only depth = 1 is implemented.
         max_depth: u8,
     },
-
-    /// Store the child object or array as a `JSONB` column directly on the parent table.
-    ///
-    /// Applied manually via the IHM. The child table is removed from the schema.
-    /// One-to-one child → single JSONB object; one-to-many child → JSONB array.
-    ///
-    /// JSON input — child array that should stay inline rather than become a separate table:
-    /// `[{"name":"Nutella","tags":["chocolate","spread","jar"]}, ...]`
-    ///
-    /// DDL — child table `products_tags` is removed, the array lands as a JSONB column:
-    /// ```text
-    /// CREATE TABLE products (
-    ///     j2s_id  BIGINT PRIMARY KEY,
-    ///     name    TEXT,
-    ///     tags    JSONB   -- stored as '["chocolate","spread","jar"]'
-    /// );
-    /// -- 1 row: ("Nutella",'["chocolate","spread","jar"]')
-    /// ```
-    JsonbFlatten,
 }
 
 /// User-facing override for a table's materialization strategy.
@@ -419,8 +399,6 @@ pub enum UserOverride {
     /// variant was renamed.
     #[serde(alias = "Ignore")]
     Skip,
-    /// Inline child as a JSONB column on the parent — IHM override only.
-    JsonbFlatten,
     /// Inline child's scalar fields as prefixed columns on the parent.
     Flatten { prefix: Arc<str>, max_depth: u8 },
 }
@@ -432,7 +410,6 @@ impl From<&UserOverride> for InferredStrategy {
             UserOverride::Pivot => Self::Pivot,
             UserOverride::Jsonb => Self::Jsonb,
             UserOverride::Skip => Self::Ignore,
-            UserOverride::JsonbFlatten => Self::JsonbFlatten,
             UserOverride::Flatten { prefix, max_depth } => Self::Flatten {
                 prefix: prefix.clone(),
                 max_depth: *max_depth,
@@ -721,7 +698,6 @@ impl InferredStrategy {
                 | Self::StructuredPivot(_)
                 | Self::SiblingCollapse(_)
                 | Self::Flatten { .. }
-                | Self::JsonbFlatten
         )
         // SiblingCollapseMulti: absorption handled via SiblingGroup.absorbed_names,
         // not through this flag — the parent itself absorbs nothing directly.
@@ -821,7 +797,6 @@ mod tests {
             UserOverride::Pivot,
             UserOverride::Jsonb,
             UserOverride::Skip,
-            UserOverride::JsonbFlatten,
             UserOverride::Flatten {
                 prefix: "p_".into(),
                 max_depth: 1,
@@ -855,14 +830,6 @@ mod tests {
         assert_eq!(
             InferredStrategy::from(&UserOverride::Skip),
             InferredStrategy::Ignore
-        );
-    }
-
-    #[test]
-    fn from_user_override_jsonb_flatten() {
-        assert_eq!(
-            InferredStrategy::from(&UserOverride::JsonbFlatten),
-            InferredStrategy::JsonbFlatten
         );
     }
 
@@ -909,8 +876,8 @@ mod tests {
     fn effective_strategy_ui_overrides_inferred_without_toml() {
         let mut s = make_schema("t");
         s.inferred_strategy = InferredStrategy::Columns;
-        s.ui_override = Some(UserOverride::JsonbFlatten);
-        assert_eq!(*s.effective_strategy(), InferredStrategy::JsonbFlatten);
+        s.ui_override = Some(UserOverride::Jsonb);
+        assert_eq!(*s.effective_strategy(), InferredStrategy::Jsonb);
     }
 
     #[test]
@@ -1057,17 +1024,6 @@ mod tests {
         assert!(
             s.absorbs_children(),
             "Flatten (inferred) must absorb children"
-        );
-    }
-
-    #[test]
-    fn table_schema_absorbs_children_via_ui_override_jsonb_flatten() {
-        let mut s = make_schema("t");
-        s.inferred_strategy = InferredStrategy::Columns;
-        s.ui_override = Some(UserOverride::JsonbFlatten);
-        assert!(
-            s.absorbs_children(),
-            "JsonbFlatten ui_override must absorb children"
         );
     }
 

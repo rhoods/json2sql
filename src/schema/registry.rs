@@ -167,7 +167,7 @@ mod tests {
     use crate::schema::finalizer::*;
     use crate::schema::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
     use crate::schema::type_tracker::PgType;
-    use crate::schema::wide_strategies::{apply_flatten, apply_jsonb_flatten};
+    use crate::schema::wide_strategies::apply_flatten;
     use serde_json::json;
 
     fn make_root(value: &Value) -> &serde_json::Map<String, Value> {
@@ -661,7 +661,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // apply_flatten / apply_jsonb_flatten
+    // apply_flatten
     // -------------------------------------------------------------------------
 
     fn make_parent_child(parent_name: &str, child_name: &str) -> Vec<TableSchema> {
@@ -731,37 +731,6 @@ mod tests {
         assert!(
             !schemas.iter().any(|s| s.name == "addr"),
             "child should be removed after flatten"
-        );
-    }
-
-    #[test]
-    fn test_apply_jsonb_flatten_table_not_found_returns_err() {
-        let mut schemas = make_parent_child("users", "meta");
-        let result = apply_jsonb_flatten(&mut schemas, "nonexistent");
-        assert!(
-            result.is_err(),
-            "should return Err when child table not found"
-        );
-    }
-
-    #[test]
-    fn test_apply_jsonb_flatten_root_table_returns_err() {
-        let mut schemas = make_parent_child("users", "meta");
-        let result = apply_jsonb_flatten(&mut schemas, "users");
-        assert!(
-            result.is_err(),
-            "should return Err when inlining a root table"
-        );
-    }
-
-    #[test]
-    fn test_apply_jsonb_flatten_success() {
-        let mut schemas = make_parent_child("users", "meta");
-        let result = apply_jsonb_flatten(&mut schemas, "meta");
-        assert!(result.is_ok());
-        assert!(
-            !schemas.iter().any(|s| s.name == "meta"),
-            "child should be removed after jsonb flatten"
         );
     }
 

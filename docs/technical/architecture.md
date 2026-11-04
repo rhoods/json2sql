@@ -327,9 +327,9 @@ Définit les types de données fondamentaux du schéma :
   - `SiblingCollapse(SiblingSchema)` : fusion de tables sœurs en une table, une ligne par clé
   - `SiblingCollapseMulti(Vec<SiblingGroup>)` : fusion de tables sœurs en une table pivot par forme de clé
   - `AutoSplit { stable_threshold, medium_keys, wide_table_name }` : tri par fréquence
-  - `Flatten { prefix, max_depth }`, `JsonbFlatten` : surcharges (TOML ou IHM)
+  - `Flatten { prefix, max_depth }` : surcharge (TOML)
   - `Ignore` : table retirée de l'import (tables absorbées par une fusion de tables sœurs, `Skip`)
-- **`UserOverride`** : choix de l'IHM (`Columns`, `Pivot`, `Jsonb`, `Skip`, `JsonbFlatten`, `Flatten`), prioritaire sur `InferredStrategy` ; `TableSchema::effective_strategy` donne la stratégie retenue
+- **`UserOverride`** : choix de l'IHM (`Columns`, `Pivot`, `Jsonb`, `Skip`, `Flatten`), prioritaire sur `InferredStrategy` ; `TableSchema::effective_strategy` donne la stratégie retenue
 - **`ColumnSchema`** : définition d'une colonne (nom PG, nom original, type, nullable, is_generated)
 - **`TableSchema`** : définition complète d'une table (nom, chemin JSON, colonnes, parent, profondeur, stratégie)
 - **`ChildKind`** : `Object`, `ObjectArray`
@@ -361,7 +361,7 @@ Transformations post-stream sur `Vec<TableSchema>` — après que l'observation 
 - **`run()`** : pipeline complet — construit les `TableSchema`, détecte les tables larges, applique les stratégies via `wide_strategies`, trie topologiquement, délègue la détection de sœurs à `cascading::finalize_cascading()`
 - **`build_base_schemas()`** : phase 1, une `TableSchema` par `TableEntry` (en parallèle, via `build_entry_schema_base()`), avec résolution des types et sans stratégie large
 - **`apply_column_limit_guard()`** : détecte les tables dépassant `PG_MAX_COLUMNS` (1 600) et applique Jsonb
-- **`exclude_absorbed_children()`** : supprime les tables enfants absorbées par une stratégie wide (Flatten, JsonbFlatten…)
+- **`exclude_absorbed_children()`** : supprime les tables enfants absorbées par une stratégie wide (Flatten, Pivot, Jsonb…)
 - **`OverflowWarning`** : type retourné quand une table est forcée en Jsonb par le garde-fou
 
 ### `cascading/`
@@ -388,7 +388,6 @@ Application des stratégies de stockage wide sur les `TableSchema`.
 - **`apply_wide_strategy_columns()`** : restructure les colonnes d'une table selon une `InferredStrategy` (Pivot, Jsonb, StructuredPivot…)
 - **`apply_structured_pivot_columns()`** : colonnes pour StructuredPivot — `(name TEXT, value <type>, <suffix_col>...)`
 - **`apply_flatten()`** : inline les colonnes scalaires d'un enfant dans le parent avec un préfixe ; le TOML ne l'appelle que pour un objet en `Columns` sans tables, routes ni colonnes aplaties à lui (`flatten_refusal` dans `config.rs`, avertissement `FlattenRefused`, #170)
-- **`apply_jsonb_flatten()`** : inline un enfant comme une seule colonne JSONB sur le parent
 - **`build_union_columns()`** : union des colonnes de plusieurs tables sœurs (plus large type par colonne)
 - **`classify_key_shape()`** / **`suggest_wide_strategy()`** : classification des clés et sélection automatique de la stratégie
 
