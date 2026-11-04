@@ -84,7 +84,7 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | `cascading/` | Détection et fusion des tables sœurs (BFS cascade) — voir sous-section dédiée ci-dessous |
 | `grouping/` | Découpage thématique des tables larges (#78) : propose des groupes de colonnes qui deviendront des tables 1:1 — voir sous-section dédiée ci-dessous |
 | `wide_strategies.rs` | Fonctions d'application des stratégies wide : `apply_wide_strategy_columns`, `apply_flatten`, `apply_jsonb_flatten`, `apply_normalize_dynamic_keys`, `build_union_columns`, `classify_key_shape` |
-| `strategies.rs` | `StrategyName` (enum des stratégies optionnelles désactivables : `Sibling`, `Pivot`, `StructuredPivot`), `StrategyError`, `parse_disabled_strategies()`. Utilisé par `Pass1Config` et `SchemaRegistry` pour gater les stratégies via `--disable-strategy`. |
+| `strategies.rs` | `StrategyName` (enum des stratégies optionnelles désactivables : `Sibling`, `StructuredPivot`), `StrategyError`, `parse_disabled_strategies()`. Utilisé par `Pass1Config` et `SchemaRegistry` pour gater les stratégies via `--disable-strategy`. |
 | `inspector.rs` | Statistiques d'inspection : `collect_stats()` construit les `ColumnStats` (histogramme de types) pour le mode `--inspect` |
 | `registry.rs` | `SchemaRegistry` : façade publique (~100 lignes prod). Délègue à `observer`, `finalizer` et `inspector` |
 | `naming.rs` | Sanitisation des identifiants PG, déduplication. Noms de tables en 53 octets au plus (premiers segments du chemin retirés, hash en dernier recours ; `derived_table_name` et `group_table_name` pour les tables dérivées et les tables de groupe) ; noms de colonnes et de contraintes en 63 octets avec hash ; détection de collisions de noms de colonnes |

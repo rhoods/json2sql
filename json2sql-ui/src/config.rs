@@ -444,11 +444,9 @@ mod tests {
     fn disabled_strategies_round_trips_from_project_to_apply() {
         let mut p = ProjectState::default();
         p.disabled_strategies.insert(StrategyName::Sibling);
-        p.disabled_strategies.insert(StrategyName::Pivot);
 
         let cfg = ProjectConfig::from_project(&p);
         assert!(cfg.disabled_strategies.contains(&"sibling".to_string()));
-        assert!(cfg.disabled_strategies.contains(&"pivot".to_string()));
         assert!(!cfg
             .disabled_strategies
             .contains(&"structured_pivot".to_string()));
@@ -456,7 +454,6 @@ mod tests {
         let mut p2 = ProjectState::default();
         cfg.apply_to(&mut p2);
         assert!(p2.disabled_strategies.contains(&StrategyName::Sibling));
-        assert!(p2.disabled_strategies.contains(&StrategyName::Pivot));
         assert!(!p2
             .disabled_strategies
             .contains(&StrategyName::StructuredPivot));
@@ -484,7 +481,8 @@ mod tests {
     #[test]
     fn apply_to_ignores_invalid_strategy_names() {
         let cfg = ProjectConfig {
-            disabled_strategies: vec!["unknown_strategy".to_string()],
+            // "pivot": saved by an older version, no longer optional since #200 — the project still loads.
+            disabled_strategies: vec!["unknown_strategy".to_string(), "pivot".to_string()],
             ..ProjectConfig::default()
         };
         let mut p = ProjectState::default();

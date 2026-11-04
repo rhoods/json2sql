@@ -1476,60 +1476,6 @@ async fn test_jsonb_strategy_root_table() {
     .await;
 }
 
-// disable pivot → InferredStrategy::Jsonb au lieu de Pivot pour les tables homogènes.
-// wide_column_threshold=3 : nutrients a 4 colonnes homogènes (int) → Pivot automatique.
-#[test]
-fn test_disable_pivot_gives_jsonb_integration() {
-    use json2sql::schema::strategies::StrategyName;
-    use json2sql::schema::table_schema::InferredStrategy;
-    use std::collections::HashSet;
-
-    let path = common::fixture("pivot_eav.jsonl");
-    // Config avec wide_column_threshold=3 pour déclencher la détection wide sur nutrients
-    let base_config = pass1::runner::Pass1Config {
-        registry: RegistryConfig {
-            wide_column_threshold: 3,
-            ..Default::default()
-        },
-        ..common::pass1_config("products")
-    };
-
-    // Avec pivot activé : Pivot attendu sur products_nutrients
-    let p1_normal = pass1::runner::run(&path, &base_config, None).unwrap();
-    assert!(
-        p1_normal
-            .schemas
-            .iter()
-            .any(|s| s.inferred_strategy == InferredStrategy::Pivot),
-        "pivot enabled → InferredStrategy::Pivot attendu sur products_nutrients"
-    );
-
-    // Avec pivot désactivé : Jsonb à la place
-    let config_disabled = pass1::runner::Pass1Config {
-        registry: RegistryConfig {
-            disabled_strategies: HashSet::from([StrategyName::Pivot]),
-            wide_column_threshold: 3,
-            ..Default::default()
-        },
-        ..common::pass1_config("products")
-    };
-    let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
-    assert!(
-        !p1_disabled
-            .schemas
-            .iter()
-            .any(|s| s.inferred_strategy == InferredStrategy::Pivot),
-        "pivot disabled → aucun InferredStrategy::Pivot, Jsonb attendu"
-    );
-    assert!(
-        p1_disabled
-            .schemas
-            .iter()
-            .any(|s| s.inferred_strategy == InferredStrategy::Jsonb),
-        "pivot disabled → InferredStrategy::Jsonb attendu"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // #163 — StructuredPivot détecté automatiquement : la grille part dans le compagnon
 // products_nut_pivot (une ligne par base), la table fille objet `comp`, le tableau `tags` et le

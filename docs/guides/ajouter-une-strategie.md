@@ -113,8 +113,8 @@ Les stratégies existantes, par origine :
 | `InferredStrategy` | Détectée automatiquement | Réglable par l'utilisateur | Désactivable (`--disable-strategy`) |
 |---|---|---|---|
 | `Columns` | par défaut | TOML `columns` | — |
-| `Pivot` | phase 3 (`suggest_wide_strategy`) | TOML `pivot`, IHM | `pivot` (donne `Jsonb` à la place) |
-| `Jsonb` | phase 3 avec `--disable-strategy pivot` seulement, phase 4 (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
+| `Pivot` | phase 3 (`suggest_wide_strategy`, valeurs d'un seul type) | TOML `pivot`, IHM | non (partie du split, #200) |
+| `Jsonb` | phase 4 seulement (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
 | `StructuredPivot` | phase 3 (suffixes) | TOML `suffix_columns` | `structured_pivot` |
 | `SiblingCollapse` | phase 2 (`finalize_cascading`) | TOML `[group.*]` | `sibling` |
 | `SiblingCollapseMulti` | phase 2 | — | `sibling` |

@@ -217,7 +217,7 @@ SELECT name, cardinality(tags) AS n, tags[1] AS premier FROM products;
 | `--sibling-jaccard` | 0.8 | Similarité min des colonnes sœurs |
 | `--depth-limit` | aucun | Avertissement si imbrication dépasse N niveaux |
 | `--workers` | 1 | Threads de la Pass 1 (inférence parallèle) |
-| `--disable-strategy` | aucun | Désactive une stratégie d'inférence optionnelle. Répétable. Valeurs : `sibling`, `pivot`, `structured_pivot`. La stratégie `split` (wide-table) est obligatoire et ne peut pas être désactivée. |
+| `--disable-strategy` | aucun | Désactive une stratégie d'inférence optionnelle. Répétable. Valeurs : `sibling`, `structured_pivot`. Le split des tables larges (`split`, dont `pivot` fait partie) est obligatoire et ne peut pas être désactivé ; pour garder une table en JSONB, `strategy = "jsonb"` dans le TOML. |
 
 ### Paramètres de chargement
 

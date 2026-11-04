@@ -168,8 +168,8 @@ pub struct Cli {
     pub workers: usize,
 
     /// Disable an optional inference strategy. Repeatable.
-    /// Valid values: sibling, pivot, `structured_pivot`.
-    /// Mandatory strategies (split) cannot be disabled — exits non-zero with explicit error.
+    /// Valid values: sibling, `structured_pivot`.
+    /// Mandatory strategies (split, pivot) cannot be disabled — exits non-zero with explicit error.
     #[arg(long = "disable-strategy", value_name = "STRATEGY")]
     pub disable_strategy: Vec<String>,
 
@@ -294,10 +294,10 @@ mod tests {
             "--disable-strategy",
             "sibling",
             "--disable-strategy",
-            "pivot",
+            "structured_pivot",
         ])
         .unwrap();
-        assert_eq!(cli.disable_strategy, vec!["sibling", "pivot"]);
+        assert_eq!(cli.disable_strategy, vec!["sibling", "structured_pivot"]);
     }
 
     #[test]

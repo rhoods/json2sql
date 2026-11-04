@@ -36,9 +36,7 @@ use super::super::suffix_detector::detect_suffix_schema;
 use super::super::table_schema::SuffixSchema;
 use super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
 use super::super::type_tracker::{widen_pg_types, PgType};
-use super::super::wide_strategies::{
-    apply_wide_strategy_columns, structured_pivot_companion, suggest_wide_strategy,
-};
+use super::super::wide_strategies::{structured_pivot_companion, suggest_wide_strategy};
 use super::base::is_scalar_column;
 use super::SchemaFinalizer;
 
@@ -89,7 +87,6 @@ pub(super) fn build_finalizer_config(finalizer: &SchemaFinalizer) -> FinalizerCo
     FinalizerConfig {
         wide_column_threshold: finalizer.wide_column_threshold,
         stable_threshold: finalizer.stable_threshold,
-        disable_pivot: finalizer.disabled_strategies.contains(&StrategyName::Pivot),
         disable_structured_pivot: finalizer
             .disabled_strategies
             .contains(&StrategyName::StructuredPivot),
@@ -99,7 +96,6 @@ pub(super) fn build_finalizer_config(finalizer: &SchemaFinalizer) -> FinalizerCo
 pub(super) struct FinalizerConfig {
     wide_column_threshold: usize,
     stable_threshold: f64,
-    disable_pivot: bool,
     disable_structured_pivot: bool,
 }
 
@@ -207,12 +203,6 @@ fn apply_non_autosplit_strategy(
         ));
     }
 
-    if config.disable_pivot {
-        // shortcut: `--disable-strategy pivot` still falls back to JSONB, until T4 of #200 removes the value.
-        stats.log(&schema.name, "Jsonb");
-        apply_wide_strategy_columns(schema, InferredStrategy::Jsonb);
-        return None;
-    }
     if suggest_wide_strategy(entry) == InferredStrategy::Pivot {
         stats.log(&schema.name, "Pivot (split identité/compagnon)");
         return Some(apply_pivot_split(schema, entry, config, existing_names));
@@ -438,7 +428,6 @@ mod tests {
         FinalizerConfig {
             wide_column_threshold: 2,
             stable_threshold: 0.1,
-            disable_pivot: false,
             disable_structured_pivot: false,
         }
     }

@@ -1528,55 +1528,6 @@ mod tests {
     }
 
     #[test]
-    fn test_disable_pivot_gives_jsonb() {
-        let obj = json!({ "nutrients": { "vit_c": 10.5, "iron": 2.3, "calcium": 50.0 } });
-
-        let mut reg_normal = SchemaRegistry::new(RegistryConfig {
-            wide_column_threshold: 2,
-            ..Default::default()
-        });
-        reg_normal.observe_root("item", make_root(&obj));
-        let schemas_normal = reg_normal.finalize();
-        // Pivot enabled → identité/compagnon split (issue #45) : identité en AutoSplit,
-        // compagnon "item_nutrients_pivot" en Pivot.
-        let nutrients_normal = schemas_normal
-            .iter()
-            .find(|s| s.name == "item_nutrients")
-            .unwrap();
-        assert!(
-            matches!(
-                &nutrients_normal.inferred_strategy,
-                InferredStrategy::AutoSplit { .. }
-            ),
-            "pivot enabled → identity split into AutoSplit expected"
-        );
-        assert!(
-            schemas_normal
-                .iter()
-                .any(|s| s.name == "item_nutrients_pivot"
-                    && s.inferred_strategy == InferredStrategy::Pivot),
-            "pivot enabled → companion item_nutrients_pivot expected"
-        );
-
-        let mut reg_disabled = SchemaRegistry::new(RegistryConfig {
-            wide_column_threshold: 2,
-            disabled_strategies: HashSet::from([StrategyName::Pivot]),
-            ..Default::default()
-        });
-        reg_disabled.observe_root("item", make_root(&obj));
-        let schemas_disabled = reg_disabled.finalize();
-        let nutrients_disabled = schemas_disabled
-            .iter()
-            .find(|s| s.name == "item_nutrients")
-            .unwrap();
-        assert_eq!(
-            nutrients_disabled.inferred_strategy,
-            InferredStrategy::Jsonb,
-            "pivot disabled → Jsonb for homogeneous wide table"
-        );
-    }
-
-    #[test]
     fn no_duplicate_table_names_after_cascade() {
         // Regression test for the "multiple primary keys" bug (42P16).
         // Structure mimics OpenFoodFacts images.cluster_X.sizes.{0,1,num}:

@@ -13,9 +13,10 @@ Rappel des colonnes générées :
 - `j2s_<parent>_id` : la ligne parente (clé étrangère) ;
 - `j2s_order` : la position de l'élément dans un tableau d'objets.
 
-Les stratégies `sibling`, `pivot` et `structured_pivot` sont détectées automatiquement (désactivables avec
-`--disable-strategy`, ou dans Setup > Strategy selection). `AutoSplit` dépend des seuils `--wide-column-threshold`,
-et `--stable-threshold`. Les autres se demandent : dans le TOML `--schema-config` (`strategy = …`),
+Les stratégies `sibling`, `pivot` et `structured_pivot` sont détectées automatiquement ; `sibling` et
+`structured_pivot` se désactivent avec `--disable-strategy` ou dans Setup > Strategy selection. `pivot` et `AutoSplit`
+forment le split des tables larges, toujours appliqué, qui dépend des seuils `--wide-column-threshold` et
+`--stable-threshold`. Les autres se demandent : dans le TOML `--schema-config` (`strategy = …`),
 dans l'écran Strategy de l'IHM, ou avec `--group-columns` pour les groupes de colonnes.
 
 ---

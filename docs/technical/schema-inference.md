@@ -191,7 +191,7 @@ Une table enfant large et creuse qui n'est pas une grille de suffixes (§ 7) est
 | **Pivot** | toutes les valeurs d'un seul type : les clés sont des données (devises, langues…) | toutes les clés dans le compagnon `{nom}_pivot` (EAV : `key`, `value`) |
 | **AutoSplit** | types mélangés : les clés sont des champs | clés fréquentes en colonnes, les autres dans `{nom}_wide` (§ 5) |
 
-JSONB n'est plus choisi automatiquement (#200), sauf avec `--disable-strategy pivot` et au-delà de 1 600 colonnes ; il se demande dans le TOML (`strategy = "jsonb"`), comme `pivot`.
+JSONB n'est plus choisi automatiquement (#200), sauf au-delà de 1 600 colonnes ; il se demande dans le TOML (`strategy = "jsonb"`), comme `pivot`.
 
 ---
 
