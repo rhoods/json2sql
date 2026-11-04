@@ -355,11 +355,11 @@ fn e_sibling_objects_under_three_letter_keys_get_a_key_column() {
 
 // ---------------------------------------------------------------------------
 // E'. Objets frères identiques sous des clés numériques et texte.
-// Aujourd'hui : la forme des clés coupe la fusion en deux tables (`_num`, `_key`), chacune avec une colonne `key`
-// (T5a ; avant : `key_id` pour `_num`). Cible (T5b) : une seule table `items_slots (key, url, w)`.
+// Les objets se ressemblent : une seule table, quelle que soit la forme des clés (T5b ; avant : deux tables `_num`
+// et `_key` coupées d'après la forme des clés).
 // ---------------------------------------------------------------------------
 #[test]
-fn e_identical_siblings_are_split_by_the_shape_of_their_keys() {
+fn e_identical_siblings_under_numeric_and_text_keys_make_one_table() {
     let rows: Vec<Value> = (0..20)
         .map(|i| {
             let slots = object(
@@ -372,12 +372,7 @@ fn e_identical_siblings_are_split_by_the_shape_of_their_keys() {
     let run = dry_run("items", &rows, &[], None);
     assert_eq!(
         run.shape(),
-        expected(&[
-            ("items", &["id"]),
-            ("items_slots", &[]),
-            ("items_slots_key", &["key", "url", "w"]),
-            ("items_slots_num", &["key", "url", "w"]),
-        ])
+        expected(&[("items", &["id"]), ("items_slots", &["key", "url", "w"]),])
     );
 }
 

@@ -8,6 +8,9 @@
 //! - fn `build_sibling_ctx` — construit le contexte de détection pour un parent.
 //! - fn `should_skip_parent` — filtre les parents non éligibles.
 //! - fn `collect_sibling_collapses` — collecte les collapses détectés sur tous les parents éligibles.
+//! - fn `detect_collapse` — le collapse d'un parent : clés mêlées, une seule table d'abord, sinon la détection mixte.
+//! - fn `single_collapse_of_alike_siblings` — une seule table pour des clés numériques et texte aux objets semblables
+//!   (#200) ; sinon la détection mixte décide.
 //! - fn `rename_shared_pivots` — renomme (hash) une table pivot dont un autre parent de la vague a déjà pris le nom.
 //! - fn `detect_homogeneous_collapse` — dispatch pour un groupe de clés homogènes.
 //! - fn `detect_mixed_collapse` — dispatch pour un groupe mixte numérique/texte.
@@ -620,15 +623,41 @@ pub(super) fn collect_sibling_collapses(
         ) else {
             continue;
         };
-        let detect = if is_mixed {
-            detect_mixed_collapse
-        } else {
-            detect_homogeneous_collapse
-        };
-        collapses.extend(detect(schemas, &ctx, obj_map, arr_map));
+        collapses.extend(detect_collapse(schemas, &ctx, is_mixed, obj_map, arr_map));
     }
     rename_shared_pivots(schemas, &mut collapses);
     collapses
+}
+
+/// The collapse of one parent: mixed numeric and text keys try one table first (#200), then the mixed detection.
+fn detect_collapse(
+    schemas: &[TableSchema],
+    ctx: &SiblingDetectCtx,
+    is_mixed: bool,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Option<Collapse> {
+    if !is_mixed {
+        return detect_homogeneous_collapse(schemas, ctx, obj_map, arr_map);
+    }
+    single_collapse_of_alike_siblings(schemas, ctx, obj_map, arr_map)
+        .or_else(|| detect_mixed_collapse(schemas, ctx, obj_map, arr_map))
+}
+
+/// Numeric and text keys whose objects are alike make one table, like keys of one shape: the split is decided by the
+/// objects, not by the shape of their keys (#200). Only for a parent with no data of its own, whose siblings fold into
+/// it (a single `SiblingCollapse` takes any key in Pass 2); otherwise `None`, and the mixed detection decides.
+fn single_collapse_of_alike_siblings(
+    schemas: &[TableSchema],
+    ctx: &SiblingDetectCtx,
+    obj_map: &std::collections::HashMap<String, Vec<usize>>,
+    arr_map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Option<Collapse> {
+    if ctx.parent_has_data {
+        return None;
+    }
+    detect_homogeneous_collapse(schemas, ctx, obj_map, arr_map)
+        .filter(|c| matches!(c.kind, CollapseKind::Single { .. }))
 }
 
 /// Each parent picks its pivot names against the tables already there, not against the other parents of the wave:
