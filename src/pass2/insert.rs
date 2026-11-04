@@ -12,7 +12,8 @@
 //! - struct `InsertCtx` — contexte mutable du passage d'insertion récursif (sinks + anomalies).
 //! - fn `insert_object` — point d'entrée : écrit la ligne (colonnes + générées), gère le cas racine
 //!   JSONB, délègue `AutoSplit` et récurse dans les enfants.
-//! - fn `write_root_jsonb` — cas spécial racine en stratégie Jsonb : écrit le blob JSON puis recurse.
+//! - fn `write_root_jsonb` — cas spécial racine en stratégie Jsonb : écrit le blob JSON puis recurse ; octet nul →
+//!   `NULL` + anomalie, comme `push_jsonb_col` (#192).
 //! - fn `insert_child_object` — dispatch un objet vers la fonction d'insertion selon son `InferredStrategy`
 //!   (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`, `NormalizeDynamicKeys`, ou insertion standard récursive) ;
 //!   seul aiguillage pour un objet enfant, un élément de tableau et une cible de routage (#172) ; un objet seul dans
@@ -31,7 +32,8 @@
 //! - fn `write_eav_rows` — une ligne EAV (clé, valeur) par clé moyenne du compagnon `AutoSplit`.
 //! - fn `push_data_col` — résout et coerce la valeur d'une colonne de données (flatten, JSONB, coercition).
 //! - fn `push_generated_col_insert` — écrit une colonne générée (`j2s_id`, `j2s_parent_id`, `j2s_order`).
-//! - fn `push_jsonb_col` — sérialise une valeur JSON brute en colonne JSONB.
+//! - fn `push_jsonb_col` — sérialise une valeur JSON brute en colonne JSONB ; octet nul (jsonb refuse `\u0000`) →
+//!   `NULL` + anomalie (#192).
 
 use std::collections::HashMap;
 
@@ -40,8 +42,9 @@ use uuid::Uuid;
 
 use crate::anomaly::collector::AnomalyCollect;
 use crate::db::copy_sink::RowBuilder;
-use crate::db::copy_text::{escape_copy_text, CopyEscaped};
+use crate::db::copy_text::CopyEscaped;
 use crate::error::Result;
+use crate::pass2::coercer::contains_null_byte;
 use crate::pass2::sink::RowSink;
 use crate::schema::grouping::sample::is_present;
 use crate::schema::table_schema::{InferredStrategy, TableSchema};
@@ -92,8 +95,14 @@ fn push_data_col<A: AnomalyCollect>(
 
     // JSONB columns accept any JSON value — serialize the raw value directly.
     if matches!(col.pg_type, crate::schema::type_tracker::PgType::Jsonb) {
-        push_jsonb_col(builder, json_val);
-        return Ok(());
+        return push_jsonb_col(
+            builder,
+            anomalies,
+            &schema.name,
+            &col.name,
+            row_id,
+            json_val,
+        );
     }
 
     // Objects and non-array-typed arrays become child tables, not columns.
@@ -216,20 +225,39 @@ pub(super) fn push_generated_col_insert(
     }
 }
 
-pub(super) fn push_jsonb_col(builder: &mut RowBuilder, json_val: &Value) {
+/// Push the JSON of `json_val` into a JSONB column, or `NULL` + one anomaly when a string or an object key of it holds
+/// a null byte: jsonb refuses `\u0000`, the JSON of a null byte, and would abort the COPY (#192).
+pub(super) fn push_jsonb_col<A: AnomalyCollect>(
+    builder: &mut RowBuilder,
+    anomalies: &mut A,
+    table: &str,
+    column: &str,
+    row_id: Uuid,
+    json_val: &Value,
+) -> Result<()> {
     if matches!(json_val, Value::Null) {
         builder.push_null();
-        return;
+        return Ok(());
     }
-    let json_str = serde_json::to_string(json_val).unwrap_or_default();
-    match escape_copy_text(&json_str) {
-        Some(escaped) => builder.push_value(&escaped),
-        None => builder.push_null(),
+    let json = serde_json::to_string(json_val).unwrap_or_default();
+    if contains_null_byte(json_val) {
+        builder.push_null();
+        return anomalies.record(
+            table,
+            column,
+            &row_id.to_string(),
+            "JSONB",
+            &json,
+            "string_contains_null_byte",
+        );
     }
+    push_text(builder, &json);
+    Ok(())
 }
 
-/// Write the full object as a JSONB blob for a root table with Jsonb strategy,
-/// then recurse into child fields so their tables still get populated.
+/// Write the full object as a JSONB blob for a root table with Jsonb strategy, then recurse into child fields so their
+/// tables still get populated. The blob is `NULL` + one anomaly when the object holds a null byte, as in
+/// `push_jsonb_col` (#192).
 fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
@@ -239,11 +267,23 @@ fn write_root_jsonb<S: RowSink, A: AnomalyCollect>(
 ) -> Result<()> {
     let mut builder = RowBuilder::new();
     builder.push_uuid(row_id); // j2s_id (no j2s_parent_id for root)
-                               // A null byte in the JSON makes the blob NULL.
-    push_text(
-        &mut builder,
-        &serde_json::to_string(obj).unwrap_or_default(),
-    );
+    let json = serde_json::to_string(obj).unwrap_or_default();
+    if obj
+        .iter()
+        .any(|(k, v)| k.contains('\0') || contains_null_byte(v))
+    {
+        builder.push_null();
+        ctx.anomalies.record(
+            &schema.name,
+            "data",
+            &row_id.to_string(),
+            "JSONB",
+            &json,
+            "string_contains_null_byte",
+        )?;
+    } else {
+        push_text(&mut builder, &json);
+    }
     write_row(ctx.sinks, ctx.anomalies, &schema.name, builder)?;
     recurse_children(path_map, ctx, schema, obj, row_id)
 }
@@ -1171,6 +1211,90 @@ mod tests {
             .collect();
         empty.sort();
         assert!(empty.is_empty(), "tables without rows: {empty:?}");
+    }
+
+    /// Under a `SiblingCollapseMulti` routing table (#193), a key with its own `ObjectArray` table, always an array of
+    /// objects (`tags`) or an object in one row and an array in the other (`links`, #169), gets one row per element; so
+    /// does an array under a sibling key, which `dispatch_child_routes` routes (`sizes`). The scalars of `labels` are
+    /// kept by its array column on the routing table: no anomaly on its table.
+    #[test]
+    fn an_array_of_objects_under_a_routing_table_reaches_its_table() {
+        let fixture = "multi_collapse_object_array.jsonl";
+        let path_map = pass1_path_map(fixture);
+        let by_name = |n: &str| path_map.values().find(|s| s.name == n).unwrap();
+        assert!(
+            matches!(
+                &*by_name("p_images").effective_strategy(),
+                InferredStrategy::SiblingCollapseMulti(_)
+            ),
+            "the fixture must reach a routing table"
+        );
+        for name in ["p_images_tags", "p_images_links"] {
+            let table = by_name(name);
+            assert_eq!(table.parent_table.as_deref(), Some("p_images"), "{name}");
+            assert!(
+                matches!(table.child_kind, Some(ChildKind::ObjectArray)),
+                "{name}"
+            );
+        }
+
+        let mut sinks: HashMap<String, CaptureSink> = path_map
+            .values()
+            .map(|s| (s.name.clone(), CaptureSink(Vec::new())))
+            .collect();
+        let mut recorder = Recorder::default();
+        let root = by_name("p");
+        let text = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(fixture),
+        )
+        .unwrap();
+        for line in text.lines() {
+            let obj: serde_json::Map<String, Value> = serde_json::from_str(line).unwrap();
+            let ctx = &mut InsertCtx {
+                sinks: &mut sinks,
+                anomalies: &mut recorder,
+            };
+            insert_object(&path_map, ctx, root, &obj, ID, None, None).unwrap();
+        }
+
+        let lost: Vec<(&str, &str)> = recorder
+            .anomalies
+            .iter()
+            .map(|(t, c, _)| (t.as_str(), c.as_str()))
+            .collect();
+        assert_eq!(
+            lost,
+            [("p_images", "labels")],
+            "only the object element of the labels column, which its table keeps"
+        );
+        // (value, j2s_order) of each row
+        for (table, column, expected) in [
+            ("p_images_tags", "name", &["a 0", "b 1", "c 0"][..]),
+            ("p_images_links", "url", &["x 0", "y 0", "z 1"]),
+            ("p_images_labels", "name", &["a 0"]),
+            (
+                "p_images_key_sizes",
+                "w",
+                &["100 0", "200 1", "300 0", "400 0"],
+            ),
+        ] {
+            let schema = by_name(table);
+            let position = |name: &str| schema.columns.iter().position(|c| c.name == name).unwrap();
+            let (value, order) = (position(column), position("j2s_order"));
+            let mut rows: Vec<String> = sinks[table]
+                .0
+                .iter()
+                .map(|r| {
+                    let text = String::from_utf8_lossy(r);
+                    let cells: Vec<&str> = text.trim_end_matches('\n').split('\t').collect();
+                    format!("{} {}", cells[value], cells[order])
+                })
+                .collect();
+            rows.sort();
+            assert_eq!(rows, expected, "{table}: value and j2s_order");
+        }
     }
 
     /// `x` is an object in one row and an array of objects in the other (#169), in both orders: its table has a row

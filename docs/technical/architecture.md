@@ -220,12 +220,12 @@ Abstraction sur l'écriture de lignes, découplant la logique d'insertion du sto
 Les écritures propres à chaque stratégie (`InferredStrategy`), appelées par `insert_child_object()` (dans `insert.rs`). Chacune construit ses lignes en suivant `schema.columns` ; les colonnes générées (`j2s_id`, clé parente, `j2s_order`) passent par `push_generated_col_insert()`.
 
 - `insert_pivot_object()` : une ligne `(key, value)` par champ
-- `insert_jsonb_object()` : l'objet entier sérialisé en JSONB, puis ses tables enfants
+- `insert_jsonb_object()` : l'objet entier sérialisé en JSONB, puis ses tables enfants ; un octet nul dans une chaîne ou une clé, que jsonb refuse, rend le blob `NULL` avec une anomalie (#192, comme `write_root_jsonb()` pour la racine)
 - `insert_structured_pivot_object()` : une ligne par base de la grille de suffixes `(name, value, suffixe1…)`
 - `insert_sibling_collapse_object()` / `insert_sibling_collapse_array_of_objects()` : tables sœurs fusionnées, une ligne par clé (et par élément quand les sœurs sont des tableaux d'objets)
 - `insert_normalize_dynamic_keys()` : une ligne par clé dynamique
 - `route_multi_collapse_children()` : `SiblingCollapseMulti`, répartit les clés entre les tables pivot de chaque groupe
-- `dispatch_child_routes()` / `route_independent_child()` : envoient un sous-objet vers sa table cible (après une fusion de tables sœurs)
+- `dispatch_child_routes()` / `route_independent_child()` : envoient un sous-objet ou un tableau vers sa table cible (après une fusion de tables sœurs ; sous une table de routage `SiblingCollapseMulti` pour le second, #193)
 - `insert_array()` : tableau d'objets, une ligne par élément objet (un tableau de scalaires n'y passe pas : c'est une colonne tableau, écrite avec les autres colonnes de sa table)
 
 ### `coercer.rs`
@@ -389,7 +389,7 @@ Application des stratégies de stockage wide sur les `TableSchema`.
 - **`apply_wide_strategy_columns()`** : restructure les colonnes d'une table selon une `InferredStrategy` (Pivot, Jsonb, StructuredPivot…)
 - **`apply_structured_pivot_columns()`** : colonnes pour StructuredPivot — `(name TEXT, value <type>, <suffix_col>...)`
 - **`apply_normalize_dynamic_keys()`** : collapse les sous-objets dynamiques d'une table en une seule table normalisée avec colonne d'ID
-- **`apply_flatten()`** : inline les colonnes scalaires d'un enfant dans le parent avec un préfixe
+- **`apply_flatten()`** : inline les colonnes scalaires d'un enfant dans le parent avec un préfixe ; le TOML ne l'appelle que pour un objet en `Columns` sans tables, routes ni colonnes aplaties à lui (`flatten_refusal` dans `config.rs`, avertissement `FlattenRefused`, #170)
 - **`apply_jsonb_flatten()`** : inline un enfant comme une seule colonne JSONB sur le parent
 - **`build_union_columns()`** : union des colonnes de plusieurs tables sœurs (plus large type par colonne)
 - **`classify_key_shape()`** / **`suggest_wide_strategy()`** : classification des clés et sélection automatique de la stratégie

@@ -42,6 +42,7 @@ symbols:
   - insert_object
   - write_row_of
   - write_root_jsonb
+  - push_jsonb_col
   - write_group_rows
   - write_autosplit_rows
   - recurse_children
@@ -141,7 +142,9 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   routage (`dispatch_child_routes`, `route_independent_child`) passent tous par `insert_child_object`, qui choisit
   l'écriture selon `effective_strategy` et transmet `order` (l'index de l'élément, pour `j2s_order`). Un objet seul
   dans une table `ObjectArray` (sa clé vaut ailleurs un tableau d'objets) y est un tableau d'un élément : `order` 0,
-  car `j2s_order` est NOT NULL (#169). Une table
+  car `j2s_order` est NOT NULL (#169). Un tableau, lui, passe par `insert_array`, depuis `recurse_children`,
+  `dispatch_child_routes` et `route_independent_child` : sous une table de routage `SiblingCollapseMulti`, une clé
+  qui a sa propre table y va, objet ou tableau ; seules les autres sont réparties entre les groupes (#193). Une table
   `Pivot` ou `SiblingCollapse` atteinte autrement serait écrite comme une table `Columns` : ses colonnes ne
   correspondraient pas à l'objet, et les enfants qu'elle absorbe seraient perdus. La racine n'y passe pas : elle ne
   prend jamais une stratégie qui écrit une ligne par clé (elle n'a pas de ligne parente à laquelle relier ces
@@ -160,7 +163,8 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   `nutriscore.2023.data.components` sous la fusion `nutriscore.data`, #180), puis son chemin dans `path_map` ; absent,
   l'objet ou le tableau passe par `record_missing_table`, qui laisse une anomalie
   (type attendu `table`) sur la table parente. Elle se tait quand rien n'est perdu ou que l'abandon est voulu : valeur
-  vide (`{}`, `[]`), parent en `Jsonb` (le blob garde tout), colonne du même nom ou enfant aplati (`flatten_sources`),
+  vide (`{}`, `[]`), parent en `Jsonb` (le blob garde tout), colonne du même nom ou objet d'un enfant aplati
+  (`flatten_sources` ; un tableau sous sa clé laisse une anomalie, ses colonnes ne lisent qu'un objet, #170),
   sur le parent ou sur l'une de ses tables de groupe (colonne tableau, `JsonbFlatten`, type mixte), ou enfant retiré
   par un `Skip` (`skipped_children`, rempli par `apply_user_overrides` et gardé dans le snapshot ; il y note aussi
   les clés de `child_routes` qui menaient à la table retirée). Même règle pour la table pivot d'un groupe
@@ -191,6 +195,14 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   est donc écrite en heure UTC (`to_utc`, #194), dans une colonne comme dans un tableau ; `Z`, une heure sans fuseau
   et une date restent telles qu'écrites. Une colonne qui mêle heures sans fuseau et heures avec décalage mêle ainsi
   des heures écrites et des heures UTC. Une colonne DATE garde le jour écrit, décalage compris. Chaque ligne compte aussi dans le total de sa table (`inc_total`), dénominateur du taux d'anomalies.
+- **Un blob `jsonb` ne contient jamais d'octet nul** (#192). Dans le JSON, l'octet nul s'écrit `\u0000`, que le type
+  `jsonb` refuse : le `COPY` échouerait, et tout l'import avec. `push_jsonb_col` (colonne `JSONB`, table enfant en
+  `Jsonb`) et `write_root_jsonb` (racine en `Jsonb`) cherchent donc l'octet nul dans les chaînes et les clés de la
+  valeur, à toute profondeur, avant de l'écrire. S'il y en a un, le blob vaut `NULL`, avec une anomalie
+  `string_contains_null_byte`, comme une colonne texte et un élément de `JSONB[]`. Pour une racine
+  en `Jsonb`, c'est tout l'enregistrement : le rapport n'en garde que 200 caractères. Une nouvelle écriture de JSON
+  vers une colonne `jsonb` doit faire le même test, sur la valeur et pas sur le JSON écrit : une chaîne qui contient
+  le texte `\u0000` devient `\\u0000` dans le JSON, où une recherche de `\u0000` la prendrait à tort pour un octet nul.
 - **La stratégie lue est `TableSchema::effective_strategy`**, pas `inferred_strategy` (voir la fiche des stratégies).
 - **Deux points d'entrée.** La CLI (`run_pass2`) et le worker de l'IHM (`run_pipeline` de `json2sql-worker`) appellent
   tous deux `run_interruptible`, chacun après son propre DDL. Un changement d'appel se fait dans les deux.

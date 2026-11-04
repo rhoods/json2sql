@@ -132,6 +132,11 @@ CREATE TABLE products_brand (
 );
 ```
 
+PostgreSQL refuse l'octet nul dans une colonne JSONB. Un objet qui en contient un, dans une chaîne ou dans une clé,
+n'y est pas écrit : sa colonne `data` vaut `NULL`, et l'objet est rapporté comme anomalie
+(`string_contains_null_byte`). L'import continue. Sur la table racine, c'est tout l'enregistrement qui manque ; le
+rapport d'anomalies n'en garde que les 200 premiers caractères.
+
 ---
 
 ## `structured_pivot` : des clés à suffixes en lignes typées
@@ -297,6 +302,10 @@ json2sql --input examples/strategies/products.jsonl --schema-config examples/str
 strategy = "flatten"
 prefix = "brand_"
 ```
+
+Seul un objet simple s'aplatit : une table en `Columns`, sans tables filles. Un tableau d'objets, une table pivot ou
+JSONB, ou un objet qui contient d'autres objets ou tableaux d'objets restent des tables, avec un avertissement
+(`cannot be flattened`) : les aplatir perdrait des données.
 
 Sans : voir `products` et `products_brand` dans l'exemple par défaut. Avec, la table `products_brand` disparaît :
 

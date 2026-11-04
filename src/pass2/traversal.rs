@@ -39,7 +39,8 @@
 //! - fn `insert_sibling_collapse_object` — une ligne par clé sibling.
 //! - fn `insert_sibling_collapse_array_of_objects` — variante tableau d'objets (avec `j2s_order`) ;
 //!   scalaires → anomalie.
-//! - fn `route_independent_child` — route une clé vers un enfant indépendant si présent.
+//! - fn `route_independent_child` — route une clé vers un enfant indépendant si présent : un objet, ou un tableau
+//!   comme `recurse_children` (#193).
 //! - fn `split_keys_by_group` — route les enfants indépendants, répartit les autres clés par groupe.
 //! - fn `group_path_segment` — segment de chemin de la table pivot d'un groupe.
 //! - fn `route_multi_collapse_children` — dispatch chaque clé vers son groupe pivot synthétique.
@@ -214,7 +215,14 @@ pub(super) fn insert_jsonb_object<S: RowSink>(
         if col.is_generated {
             push_generated_col_insert(&mut builder, col, child_id, Some(parent_id), order);
         } else {
-            push_jsonb_col(&mut builder, value);
+            push_jsonb_col(
+                &mut builder,
+                anomalies,
+                &schema.name,
+                &col.name,
+                child_id,
+                value,
+            )?;
         }
     }
     write_row(sinks, anomalies, &schema.name, builder)?;
@@ -595,28 +603,44 @@ pub(super) fn insert_normalize_dynamic_keys<S: RowSink>(
     Ok(())
 }
 
-/// Route a key-value pair to an independent child schema if one exists.
-/// Returns `true` if routed (caller should skip group routing), `false` otherwise.
+/// Route a key-value pair to an independent child schema if one exists: an object as an object child, an array as
+/// `recurse_children` does (#193). Returns `true` if routed (caller should skip group routing), `false` otherwise.
 fn route_independent_child<S: RowSink>(
     path_map: &HashMap<String, TableSchema>,
     sinks: &mut HashMap<String, S>,
     anomalies: &mut impl AnomalyCollect,
-    schema_name: &str,
+    schema: &TableSchema,
+    key: &str,
     value: &Value,
-    child_path_key: &str,
     routing_id: Uuid,
 ) -> Result<bool> {
-    let Some(child_schema) = path_map.get(child_path_key) else {
+    let routing_path = schema.path.join(&PATH_SEP.to_string());
+    let Some(child_schema) = path_map.get(&format!("{routing_path}{PATH_SEP}{key}")) else {
         return Ok(false);
     };
-    if child_schema.parent_table.as_deref() != Some(schema_name) {
+    if child_schema.parent_table.as_deref() != Some(schema.name.as_str()) {
         return Ok(false);
     }
-    let Value::Object(nested) = value else {
-        return Ok(false);
-    };
-    let ctx = &mut InsertCtx { sinks, anomalies };
-    insert_child_object(path_map, ctx, child_schema, nested, value, routing_id, None)?;
+    match value {
+        Value::Object(nested) => {
+            let ctx = &mut InsertCtx { sinks, anomalies };
+            insert_child_object(path_map, ctx, child_schema, nested, value, routing_id, None)?;
+        }
+        // The routing table may keep the scalars of the key in an array column, as any parent.
+        Value::Array(arr) => {
+            let keeps = keeps_scalars_in_array_column(schema, key);
+            insert_array(
+                path_map,
+                sinks,
+                anomalies,
+                child_schema,
+                arr,
+                routing_id,
+                keeps,
+            )?;
+        }
+        _ => return Ok(false),
+    }
     Ok(true)
 }
 
@@ -631,19 +655,9 @@ fn split_keys_by_group<S: RowSink>(
     routing_id: Uuid,
     groups: &[SiblingGroup],
 ) -> Result<Vec<serde_json::Map<String, Value>>> {
-    let routing_path = schema.path.join(&PATH_SEP.to_string());
     let mut group_submaps = vec![serde_json::Map::new(); groups.len()];
     for (key, value) in obj {
-        let child_path_key = format!("{routing_path}{PATH_SEP}{key}");
-        if route_independent_child(
-            path_map,
-            sinks,
-            anomalies,
-            &schema.name,
-            value,
-            &child_path_key,
-            routing_id,
-        )? {
+        if route_independent_child(path_map, sinks, anomalies, schema, key, value, routing_id)? {
             continue;
         }
         if let Some(idx) = find_group_for_key(groups, key) {
@@ -760,7 +774,7 @@ fn record_dropped_scalar(
 
 /// One anomaly for an object or array under `parent` whose key has no table to go to (#167), unless it is dropped on
 /// purpose: empty, kept by the parent (its `Jsonb` blob, a column of the same name on it or on one of its column
-/// groups, a flattened child) or Skip-ed by the user.
+/// groups, the object of a flattened child) or Skip-ed by the user.
 pub(super) fn record_missing_table(
     path_map: &HashMap<String, TableSchema>,
     anomalies: &mut impl AnomalyCollect,
@@ -774,9 +788,11 @@ pub(super) fn record_missing_table(
         Value::Array(a) => a.is_empty(),
         _ => true,
     };
-    // Column groups take their columns and flatten sources from the parent (#78): they keep the field too.
+    // Column groups take their columns and flatten sources from the parent (#78): they keep the field too. The columns
+    // of a flattened child are read from an object only (`column_value`): an array under its key is lost (#170).
     let keeps = |t: &TableSchema| {
-        t.find_by_original(field).is_some() || t.flatten_sources.values().any(|f| f == field)
+        t.find_by_original(field).is_some()
+            || (value.is_object() && t.flatten_sources.values().any(|f| f == field))
     };
     if empty
         || matches!(*parent.effective_strategy(), InferredStrategy::Jsonb)
@@ -1988,6 +2004,11 @@ mod tests {
         assert_eq!(record(&parent, "lost", "[]"), 0, "tableau vide");
         assert_eq!(record(&parent, "tags", r#"["x"]"#), 0, "colonne tableau");
         assert_eq!(record(&parent, "n", r#"{"k": 1}"#), 0, "enfant aplati");
+        assert_eq!(
+            record(&parent, "n", r#"[{"k": 1}]"#),
+            1,
+            "tableau sous un enfant aplati : ses colonnes ne lisent qu'un objet (#170)"
+        );
         assert_eq!(record(&parent, "gone", r#"{"k": 1}"#), 0, "enfant Skip-é");
         parent.inferred_strategy = InferredStrategy::Jsonb;
         assert_eq!(record(&parent, "lost", r#"{"k": 1}"#), 0, "blob Jsonb");
