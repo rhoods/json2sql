@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Base de données, création des tables, contraintes, réglages du serveur et connexions
-verified_at: db4ec51
+verified_at: 28a6e29
 files:
   - src/db/connection.rs
   - src/db/ddl.rs

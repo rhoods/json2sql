@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Finalisation du schéma, des observations de la Pass 1 aux TableSchema
-verified_at: db4ec51
+verified_at: 28a6e29
 files:
   - src/schema/finalizer/
   - src/schema/cascading/

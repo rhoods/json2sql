@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: IHM, état, écrans, composants, persistance du projet
-verified_at: 812f341
+verified_at: 28a6e29
 files:
   - json2sql-ui/src/main.rs
   - json2sql-ui/src/state/

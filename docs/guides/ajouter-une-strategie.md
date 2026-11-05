@@ -1,7 +1,7 @@
 ---
 type: recette
 sujet: Ajouter une stratégie de matérialisation
-verified_at: db4ec51
+verified_at: 28a6e29
 files:
   - src/schema/table_schema.rs
   - src/schema/strategies.rs
