@@ -1,6 +1,6 @@
 ---
 type: carte
-sujet: Groupes de colonnes, proposition (--suggest-groups) et application (TOML, --group-columns, IHM)
+sujet: Groupes de colonnes, proposition (--suggest) et application (TOML, --group-columns, IHM)
 verified_at: db4ec51
 files:
   - src/schema/grouping/
@@ -109,7 +109,7 @@ symbols:
 
 Carte de la zone `src/schema/grouping/` et `src/schema/column_groups.rs`, pour savoir où intervenir et ce qui casse
 sans erreur de compilation. Le fonctionnement est décrit dans [strategies.md](../functional/strategies.md) (section
-« Groupes de colonnes »), [usage.md](../functional/usage.md) (`column_groups`, `--group-columns`, `--suggest-groups`),
+« Groupes de colonnes »), [usage.md](../functional/usage.md) (`column_groups`, `--group-columns`, `--suggest`),
 [schema-inference.md](../technical/schema-inference.md) et [modules.md](../technical/modules.md) ; le côté stratégies
 dans [ajouter-une-strategie.md](ajouter-une-strategie.md) ; l'échantillon pris en Pass 1 (`RowSampler`, `samples_of`)
 dans la [carte Pass 1](pass1.md).
@@ -120,7 +120,7 @@ Un groupe de colonnes est une **couche posée après la finalisation** : il déc
 (`TableSchema::takes_column_groups`) en tables 1:1, une par thème de colonnes. La table garde sa stratégie. La zone
 fait deux choses :
 
-- **proposer** (`--suggest-groups`, #78) : un TOML `column_groups` et un rapport, sans toucher la base ;
+- **proposer** (`--suggest`, #78) : un TOML `column_groups` et un rapport, sans toucher la base ;
 - **appliquer** : `apply_column_groups` lit un TOML `column_groups` ; `apply_name_groups` applique les groupes
   confirmés que la zone propose elle-même (`--group-columns`, case « Column groups » de l'IHM, #91), en passant par
   le même `apply_column_groups`.
@@ -137,11 +137,11 @@ plusieurs familles n'est confirmé que si un **signal de données** (tableau ci-
 | Nouveau signal de données | `Signal`, `DataSignals::verdict`, `DataSignals::evidence`, `evidence_text` (§ 4) | en partie : pas pour la liste de `DataSignals::evidence` |
 | Seuils de la proposition | constantes en tête de `proposal.rs`, `LexicalParams::default`, `MIN_TABLE_COLUMNS` ; mesurer avec `tests/bench_column_groups.rs` (§ 4) | non |
 | Découpe des noms | `normalize` (`names.rs`) | non |
-| Sorties de `--suggest-groups` | `to_toml`, `to_markdown` (`render.rs`) | non |
+| Sorties de `--suggest` | `to_toml`, `to_markdown` (`render.rs`) | non |
 | Règles d'un groupe appliqué | `apply_column_groups`, `judge`, `check_group`, `forbid_emptying`, `MIN_GROUP_COLUMNS` | non |
 | Nom des tables de groupe | `group_table_name` (`naming.rs`), `avoid_taken_names` | non |
 | Tables proposées | `eligible`, puis les filtres de `suggest` et de `name_proposals` (§ 3) | non |
-| Échantillon | Pass 1 : `samples_of_rows` ; `--suggest-groups` : `sample_tables` ; stocké : `StoredSample` (§ 4) | non pour le snapshot |
+| Échantillon | Pass 1 : `samples_of_rows` ; `--suggest` : `sample_tables` ; stocké : `StoredSample` (§ 4) | non pour le snapshot |
 | IHM | `build_effective_schemas`, `display_schemas`, `group_preview`, `splittable_tables` (`overrides.rs`) | non |
 | Écriture en Pass 2 | `write_group_rows` (`insert.rs`) | non |
 | Stratégie qui accepte ou non les groupes | `TableSchema::takes_column_groups`, voir [ajouter-une-strategie.md](ajouter-une-strategie.md) | non |
@@ -174,7 +174,7 @@ CLI : post_process_schema (pipeline.rs)
             └─ confirmed_config → apply_column_groups
        └─ reindex_stats
 
---suggest-groups : suggest_groups → suggest (suggest.rs)
+--suggest : suggest_groups → suggest (suggest.rs)
   ├─ data_signals : relit le fichier (sample_tables, DEFAULT_BUDGET lignes à pas régulier)
   ├─ proposal_for pour chaque table eligible (+ placements avec un modèle)
   └─ Suggestion { toml: to_toml, report: to_markdown }
@@ -196,8 +196,8 @@ par `RowSampler` ; il est sauvé dans le snapshot (`SchemaSnapshot`, champ `samp
 - **Les signaux s'éteignent sans avertissement en CLI et dans l'IHM.** `signals_of` (`auto.rs`) rend une raison au
   lieu de signaux quand la table n'a pas d'échantillon (vieux snapshot) ou que ses colonnes ont changé depuis la Pass 1
   (un `flatten` du TOML) ; la table est alors groupée par ses noms seuls, donc aucune fusion n'est appliquée. Cette
-  raison n'est montrée nulle part (le rapport de `--suggest-groups` donne la sienne, celle de sa propre relecture).
-- **Deux échantillons différents.** `--suggest-groups` relit le fichier (`sample_tables`, pas régulier sur les lignes
+  raison n'est montrée nulle part (le rapport de `--suggest` donne la sienne, celle de sa propre relecture).
+- **Deux échantillons différents.** `--suggest` relit le fichier (`sample_tables`, pas régulier sur les lignes
   racine, `DEFAULT_BUDGET`) ; `--group-columns` et l'IHM lisent l'échantillon de la Pass 1. Le TOML proposé et les
   groupes appliqués peuvent donc confirmer des fusions différentes sur le même fichier.
 - **Lire une colonne comme la Pass 2.** `key_path` (`suggest.rs`) recopie la règle de `column_value` et
@@ -211,7 +211,7 @@ par `RowSampler` ; il est sauvé dans le snapshot (`SchemaSnapshot`, champ `samp
   groupes automatiques pour cette table.
 - **Les groupes automatiques sont recalculés à chaque chargement.** Changer un seuil, `normalize` ou un signal change
   en silence ce qu'importe un snapshot existant (cases cochées, `--group-columns`). Un TOML déjà produit par
-  `--suggest-groups` reste, lui, figé.
+  `--suggest` reste, lui, figé.
 - **Le même TOML doit donner le même schéma.** `SchemaConfig` range ses tables dans une `HashMap` ;
   `apply_column_groups` les trie par nom avant d'appliquer, et applique les groupes d'une table dans l'ordre de leurs
   noms. Une nouvelle boucle sur ces tables doit trier aussi.
@@ -285,7 +285,7 @@ tables de groupe. Les autres ne demandent pas de base.
 
 Vues en écrivant la fiche, pas tranchées.
 
-1. **Deux échantillonneurs** (#152). `--suggest-groups` relit le fichier avec sa propre règle (`sample_tables`), alors que
+1. **Deux échantillonneurs** (#152). `--suggest` relit le fichier avec sa propre règle (`sample_tables`), alors que
    `--group-columns` et l'IHM utilisent l'échantillon de la Pass 1 : deux codes, et un TOML proposé qui peut confirmer
    d'autres fusions que celles appliquées.
 2. **La lecture d'une colonne est écrite deux fois** (#153) : `key_path` (`suggest.rs`) et `column_value` (`insert.rs`).

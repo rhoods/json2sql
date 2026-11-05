@@ -120,12 +120,16 @@ async fn test_pg_array_pivot_split_keeps_arrays_e2e() {
     .await;
 }
 
-/// Issues #85, #163 — wide object with suffix keys and an array: the suffix grid goes to the
+/// Issues #85, #163 — wide object with suffix keys and an array: the suffix grid of the TOML (#200, T8) goes to the
 /// `_pivot` companion, the pg-array field stays on the identity table.
 #[tokio::test]
 async fn test_pg_array_structured_pivot_keeps_arrays_e2e() {
     integration::with_pg_container(|client, schema, url| async move {
-        let result = run_pipeline(base_config(url, schema.clone(), "tc_pg_array_structured_pivot.jsonl", 3)).await;
+        let config = PipelineConfig {
+            schema_config: Some(integration::fixture("tc_pg_array_structured_pivot.toml")),
+            ..base_config(url, schema.clone(), "tc_pg_array_structured_pivot.jsonl", 3)
+        };
+        let result = run_pipeline(config).await;
         assert!(result.is_ok(), "pg_array_structured_pivot pipeline failed: {result:?}");
 
         let sql = format!(

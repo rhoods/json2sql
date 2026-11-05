@@ -1261,138 +1261,36 @@ async fn test_jsonb_strategy_root_table() {
 }
 
 // ---------------------------------------------------------------------------
-// #163 — StructuredPivot détecté automatiquement : la grille part dans le compagnon
-// products_nut_pivot (une ligne par base), la table fille objet `comp`, le tableau `tags` et le
-// scalaire `brand` restent avec products_nut. Widget → 3 lignes de pivot, Gadget → 3 (serving NULL).
+// #200, T8 — la grille de suffixes n'est plus appliquée sans le TOML : la table, large et d'un seul type de valeur,
+// passe par le split identité/compagnon (Pivot), et `--disable-strategy structured_pivot` est refusé.
 // ---------------------------------------------------------------------------
-#[tokio::test]
-async fn test_structured_pivot_split_keeps_children_arrays_and_other_scalars() {
-    common::with_schema_url(|client, schema, url| async move {
-        let path = common::fixture("structured_pivot_split.jsonl");
-        let config = pass1::runner::Pass1Config {
-            registry: RegistryConfig {
-                wide_column_threshold: 3,
-                ..Default::default()
-            },
-            ..common::pass1_config("products")
-        };
-        let p1 = pass1::runner::run(&path, &config, None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
-            .await
-            .unwrap();
-        let p2 = pass2::runner::run(
-            &path,
-            &p1.schemas,
-            &client,
-            &url,
-            &common::pass2_config("products", &schema),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
-        for (table, rows) in [
-            ("products", 2),
-            ("products_nut", 2),
-            ("products_nut_pivot", 6),
-            ("products_nut_comp", 2),
-        ] {
-            assert_eq!(common::row_count(&client, &schema, table).await, rows, "{table}");
-        }
-        assert_eq!(common::array_elements(&client, &schema, "products_nut", "tags").await, 3);
-
-        let widget = |select: &str, from_nut: &str| {
-            format!(
-                "SELECT {select} FROM \"{schema}\".\"products\" p \
-                 JOIN \"{schema}\".\"products_nut\" n ON n.j2s_products_id = p.j2s_id \
-                 {from_nut} WHERE p.name = 'Widget'"
-            )
-        };
-        let fat = client
-            .query_one(
-                &widget(
-                    "v.value, v._100g, v.serving",
-                    &format!(
-                        "JOIN \"{schema}\".\"products_nut_pivot\" v \
-                         ON v.j2s_products_nut_id = n.j2s_id AND v.name = 'fat'"
-                    ),
-                ),
-                &[],
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            (fat.get::<_, Option<i32>>(0), fat.get::<_, Option<i32>>(1), fat.get::<_, Option<i32>>(2)),
-            (Some(1), Some(2), Some(3))
-        );
-        let comp = client
-            .query_one(
-                &widget(
-                    "n.brand, c.k",
-                    &format!(
-                        "JOIN \"{schema}\".\"products_nut_comp\" c ON c.j2s_products_nut_id = n.j2s_id"
-                    ),
-                ),
-                &[],
-            )
-            .await
-            .unwrap();
-        assert_eq!(comp.get::<_, Option<String>>(0).as_deref(), Some("acme"));
-        assert_eq!(comp.get::<_, Option<i32>>(1), Some(1));
-    })
-    .await;
-}
-
-// disable structured_pivot → suffix detection skippée → fallback suggest_wide_strategy.
-// Fixture : nutrients avec 9 colonnes numériques à pattern _100g/_serving (3 bases).
-// wide_column_threshold=4 : 9 colonnes > 4 → wide detection active.
-// Activé : StructuredPivot. Désactivé : Pivot (all-numeric fallback).
 #[test]
-fn test_disable_structured_pivot_gives_pivot_integration() {
+fn test_suffix_grid_is_not_applied_without_the_toml_integration() {
     use json2sql::schema::strategies::StrategyName;
     use json2sql::schema::table_schema::InferredStrategy;
-    use std::collections::HashSet;
 
     let path = common::fixture("structured_pivot.jsonl");
-    let base_config = pass1::runner::Pass1Config {
+    let config = pass1::runner::Pass1Config {
         registry: RegistryConfig {
             wide_column_threshold: 4,
             ..Default::default()
         },
         ..common::pass1_config("products")
     };
-
-    // structured_pivot activé : StructuredPivot attendu sur products_nutrients
-    let p1_normal = pass1::runner::run(&path, &base_config, None).unwrap();
+    let p1 = pass1::runner::run(&path, &config, None).unwrap();
     assert!(
-        p1_normal.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::StructuredPivot(_))),
-        "structured_pivot enabled → InferredStrategy::StructuredPivot attendu sur products_nutrients"
-    );
-
-    // structured_pivot désactivé : aucun StructuredPivot, Pivot à la place (all-numeric)
-    let config_disabled = pass1::runner::Pass1Config {
-        registry: RegistryConfig {
-            disabled_strategies: HashSet::from([StrategyName::StructuredPivot]),
-            wide_column_threshold: 4,
-            ..Default::default()
-        },
-        ..common::pass1_config("products")
-    };
-    let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
-    assert!(
-        !p1_disabled
-            .schemas
+        !p1.schemas
             .iter()
             .any(|s| matches!(s.inferred_strategy, InferredStrategy::StructuredPivot(_))),
-        "structured_pivot disabled → aucun InferredStrategy::StructuredPivot"
+        "no StructuredPivot without suffix_columns"
     );
     assert!(
-        p1_disabled
-            .schemas
+        p1.schemas
             .iter()
             .any(|s| s.inferred_strategy == InferredStrategy::Pivot),
-        "structured_pivot disabled → InferredStrategy::Pivot attendu (fallback all-numeric)"
+        "InferredStrategy::Pivot attendu (valeurs toutes numériques)"
     );
+    assert!(StrategyName::try_from("structured_pivot").is_err());
 }
 
 // ---------------------------------------------------------------------------

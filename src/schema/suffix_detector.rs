@@ -7,7 +7,6 @@
 //!
 //! Fonctions :
 //! - fn `build_suffix_to_bases` — énumère les découpages (base, suffixe) candidats sur `_`.
-//! - fn `scalar_keys` — clés scalaires d'une table : ni objet, ni tableau, ni colonne PG array.
 //! - fn `assign_keys` — attribue chaque clé au suffixe le plus long qui la termine.
 //! - fn `detect_suffix_schema` — détecte automatiquement la grille bases × suffixes et ses clés.
 //! - fn `grid_keys` — clés nues et clés de la grille d'une attribution.
@@ -20,12 +19,13 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use indexmap::IndexMap;
-
 use crate::schema::naming::sanitize_identifier;
-use crate::schema::observer::TableEntry;
+use crate::schema::stats::{ColumnStats, ObservedKeys};
 use crate::schema::table_schema::{SuffixColumn, SuffixSchema};
-use crate::schema::type_tracker::{widen_pg_types, PgType, TypeTracker};
+use crate::schema::type_tracker::{widen_pg_types, PgType};
+
+/// Minimum fraction of the keys a proposed grid must cover (#163); the grid is only proposed (#200).
+pub const SUFFIX_MIN_COVERAGE: f64 = 0.3;
 
 /// Minimum number of distinct bases a suffix must appear with: two let a pair of dynamic keys
 /// (`en:celery_seed`, `en:mustard_seed`) invent a `_seed` suffix (#163).
@@ -49,19 +49,6 @@ fn build_suffix_to_bases(all_keys: &[&str]) -> HashMap<String, HashSet<String>> 
     suffix_to_bases
 }
 
-/// Keys of the table that hold scalars: objects and arrays are child tables or PG array columns,
-/// never part of a grid.
-fn scalar_keys(entry: &TableEntry) -> Vec<&str> {
-    entry
-        .columns
-        .iter()
-        .filter(|(k, t)| {
-            !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k)
-        })
-        .map(|(k, _)| k.as_str())
-        .collect()
-}
-
 /// Suffix → keys ending with it, each key under the longest suffix that ends it with a non-empty
 /// base (`fat_prepared_100g` goes to `_prepared_100g`, not `_100g`). Pass 2 matches the same way.
 fn assign_keys<'a>(keys: &[&'a str], suffixes: &[String]) -> BTreeMap<String, Vec<&'a str>> {
@@ -78,17 +65,18 @@ fn assign_keys<'a>(keys: &[&'a str], suffixes: &[String]) -> BTreeMap<String, Ve
     assigned
 }
 
-/// The grid of a wide table: suffixes shared by at least `MIN_BASES` bases and by at least
+/// The grid of a wide table, from its scalar keys (objects and arrays are child tables or PG array columns, never
+/// part of a grid): suffixes shared by at least `MIN_BASES` bases and by at least
 /// `coverage_threshold` of all the bases, with the keys it covers (suffixed keys and bare bases).
 /// The grid must also cover `coverage_threshold` of the table's scalar columns.
 ///
 /// Returns `None` if no grid is found above threshold.
 #[must_use]
 pub fn detect_suffix_schema(
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     coverage_threshold: f64,
 ) -> Option<(SuffixSchema, HashSet<String>)> {
-    let keys = scalar_keys(entry);
+    let keys: Vec<&str> = observed.keys().map(String::as_str).collect();
     let assigned = retained_assignment(&keys, coverage_threshold);
     if assigned.is_empty() {
         return None;
@@ -97,8 +85,7 @@ pub fn detect_suffix_schema(
     if (grid.len() as f64 / keys.len() as f64) < coverage_threshold {
         return None;
     }
-    let (suffix_cols, value_type) =
-        build_suffix_cols_and_value_type(&assigned, &bare, &entry.columns);
+    let (suffix_cols, value_type) = build_suffix_cols_and_value_type(&assigned, &bare, observed);
     let schema = SuffixSchema {
         suffix_cols,
         value_type,
@@ -165,7 +152,7 @@ fn retained_assignment<'a>(
 fn build_suffix_cols_and_value_type(
     assigned: &BTreeMap<String, Vec<&str>>,
     bare: &[&str],
-    columns: &IndexMap<String, TypeTracker>,
+    columns: &ObservedKeys,
 ) -> (Vec<SuffixColumn>, PgType) {
     let suffix_cols = assigned
         .iter()
@@ -181,11 +168,10 @@ fn build_suffix_cols_and_value_type(
 
 /// Widest type of the observed keys (`TEXT` when there is none). A key only ever seen as `null`
 /// says nothing about the type: its tracker falls back to `TEXT` and would widen the whole column.
-fn widest_type<'a>(trackers: impl Iterator<Item = &'a TypeTracker>) -> PgType {
-    trackers
-        .filter(|t| t.total_count > t.null_count)
-        .fold(None::<PgType>, |acc, tracker| {
-            let t = tracker.to_pg_type();
+fn widest_type<'a>(keys: impl Iterator<Item = &'a ColumnStats>) -> PgType {
+    keys.filter(|k| k.total_count > k.null_count)
+        .fold(None::<PgType>, |acc, key| {
+            let t = key.pg_type.clone();
             Some(match acc {
                 None => t,
                 Some(a) => widen_pg_types(a, &t),
@@ -233,7 +219,7 @@ pub fn declared_suffixes(suffix_list: &[String]) -> Vec<String> {
 #[must_use]
 pub fn build_suffix_schema_from_list(
     suffix_list: &[String],
-    columns: &IndexMap<String, TypeTracker>,
+    columns: &ObservedKeys,
 ) -> (SuffixSchema, HashSet<String>) {
     let suffixes = declared_suffixes(suffix_list);
     let keys: Vec<&str> = columns.keys().map(String::as_str).collect();
@@ -269,6 +255,8 @@ pub fn build_suffix_schema_from_list(
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
+    use crate::schema::type_tracker::TypeTracker;
+    use indexmap::IndexMap;
 
     fn make_object_tracker() -> TypeTracker {
         let mut t = TypeTracker::new(256);
@@ -276,16 +264,28 @@ mod tests {
         t
     }
 
-    fn entry_of(columns: IndexMap<String, TypeTracker>) -> TableEntry {
-        TableEntry {
-            path_key: "t".to_string(),
-            path: vec!["t".to_string()],
-            parent_key: String::new(),
-            columns,
-            child_kind: None,
-            array_columns: IndexMap::new(),
-            row_count: 1,
+    fn stat_of(key: &str, tracker: &TypeTracker) -> ColumnStats {
+        ColumnStats {
+            table_name: "t".to_string(),
+            column_name: key.to_string(),
+            original_name: key.to_string(),
+            pg_type: tracker.to_pg_type(),
+            total_count: tracker.total_count,
+            null_count: tracker.null_count,
+            type_histogram: Vec::new(),
         }
+    }
+
+    /// The scalar keys of `columns`, as Pass 1 keeps them in its statistics: no object field.
+    fn entry_of(columns: IndexMap<String, TypeTracker>) -> ObservedKeys {
+        columns
+            .into_iter()
+            .filter(|(_, t)| !t.is_object_field() && !t.is_array_field())
+            .map(|(k, t)| {
+                let stat = stat_of(&k, &t);
+                (k, stat)
+            })
+            .collect()
     }
 
     /// `{base}{suffix}` float columns for every base and suffix ("" = the bare key).
@@ -371,18 +371,12 @@ mod tests {
     }
 
     #[test]
-    fn objects_and_arrays_are_not_part_of_the_grid() {
+    fn objects_are_not_part_of_the_grid() {
         let mut cols = grid(&["a", "b", "c"], &["", "_100g"]);
         for base in ["p", "q", "r"] {
             cols.insert(format!("{base}_nutrients"), make_object_tracker());
         }
-        cols.insert("d_100g".to_string(), make_float_tracker());
-        let mut entry = entry_of(cols);
-        // A field seen both as a scalar and as an array is a PG array column (#86).
-        entry
-            .array_columns
-            .insert("d_100g".to_string(), make_float_tracker());
-        let (schema, keys) = detect_suffix_schema(&entry, 0.3).expect("grid");
+        let (schema, keys) = detect_suffix_schema(&entry_of(cols), 0.3).expect("grid");
         let suffixes: Vec<&str> = schema
             .suffix_cols
             .iter()
@@ -488,7 +482,7 @@ mod tests {
             rare.observe(&serde_json::json!(f64::from(i) + 0.5));
         }
         rare.observe(&serde_json::json!("10000000000000000000"));
-        let trackers = [make_float_tracker(), rare];
-        assert_eq!(widest_type(trackers.iter()), PgType::DoublePrecision);
+        let keys = [stat_of("a", &make_float_tracker()), stat_of("b", &rare)];
+        assert_eq!(widest_type(keys.iter()), PgType::DoublePrecision);
     }
 }

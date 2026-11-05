@@ -184,9 +184,9 @@ positions trop grandes). Toute nouvelle liste affichée doit dire quelle liste e
 
 **Écrit une variante à la fois.**
 
-- Les trois interrupteurs de stratégie de `SetupScreen` sont écrits un par un (`Sibling`, `Pivot`,
-  `StructuredPivot`), sans lire `StrategyName::OPTIONAL`. Une nouvelle stratégie désactivable n'apparaît pas dans
-  l'IHM, sans erreur.
+- L'interrupteur de stratégie de `SetupScreen` est écrit à la main (`Sibling`, seule stratégie désactivable depuis
+  #200), sans lire `StrategyName::OPTIONAL`. Une nouvelle stratégie désactivable n'apparaît pas dans l'IHM, sans
+  erreur.
 - Les boutons d'override de `StrategyScreen` (Default, Jsonb, Pivot, Skip) sont écrits un par un, une fois pour
   la table choisie et une fois pour la sélection multiple. Un nouveau `UserOverride` n'y apparaît pas.
 - Les décisions en `matches!` valent « faux » pour une variante inconnue : `RowFlags::compute` (badges « ROUTE »

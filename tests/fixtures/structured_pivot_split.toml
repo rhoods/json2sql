@@ -1,0 +1,3 @@
+# #200, T8: the suffix grid of structured_pivot_split.jsonl, asked in the TOML (no longer automatic).
+[products_nut]
+suffix_columns = ["_100g", "_serving"]

@@ -168,8 +168,9 @@ pub struct Cli {
     pub workers: usize,
 
     /// Disable an optional inference strategy. Repeatable.
-    /// Valid values: sibling, `structured_pivot`.
-    /// Mandatory strategies (split, pivot) cannot be disabled — exits non-zero with explicit error.
+    /// Valid values: sibling.
+    /// Mandatory strategies (split, pivot) cannot be disabled, and `structured_pivot` is only proposed (#200):
+    /// exits non-zero with explicit error.
     #[arg(long = "disable-strategy", value_name = "STRATEGY")]
     pub disable_strategy: Vec<String>,
 
@@ -191,19 +192,20 @@ pub struct Cli {
     pub tune_wal: bool,
 
     /// Instead of importing, propose a split of every wide table (`Columns` or `AutoSplit`, at least 20 data columns)
-    /// into 1:1 thematic tables: write the `column_groups` TOML to FILE and print the report. No database is needed.
+    /// into 1:1 thematic tables, and the suffix grids its names form (commented): write the TOML to FILE and print
+    /// the report. No database is needed. Was `--suggest-groups` before #200.
     #[arg(long, value_name = "FILE", conflicts_with = "dry_run")]
-    pub suggest_groups: Option<PathBuf>,
+    pub suggest: Option<PathBuf>,
 
     /// Split every wide table (`Columns` or `AutoSplit`, at least 20 data columns) into 1:1 tables of the column groups
     /// its names confirm, after the schema snapshot is saved. Off by default; a `column_groups` key in the
     /// --schema-config section of a table wins (`column_groups = {}` keeps the table whole).
-    #[arg(long, default_value_t = false, conflicts_with = "suggest_groups")]
+    #[arg(long, default_value_t = false, conflicts_with = "suggest")]
     pub group_columns: bool,
 
-    /// With --suggest-groups: folder of a static embedding model (`Model2Vec`, `WordPiece` tokenizer, for example
+    /// With --suggest: folder of a static embedding model (`Model2Vec`, `WordPiece` tokenizer, for example
     /// `potion-base-8M`) used to suggest the two nearest groups for each column left in a table. Never downloaded.
-    #[arg(long, value_name = "DIR", requires = "suggest_groups")]
+    #[arg(long, value_name = "DIR", requires = "suggest")]
     pub embedding_model: Option<PathBuf>,
 }
 
@@ -294,10 +296,11 @@ mod tests {
             "--disable-strategy",
             "sibling",
             "--disable-strategy",
-            "structured_pivot",
+            "pivot",
         ])
         .unwrap();
-        assert_eq!(cli.disable_strategy, vec!["sibling", "structured_pivot"]);
+        // clap keeps every value; their check comes later (`parse_disabled_strategies`).
+        assert_eq!(cli.disable_strategy, vec!["sibling", "pivot"]);
     }
 
     #[test]
@@ -307,9 +310,24 @@ mod tests {
     }
 
     #[test]
+    fn test_suggest_groups_is_renamed_suggest() {
+        // #200, T10: the option proposes the suffix grids too; the old name fails and clap points to the new one.
+        let err = Cli::try_parse_from([
+            "json2sql",
+            "--input",
+            "data.json",
+            "--suggest-groups",
+            "groups.toml",
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("'--suggest'"), "{err}");
+    }
+
+    #[test]
     fn test_suggest_groups_default_is_off() {
         let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
-        assert!(cli.suggest_groups.is_none());
+        assert!(cli.suggest.is_none());
     }
 
     #[test]
@@ -318,11 +336,11 @@ mod tests {
             "json2sql",
             "--input",
             "data.json",
-            "--suggest-groups",
+            "--suggest",
             "groups.toml",
         ])
         .unwrap();
-        assert_eq!(cli.suggest_groups, Some(PathBuf::from("groups.toml")));
+        assert_eq!(cli.suggest, Some(PathBuf::from("groups.toml")));
     }
 
     #[test]
@@ -331,7 +349,7 @@ mod tests {
             "json2sql",
             "--input",
             "data.json",
-            "--suggest-groups",
+            "--suggest",
             "groups.toml",
             "--embedding-model",
             "models/potion",
@@ -354,7 +372,7 @@ mod tests {
             "json2sql",
             "--input",
             "data.json",
-            "--suggest-groups",
+            "--suggest",
             "groups.toml",
             "--dry-run",
         ])
@@ -383,7 +401,7 @@ mod tests {
             "--input",
             "data.json",
             "--group-columns",
-            "--suggest-groups",
+            "--suggest",
             "groups.toml",
         ])
         .is_err());

@@ -459,7 +459,7 @@ fn nutrient_scores() -> Vec<Value> {
 // ---------------------------------------------------------------------------
 // F. Grille nom × suffixe dans une table dense : aujourd'hui 21 colonnes, la grille n'est pas cherchée ; forcée dans
 // le TOML, `name, value, points, norm_value` (`value` vient de `sugars`, `norm_value` de `sugars_value`, #93).
-// Cible (PR 2, T8) : la grille est proposée, jamais appliquée seule, et jamais une table par nom.
+// T8 : la grille est proposée (`--suggest`), jamais appliquée seule, et jamais une table par nom.
 // ---------------------------------------------------------------------------
 #[test]
 fn f_dense_name_suffix_grid_stays_columns_unless_the_toml_asks() {
@@ -487,13 +487,39 @@ fn rows_with_obj(obj: impl Fn(usize) -> Value) -> Vec<Value> {
     (0..300).map(|i| json!({"id": i, "obj": obj(i)})).collect()
 }
 
-/// Le résultat des JSON de suffixes aujourd'hui : `t (id)`, `t_obj` vide (ou avec `rest`), et la grille `t_obj_pivot`.
-/// Cible (PR 2, T8) : plus de grille sans TOML ; la table large et creuse passe par le split.
-fn assert_grid(run: &DryRun, rest: &[&str], grid: &[&str]) {
+/// Le résultat des JSON de suffixes sans TOML (T8) : plus de grille ; la table large et creuse passe par le split,
+/// et toutes ses clés vont dans le compagnon clé/valeur `companion`.
+fn assert_split(run: &DryRun, companion: &str) {
     assert_eq!(
         run.shape(),
-        expected(&[("t", &["id"]), ("t_obj", rest), ("t_obj_pivot", grid)])
+        expected(&[
+            ("t", &["id"]),
+            ("t_obj", &[]),
+            (companion, &["key", "value"])
+        ])
     );
+}
+
+/// Le fichier de propositions de `json2sql --suggest` sur `rows` (T8 : les grilles y sont proposées).
+fn suggest_toml(table: &str, rows: &[Value]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.jsonl");
+    let lines: String = rows.iter().map(|row| format!("{row}\n")).collect();
+    std::fs::write(&input, lines).unwrap();
+    let toml = dir.path().join("groups.toml");
+    let out = Command::new(env!("CARGO_BIN_EXE_json2sql"))
+        .arg("--input")
+        .arg(&input)
+        .args(["--table", table, "--suggest"])
+        .arg(&toml)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::read_to_string(&toml).unwrap()
 }
 
 const METEO: [&str; 12] = [
@@ -511,7 +537,8 @@ const METEO: [&str; 12] = [
     "solar_radiation",
 ];
 
-// Suffixes « aspects » remplis ensemble : la grille est bonne.
+// Suffixes « aspects » remplis ensemble : la grille est bonne. Elle n'est plus appliquée sans TOML (T8) ; elle est
+// proposée, commentée, dans le fichier de `--suggest`.
 #[test]
 fn suffix_grid_of_statistics() {
     let rows = rows_with_obj(|i| {
@@ -520,14 +547,16 @@ fn suffix_grid_of_statistics() {
             json!(1.5)
         })
     });
-    assert_grid(
-        &dry_run("t", &rows, &[], None),
-        &[],
-        &["name", "avg", "max", "min"],
+    assert_split(&dry_run("t", &rows, &[], None), "t_obj_pivot");
+    let proposed = suggest_toml("t", &rows);
+    assert!(
+        proposed.contains("[t_obj]\n")
+            && proposed.contains("# suffix_columns = [\"_avg\", \"_max\", \"_min\"]"),
+        "{proposed}"
     );
 }
 
-// Unités alternatives, une par objet : la grille est trouvée (coupée sur `_temp_c`…), mais 2 colonnes sur 3 vides.
+// Unités alternatives, une par objet : une grille serait trouvée (coupée sur `_temp_c`…), 2 colonnes sur 3 vides.
 #[test]
 fn suffix_grid_of_alternative_units() {
     let temps = [
@@ -542,18 +571,14 @@ fn suffix_grid_of_alternative_units() {
         let key = format!("{}_{}", temps[i % 6], ["c", "f", "k"][i / 6 % 3]);
         object([key], |_| json!(21.5))
     });
-    assert_grid(
-        &dry_run("t", &rows, &[], None),
-        &[],
-        &["name", "temp_c", "temp_f", "temp_k"],
-    );
+    assert_split(&dry_run("t", &rows, &[], None), "t_obj_pivot");
 }
 
 const LANGS: [&str; 15] = [
     "fr", "en", "de", "es", "it", "pt", "nl", "sv", "pl", "cs", "ro", "hu", "el", "fi", "da",
 ];
 
-// Traductions, une langue par objet : une colonne par langue, 14 vides sur 15 par ligne.
+// Traductions, une langue par objet : la grille ferait une colonne par langue, 14 vides sur 15 par ligne.
 #[test]
 fn suffix_grid_of_languages() {
     let rows = rows_with_obj(|i| {
@@ -561,12 +586,10 @@ fn suffix_grid_of_languages() {
         let fields = ["title", "description", "summary", "keywords", "slug"];
         object(fields.map(|f| format!("{f}_{lang}")), |k| json!(k))
     });
-    let mut grid = vec!["name"];
-    grid.extend(LANGS);
-    assert_grid(&dry_run("t", &rows, &[], None), &[], &grid);
+    assert_split(&dry_run("t", &rows, &[], None), "t_obj_pivot");
 }
 
-// Séries annuelles, une année par objet : une colonne par année (`_2015`… : un nom ne commence pas par un chiffre).
+// Séries annuelles, une année par objet : la grille ferait une colonne par année (`_2015`…).
 #[test]
 fn suffix_grid_of_years() {
     let bases = ["revenue", "cost", "margin", "headcount", "capex", "opex"];
@@ -575,13 +598,10 @@ fn suffix_grid_of_years() {
             json!(42)
         })
     });
-    let years: Vec<String> = (2015..=2025).map(|y| format!("_{y}")).collect();
-    let mut grid = vec!["name"];
-    grid.extend(years.iter().map(String::as_str));
-    assert_grid(&dry_run("t", &rows, &[], None), &[], &grid);
+    assert_split(&dry_run("t", &rows, &[], None), "t_obj_pivot");
 }
 
-// Statistiques en préfixe (`min_temperature`) : la grille est trouvée à l'envers, une ligne par statistique.
+// Statistiques en préfixe (`min_temperature`) : la grille serait trouvée à l'envers, une ligne par statistique.
 #[test]
 fn suffix_grid_of_prefixed_statistics_is_upside_down() {
     let measures = [
@@ -605,13 +625,11 @@ fn suffix_grid_of_prefixed_statistics_is_upside_down() {
             |_| json!(3.5),
         )
     });
-    let mut grid = vec!["name"];
-    grid.extend(measures);
-    assert_grid(&dry_run("t", &rows, &[], None), &[], &grid);
+    assert_split(&dry_run("t", &rows, &[], None), "t_obj_pivot");
 }
 
-// Le piège : des identifiants, des dates et des noms d'objets sans rapport donnent une grille absurde, appliquée sans
-// rien demander. Cible (PR 2, T8) : aucune grille appliquée.
+// Le piège : des identifiants, des dates et des noms d'objets sans rapport donnent une grille absurde. Elle n'est plus
+// appliquée (T8) : la table, aux types mélangés, est coupée par fréquence ; la grille n'est que proposée, commentée.
 #[test]
 fn suffix_trap_of_ids_and_dates_gives_an_absurd_grid() {
     let keys = [
@@ -651,21 +669,18 @@ fn suffix_trap_of_ids_and_dates_gives_an_absurd_grid() {
         };
         object([key.to_string()], |_| value.clone())
     });
-    let rest = [
-        "status", "amount", "currency", "note", "channel", "coupon", "carrier", "invoice",
-        "refund", "tax", "discount", "weight", "zone",
-    ];
-    assert_grid(
-        &dry_run("t", &rows, &[], None),
-        &rest,
-        &["name", "at", "id", "norm_name"],
+    assert_split(&dry_run("t", &rows, &[], None), "t_obj_wide");
+    let proposed = suggest_toml("t", &rows);
+    assert!(
+        proposed.contains("# suffix_columns = [\"_at\", \"_id\", \"_name\"]"),
+        "{proposed}"
     );
 }
 
 // ---------------------------------------------------------------------------
 // G. Des mesures en plusieurs unités (`length_mm`, `length_cm`, `weight_g`…), une unité par mesure et par objet :
 // chaque clé est présente dans au moins 10 % des lignes, la table est stable et reste en 18 colonnes.
-// Cible : inchangé (la grille ne serait qu'une proposition, PR 2).
+// T8 : inchangé, la grille n'est qu'une proposition.
 // ---------------------------------------------------------------------------
 #[test]
 fn g_measures_in_several_units_stay_columns() {
@@ -685,4 +700,100 @@ fn g_measures_in_several_units_stay_columns() {
     let run = dry_run("products", &rows, &[], None);
     assert_eq!(run.shape().len(), 2);
     assert_eq!(run.shape()["products_measures"].len(), 18);
+}
+
+// ---------------------------------------------------------------------------
+// T9 (PR 2) : le split se fait après le TOML et les groupes, qui voient donc toutes les clés de la table.
+// ---------------------------------------------------------------------------
+
+/// 300 objets creux de 36 clés `{base}_{min,max,avg}`, une base par ligne : une table large et creuse.
+fn meteo_stats() -> Vec<Value> {
+    rows_with_obj(|i| {
+        let base = METEO[i % 12];
+        object(["min", "max", "avg"].map(|s| format!("{base}_{s}")), |_| {
+            json!(1.5)
+        })
+    })
+}
+
+// Point réservé 1 : `suffix_columns` s'applique à une table large et creuse, que le split aurait coupée. Sans la
+// grille automatique, la table passe en clé/valeur ; avec la grille du TOML, elle a ses colonnes de suffixes.
+#[test]
+fn t9_suffix_columns_apply_to_a_wide_sparse_table() {
+    let rows = meteo_stats();
+    let args: [&str; 0] = [];
+    let split = dry_run("t", &rows, &args, None);
+    assert_eq!(
+        split.shape(),
+        expected(&[
+            ("t", &["id"]),
+            ("t_obj", &[]),
+            ("t_obj_pivot", &["key", "value"])
+        ])
+    );
+
+    let toml = "[t_obj]\nsuffix_columns = [\"_min\", \"_max\", \"_avg\"]\n";
+    let grid = dry_run("t", &rows, &args, Some(toml));
+    assert_eq!(
+        grid.shape(),
+        expected(&[
+            ("t", &["id"]),
+            ("t_obj", &[]),
+            ("t_obj_pivot", &["name", "avg", "max", "min"]),
+        ])
+    );
+    assert!(!grid.stderr.contains("WARNING"), "{}", grid.stderr);
+}
+
+// Point réservé 2 : un groupe du TOML peut citer des clés rares, qui iraient sans lui en clé/valeur. Le split
+// traite ensuite le reste de la racine.
+#[test]
+fn t9_a_toml_group_takes_keys_the_split_would_send_to_key_value() {
+    let toml = "[events.column_groups]\nmetrics = [\"m_0\", \"m_1\", \"m_2\", \"m_3\"]\n";
+    let run = dry_run("events", &events(false), &[], Some(toml));
+    assert_eq!(
+        run.shape(),
+        expected(&[
+            ("events", &["id", "ts", "type"]),
+            ("events_metrics", &["m_0", "m_1", "m_2", "m_3"]),
+            ("events_wide", &["key", "value"]),
+        ])
+    );
+    assert!(
+        run.stderr.contains("86 medium → events_wide") && !run.stderr.contains("WARNING"),
+        "{}",
+        run.stderr
+    );
+}
+
+// Point réservé 3 : un snapshot se relance avec un autre TOML. Il est sauvé avant le TOML et le split, qui sont
+// refaits au chargement à partir des stats : pas de Pass 1 à refaire.
+#[test]
+fn t9_a_snapshot_reloads_with_another_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = dir.path().join("schema.json");
+    let snapshot = snapshot.to_str().unwrap();
+    let first = "[events.column_groups]\nmetrics = [\"m_0\", \"m_1\", \"m_2\", \"m_3\"]\n";
+    dry_run(
+        "events",
+        &events(false),
+        &["--schema-output", snapshot],
+        Some(first),
+    );
+
+    let second = "[events.column_groups]\nmetrics = [\"m_4\", \"m_5\", \"m_6\"]\n";
+    let run = dry_run(
+        "events",
+        &events(false),
+        &["--schema-input", snapshot],
+        Some(second),
+    );
+    assert_eq!(
+        run.shape(),
+        expected(&[
+            ("events", &["id", "ts", "type"]),
+            ("events_metrics", &["m_4", "m_5", "m_6"]),
+            ("events_wide", &["key", "value"]),
+        ])
+    );
 }

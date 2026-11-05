@@ -5,19 +5,50 @@
 //! in Pass 2 when values can't be coerced to the inferred `PostgreSQL` type.
 //!
 //! Fonctions :
+//! - type `ObservedKeys` — les clés scalaires d'une table, par clé JSON, telles que les lit le split (#200).
+//! - fn `observed_keys_by_table` — les `ObservedKeys` de chaque table des stats (le split, les grilles proposées).
 //! - struct `ColumnStats` — distribution de types pour une colonne observée pendant Pass 1.
 //! - fn `ColumnStats::is_mixed` — vrai si plusieurs types JSON ont été observés pour la colonne.
 //! - fn `ColumnStats::non_null_count` — nombre de valeurs non nulles.
 //! - fn `write_column_line` — écrit une ligne de rapport pour une colonne (avec histogramme si mixte).
 //! - fn `write_text_report` — écrit le rapport texte complet (groupé par table).
 
+use indexmap::IndexMap;
+
 use crate::schema::type_tracker::PgType;
+
+/// The scalar keys of one table as the wide-table split reads them, by JSON key: type and counts (#200).
+pub type ObservedKeys = IndexMap<String, ColumnStats>;
+
+/// The scalar keys of each table in `stats`, by JSON key. A PG array column (a field also seen as an
+/// array, #48) is not a scalar key; objects and arrays have no statistics.
+#[must_use]
+pub fn observed_keys_by_table(
+    stats: &[ColumnStats],
+) -> std::collections::HashMap<&str, ObservedKeys> {
+    let mut by_table: std::collections::HashMap<&str, ObservedKeys> =
+        std::collections::HashMap::new();
+    for stat in stats
+        .iter()
+        .filter(|s| !matches!(s.pg_type, PgType::Array(_)))
+    {
+        by_table
+            .entry(stat.table_name.as_str())
+            .or_default()
+            .insert(stat.original_name.clone(), stat.clone());
+    }
+    by_table
+}
 
 /// Type distribution for one column observed during Pass 1.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ColumnStats {
     pub table_name: String,
     pub column_name: String,
+    /// The JSON key of the column: two keys can share a column name (`energy-kcal`, `energy_kcal`). Empty in
+    /// snapshots saved before #200.
+    #[serde(default)]
+    pub original_name: String,
     pub pg_type: PgType,
     pub total_count: u64,
     pub null_count: u64,

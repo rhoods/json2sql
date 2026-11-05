@@ -113,10 +113,10 @@ Les stratégies existantes, par origine :
 | `Columns` | par défaut | TOML `columns` | — |
 | `Pivot` | phase 3 (`suggest_wide_strategy`, valeurs d'un seul type) | TOML `pivot`, IHM | non (partie du split, #200) |
 | `Jsonb` | phase 4 seulement (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
-| `StructuredPivot` | phase 3 (suffixes) | TOML `suffix_columns` | `structured_pivot` |
+| `StructuredPivot` | jamais : la grille est proposée par `--suggest` (#200) | TOML `suffix_columns` | — (refusé, plus rien d'automatique) |
 | `SiblingCollapse` | phase 2 (`finalize_cascading`) | TOML `[group.*]` | `sibling` |
 | `SiblingCollapseMulti` | phase 2 | — | `sibling` |
-| `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (`split` est obligatoire) |
+| `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (le split est obligatoire) |
 | `Ignore` | jamais : projection de `UserOverride::Skip` | IHM (`Skip`) | — |
 | `Flatten` | jamais | TOML `flatten` | — |
 
@@ -139,7 +139,7 @@ Pass 1 (observation)
 └─ SchemaFinalizer::run
    ├─ phase 1  schémas de base, table par table
    ├─ phase 2  finalize_cascading           → SiblingCollapse(Multi)               [sibling]
-   ├─ phase 3  apply_wide_table_strategies  → Pivot, Jsonb, StructuredPivot, AutoSplit [pivot, structured_pivot]
+   ├─ phase 3  apply_wide_table_strategies  → Pivot, AutoSplit (après le TOML, #200)
    └─ phase 4  apply_column_limit_guard (→ Jsonb), puis exclude_absorbed_children
 Overrides : TOML (apply_overrides_complete), IHM (apply_user_overrides)
    → TableSchema::effective_strategy : IHM > TOML > inférée
@@ -191,7 +191,7 @@ Le compilateur ne voit pas le reste :
 - [ ] `InferredStrategy::absorbs_children` : la stratégie absorbe-t-elle ses enfants ? (voir § 3)
 - [ ] `InferredStrategy::is_wide` : vrai pour tout sauf `Columns` ; vérifier que c'est voulu.
 - [ ] `TableSchema::takes_column_groups` : la table peut-elle être découpée en groupes de colonnes ? (aujourd'hui
-  `Columns` et `AutoSplit`). `--group-columns`, la case de l'IHM et `--suggest-groups` passent tous par ce test :
+  `Columns` et `AutoSplit`). `--group-columns`, la case de l'IHM et `--suggest` passent tous par ce test :
   une stratégie oubliée ici n'est jamais découpée, sans avertissement.
 - [ ] Pass 2, table racine : `insert_object` traite à part `Jsonb` (`write_root_jsonb`), `SiblingCollapseMulti` et
   `AutoSplit` (`write_autosplit_rows`).
