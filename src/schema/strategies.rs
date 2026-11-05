@@ -51,7 +51,7 @@ impl TryFrom<&str> for StrategyName {
 pub enum StrategyError {
     #[error("strategy '{0}' is mandatory and cannot be disabled\n  → mandatory strategies: split, pivot (part of the split)\n  → to store one table as JSONB: strategy = \"jsonb\" in its --schema-config section\n  → optional strategies: sibling")]
     Mandatory(String),
-    #[error("strategy '{0}' is no longer automatic, there is nothing to disable\n  → --suggest-groups proposes the suffix grids; suffix_columns in a --schema-config section applies one\n  → optional strategies: sibling")]
+    #[error("strategy '{0}' is no longer automatic, there is nothing to disable\n  → --suggest proposes the suffix grids; suffix_columns in a --schema-config section applies one\n  → optional strategies: sibling")]
     Proposed(String),
     #[error("unknown strategy '{0}'\n  → optional strategies: sibling")]
     Unknown(String),

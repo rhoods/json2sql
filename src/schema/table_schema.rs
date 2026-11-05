@@ -213,7 +213,7 @@ pub enum InferredStrategy {
     ///
     /// Trigger: the TOML `suffix_columns` of the table, never the detection, which only proposes
     /// a grid when `SUFFIX_MIN_COVERAGE` (30%) of the keys follow a `{base}` / `{base}_{suffix}`
-    /// pattern (e.g. `energy`, `energy_100g`, `energy_unit`; `--suggest-groups`, #200). One row
+    /// pattern (e.g. `energy`, `energy_100g`, `energy_unit`; `--suggest`, #200). One row
     /// per base group.
     ///
     /// JSON input (flat object with prefixed keys):

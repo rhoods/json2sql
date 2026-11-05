@@ -120,7 +120,7 @@ dans `table_schema.rs`, est le modèle que lisent ensuite les overrides, le DDL,
 | Nouvelle stratégie | la fiche [ajouter-une-strategie.md](ajouter-une-strategie.md) | en partie |
 | Nouveau seuil ou réglage | `SchemaFinalizer::new` (sept arguments par position, voir #112), puis `FinalizerConfig` et `build_finalizer_config` pour la phase 3 | oui pour l'ajout, **non** pour l'ordre des arguments de même type |
 | Choix de stratégie d'une table large | `apply_wide_strategy`, `apply_non_autosplit_strategy`, `suggest_wide_strategy` | non |
-| Grille de suffixes proposée | `detect_suffix_schema` (appelée par `--suggest-groups`) ; appliquée par le TOML `suffix_columns` | non |
+| Grille de suffixes proposée | `detect_suffix_schema` (appelée par `--suggest`) ; appliquée par le TOML `suffix_columns` | non |
 | Fusion de tables sœurs | `finalize_cascading` et les vagues de `cascading/detection/` | non |
 | Forme des clés des tables sœurs | `KeyShape`, `classify_key_shape`, et le nom de colonne clé (§ 4) | **non** |
 | Nom d'une table ou d'une colonne | `NamingRegistry`, `ColumnNameRegistry` (`naming.rs`) | non |
@@ -170,7 +170,7 @@ split_wide_tables(schemas, stats: ColumnStats de la Pass 1, RegistryConfig)
    │           et qui a des statistiques à son nom
    │           apply_wide_strategy → AutoSplit (racine) ou apply_non_autosplit_strategy
    │           (apply_pivot_split si un seul type, sinon AutoSplit ; jamais de grille de suffixes,
-   │           seulement proposée par --suggest-groups, #200) ;
+   │           seulement proposée par --suggest, #200) ;
    │           compagnons _wide / _pivot ajoutés à la fin, dans l'ordre des tables
    └─ phase 4  apply_column_limit_guard (si apply_pg_guard), puis exclude_absorbed_children
 → Vec<OverflowWarning>

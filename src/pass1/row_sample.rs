@@ -17,7 +17,7 @@
 //! - fn `RowSampler::into_rows` — les lignes gardées, dans l'ordre du fichier.
 //! - fn `RowSampler::halve` — garde une ligne sur deux et double le pas.
 
-/// Most rows kept: the budget of `--suggest-groups`.
+/// Most rows kept: the budget of `--suggest`.
 pub const ROW_BUDGET: usize = 20_000;
 /// Most bytes of rows kept at once.
 pub const BYTE_BUDGET: usize = 256 << 20;

@@ -37,7 +37,7 @@ use super::proposal::{
 const WIDTH: usize = 100;
 
 const TOML_HEADER: &str =
-    "# Suggested by `json2sql --suggest-groups`: review, edit, then apply with --schema-config.\n\
+    "# Suggested by `json2sql --suggest`: review, edit, then apply with --schema-config.\n\
 # Active lines are groups the names justify as they are. A commented block is a fusion that no\n\
 # data signal confirms: it replaces the active groups it names, so delete their lines to use it.\n\
 # A commented `suffix_columns` is a suffix grid the names form: uncomment it to apply it.\n\n";

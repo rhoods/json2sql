@@ -1581,7 +1581,7 @@ mod tests {
     #[test]
     fn a_suffix_grid_is_never_applied_automatically() {
         // #200, T8: nutrients has 9 cols with suffix patterns _100g / _serving over 3 bases. The grid is only
-        // proposed (`--suggest-groups`); the split decides alone: one type of value → key/value companion.
+        // proposed (`--suggest`); the split decides alone: one type of value → key/value companion.
         let obj = json!({
             "nutrients": {
                 "calories": 100, "calories_100g": 200, "calories_serving": 150,

@@ -113,7 +113,7 @@ Les stratégies existantes, par origine :
 | `Columns` | par défaut | TOML `columns` | — |
 | `Pivot` | phase 3 (`suggest_wide_strategy`, valeurs d'un seul type) | TOML `pivot`, IHM | non (partie du split, #200) |
 | `Jsonb` | phase 4 seulement (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
-| `StructuredPivot` | jamais : la grille est proposée par `--suggest-groups` (#200) | TOML `suffix_columns` | — (refusé, plus rien d'automatique) |
+| `StructuredPivot` | jamais : la grille est proposée par `--suggest` (#200) | TOML `suffix_columns` | — (refusé, plus rien d'automatique) |
 | `SiblingCollapse` | phase 2 (`finalize_cascading`) | TOML `[group.*]` | `sibling` |
 | `SiblingCollapseMulti` | phase 2 | — | `sibling` |
 | `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (le split est obligatoire) |
@@ -191,7 +191,7 @@ Le compilateur ne voit pas le reste :
 - [ ] `InferredStrategy::absorbs_children` : la stratégie absorbe-t-elle ses enfants ? (voir § 3)
 - [ ] `InferredStrategy::is_wide` : vrai pour tout sauf `Columns` ; vérifier que c'est voulu.
 - [ ] `TableSchema::takes_column_groups` : la table peut-elle être découpée en groupes de colonnes ? (aujourd'hui
-  `Columns` et `AutoSplit`). `--group-columns`, la case de l'IHM et `--suggest-groups` passent tous par ce test :
+  `Columns` et `AutoSplit`). `--group-columns`, la case de l'IHM et `--suggest` passent tous par ce test :
   une stratégie oubliée ici n'est jamais découpée, sans avertissement.
 - [ ] Pass 2, table racine : `insert_object` traite à part `Jsonb` (`write_root_jsonb`), `SiblingCollapseMulti` et
   `AutoSplit` (`write_autosplit_rows`).

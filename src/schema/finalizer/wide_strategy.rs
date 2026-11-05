@@ -165,7 +165,7 @@ fn apply_wide_strategy(
 
 /// Chooses the split of a wide child table: the identity/companion split (Pivot) when its values are
 /// all of one type (its keys are data: currencies, languages…), `AutoSplit` by frequency otherwise.
-/// A suffix grid found in the names is only proposed (`--suggest-groups`), never applied here (#200).
+/// A suffix grid found in the names is only proposed (`--suggest`), never applied here (#200).
 fn apply_non_autosplit_strategy(
     schema: &mut TableSchema,
     observed: &ObservedKeys,

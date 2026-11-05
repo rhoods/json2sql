@@ -1,4 +1,4 @@
-//! The `--suggest-groups` run on a finalized schema (#78, T1e): propose a split for every table that can take one.
+//! The `--suggest` run on a finalized schema (#78, T1e): propose a split for every table that can take one.
 //!
 //! A table is eligible when its effective strategy is `Columns` or `AutoSplit` and it has at least
 //! [`MIN_TABLE_COLUMNS`] data columns (a number of its own, not the wide-table threshold). All the eligible tables

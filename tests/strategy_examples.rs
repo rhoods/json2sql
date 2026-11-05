@@ -459,7 +459,7 @@ fn nutrient_scores() -> Vec<Value> {
 // ---------------------------------------------------------------------------
 // F. Grille nom × suffixe dans une table dense : aujourd'hui 21 colonnes, la grille n'est pas cherchée ; forcée dans
 // le TOML, `name, value, points, norm_value` (`value` vient de `sugars`, `norm_value` de `sugars_value`, #93).
-// T8 : la grille est proposée (`--suggest-groups`), jamais appliquée seule, et jamais une table par nom.
+// T8 : la grille est proposée (`--suggest`), jamais appliquée seule, et jamais une table par nom.
 // ---------------------------------------------------------------------------
 #[test]
 fn f_dense_name_suffix_grid_stays_columns_unless_the_toml_asks() {
@@ -500,7 +500,7 @@ fn assert_split(run: &DryRun, companion: &str) {
     );
 }
 
-/// Le fichier de propositions de `json2sql --suggest-groups` sur `rows` (T8 : les grilles y sont proposées).
+/// Le fichier de propositions de `json2sql --suggest` sur `rows` (T8 : les grilles y sont proposées).
 fn suggest_toml(table: &str, rows: &[Value]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.jsonl");
@@ -510,7 +510,7 @@ fn suggest_toml(table: &str, rows: &[Value]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_json2sql"))
         .arg("--input")
         .arg(&input)
-        .args(["--table", table, "--suggest-groups"])
+        .args(["--table", table, "--suggest"])
         .arg(&toml)
         .output()
         .unwrap();
@@ -538,7 +538,7 @@ const METEO: [&str; 12] = [
 ];
 
 // Suffixes « aspects » remplis ensemble : la grille est bonne. Elle n'est plus appliquée sans TOML (T8) ; elle est
-// proposée, commentée, dans le fichier de `--suggest-groups`.
+// proposée, commentée, dans le fichier de `--suggest`.
 #[test]
 fn suffix_grid_of_statistics() {
     let rows = rows_with_obj(|i| {

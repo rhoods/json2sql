@@ -151,7 +151,7 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
     finalize_pass2(&pass2, &cfg)
 }
 
-/// Propose a split of every wide table instead of importing (`--suggest-groups`, #78): the same Pass 1 (or
+/// Propose a split of every wide table instead of importing (`--suggest`, #78): the same Pass 1 (or
 /// snapshot) and overrides as an import, then ONE sample of the input's rows and a proposal for each eligible
 /// table. `cfg.limit` bounds the sampled root rows. With the folder of a static embedding `model`, the columns left
 /// in a table also get the two groups nearest to their name; the model is read first, so a bad folder fails before
@@ -1114,7 +1114,7 @@ mod tests {
 
     #[test]
     fn group_columns_applies_the_active_groups_suggest_groups_proposes() {
-        // parity with --suggest-groups when the sample holds the whole file
+        // parity with --suggest when the sample holds the whole file
         let file = fused_jsonl(60);
         let s = suggest_groups(cfg_for(&file), None).unwrap();
         let parsed: toml::Table = toml::from_str(&s.toml).unwrap();

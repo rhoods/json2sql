@@ -1,7 +1,7 @@
 //! Column groups found by the names alone, applied as a strategy (#91, phase 1): `--group-columns` and the per-table
 //! switch of the UI.
 //!
-//! The tables are those `--suggest-groups` would analyse (`Columns` or `AutoSplit`, at least
+//! The tables are those `--suggest` would analyse (`Columns` or `AutoSplit`, at least
 //! [`super::suggest::MIN_TABLE_COLUMNS`] data columns), minus the tables that are already split and the group tables
 //! themselves: a table is proposed once, from all its columns, so applying twice changes nothing, and Pass 2 only
 //! fills the groups of a table it writes from its own object. Only the groups the names confirm are applied, never a
@@ -10,7 +10,7 @@
 //! on the order of the schema.
 //!
 //! With the Pass 1 sample of a table (phase 2, kept in the snapshot), its data signals confirm the fusions of
-//! families too, as in `--suggest-groups`; a table without a sample, or whose columns changed since Pass 1 (a TOML
+//! families too, as in `--suggest`; a table without a sample, or whose columns changed since Pass 1 (a TOML
 //! `flatten`, an older snapshot), is grouped by its names alone.
 //!
 //! Fonctions :

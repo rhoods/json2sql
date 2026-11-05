@@ -81,7 +81,7 @@ les rapports. La zone décide **de l'ordre des étapes et de ce qui sort où** ;
 | Nouvelle option de la Pass 1 | en plus : `RegistryConfig` dans `run_pass1_workers`, puis la fiche [pass1.md](pass1.md) | oui pour `RegistryConfig` (littéral) |
 | Nouvelle option de la Pass 2 | en plus : `Pass2Config` dans `run_pass2`, et côté IHM `WorkerConfig::into_pass2_config` (voir [pass2.md](pass2.md)) | oui pour `Pass2Config` (littéral) |
 | Nouvelle étape sur le schéma (après la Pass 1, avant le DDL) | `post_process_schema`, à sa place dans l'ordre (§ 3) | non |
-| Nouveau mode qui remplace l'import (comme `--suggest-groups`) | `main` choisit entre `run_suggest_groups` et `run_pipeline` ; la fonction du mode réutilise `finalized_schema` | non |
+| Nouveau mode qui remplace l'import (comme `--suggest`) | `main` choisit entre `run_suggest_groups` et `run_pipeline` ; la fonction du mode réutilise `finalized_schema` | non |
 | Nouvelle sous-commande | une variante de `Commands` et son cas dans le `match` de `main` (sans cas par défaut) | oui |
 | Nouveau format de rapport d'anomalies | une variante d'`AnomalyFormat` et son cas dans `write_report` (sans cas par défaut) ; la valeur CLI vient du nom de la variante | oui |
 | Nouvelle erreur | une variante de `J2sError` dans `src/error.rs` | non : `main` affiche toute erreur de la même façon |
@@ -93,7 +93,7 @@ les rapports. La zone décide **de l'ordre des étapes et de ce qui sort où** ;
 main (src/main.rs)
 ├─ Commands::Inspect → run_inspect (main.rs) → pass1::runner::run_inspect : Pass 1 sur N objets, sans stratégie
 └─ sans sous-commande : parse_disabled_strategies, Cli → PipelineConfig
-   ├─ --suggest-groups → run_suggest_groups → suggest_groups → finalized_schema → proposition (aucune base)
+   ├─ --suggest → run_suggest_groups → suggest_groups → finalized_schema → proposition (aucune base)
    └─ sinon → run_pipeline (src/pipeline.rs)
         ├─ finalized_schema
         │   ├─ resolve_input : stdin copié dans un fichier temporaire (le fichier est lu deux fois)
@@ -126,7 +126,7 @@ worker (`json2sql-worker/src/pipeline.rs`, un autre que celui de `src/pipeline.r
   `--wide-column-threshold`, `--workers`, `--disable-strategy`…) : `load_or_infer_schema` ne lance pas
   `run_pass1_workers`. Le fichier d'entrée reste nécessaire pour la Pass 2.
 - **stdout porte les résultats, stderr la progression.** Sortent sur stdout : le DDL de `--dry-run`, le rapport
-  d'anomalies sans `--anomaly-output`, le rapport de `--suggest-groups` et le schéma d'`inspect` sans `--output`.
+  d'anomalies sans `--anomaly-output`, le rapport de `--suggest` et le schéma d'`inspect` sans `--output`.
   Un message de progression écrit avec `println!` se mélange à ces sorties redirigées ; il va sur stderr
   (`eprintln!`).
 - **L'ordre de `post_process_schema` est voulu.** Surcharges du TOML, puis snapshot, puis groupes de colonnes, puis
@@ -141,7 +141,7 @@ worker (`json2sql-worker/src/pipeline.rs`, un autre que celui de `src/pipeline.r
   la lier au seul tiret bas (au lieu de `_stdin_temp`) supprime le fichier aussitôt, et la Pass 2 ne trouve plus
   son entrée.
 - **`--limit` a trois sens.** Avec `inspect` : objets lus par la Pass 1 (défaut 500). À l'import : objets racines
-  envoyés à la Pass 2 (la Pass 1 lit tout). Avec `--suggest-groups` : lignes racines relues pour la proposition.
+  envoyés à la Pass 2 (la Pass 1 lit tout). Avec `--suggest` : lignes racines relues pour la proposition.
 - **`inspect` n'utilise que `--text-threshold`.** Le `RegistryConfig` construit par `run_inspect` (main.rs) est
   remplacé par `build_inspect_registry` (#112) : y ajouter un réglage n'a aucun effet.
 - **Toute erreur sort de la même façon.** `main` convertit chaque `J2sError` en message et code de sortie 1 ; une
@@ -162,7 +162,7 @@ Les endroits prévus sont au § 1. Trois demandent des étapes que le compilateu
 - [ ] un test `Cli::try_parse_from` dans `cli.rs` (défaut et valeur) ;
 - [ ] décider si l'IHM doit l'avoir : `WorkerConfig` et la fiche IHM.
 
-**Nouveau mode à la place de l'import.** Prendre `--suggest-groups` pour modèle : une option `Option<PathBuf>`
+**Nouveau mode à la place de l'import.** Prendre `--suggest` pour modèle : une option `Option<PathBuf>`
 exclusive des modes voisins (`conflicts_with`), choisie dans `main`, une fonction publique dans `pipeline.rs` qui
 passe par `finalized_schema` (mêmes Pass 1, snapshot et surcharges que l'import) et ne touche pas la base. Écrire le
 résultat sur stdout ou dans le fichier, la progression sur stderr.
