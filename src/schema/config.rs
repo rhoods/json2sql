@@ -26,7 +26,7 @@
 //! - fn `apply_suffix_columns_override` — applique `suffix_columns` : la grille part dans un compagnon `_pivot` (#163).
 //! - fn `suffix_columns_already_applied` — vrai si la table est déjà l'identité de ces `suffix_columns` (#129).
 //! - fn `require_columns_strategy` — refuse un override qui suppose une table encore en `Columns`.
-//! - fn `type_map_of` — `TypeTracker` factices tirés des types des colonnes d'un schéma figé (sans tableaux PG ni JSONB).
+//! - fn `type_map_of` — observations factices tirées des types des colonnes d'un schéma figé (sans tableaux PG ni JSONB).
 //! - fn `apply_column_type_overrides` — applique les overrides de type par colonne.
 //! - fn `override_column_type` — change le type d'une colonne, ou dit pourquoi c'est impossible.
 //! - fn `apply_group_overrides` — applique les groupes de fusion (`[group.*]`, stratégie `keyed_pivot`).
@@ -798,12 +798,10 @@ fn require_columns_strategy(
     })
 }
 
-/// At config-apply time the schema is already finalized (columns are resolved): a dummy
-/// `TypeTracker` per scalar data column, primed from its type, lets `build_suffix_schema_from_list`
-/// widen types correctly.
-fn type_map_of(
-    schema: &TableSchema,
-) -> indexmap::IndexMap<String, crate::schema::type_tracker::TypeTracker> {
+/// At config-apply time the schema is already finalized (columns are resolved): one observation
+/// per scalar data column, typed by a dummy `TypeTracker` primed from its type, lets
+/// `build_suffix_schema_from_list` widen types correctly.
+fn type_map_of(schema: &TableSchema) -> crate::schema::stats::ObservedKeys {
     let mut type_map = indexmap::IndexMap::new();
     // PG array and JSONB columns hold arrays and objects, which Pass 2 never sends to the
     // pivot: they stay on the identity table, as the detection's `scalar_keys` keeps them out.
@@ -813,7 +811,16 @@ fn type_map_of(
     {
         let mut tracker = crate::schema::type_tracker::TypeTracker::new(256);
         prime_tracker_from_pg_type(&mut tracker, &col.pg_type);
-        type_map.insert(col.original_name.clone(), tracker);
+        let observed = crate::schema::stats::ColumnStats {
+            table_name: schema.name.clone(),
+            column_name: col.name.clone(),
+            original_name: col.original_name.clone(),
+            pg_type: tracker.to_pg_type(),
+            total_count: tracker.total_count,
+            null_count: tracker.null_count,
+            type_histogram: Vec::new(),
+        };
+        type_map.insert(col.original_name.clone(), observed);
     }
     type_map
 }

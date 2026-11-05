@@ -1,6 +1,7 @@
 //! Phase 3 — décision de la stratégie wide-table, par table.
 //!
 //! - fn `apply_wide_table_strategies` — applique la stratégie choisie à chaque table éligible.
+//! - fn `observed_keys_by_table` — les clés scalaires de chaque table, lues dans les stats de la Pass 1 (#200).
 //! - struct `WideStats` — mesures d'une table wide (lignes, colonnes scalaires, ratio stable).
 //! - fn `WideStats::log` — journalise la stratégie choisie pour la table.
 //! - fn `stable_ratio` — part des colonnes scalaires présentes dans assez de lignes.
@@ -27,60 +28,65 @@
 //! - fn `build_finalizer_config` — assemble la config figée passée à ces fonctions.
 //! - struct `FinalizerConfig` — config figée (seuils + stratégies désactivées) pour cette phase.
 
-use indexmap::IndexMap;
+use std::collections::HashMap;
 
-use super::super::naming::NamingRegistry;
-use super::super::observer::TableEntry;
+use super::super::stats::{ColumnStats, ObservedKeys};
 use super::super::strategies::StrategyName;
 use super::super::suffix_detector::detect_suffix_schema;
 use super::super::table_schema::SuffixSchema;
 use super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
 use super::super::type_tracker::{widen_pg_types, PgType};
 use super::super::wide_strategies::{structured_pivot_companion, suggest_wide_strategy};
-use super::base::is_scalar_column;
 use super::SchemaFinalizer;
 
 /// Phase 3: apply per-table wide strategies (Pivot, Jsonb, `StructuredPivot`, `AutoSplit`)
-/// to all remaining tables after fusion is complete.
+/// to all remaining tables after fusion is complete. The keys of a table are read in the Pass 1
+/// `stats`, which a snapshot keeps (#200): a table with no statistics under its name (a table the
+/// cascade made) is never split.
 pub(super) fn apply_wide_table_strategies(
     schemas: &mut Vec<TableSchema>,
-    tables: &IndexMap<String, TableEntry>,
-    naming: &NamingRegistry,
+    stats: &[ColumnStats],
     config: &FinalizerConfig,
 ) {
+    let observed = observed_keys_by_table(stats);
     let mut extra_schemas: Vec<TableSchema> = Vec::new();
-    let schema_map: std::collections::HashMap<String, usize> = schemas
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.name.clone(), i))
-        .collect();
     // Toutes les tables déjà nommées à ce stade — sert à garantir l'unicité des noms de
     // compagnon `_pivot` synthétiques (mis à jour au fil des créations pour couvrir aussi
     // les collisions entre deux compagnons créés dans le même passage).
     let mut existing_names: std::collections::HashSet<String> =
         schemas.iter().map(|s| s.name.clone()).collect();
 
-    for (path_key, entry) in tables {
-        let pg_name = naming.table_name_lookup_from_dot_key(path_key);
-        if let Some(&idx) = schema_map.get(&pg_name) {
-            // [issue #45, finding 6] `tables` liste les chemins PRÉ-fusion (Phase 1) ; un
-            // chemin pré-fusion peut se résoudre, via NamingRegistry, vers une table que la
-            // Phase 2 (finalize_cascading) a déjà fusionnée (SiblingCollapse/SiblingCollapseMulti/
-            // ...). Retraiter cette table avec le TableEntry pré-fusion associé au chemin corrompt
-            // la table déjà fusionnée (colonnes/medium_keys issus d'une autre observation) —
-            // confirmé empiriquement en production (medium_keys peuplé de colonnes étrangères).
-            if !matches!(schemas[idx].inferred_strategy, InferredStrategy::Columns) {
-                continue;
-            }
-            if let Some(extra) =
-                apply_wide_strategy(&mut schemas[idx], entry, config, &existing_names)
-            {
-                existing_names.insert(extra.name.clone());
-                extra_schemas.push(extra);
-            }
+    for schema in schemas.iter_mut() {
+        // [issue #45, finding 6] A table the cascade already fused (SiblingCollapse…) is never
+        // split again: its statistics are those of the pre-fusion tables, not of its columns.
+        if !matches!(schema.inferred_strategy, InferredStrategy::Columns) {
+            continue;
+        }
+        let Some(keys) = observed.get(schema.name.as_str()) else {
+            continue;
+        };
+        if let Some(extra) = apply_wide_strategy(schema, keys, config, &existing_names) {
+            existing_names.insert(extra.name.clone());
+            extra_schemas.push(extra);
         }
     }
     schemas.extend(extra_schemas);
+}
+
+/// The scalar keys of each table in `stats`, by JSON key. A PG array column (a field also seen as an
+/// array, #48) is not a scalar key; objects and arrays have no statistics.
+fn observed_keys_by_table(stats: &[ColumnStats]) -> HashMap<&str, ObservedKeys> {
+    let mut by_table: HashMap<&str, ObservedKeys> = HashMap::new();
+    for stat in stats
+        .iter()
+        .filter(|s| !matches!(s.pg_type, PgType::Array(_)))
+    {
+        by_table
+            .entry(stat.table_name.as_str())
+            .or_default()
+            .insert(stat.original_name.clone(), stat.clone());
+    }
+    by_table
 }
 
 pub(super) fn build_finalizer_config(finalizer: &SchemaFinalizer) -> FinalizerConfig {
@@ -119,16 +125,14 @@ impl WideStats {
 
 /// Share of the scalar columns present in at least `stable_threshold` of the rows.
 fn stable_ratio(
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     row_count: f64,
     stable_threshold: f64,
     scalar_cols: usize,
 ) -> f64 {
-    let stable_count = entry
-        .columns
-        .iter()
-        .filter(|(field, t)| is_scalar_column(entry, field, t))
-        .filter(|(_, t)| t.total_count as f64 / row_count >= stable_threshold)
+    let stable_count = observed
+        .values()
+        .filter(|k| k.total_count as f64 / row_count >= stable_threshold)
         .count();
     stable_count as f64 / scalar_cols as f64
 }
@@ -139,12 +143,12 @@ fn stable_ratio(
 /// of the split (`_wide` or `_pivot`), if any.
 fn apply_wide_strategy(
     schema: &mut TableSchema,
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     config: &FinalizerConfig,
     existing_names: &std::collections::HashSet<String>,
 ) -> Option<TableSchema> {
     let is_wide_eligible = matches!(
-        entry.child_kind,
+        schema.child_kind,
         Some(ChildKind::Object | ChildKind::ObjectArray) | None
     );
     // Only scalar columns make a table wide. PG array columns stay on the table whatever the
@@ -155,24 +159,29 @@ fn apply_wide_strategy(
         return None;
     }
 
-    let row_count = entry.row_count.max(1) as f64;
-    let ratio_stable = stable_ratio(entry, row_count, config.stable_threshold, scalar_col_count);
+    let row_count = schema.row_count.max(1) as f64;
+    let ratio_stable = stable_ratio(
+        observed,
+        row_count,
+        config.stable_threshold,
+        scalar_col_count,
+    );
     let stats = WideStats {
         row_count,
         scalar_col_count,
         ratio_stable,
     };
 
-    if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && entry.row_count >= 10 {
+    if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && schema.row_count >= 10 {
         let strategy = "Columns (high stable ratio — legitimate schema, not key explosion)";
         stats.log(&schema.name, strategy);
         return None;
     }
     // The rows of the root are the records of the file: its keys are fields, kept by frequency (#200).
-    if entry.parent_key.is_empty() {
-        return apply_autosplit_strategy(schema, entry, config, &stats, existing_names);
+    if schema.parent_table.is_none() {
+        return apply_autosplit_strategy(schema, observed, config, &stats, existing_names);
     }
-    apply_non_autosplit_strategy(schema, entry, config, &stats, existing_names)
+    apply_non_autosplit_strategy(schema, observed, config, &stats, existing_names)
 }
 
 /// Chooses the split of a wide child table: `StructuredPivot` when its keys form a suffix grid,
@@ -180,7 +189,7 @@ fn apply_wide_strategy(
 /// currencies, languages…), `AutoSplit` by frequency otherwise (#200).
 fn apply_non_autosplit_strategy(
     schema: &mut TableSchema,
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     config: &FinalizerConfig,
     stats: &WideStats,
     existing_names: &std::collections::HashSet<String>,
@@ -188,7 +197,7 @@ fn apply_non_autosplit_strategy(
     let grid = if config.disable_structured_pivot {
         None
     } else {
-        detect_suffix_schema(entry, SUFFIX_MIN_COVERAGE)
+        detect_suffix_schema(observed, SUFFIX_MIN_COVERAGE)
     };
     if let Some((suffix_schema, grid_keys)) = grid {
         let n = suffix_schema.suffix_cols.len();
@@ -203,11 +212,11 @@ fn apply_non_autosplit_strategy(
         ));
     }
 
-    if suggest_wide_strategy(entry) == InferredStrategy::Pivot {
+    if suggest_wide_strategy(observed) == InferredStrategy::Pivot {
         stats.log(&schema.name, "Pivot (split identité/compagnon)");
-        return Some(apply_pivot_split(schema, entry, config, existing_names));
+        return Some(apply_pivot_split(schema, observed, config, existing_names));
     }
-    apply_autosplit_strategy(schema, entry, config, stats, existing_names)
+    apply_autosplit_strategy(schema, observed, config, stats, existing_names)
 }
 
 /// Move the keys of the suffix grid of `schema` to a structured companion `_pivot` table (one
@@ -255,7 +264,7 @@ pub fn apply_structured_pivot_split(
 /// which never recursed into them.
 fn apply_pivot_split(
     schema: &mut TableSchema,
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     config: &FinalizerConfig,
     existing_names: &std::collections::HashSet<String>,
 ) -> TableSchema {
@@ -266,7 +275,7 @@ fn apply_pivot_split(
         .collect();
     schema.columns.retain(|c| c.is_generated || is_pg_array(c));
     let wide_name = unique_companion_name(&schema.name, "pivot", existing_names);
-    let value_type = infer_medium_value_type(entry, &all_keys);
+    let value_type = infer_medium_value_type(observed, &all_keys);
     build_wide_pivot_schema(schema, wide_name, value_type, all_keys, config)
 }
 
@@ -304,43 +313,39 @@ const fn is_pg_array(col: &ColumnSchema) -> bool {
 /// The scalar keys of an `AutoSplit` table below `stable_threshold`: they all go to the `_wide` companion,
 /// however rare (#200).
 fn collect_medium_keys(
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     row_count: f64,
     stable_threshold: f64,
 ) -> std::collections::HashSet<String> {
-    entry
-        .columns
+    observed
         .iter()
-        .filter(|(k, t)| {
-            !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k)
-        })
         .filter(|(_, t)| (t.total_count as f64 / row_count) < stable_threshold)
         .map(|(k, _)| k.clone())
         .collect()
 }
 
 fn infer_medium_value_type(
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     medium_keys: &std::collections::HashSet<String>,
 ) -> PgType {
     medium_keys
         .iter()
-        .filter_map(|k| entry.columns.get(k))
+        .filter_map(|k| observed.get(k))
         .fold(None::<PgType>, |acc, t| {
-            Some(acc.map_or_else(|| t.to_pg_type(), |a| widen_pg_types(a, &t.to_pg_type())))
+            Some(acc.map_or_else(|| t.pg_type.clone(), |a| widen_pg_types(a, &t.pg_type)))
         })
         .unwrap_or(PgType::Text)
 }
 
 fn apply_autosplit_strategy(
     schema: &mut TableSchema,
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     config: &FinalizerConfig,
     stats: &WideStats,
     existing_names: &std::collections::HashSet<String>,
 ) -> Option<TableSchema> {
     let (row_count, stable) = (stats.row_count, config.stable_threshold);
-    let medium_keys = collect_medium_keys(entry, row_count, stable);
+    let medium_keys = collect_medium_keys(observed, row_count, stable);
     // Every key is frequent (few rows): no companion to build, the table stays Columns.
     if medium_keys.is_empty() {
         stats.log(&schema.name, "Columns (every key is frequent)");
@@ -351,8 +356,7 @@ fn apply_autosplit_strategy(
     schema.columns.retain(|c| {
         c.is_generated
             || is_pg_array(c)
-            || entry
-                .columns
+            || observed
                 .get(&c.original_name)
                 .is_some_and(|t| t.total_count as f64 / row_count >= stable)
     });
@@ -364,7 +368,7 @@ fn apply_autosplit_strategy(
         &schema.name,
         &format!("AutoSplit ({stable_col_count} stable cols, {medium} medium → {wide_name})"),
     );
-    let value_type = infer_medium_value_type(entry, &medium_keys);
+    let value_type = infer_medium_value_type(observed, &medium_keys);
     Some(build_wide_pivot_schema(
         schema,
         wide_name,
@@ -432,6 +436,38 @@ mod tests {
         }
     }
 
+    fn stat(table: &str, key: &str, pg_type: PgType) -> ColumnStats {
+        ColumnStats {
+            table_name: table.to_string(),
+            column_name: NamingRegistry::column_name(key),
+            original_name: key.to_string(),
+            pg_type,
+            total_count: 3,
+            null_count: 0,
+            type_histogram: Vec::new(),
+        }
+    }
+
+    /// The split reads the keys by their JSON name: two keys of one column name stay two keys, and
+    /// a PG array column is not a scalar key (#200).
+    #[test]
+    fn observed_keys_are_the_scalar_json_keys_of_each_table() {
+        let stats = [
+            stat("t", "energy-kcal", PgType::Integer),
+            stat("t", "energy_kcal", PgType::DoublePrecision),
+            stat("t", "tags", PgType::Array(Box::new(PgType::Text))),
+            stat("u", "x", PgType::Text),
+        ];
+        let by_table = observed_keys_by_table(&stats);
+        let keys: Vec<&str> = by_table["t"].keys().map(String::as_str).collect();
+        assert_eq!(keys, ["energy-kcal", "energy_kcal"]);
+        assert_eq!(
+            by_table["t"]["energy_kcal"].pg_type,
+            PgType::DoublePrecision
+        );
+        assert_eq!(by_table["u"].len(), 1);
+    }
+
     // ---------------------------------------------------------------------------
     // [issue #45] Phase 3 ne doit jamais retraiter une table déjà assignée par la Phase 2
     // (finding 6 de l'issue, confirmé empiriquement en production sur OpenFoodFacts :
@@ -487,7 +523,8 @@ mod tests {
         }
         let mut schemas = vec![fused];
 
-        apply_wide_table_strategies(&mut schemas, &observer.tables, &naming, &make_config());
+        let stats = crate::schema::inspector::collect_stats(&observer, &mut naming);
+        apply_wide_table_strategies(&mut schemas, &stats, &make_config());
 
         assert_eq!(
             schemas.len(),

@@ -937,6 +937,7 @@ mod tests {
         ColumnStats {
             table_name: table.to_string(),
             column_name: column.to_string(),
+            original_name: column.to_string(),
             pg_type: PgType::Text,
             total_count: 10,
             null_count: 0,

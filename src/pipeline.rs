@@ -1273,6 +1273,7 @@ mod tests {
         crate::schema::stats::ColumnStats {
             table_name: table.to_string(),
             column_name: column.to_string(),
+            original_name: column.to_string(),
             pg_type: crate::schema::type_tracker::PgType::Text,
             total_count: 5,
             null_count: 0,

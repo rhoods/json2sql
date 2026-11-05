@@ -124,9 +124,10 @@ impl SchemaRegistry {
             self.disabled_strategies.clone(),
             apply_pg_guard,
         );
-        let (schemas, collisions, overflow) =
-            finalizer.run(&self.observer.tables, &mut self.naming);
+        let (mut schemas, collisions) = finalizer.run(&self.observer.tables, &mut self.naming);
         self.column_collisions = collisions;
+        let stats = self.collect_stats();
+        let overflow = finalizer.split(&mut schemas, &stats);
         (schemas, overflow)
     }
 
@@ -880,7 +881,8 @@ mod tests {
         let finalizer =
             SchemaFinalizer::new(256, 3, 0.5, 0.10, HashSet::<StrategyName>::new(), true);
         let mut naming = NamingRegistry::default();
-        let (schemas, _collisions, warnings) = finalizer.run(&IndexMap::new(), &mut naming);
+        let (mut schemas, _collisions) = finalizer.run(&IndexMap::new(), &mut naming);
+        let warnings = finalizer.split(&mut schemas, &[]);
         // Empty input: no schemas, no warnings.
         assert!(schemas.is_empty());
         assert!(warnings.is_empty());
@@ -898,7 +900,8 @@ mod tests {
         let finalizer =
             SchemaFinalizer::new(256, 3, 0.5, 0.10, HashSet::<StrategyName>::new(), false);
         let mut naming = NamingRegistry::default();
-        let (_schemas, _collisions, warnings) = finalizer.run(&IndexMap::new(), &mut naming);
+        let (mut schemas, _collisions) = finalizer.run(&IndexMap::new(), &mut naming);
+        let warnings = finalizer.split(&mut schemas, &[]);
         assert!(warnings.is_empty());
     }
 

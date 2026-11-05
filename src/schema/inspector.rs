@@ -16,13 +16,14 @@ use super::type_tracker::{InferredType, PgType, TypeTracker};
 
 fn make_stat(
     table_name: &str,
-    column_name: String,
+    original_field: &str,
     pg_type: PgType,
     tracker: &TypeTracker,
 ) -> ColumnStats {
     ColumnStats {
         table_name: table_name.to_string(),
-        column_name,
+        column_name: NamingRegistry::column_name(original_field),
+        original_name: original_field.to_string(),
         pg_type,
         total_count: tracker.total_count,
         null_count: tracker.null_count,
@@ -43,19 +44,14 @@ fn collect_entry_stats(entry: &super::observer::TableEntry, table_name: &str) ->
         }
         stats.push(make_stat(
             table_name,
-            NamingRegistry::column_name(original_field),
+            original_field,
             tracker.to_pg_type(),
             tracker,
         ));
     }
     for (original_field, tracker) in &entry.array_columns {
         let pg_type = entry.array_column_type(original_field, tracker);
-        stats.push(make_stat(
-            table_name,
-            NamingRegistry::column_name(original_field),
-            pg_type,
-            tracker,
-        ));
+        stats.push(make_stat(table_name, original_field, pg_type, tracker));
     }
     stats
 }

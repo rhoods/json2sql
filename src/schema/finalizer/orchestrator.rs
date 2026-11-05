@@ -1,8 +1,9 @@
-//! `SchemaFinalizer` — orchestrateur des 4 phases (base → cascade → wide strategies → guard).
+//! `SchemaFinalizer` — orchestrateur des 4 phases (base → cascade, puis wide strategies → guard).
 //!
 //! - struct `SchemaFinalizer` — transforme les observations brutes en `TableSchema` finalisés.
 //! - fn `SchemaFinalizer::new` — construit le finaliseur avec ses seuils.
-//! - fn `SchemaFinalizer::run` — orchestre les 4 phases (base → cascade → wide strategies → guard).
+//! - fn `SchemaFinalizer::run` — phases 1 et 2 (base → cascade) : le schéma avant le split des tables larges.
+//! - fn `SchemaFinalizer::split` — phases 3 et 4 (wide strategies → guard), d'après les stats de la Pass 1 (#200).
 //! - fn `parents_of_object_children` — tables qui ont au moins un enfant objet.
 //! - fn `dedup_and_sort` — après la cascade : retire les noms en double (`WARNING` si deux chemins, #180), rétablit l'ordre profondeur puis chemin.
 
@@ -12,6 +13,7 @@ use std::collections::HashSet;
 use super::super::cascading::finalize_cascading;
 use super::super::naming::{ColumnCollision, NamingRegistry};
 use super::super::observer::TableEntry;
+use super::super::stats::ColumnStats;
 use super::super::strategies::StrategyName;
 use super::super::table_schema::{ChildKind, TableSchema};
 use super::base::build_base_schemas;
@@ -53,11 +55,9 @@ impl SchemaFinalizer {
         }
     }
 
-    /// Convert all accumulated observations into finalized `TableSchema` objects,
-    /// sorted topologically (parents before children).
-    /// Returns `(schemas, column_collisions, overflow_warnings)`.
-    /// `overflow_warnings` is non-empty only when `apply_pg_guard` is `true`.
-    /// Build the final schema from the collected `TableEntry` map.
+    /// Build the schema from the collected `TableEntry` map, sorted topologically (parents before
+    /// children), before the split of the wide tables: `split` does it, from the Pass 1 statistics.
+    /// Returns `(schemas, column_collisions)`.
     ///
     /// Ordering is constrained by two structural phases that cannot be interleaved:
     ///
@@ -75,15 +75,13 @@ impl SchemaFinalizer {
         &self,
         tables: &IndexMap<String, TableEntry>,
         naming: &mut NamingRegistry,
-    ) -> (Vec<TableSchema>, Vec<ColumnCollision>, Vec<OverflowWarning>) {
+    ) -> (Vec<TableSchema>, Vec<ColumnCollision>) {
         // Pre-register all table names so that table_name_lookup() (read-only) works in parallel.
         for key in tables.keys() {
             naming.table_name_from_dot_key(key);
         }
 
         let tables_with_object_children = parents_of_object_children(tables);
-
-        let config = build_finalizer_config(self);
 
         // Phase 1 — per-table: schema construction WITHOUT wide-table strategies yet.
         // Each table is processed independently and in parallel. Defers InferredStrategy
@@ -99,20 +97,29 @@ impl SchemaFinalizer {
         }
 
         dedup_and_sort(&mut schemas);
+        (schemas, all_collisions)
+    }
 
+    /// Phases 3 and 4 on the schemas `run` built: split the wide tables after reading their keys
+    /// in `stats` (a snapshot keeps them, #200), then the column limit guard and the exclusion of
+    /// the absorbed children. Returns the overflow warnings, empty unless `apply_pg_guard` is `true`.
+    pub(crate) fn split(
+        &self,
+        schemas: &mut Vec<TableSchema>,
+        stats: &[ColumnStats],
+    ) -> Vec<OverflowWarning> {
         // Phase 3 — per-table: apply wide-table strategies (Pivot, Jsonb, StructuredPivot, AutoSplit)
         // to remaining tables after fusion is complete.
-        apply_wide_table_strategies(&mut schemas, tables, naming, &config);
+        apply_wide_table_strategies(schemas, stats, &build_finalizer_config(self));
 
         // Phase 4 — cleanup: column limit guard and absorbed child exclusion.
         let overflow_warnings = if self.apply_pg_guard {
-            apply_column_limit_guard(&mut schemas)
+            apply_column_limit_guard(schemas)
         } else {
             Vec::new()
         };
-        exclude_absorbed_children(&mut schemas);
-
-        (schemas, all_collisions, overflow_warnings)
+        exclude_absorbed_children(schemas);
+        overflow_warnings
     }
 }
 

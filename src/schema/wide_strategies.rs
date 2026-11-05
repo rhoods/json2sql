@@ -33,7 +33,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use super::finalizer::exclude_absorbed_children;
-use super::observer::TableEntry;
+use super::stats::ObservedKeys;
 use super::table_schema::{
     ChildKind, ColumnSchema, InferredStrategy, KeyShape, SuffixSchema, TableSchema,
 };
@@ -45,17 +45,14 @@ use crate::error::{J2sError, Result};
 const KEY_SHAPE_DOMINANT_RATIO: f64 = 0.8;
 
 /// Determine whether a wide table's values are type-homogeneous (→ Pivot) or not (→ Jsonb).
-pub fn suggest_wide_strategy(entry: &TableEntry) -> InferredStrategy {
+pub fn suggest_wide_strategy(observed: &ObservedKeys) -> InferredStrategy {
     let mut has_string = false;
     let mut has_numeric = false;
     let mut has_boolean = false;
     let mut has_date_like = false;
 
-    for tracker in entry.columns.values() {
-        if tracker.is_object_field() || tracker.is_array_field() {
-            continue;
-        }
-        match tracker.to_pg_type() {
+    for key in observed.values() {
+        match key.pg_type {
             PgType::Text | PgType::VarChar(_) | PgType::Array(_) | PgType::Jsonb => {
                 has_string = true;
             }
