@@ -252,6 +252,5 @@ Vues en écrivant la fiche, pas tranchées.
 2. **Deux styles de contexte.** `insert.rs` passe un `InsertCtx`, `traversal.rs` passe `sinks` et `anomalies`
    séparément. `insert_array`, `insert_jsonb_object`, `dispatch_child_routes` et `route_independent_child` reçoivent
    les deux morceaux et reconstruisent un `InsertCtx` pour appeler `insert_child_object` ou `recurse_children`.
-3. **architecture.md décalé hors Pass 2** : la section `traversal.rs` est à jour depuis #172, mais la partie
-   `src/schema/` cite encore un enum `WideStrategy` et une stratégie `KeyedPivot` (aujourd'hui `InferredStrategy` et
-   `SiblingCollapse`).
+3. **architecture.md décalé hors Pass 2** : corrigé, la partie `src/schema/` décrit `InferredStrategy` (relu pour
+   #200). `schema-inference.md` § 7 parle encore d'une stratégie `KeyedPivot` (aujourd'hui `SiblingCollapse`, #138).

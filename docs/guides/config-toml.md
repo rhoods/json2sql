@@ -20,6 +20,7 @@ files:
   - tests/fixtures/
 symbols:
   - TomlStrategy
+  - TomlStrategy::parse
   - SchemaConfig
   - SchemaConfig::from_file
   - GroupConfig
@@ -101,11 +102,13 @@ pages sont en partie fausses** (§ 3). Ajouter une stratégie a sa propre fiche 
 
 ## Rôle
 
-Après la finalisation, deux sources peuvent changer le schéma : le **TOML** de `--schema-config` (CLI seulement :
+Après la Pass 1, deux sources peuvent changer le schéma : le **TOML** de `--schema-config` (CLI seulement :
 l'IHM n'en lit jamais) et les **overrides de l'IHM** (`UserOverride` Pivot, Jsonb, Skip, gardés dans le snapshot).
 Chaque `TableSchema` garde sa stratégie inférée et un override par source ; `TableSchema::effective_strategy` choisit
 dans l'ordre IHM, puis TOML, puis inférée. Le **snapshot** (`SchemaSnapshot`, un JSON) enregistre le résultat de la
 Pass 1 pour le recharger sans relire le fichier : `--schema-output` / `--schema-input` en CLI, Save / Load dans l'IHM.
+Depuis #200, les surcharges passent **avant** le split des tables larges : le TOML voit toutes les clés, et une table
+qu'il règle n'est pas coupée. Le snapshot de la CLI est écrit avant le TOML ; celui de l'IHM, après son split.
 
 ## 1. Où intervenir
 
@@ -169,6 +172,7 @@ CLI : run_pipeline
                               └─ apply_user_overrides (si strategy_overrides n'est pas vide),
                                    qui finit par exclude_absorbed_children
   post_process_schema
+    ├─ save_schema_snapshot (--schema-output) : le schéma AVANT le TOML et le split (#200)
     ├─ apply_schema_config : SchemaConfig::from_file → apply_overrides_complete
     │     ├─ apply_overrides, table par table :
     │     │    already_overridden : une table qui a déjà un override saute strategy et suffix_columns
@@ -179,7 +183,7 @@ CLI : run_pipeline
     │     ├─ apply_group_overrides ([group.*]) : apply_keyed_pivot_merge, puis routes du parent vers le groupe
     │     ├─ apply_column_groups (column_groups)
     │     └─ exclude_absorbed_children
-    ├─ save_schema_snapshot (--schema-output) : le schéma APRÈS le TOML
+    ├─ split (pass1::runner) : les tables larges et creuses que le TOML n'a pas réglées (voir finalisation.md)
     └─ apply_group_columns (--group-columns, tables cochées du snapshot ; toml_column_group_tables relit le TOML)
 
 IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snapshot)
@@ -194,8 +198,9 @@ IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snap
   remet à la main (quatre endroits). Une table pivotée par override a donc des colonnes « key » et « value » et une stratégie
   inférée `Columns`. Les gardes qui lisent `inferred_strategy` (`columns`, `suffix_columns`) la croient encore en
   colonnes : c'est `already_overridden` qui les protège, en passant avant elles.
-- **Un override ne reconstruit qu'une fois les colonnes (#129).** Le snapshot de la CLI est écrit *après* le TOML, et
-  garde `toml_override` ; `restore_from_snapshot` applique l'IHM avant le TOML. Deux overrides peuvent donc viser la
+- **Un override ne reconstruit qu'une fois les colonnes (#129).** Avant #200, le snapshot de la CLI était écrit
+  *après* le TOML et gardait `toml_override` ; il est maintenant écrit avant, mais un snapshot plus ancien le garde
+  encore, et `restore_from_snapshot` applique l'IHM avant le TOML. Deux overrides peuvent donc viser la
   même table, et le second partirait des colonnes du premier (avant #129 : `value VARCHAR(2)` devenu `TEXT`, ou
   `suffix_columns` sur une table pivotée, sans avertissement). Côté TOML, `already_overridden` : le même override est
   ignoré sans bruit (snapshot rechargé avec son TOML, usage normal), un autre donne `AlreadyOverridden` (l'IHM gagne,
@@ -248,13 +253,13 @@ IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snap
 - **Des noms réservés.** `strategy`, `suffix_columns`, `id_column`, `prefix`, `max_depth` et `column_groups` sont des
   clés de la table : une colonne qui porte un de ces noms ne peut pas être typée. Une table nommée `group` ne peut pas
   être configurée : `[group]` est lu comme les groupes de fusion (erreur de lecture du TOML, vérifié).
-- **Les docs annoncent ce que le TOML refuse.** `strategy = "ignore"` donne `UnknownStrategy` (vérifié) ; Skip n'existe
-  que dans l'IHM. usage.md ne cite ni `normalize_dynamic_keys`, ni `flatten` (et ses clés `prefix`, `max_depth`,
-  `id_column`).
-- **Les noms de stratégie sont des chaînes, en quatre copies** : `apply_strategy_override` (en minuscules, cas par
-  défaut `UnknownStrategy`), `rebuilds_columns`, `conflicting_strategy_override` et `already_overridden`. Une valeur
-  oubliée dans l'une d'elles ne casse rien à la compilation : la table n'est pas défaite de ses groupes de colonnes, le
-  conflit avec `suffix_columns` n'est pas signalé, ou un TOML rechargé avec son snapshot avertit à tort.
+- **Les docs annonçaient ce que le TOML refuse.** `strategy = "ignore"` donne `UnknownStrategy` (vérifié) ; Skip
+  n'existe que dans l'IHM. usage.md et schema-inference.md ne citent plus `ignore` depuis #200 ; usage.md ne décrit
+  pas les clés `prefix`, `max_depth` et `id_column` de `flatten` (#131).
+- **Les noms de stratégie du TOML sont lus une fois** (#132, #200) : `TomlStrategy::parse`, puis `rebuilds_columns`,
+  `conflicting_strategy_override`, `already_overridden` (par `user_override`) et `apply_strategy_override` décident
+  par un `match` sans cas par défaut. Une valeur ajoutée à `TomlStrategy` ne compile pas tant que ces règles ne disent
+  pas ce qu'elle fait (§ 1).
 - **Ce que le snapshot écrit, il faut pouvoir le relire.** Les noms des variantes de `InferredStrategy`,
   `UserOverride`, `ChildKind`, `JsonFormat` et `PgType` sont écrits dans le fichier : renommer une variante rend les
   anciens snapshots illisibles (précédents : l'alias `Ignore` de `Skip`, `wide_strategy`, le message dédié de
@@ -330,6 +335,6 @@ Vues en écrivant la fiche, pas tranchées.
 4. **Code sans effet** : `save` et `save_with_overrides` ne servent qu'aux tests (#133) ; `config_warnings` de l'état de
    l'IHM n'est jamais rempli, sa bannière ne s'affiche jamais ; `Flatten` n'est jamais posé
    comme `UserOverride` (odeur 6 de #96 ; `JsonbFlatten` supprimé, #200).
-5. **Docs décalées** (odeur 7 de #96, élargie ; #131) : `[table.columns]` et `ignore` dans usage.md et schema-inference.md ;
+5. **Docs décalées** (odeur 7 de #96, élargie ; #131) : `[table.columns]` dans usage.md et schema-inference.md (`ignore` retiré, #200) ;
    clés absentes d'usage.md ; l'en-tête de `config.rs` parle d'« erreur » pour une table ou une colonne inconnue (ce
    sont des avertissements).

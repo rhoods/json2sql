@@ -39,18 +39,18 @@ src/
 Séquence de `run_pipeline()` :
 
 1. Résout l'entrée (fichier, ou stdin bufferisé dans un fichier temporaire — seul usage disque de l'outil, nécessaire car le fichier est lu deux fois)
-2. Lance la Pass 1 (ou charge un snapshot via `--schema-input`)
+2. Lance la Pass 1 sans le split des tables larges (`run_before_split`), ou charge un snapshot via `--schema-input`
 3. Affiche les avertissements (noms tronqués, collisions de colonnes, dépassement de profondeur)
-4. Applique les surcharges TOML (`--schema-config`)
-5. Ré-exclut les tables enfants absorbées après les surcharges
-6. Sauvegarde le snapshot (`--schema-output`), avant la stratégie de groupes : un snapshot ne contient jamais de groupes automatiques
+4. Sauvegarde le snapshot (`--schema-output`), **avant** le TOML et le split (#200) : un snapshot garde toutes les clés de ses tables larges, ne contient jamais de groupes automatiques ni de surcharges du TOML, et se relance avec un autre TOML sans refaire la Pass 1
+5. Applique les surcharges TOML (`--schema-config` : types, stratégies, groupes de fusion, groupes de colonnes, grilles `suffix_columns`), puis ré-exclut les tables enfants absorbées
+6. Le split des tables larges (`pass1::runner::split` → `SchemaFinalizer::split`) : coupe les tables larges et creuses que le TOML n'a pas réglées, d'après les statistiques de la Pass 1 (`ColumnStats`, gardées dans le snapshot), puis applique la garde des 1600 colonnes
 7. Avec `--group-columns`, ou pour les tables cochées dans un snapshot de l'IHM : découpe les tables larges en groupes de colonnes par leurs noms (`schema::grouping::auto`, #91), sauf les tables dont le TOML a une clé `column_groups`, puis ré-indexe les statistiques
 8. Génère le rapport de schéma (optionnel)
 9. En mode `--dry-run` : affiche le DDL SQL et sort
 10. Sinon : se connecte à PostgreSQL, crée les tables, lance la Pass 2
 11. Affiche le résumé d'import et les anomalies
 
-Avec `--suggest` (incompatible avec `--group-columns`), `main.rs` appelle `pipeline::suggest_groups()` à la place : les étapes 1 à 8 (partagées via `finalized_schema()`), puis la proposition de découpage de toutes les tables larges, depuis un seul échantillon du fichier (`schema::grouping::suggest`), et, avec `--embedding-model`, les deux groupes les plus proches de chaque colonne laissée dans la table (`placement`) ; aucune base n'est touchée (#78).
+Avec `--suggest` (incompatible avec `--group-columns`), `main.rs` appelle `pipeline::suggest_groups()` à la place : les étapes 1 à 5 (partagées via `finalized_schema()`, sans le split : les propositions voient toutes les clés, au plus les 2000 plus fréquentes d'une table), puis la proposition de découpage de toutes les tables larges, depuis un seul échantillon du fichier (`schema::grouping::suggest`), et, avec `--embedding-model`, les deux groupes les plus proches de chaque colonne laissée dans la table (`placement`) ; aucune base n'est touchée (#78).
 
 ---
 
@@ -196,12 +196,12 @@ Mesure de la RAM système (RSS, pression mémoire) via `sysinfo`. Utilitaires no
 
 ### `runner.rs`
 
-Orchestre la Pass 1. Lit le fichier en streaming, appelle `SchemaObserver::observe_root()` pour chaque objet JSON racine, suit la progression, puis délègue la finalisation à `SchemaFinalizer`.
+Orchestre la Pass 1. Lit le fichier en streaming, appelle `SchemaObserver::observe_root()` pour chaque objet JSON racine, suit la progression, puis délègue la finalisation à `SchemaFinalizer`. `run_before_split()` (et `run_parallel_before_split()`) s'arrête avant le split des tables larges, que `split()` lance une fois le snapshot écrit et le TOML appliqué (#200) ; `run()` enchaîne les deux.
+- `stats` : statistiques de colonnes, qui servent aussi au split (le snapshot les garde)
 
 Retourne `Pass1Result` contenant :
 - `schemas` : liste topologique des `TableSchema`
 - `total_rows` : nombre total de lignes lues
-- `stats` : statistiques de colonnes pour le rapport
 - `truncated_names` : noms de tables raccourcis pour tenir en 53 octets
 - `column_collisions` : collisions de noms de colonnes résolues par hash
 
@@ -319,22 +319,22 @@ Modèle de données du schéma et toute la logique d'inférence.
 
 Définit les types de données fondamentaux du schéma :
 
-- **`InferredStrategy`** : stratégie de stockage d'une table, choisie par la Pass 1 et par le TOML
+- **`InferredStrategy`** : stratégie de stockage d'une table, choisie par la cascade, le split et le TOML
   - `Columns` : colonnes normales (défaut)
-  - `Pivot` : EAV générique
-  - `Jsonb` : objet JSONB
-  - `StructuredPivot(SuffixSchema)` : pivot par pattern de suffixes
+  - `Pivot` : EAV générique ; le split la pose sur l'identité d'une table enfant aux valeurs d'un seul type (compagnon `_pivot`), le TOML et l'IHM sur la table elle-même
+  - `Jsonb` : objet JSONB, sur demande seulement (TOML, IHM) ou par la garde des 1600 colonnes ; jamais choisi par le split (#200)
+  - `StructuredPivot(SuffixSchema)` : grille de suffixes, posée seulement par `suffix_columns` du TOML (#200)
   - `SiblingCollapse(SiblingSchema)` : fusion de tables sœurs en une table, une ligne par clé
   - `SiblingCollapseMulti(Vec<SiblingGroup>)` : fusion de tables sœurs en une table pivot par forme de clé
-  - `AutoSplit { stable_threshold, medium_keys, wide_table_name }` : tri par fréquence
+  - `AutoSplit { stable_threshold, medium_keys, wide_table_name }` : tri par fréquence (split de la racine, ou d'une table enfant aux types mélangés) ; aussi l'identité d'une grille `suffix_columns`
   - `Flatten { prefix, max_depth }` : surcharge (TOML)
   - `Ignore` : table retirée de l'import (tables absorbées par une fusion de tables sœurs, `Skip`)
 - **`UserOverride`** : choix de l'IHM (`Columns`, `Pivot`, `Jsonb`, `Skip`, `Flatten`), prioritaire sur `InferredStrategy` ; `TableSchema::effective_strategy` donne la stratégie retenue
 - **`ColumnSchema`** : définition d'une colonne (nom PG, nom original, type, nullable, is_generated)
 - **`TableSchema`** : définition complète d'une table (nom, chemin JSON, colonnes, parent, profondeur, stratégie)
 - **`ChildKind`** : `Object`, `ObjectArray`
-- **`KeyShape`** : forme des clés détectées (Numeric, IsoLang, Slug, Mixed)
-- **`SuffixSchema`** / **`SiblingSchema`** : métadonnées pour StructuredPivot et SiblingCollapse. `SiblingSchema` contient le nom de la colonne clé (`key_col_name`), la forme des clés (`KeyShape`) et le flag `array_children` (ObjectArray vs Object) ; il n'y a pas de colonne JSONB brute
+- **`KeyShape`** : forme des clés détectées (Numeric, IsoLang, Slug, Mixed) ; ne choisit plus le nom de la colonne clé ni le choix « ces clés sont-elles des données ? » (#200)
+- **`SuffixSchema`** / **`SiblingSchema`** : métadonnées pour StructuredPivot et SiblingCollapse. `SiblingSchema` contient le nom de la colonne clé (`key_col_name` : toujours `key`, `j2s_key` si un champ s'appelle déjà `key` ; `key_id` pour un groupe TOML `[group.*]`), la forme des clés (`KeyShape`) et le flag `array_children` (ObjectArray vs Object) ; il n'y a pas de colonne JSONB brute
 
 ### `type_tracker.rs`
 
@@ -358,7 +358,8 @@ Observation mutable row-by-row pendant le streaming JSON.
 Transformations post-stream sur `Vec<TableSchema>` — après que l'observation est terminée.
 
 - **`SchemaFinalizer`** : configuration (`wide_column_threshold`, `sibling_threshold`, `sibling_jaccard`…)
-- **`run()`** : pipeline complet — construit les `TableSchema`, détecte les tables larges, applique les stratégies via `wide_strategies`, trie topologiquement, délègue la détection de sœurs à `cascading::finalize_cascading()`
+- **`run()`** : phases 1 et 2 — construit les `TableSchema`, délègue la détection de sœurs à `cascading::finalize_cascading()` (sauf `--disable-strategy sibling`), trie topologiquement ; sans le split
+- **`split()`** : phases 3 et 4, appelées après le TOML (#200) — coupe les tables larges et creuses d'après les `ColumnStats` de la Pass 1 (`wide_strategy.rs` : racine par fréquence ; enfant en `Pivot` si un seul type, sinon par fréquence ; aucune clé jetée), puis la garde des 1600 colonnes et l'exclusion des enfants absorbés. Une table que le TOML ou l'IHM a réglée, ou que la cascade a fusionnée, n'est pas coupée
 - **`build_base_schemas()`** : phase 1, une `TableSchema` par `TableEntry` (en parallèle, via `build_entry_schema_base()`), avec résolution des types et sans stratégie large
 - **`apply_column_limit_guard()`** : détecte les tables dépassant `PG_MAX_COLUMNS` (1 600) et applique Jsonb
 - **`exclude_absorbed_children()`** : supprime les tables enfants absorbées par une stratégie wide (Flatten, Pivot, Jsonb…)
@@ -379,17 +380,17 @@ Convertit un `SchemaObserver` en `ColumnStats` pour le rapport de la sous-comman
 
 ### `strategies.rs`
 
-Enum `StrategyName` des heuristiques désactivables via `--disable-strategy`.
+Enum `StrategyName` des heuristiques désactivables via `--disable-strategy` : seule `sibling` (`StrategyName::OPTIONAL`). `pivot`, `split` et `structured_pivot` sont refusés avec un message (`StrategyError`, #200).
 
 ### `wide_strategies.rs`
 
 Application des stratégies de stockage wide sur les `TableSchema`.
 
 - **`apply_wide_strategy_columns()`** : restructure les colonnes d'une table selon une `InferredStrategy` (Pivot, Jsonb, StructuredPivot…)
-- **`apply_structured_pivot_columns()`** : colonnes pour StructuredPivot — `(name TEXT, value <type>, <suffix_col>...)`
+- **`apply_structured_pivot_columns()`** : colonnes pour StructuredPivot — `(name TEXT, value <type>, <suffix_col>...)` ; le TOML passe par `apply_structured_pivot_split` (finalizer), qui garde l'identité et crée le compagnon `_pivot`
 - **`apply_flatten()`** : inline les colonnes scalaires d'un enfant dans le parent avec un préfixe ; le TOML ne l'appelle que pour un objet en `Columns` sans tables, routes ni colonnes aplaties à lui (`flatten_refusal` dans `config.rs`, avertissement `FlattenRefused`, #170)
 - **`build_union_columns()`** : union des colonnes de plusieurs tables sœurs (plus large type par colonne)
-- **`classify_key_shape()`** / **`suggest_wide_strategy()`** : classification des clés et sélection automatique de la stratégie
+- **`classify_key_shape()`** / **`suggest_wide_strategy()`** : forme des clés (sert encore à la cascade) ; homogénéité des types des valeurs, qui décide du split d'une table enfant (un seul type → `Pivot`, sinon `AutoSplit`)
 
 ### `reporter.rs`
 
@@ -422,7 +423,7 @@ Parsing et application des surcharges manuelles depuis un fichier TOML.
 
 - **`SchemaConfig`** : structure parsée depuis le TOML. `tables` : une section par table (`table_name` → clés de la section : `strategy`, `suffix_columns`, `column_groups`, types de colonnes…, gardées en `toml::Value`) ; `group` : les groupes de fusion manuels
 - **`GroupConfig`** : un groupe de fusion (`strategy`, `members`)
-- **`apply_overrides()`** : applique les surcharges sur la liste de `TableSchema` finalisés
+- **`apply_overrides()`** : applique les surcharges sur la liste de `TableSchema` de la Pass 1, avant le split (#200)
 - **`parse_pg_type()`** : parse les chaînes de type (`INTEGER`, `BIGINT`, `VARCHAR(255)`, etc.)
 
 ### `stats.rs`
@@ -434,9 +435,9 @@ Rapport de statistiques du schéma post-inférence.
 
 ### `suffix_detector.rs`
 
-Détection automatique de patterns `{base}_{suffixe}` dans les tables larges.
+Détection de patterns `{base}_{suffixe}` dans les tables larges : seulement **proposée** (`--suggest`, en `# suffix_columns = [...]` commenté), jamais appliquée seule (#200).
 
-- **`detect_suffix_schema()`** : analyse les colonnes d'une table large et identifie les suffixes fréquents
+- **`detect_suffix_schema()`** : analyse les colonnes d'une table large et identifie les suffixes fréquents (appelée par `--suggest`)
 - **`build_suffix_schema_from_list()`** : construit un `SuffixSchema` depuis une liste explicite (TOML)
 
 ### `persistence.rs`
@@ -444,7 +445,7 @@ Détection automatique de patterns `{base}_{suffixe}` dans les tables larges.
 Sérialisation et désérialisation du résultat Pass 1 — permet à l'IHM de découpler les deux passes.
 
 - **`SchemaSnapshot`** : struct sérialisable contenant `version`, `total_rows`, `schemas`, `truncated_names`, `column_collisions`, `stats`, et deux champs optionnels de #91 : `group_columns` (tables cochées dans l'IHM) et `samples` (présence et valeurs des tables larges dans l'échantillon du Pass 1, tables de nombres en hexadécimal). Ces champs ne changent pas la version : une version antérieure les ignore sans perte
-- **`save()`** : sérialise un résultat Pass 1 en JSON vers un fichier
+- **`save()`** : sérialise un résultat Pass 1 en JSON vers un fichier, avant le TOML et le split (#200) : le split se refait au chargement, d'après `stats`
 - **`load()`** : désérialise et vérifie la version (`SCHEMA_FORMAT_VERSION = 2`) ; refuse, avec un message qui demande de relancer la Pass 1, un snapshot d'avant #84 qui contient une table de jonction `ScalarArray`
 
 ---
@@ -457,6 +458,7 @@ Tests d'intégration Rust qui testent des cas end-to-end sur une vraie base Post
 |---|---|
 | `integration_schema.rs` | Inférence de schéma : tables, colonnes, types, normalisation |
 | `integration_strategies.rs` | Stratégies wide : AutoSplit, Pivot, Jsonb, StructuredPivot, SiblingCollapse |
+| `strategy_examples.rs` | DDL de `--dry-run` (sans base) des exemples de #200 : split, `sibling`, grilles de suffixes proposées par `--suggest` |
 | `integration_overrides.rs` | Surcharges TOML : types forcés, stratégies manuelles |
 | `integration_anomalies.rs` | Pipeline d'anomalies : détection, rapport, max-anomaly-rate |
 | `common/` | Helpers partagés (connexion DB, setup/teardown de schéma) |

@@ -108,8 +108,9 @@ La finalisation transforme les observations de la Pass 1 (un `TableEntry` par ch
 de chaque table. Elle rend aussi les collisions de noms de colonnes (`ColumnCollision`) et les tables converties par
 la garde des 1 600 colonnes (`OverflowWarning`). Elle se fait en deux temps (#200) : `SchemaFinalizer::run` construit
 les tables et fusionne les tables sœurs (phases 1 et 2) ; `SchemaFinalizer::split` coupe les tables larges puis
-applique la garde (phases 3 et 4). Entre les deux, la CLI sauve le snapshot, applique le TOML et les groupes de
-colonnes : ils voient ainsi toutes les clés d'une table large. `split_wide_tables` lance le second temps ; il lit les
+applique la garde (phases 3 et 4). Entre les deux, la CLI sauve le snapshot, applique le TOML et ses groupes de
+colonnes : ils voient ainsi toutes les clés d'une table large (les groupes de `--group-columns` viennent après le
+split). `split_wide_tables` lance le second temps ; il lit les
 clés de chaque table dans les statistiques de la Pass 1 (`ColumnStats`), que le snapshot garde. `TableSchema`, défini
 dans `table_schema.rs`, est le modèle que lisent ensuite les overrides, le DDL, la Pass 2 et l'IHM.
 
@@ -162,7 +163,7 @@ SchemaRegistry::finalize_before_split (voir pass1.md)
    └─ doublons de nom retirés, tri par profondeur puis chemin JSON
 → (Vec<TableSchema>, Vec<ColumnCollision>)
 
-   (CLI : snapshot, puis TOML et groupes de colonnes, voir pipeline.rs)
+   (CLI : snapshot, puis TOML et ses groupes de colonnes, voir pipeline.rs ; --group-columns après le split)
 
 split_wide_tables(schemas, stats: ColumnStats de la Pass 1, RegistryConfig)
 └─ SchemaFinalizer::split
@@ -176,7 +177,7 @@ split_wide_tables(schemas, stats: ColumnStats de la Pass 1, RegistryConfig)
 → Vec<OverflowWarning>
 ```
 
-Après la finalisation, les overrides TOML repassent par `exclude_absorbed_children` (`apply_overrides_complete`).
+Les overrides TOML, appliqués entre les deux temps, passent aussi par `exclude_absorbed_children` (`apply_overrides_complete`).
 
 ## 3. Invariants et pièges
 
@@ -322,9 +323,10 @@ de la fiche des stratégies).
    hash, #179), mais deux tables pivot qui prenaient le même nom, corrigées (§ 3). Reste la colonne parente :
    `make_pivot_preamble` et d'autres constructeurs de la cascade l'écrivent en littéral, sans l'assertion de
    `ColumnSchema::parent_fk`. Sans effet aujourd'hui : un parent fait 53 octets au plus, donc `j2s_…_id` au plus 60.
-3. **La phase 3 parcourt les `TableEntry` pré-fusion** (#137) au lieu des schémas, d'où la garde de #45 et les tables
-   synthétiques jamais élargies. `build_base_schemas` garde aussi un paramètre inutilisé.
+3. **La phase 3 lit des statistiques pré-fusion** (#137). Depuis #200 elle part des schémas et des `ColumnStats`,
+   plus des `TableEntry`, mais les statistiques restent celles des tables d'avant la fusion : d'où la garde de #45 et
+   les tables synthétiques jamais coupées. `build_base_schemas` garde aussi un paramètre inutilisé.
 4. **Docs décalées** (#138). `schema-inference.md` situe la finalisation dans `registry.rs` (`finalize_siblings`, aujourd'hui
-   `finalize_cascading`), parle de stratégie « KeyedPivot » et d'une colonne `j2s_data` qui n'existe pas, et dit que
-   l'exclusion des tables absorbées tourne dans `main.rs`. La doc d'`apply_column_limit_guard` (enfants gardés) et
+   `finalize_cascading`), parle de stratégie « KeyedPivot » et d'une colonne `j2s_data` qui n'existe pas, (l'exclusion des tables absorbées
+   dans `main.rs` est corrigée depuis #200). La doc d'`apply_column_limit_guard` (enfants gardés) et
    celle du champ `inferred_strategy` (jamais modifié) sont fausses (§ 3).

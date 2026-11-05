@@ -84,11 +84,11 @@ Modèle de données du schéma, inférence, nommage, config et persistance.
 | `cascading/` | Détection et fusion des tables sœurs (BFS cascade) — voir sous-section dédiée ci-dessous |
 | `grouping/` | Découpage thématique des tables larges (#78) : propose des groupes de colonnes qui deviendront des tables 1:1 — voir sous-section dédiée ci-dessous |
 | `wide_strategies.rs` | Fonctions d'application des stratégies wide : `apply_wide_strategy_columns`, `apply_flatten`, `build_union_columns`, `classify_key_shape` |
-| `strategies.rs` | `StrategyName` (enum des stratégies optionnelles désactivables : `Sibling`, `StructuredPivot`), `StrategyError`, `parse_disabled_strategies()`. Utilisé par `Pass1Config` et `SchemaRegistry` pour gater les stratégies via `--disable-strategy`. |
+| `strategies.rs` | `StrategyName` (enum des stratégies désactivables par `--disable-strategy` : `Sibling` seule depuis #200 ; `pivot`, `split` et `structured_pivot` sont refusés avec un message), `StrategyError`, `parse_disabled_strategies()`. Utilisé par `Pass1Config` et `SchemaRegistry` pour gater les stratégies via `--disable-strategy`. |
 | `inspector.rs` | Statistiques d'inspection : `collect_stats()` construit les `ColumnStats` (histogramme de types) pour le mode `--inspect` |
 | `registry.rs` | `SchemaRegistry` : façade publique (~100 lignes prod). Délègue à `observer`, `finalizer` et `inspector` |
 | `naming.rs` | Sanitisation des identifiants PG, déduplication. Noms de tables en 53 octets au plus (premiers segments du chemin retirés, hash en dernier recours ; `derived_table_name` et `group_table_name` pour les tables dérivées et les tables de groupe) ; noms de colonnes et de contraintes en 63 octets avec hash ; détection de collisions de noms de colonnes |
-| `suffix_detector.rs` | Détecte les patterns `{base}_{suffixe}` dans les tables larges pour la stratégie `StructuredPivot` |
+| `suffix_detector.rs` | Détecte les patterns `{base}_{suffixe}` dans les tables larges : la grille est proposée par `--suggest`, jamais appliquée seule (#200) |
 | `config.rs` | Parse et applique le fichier TOML de surcharges manuelles (`--schema-config`) |
 | `column_groups.rs` | Applique la clé `column_groups` d'une table de la config (#78) : chaque groupe de colonnes devient une table fille 1:1 (`{table}_{groupe}`, 53 octets au plus, hash au-delà) qui reçoit les colonnes et leurs `flatten_sources`, la table garde les autres colonnes et la liste de ses tables de groupe (`column_groups`). Groupes appliqués après les types, stratégies et `flatten`, dans l'ordre alphabétique de leurs noms. Un groupe invalide (colonne inconnue, générée ou déjà prise, moins de 3 colonnes, nom de table pris) est ignoré avec un avertissement ; une table qui n'est ni `Columns` ni `AutoSplit`, ou dont toutes les colonnes partiraient, n'est pas découpée. Réappliquer la config ne change rien ; une table de groupe existante avec d'autres colonnes est une erreur. `dissolve_column_groups()` remet les colonnes dans la table (avant un `Pivot`/`Jsonb`), `prune_missing_groups()` retire les noms de tables disparues, `reindex_stats()` rattache les statistiques d'une colonne déplacée à sa table de groupe |
 | `stats.rs` | Struct `ColumnStats` + génère le rapport texte de statistiques de colonnes (types inférés, taux de nullité, colonnes MIXED) |
@@ -101,9 +101,9 @@ Transforme les observations brutes (`TableEntry`) en `TableSchema` finalisés : 
 
 | Fichier | Rôle |
 |---|---|
-| `orchestrator.rs` | `SchemaFinalizer` (struct + `impl`, dont `run()`) — orchestre les 4 phases (base → cascade → wide strategies → guard) |
+| `orchestrator.rs` | `SchemaFinalizer` (struct + `impl`) — `run()` : phases 1 et 2 (base → cascade) ; `split()` : phases 3 et 4 (split des tables larges → garde), appelées après le TOML (#200) |
 | `base.rs` | Phase 1 — construction des schémas de base, par table (parallèle via rayon) |
-| `wide_strategy.rs` | Phase 3 — décision de la stratégie wide-table (Columns/`StructuredPivot`/Pivot/Jsonb/`AutoSplit`), par table |
+| `wide_strategy.rs` | Phase 3 — le split des tables larges et creuses, par table : racine par fréquence (`AutoSplit`), enfant en `Pivot` si un seul type, sinon `AutoSplit` ; et `apply_structured_pivot_split`, la grille `suffix_columns` du TOML |
 | `guard.rs` | Phase 4 — garde-fou 1600 colonnes (`apply_column_limit_guard`), exclusion des enfants absorbés (`exclude_absorbed_children`) |
 | `mod.rs` | Déclare les sous-modules, ré-exporte `SchemaFinalizer`, `OverflowWarning`, `exclude_absorbed_children` |
 

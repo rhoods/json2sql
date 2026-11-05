@@ -79,7 +79,7 @@ Une table est dite **large** si le nombre de ses colonnes **scalaires** (hors co
 
 ## 4. Garde ratio_stable (P1)
 
-**Fichier :** `src/schema/registry.rs` — condition [3a]
+**Fichier :** `src/schema/finalizer/wide_strategy.rs` — `apply_wide_strategy()`, `stable_ratio()`
 
 Avant d'appliquer une stratégie wide, on vérifie :
 
@@ -119,13 +119,13 @@ Les colonnes tableau restent toujours dans la table principale.
 
 ---
 
-## 6. Détection de suffixes structurés (StructuredPivot)
+## 6. Grille de suffixes (StructuredPivot) : proposée, puis appliquée par le TOML
 
 **Fichier :** `src/schema/suffix_detector.rs`
 
-Pour les tables larges non-racines dont les colonnes suivent un pattern `{base}_{suffixe}` (ex. `calcium_100g`, `calcium_unit`, `calcium_serving`), un pivot structuré est auto-détecté.
+Les colonnes d'une table large peuvent suivre un pattern `{base}_{suffixe}` (ex. `calcium_100g`, `calcium_unit`, `calcium_serving`). Depuis #200, la grille n'est plus appliquée seule : les noms trouvent une grille dans n'importe quel domaine, absurde parfois (`user_id`, `created_at`, `user_name`). `--suggest` la cherche (algorithme ci-dessous) dans chaque table d'au moins 20 colonnes de données et l'écrit en commentaire (`# suffix_columns = [...]` sous `[table]`) ; `suffix_columns` du TOML l'applique, avant le split.
 
-La table n'est pas vidée : seules les clés de la grille (clés suffixées et clés nues qui en sont les bases) partent dans un compagnon `{table}_pivot` (`unique_companion_name`), une ligne par base. La table garde son nom, ses scalaires hors grille, ses colonnes PG array et ses vraies tables filles ; elle prend `AutoSplit` avec les clés de la grille en `medium_keys` et le compagnon en `wide_table_name`, comme le split Pivot (§ 8). En Pass 2, `write_autosplit_rows` voit que le compagnon est un `StructuredPivot` et regroupe les clés par base (#163).
+Appliquée, la table n'est pas vidée : seules les clés de la grille (clés suffixées et clés nues qui en sont les bases) partent dans un compagnon `{table}_pivot` (`unique_companion_name`), une ligne par base. La table garde son nom, ses scalaires hors grille, ses colonnes PG array et ses vraies tables filles ; elle prend `AutoSplit` avec les clés de la grille en `medium_keys` et le compagnon en `wide_table_name`, comme le split Pivot (§ 8). En Pass 2, `write_autosplit_rows` voit que le compagnon est un `StructuredPivot` et regroupe les clés par base (#163).
 
 ### Algorithme
 
@@ -137,7 +137,7 @@ La table n'est pas vidée : seules les clés de la grille (clés suffixées et c
 
 > **Limite.** L'élargissement se fait colonne par colonne. Une colonne de suffixe très creuse avec une chaîne (par exemple 3 valeurs, dont 1 chaîne : 33 %) reste en `VARCHAR`, et toute la colonne du pivot passe en `TEXT`. Les unions de tables sœurs (`wide_strategies.rs`) suivent la même règle.
 
-Ce comportement peut être forcé manuellement dans le fichier de config TOML via `strategy = "structured_pivot"` et `suffix_columns = ["_100g", "_unit"]`. L'override passe par le même découpage (`apply_structured_pivot_split`) ; le rejouer sur un snapshot qui a déjà le compagnon ne change rien. Les colonnes de suffixe sont typées d'après les types déjà résolus des clés : un `VARCHAR(n)` garde sa longueur, avec la marge de 20 % (#117) ; les colonnes tableau PG et `JSONB` restent sur la table d'identité.
+Le TOML l'applique avec `suffix_columns = ["_100g", "_unit"]` (la forme `strategy = "structured_pivot"` avec `suffix_columns` est encore lue). L'override passe par `apply_structured_pivot_split`, avant le split : une table large et creuse qui a une grille garde ses colonnes de suffixes ; le rejouer sur un snapshot qui a déjà le compagnon ne change rien. Les colonnes de suffixe sont typées d'après les types déjà résolus des clés : un `VARCHAR(n)` garde sa longueur, avec la marge de 20 % (#117) ; les colonnes tableau PG et `JSONB` restent sur la table d'identité.
 
 ---
 
@@ -187,7 +187,7 @@ numériques et texte en deux tables.
 
 **Fichier :** `src/schema/wide_strategies.rs` — `suggest_wide_strategy()`
 
-Une table enfant large et creuse qui n'est pas une grille de suffixes (§ 7) est coupée selon les types de ses valeurs :
+Une table enfant large et creuse, sans grille `suffix_columns` dans le TOML (§ 6), est coupée selon les types de ses valeurs :
 
 | Stratégie | Critère | Stockage |
 |---|---|---|
@@ -234,8 +234,8 @@ Les stratégies **Pivot**, **Jsonb**, **StructuredPivot** et **KeyedPivot** abso
 `AutoSplit` n'absorbe **pas** ses enfants : les tables enfants (ex. `_nutriments`, `_ingredients`) restent indépendantes.
 
 Cette passe est exécutée **deux fois** :
-1. Dans `finalize()` — après la construction du schéma initial
-2. Dans `main.rs` après `apply_overrides()` — pour prendre en compte les stratégies définies manuellement dans le TOML
+1. Dans `apply_overrides_complete()` — après les stratégies définies manuellement dans le TOML
+2. Dans `SchemaFinalizer::split()` — après le split des tables larges et la garde des 1600 colonnes
 
 ---
 
@@ -250,10 +250,9 @@ Le fichier TOML permet de forcer des décisions que l'inférence automatique ne 
 [nom_table]
 strategy = "jsonb"          # forcer une stratégie
 # strategy = "pivot"
-# strategy = "structured_pivot"
 # strategy = "columns"
-# strategy = "ignore"
-suffix_columns = ["_100g", "_unit"]  # suffixes explicites pour structured_pivot
+# strategy = "flatten"
+suffix_columns = ["_100g", "_unit"]  # la grille de suffixes (proposée par --suggest)
 
 [nom_table.columns]
 ma_colonne = "INTEGER"      # forcer un type de colonne
@@ -261,7 +260,7 @@ ma_colonne = "INTEGER"      # forcer un type de colonne
 
 Les types forçables sont scalaires : une surcharge sur une colonne tableau est ignorée avec un avertissement. Forcer un type numérique sur une colonne de chaînes n'est pas une conversion : chaque chaîne devient `NULL` + anomalie (§ 1).
 
-Les surcharges sont appliquées après `finalize()` et suivies d'une nouvelle passe d'exclusion.
+Les surcharges sont appliquées après la Pass 1 et la sauvegarde du snapshot, **avant** le split des tables larges (#200), et suivies d'une nouvelle passe d'exclusion. Une table que le TOML règle (`strategy`, y compris `columns`) n'est pas coupée par le split.
 
 ### Groupes de colonnes (`column_groups`, #78)
 
@@ -276,7 +275,7 @@ Une table à stratégie `Columns` ou `AutoSplit` range chaque groupe dans une ta
 
 Un groupe est ignoré avec un avertissement (`ConfigWarning::ColumnGroup*`) pour une colonne inconnue, générée ou déjà dans un autre groupe, un groupe de moins de 3 colonnes, un nom de table déjà pris ou un parent qui n'aurait plus de colonne de données. Réappliquer la même config ne change rien ; une table de groupe existante avec d'autres colonnes est une erreur. Un snapshot qui contient des groupes est écrit en version 3 (`load` accepte 2 et 3).
 
-**Stratégie `--group-columns` (#91).** Après le TOML, les overrides de l'IHM et la sauvegarde du snapshot, `grouping::auto::apply_name_groups` propose par les noms seuls chaque table éligible (comme `--suggest`, sans échantillon) et applique ses groupes confirmés par le même chemin qu'une config. Elle saute les tables déjà découpées (relancer la proposition sur le reste d'une table donnerait d'autres groupes : les seuils des noms dépendent des colonnes de la table), les tables de groupe (la Pass 2 ne remplit que les groupes d'une table écrite depuis son objet) et les tables dont le TOML a une clé `column_groups`. Les colonnes sont triées par nom avant la proposition, si bien que le résultat ne dépend pas de l'ordre des colonnes (#90). Le snapshot n'en contient jamais le résultat, seulement les tables cochées dans l'IHM (`SchemaSnapshot.group_columns`).
+**Stratégie `--group-columns` (#91).** Après la sauvegarde du snapshot, le TOML, les overrides de l'IHM et le split, `grouping::auto::apply_name_groups` propose par les noms seuls chaque table éligible (comme `--suggest`, sans échantillon) et applique ses groupes confirmés par le même chemin qu'une config. Elle saute les tables déjà découpées (relancer la proposition sur le reste d'une table donnerait d'autres groupes : les seuils des noms dépendent des colonnes de la table), les tables de groupe (la Pass 2 ne remplit que les groupes d'une table écrite depuis son objet) et les tables dont le TOML a une clé `column_groups`. Les colonnes sont triées par nom avant la proposition, si bien que le résultat ne dépend pas de l'ordre des colonnes (#90). Le snapshot n'en contient jamais le résultat, seulement les tables cochées dans l'IHM (`SchemaSnapshot.group_columns`).
 
 **Signaux de données depuis le snapshot (#91, phase 2).** Pendant la Pass 1, le thread de lecture garde un échantillon borné et déterministe des lignes racine (`pass1/row_sample.rs`) ; après la finalisation, `grouping::suggest::samples_of_rows` en tire la présence et les valeurs de chaque table éligible, colonnes triées par nom, lignes analysées une à une, et les range dans `Pass1Result.samples` puis dans le snapshot. La stratégie construit les `DataSignals` d'une table depuis cet échantillon si ses colonnes sont celles du Pass 1 : la règle des deux signaux confirme alors les fusions de familles, comme `--suggest`. Les colonnes laissées dans la table qu'un lift ajusté par richesse rapproche d'un groupe sont des candidats (`TableProposal.attachments`), affichés et jamais appliqués : sur OFF, la co-présence (φ) ne rattachait rien, les colonnes orphelines étant rares.
 

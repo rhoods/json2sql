@@ -22,6 +22,8 @@ symbols:
   - AppState
   - AppState::cancel
   - AppState::load_snapshot
+  - pass1_registry_config
+  - split_wide_tables
   - AppState::clear_snapshot
   - AppState::apply_progress_event
   - AppState::apply_worker_result
@@ -103,7 +105,7 @@ L'IHM est une application Dioxus de bureau. Tout son état tient dans un seul `A
 |---|---|---|
 | Nouvel écran | `AppScreen`, son cas dans `App`, un fichier de `screens/`, les boutons qui y mènent (§ 4) | oui pour le cas dans `App`, non pour la navigation |
 | Nouveau réglage du projet, sauvé d'une session à l'autre | `ProjectState`, `ProjectConfig`, `ProjectConfig::apply_to`, un champ dans `SetupScreen` (§ 4) | en partie : pas `ProjectConfig::apply_to` ni `try_save` |
-| Nouveau réglage de la Pass 1 | `RegistryConfig` dans `AnalysisScreen` ; les seuils de l'IHM sont des constantes de `state/mod.rs` (§ 3) | oui : `RegistryConfig` est construit en littéral |
+| Nouveau réglage de la Pass 1 | `RegistryConfig`, construit par `pass1_registry_config` (Pass 1 et snapshot chargé) ; les seuils de l'IHM sont des constantes de `state/mod.rs` (§ 3) | oui : `RegistryConfig` est construit en littéral |
 | Nouveau paramètre d'import | `WorkerConfig` (`src/ipc.rs`), rempli dans `ImportScreen` ; côté worker, `WorkerConfig::into_pass2_config` | oui : `WorkerConfig` est construit en littéral |
 | Nouvelle stratégie ou nouvel override | badges : `strategy_label`, `strategy_badge`, `user_override_badge` ; boutons de `StrategyScreen` ; interrupteurs de `SetupScreen` | oui pour les badges (`match` sans cas par défaut), **non** pour les boutons et interrupteurs |
 | Nouvel événement de progression | `ProgressEvent`, `AppState::apply_progress_event` | oui (`match` sans cas par défaut) |
@@ -131,8 +133,9 @@ main : CSS (design_css) + scripts, fenêtre
        ├─ find_active_socket : un worker tourne encore → AppScreen::Resume
        └─ match sur AppScreen (sans cas par défaut) → un écran, qui reçoit le Signal<AppState>
 
-SetupScreen : chaque champ modifié → try_save ; snapshot → AppState::load_snapshot
-  └─ AnalysisScreen : Pass 1 dans l'IHM (Pass1Config + RegistryConfig → run / run_parallel)
+SetupScreen : chaque champ modifié → try_save ; snapshot → split_wide_tables (seuils de pass1_registry_config,
+             #200 : un snapshot de la CLI n'est pas coupé) → AppState::load_snapshot
+  └─ AnalysisScreen : Pass 1 dans l'IHM (Pass1Config + pass1_registry_config → run / run_parallel, split compris)
        ├─ ProgressEvent → AppState::apply_progress_event
        └─ résultat → SchemaState (schemas, échantillons…) ; cases des groupes : splittable_tables
   └─ StrategyScreen : overrides et groupes dans SchemaState ; liste : display_schemas → build_table_rows → TableListPanel
@@ -204,8 +207,8 @@ vide).
 
 **Deux processus, deux chemins.**
 
-- Un réglage de la Pass 1 va dans `RegistryConfig`, construit dans `AnalysisScreen`. Les seuils de l'IHM sont écrits
-  en dur dans `state/mod.rs` et diffèrent des défauts de la CLI (`PASS1_WIDE_COLUMN_THRESHOLD` 10 contre 15,
+- Un réglage de la Pass 1 va dans `RegistryConfig`, construit par `pass1_registry_config` pour `AnalysisScreen` et
+  pour le split d'un snapshot chargé (#200). Les seuils de l'IHM sont écrits en dur dans `state/mod.rs` et diffèrent des défauts de la CLI (`PASS1_WIDE_COLUMN_THRESHOLD` 10 contre 15,
   `PASS1_SIBLING_THRESHOLD` 3 contre 2, `PASS1_SIBLING_JACCARD` 0,5 contre 0,8) : le même fichier ne donne pas le
   même schéma dans la CLI et dans l'IHM (#112).
 - Un paramètre d'import va dans `WorkerConfig`, sérialisé vers le worker. `ImportScreen` lit d'abord tous les champs

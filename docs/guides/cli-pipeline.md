@@ -93,14 +93,14 @@ les rapports. La zone décide **de l'ordre des étapes et de ce qui sort où** ;
 main (src/main.rs)
 ├─ Commands::Inspect → run_inspect (main.rs) → pass1::runner::run_inspect : Pass 1 sur N objets, sans stratégie
 └─ sans sous-commande : parse_disabled_strategies, Cli → PipelineConfig
-   ├─ --suggest → run_suggest_groups → suggest_groups → finalized_schema → proposition (aucune base)
+   ├─ --suggest → run_suggest_groups → suggest_groups → finalized_schema (sans le split) → proposition (aucune base)
    └─ sinon → run_pipeline (src/pipeline.rs)
         ├─ finalized_schema
         │   ├─ resolve_input : stdin copié dans un fichier temporaire (le fichier est lu deux fois)
         │   ├─ load_or_infer_schema : restore_from_snapshot (--schema-input) ou run_pass1_workers
         │   ├─ report_pass1_warnings
-        │   └─ post_process_schema : apply_schema_config → save_schema_snapshot → apply_group_columns
-        │                            → emit_schema_report
+        │   └─ post_process_schema : save_schema_snapshot → apply_schema_config → split (pass1::runner)
+        │                            → apply_group_columns → emit_schema_report
         ├─ --dry-run → print_dry_run_ddl, fin
         ├─ connect_and_create_tables : DDL sans contraintes
         ├─ run_pass2 → run_interruptible (Ctrl-C via ctrl_c_interrupt)
@@ -122,17 +122,20 @@ worker (`json2sql-worker/src/pipeline.rs`, un autre que celui de `src/pipeline.r
 - **Deux chaînes, CLI et IHM.** Une option ajoutée à la CLI n'existe pas dans l'IHM : ni `PipelineConfig`, ni
   `post_process_schema`, ni les rapports de `finalize_pass2` n'y servent. Les défauts des seuils diffèrent déjà entre
   les deux (#112). L'IHM a sa carte (#100).
-- **`--schema-input` ignore en silence toutes les options de la Pass 1** (`--text-threshold`,
-  `--wide-column-threshold`, `--workers`, `--disable-strategy`…) : `load_or_infer_schema` ne lance pas
-  `run_pass1_workers`. Le fichier d'entrée reste nécessaire pour la Pass 2.
+- **`--schema-input` ignore en silence les options de la Pass 1** (`--text-threshold`, `--workers`,
+  `--disable-strategy`, `--sibling-threshold`…) : `load_or_infer_schema` ne lance pas `run_pass1_workers`. Les seuils
+  du split (`--wide-column-threshold`, `--stable-threshold`), eux, s'appliquent : le split se refait après le
+  chargement, d'après les statistiques du snapshot (#200). Le fichier d'entrée reste nécessaire pour la Pass 2.
 - **stdout porte les résultats, stderr la progression.** Sortent sur stdout : le DDL de `--dry-run`, le rapport
   d'anomalies sans `--anomaly-output`, le rapport de `--suggest` et le schéma d'`inspect` sans `--output`.
   Un message de progression écrit avec `println!` se mélange à ces sorties redirigées ; il va sur stderr
   (`eprintln!`).
-- **L'ordre de `post_process_schema` est voulu.** Surcharges du TOML, puis snapshot, puis groupes de colonnes, puis
-  rapport : le snapshot est écrit avant les groupes automatiques pour qu'un TOML donné plus tard l'emporte encore
-  (test `the_snapshot_is_saved_before_the_strategy` de `pipeline.rs`). Une étape insérée au mauvais endroit change
-  ce que contient le snapshot, sans erreur.
+- **L'ordre de `post_process_schema` est voulu** (#200). Snapshot, puis surcharges du TOML, puis split, puis groupes
+  de colonnes, puis rapport : le snapshot n'a ni TOML, ni split, ni groupes automatiques, et se relance avec un autre
+  TOML (tests `the_snapshot_is_saved_before_the_strategy` et
+  `a_snapshot_is_saved_before_the_toml_which_the_reload_applies_again` de `pipeline.rs`) ; le TOML voit toutes les clés
+  avant que le split en envoie en clé/valeur. Une étape insérée au mauvais endroit change ce que contient le snapshot,
+  sans erreur. `--suggest` passe par le même chemin, sans le split.
 - **`--max-anomaly-rate` agit après le COMMIT.** `finalize_pass2` compare le taux une fois la Pass 2 finie : les
   lignes sont déjà en base, seuls le message et le code de sortie changent. usage.md dit « abort ».
 - **Le rapport d'anomalies n'est écrit que s'il y a des anomalies, ou si `--anomaly-output` est donné.** Sans
