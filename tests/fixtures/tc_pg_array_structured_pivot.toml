@@ -1,0 +1,3 @@
+# #200, T8: the suffix grid of tc_pg_array_structured_pivot.jsonl, asked in the TOML (no longer automatic).
+[products_nutrients]
+suffix_columns = ["_100g", "_serving"]

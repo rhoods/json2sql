@@ -1579,8 +1579,9 @@ mod tests {
     }
 
     #[test]
-    fn test_disable_structured_pivot_falls_through_to_pivot_or_jsonb() {
-        // nutrients has 9 cols with suffix patterns _100g / _serving over 3 bases → StructuredPivot normally
+    fn a_suffix_grid_is_never_applied_automatically() {
+        // #200, T8: nutrients has 9 cols with suffix patterns _100g / _serving over 3 bases. The grid is only
+        // proposed (`--suggest-groups`); the split decides alone: one type of value → key/value companion.
         let obj = json!({
             "nutrients": {
                 "calories": 100, "calories_100g": 200, "calories_serving": 150,
@@ -1588,44 +1589,21 @@ mod tests {
                 "salt": 1, "salt_100g": 2, "salt_serving": 3
             }
         });
-
-        // Default: StructuredPivot expected
-        let mut reg_normal = SchemaRegistry::new(RegistryConfig {
+        let mut reg = SchemaRegistry::new(RegistryConfig {
             wide_column_threshold: 3,
             sibling_threshold: usize::MAX,
             ..Default::default()
         });
-        reg_normal.observe_root("products", make_root(&obj));
-        let schemas_normal = reg_normal.finalize();
-        // The grid goes to the `_pivot` companion of products_nutrients (#163).
-        let nutrients_normal = schemas_normal
-            .iter()
-            .find(|s| s.name == "products_nutrients_pivot")
-            .unwrap();
+        reg.observe_root("products", make_root(&obj));
+        let schemas = reg.finalize();
         assert!(
-            matches!(
-                nutrients_normal.inferred_strategy,
-                InferredStrategy::StructuredPivot(_)
-            ),
-            "structured_pivot enabled → StructuredPivot expected, got: {:?}",
-            nutrients_normal.inferred_strategy
-        );
-
-        // With structured_pivot disabled: fall through to Pivot or Jsonb
-        let mut reg_disabled = SchemaRegistry::new(RegistryConfig {
-            wide_column_threshold: 3,
-            sibling_threshold: usize::MAX,
-            disabled_strategies: HashSet::from([StrategyName::StructuredPivot]),
-            ..Default::default()
-        });
-        reg_disabled.observe_root("products", make_root(&obj));
-        let schemas_disabled = reg_disabled.finalize();
-        assert!(
-            !schemas_disabled
+            !schemas
                 .iter()
                 .any(|s| matches!(s.inferred_strategy, InferredStrategy::StructuredPivot(_))),
-            "structured_pivot disabled → no StructuredPivot table"
+            "no StructuredPivot table without the TOML"
         );
+        assert!(schemas.iter().any(|s| s.name == "products_nutrients_pivot"
+            && s.inferred_strategy == InferredStrategy::Pivot));
     }
 
     // ── issue #48 : tableaux de scalaires + occurrences mixtes scalaire/array ──
@@ -1770,6 +1748,27 @@ mod tests {
         );
     }
 
+    /// `reg` finalized as the CLI does with `[table] suffix_columns = suffixes` in its TOML: the TOML before the split
+    /// (#200, T8: the grid is never applied automatically). The wide-table threshold is 3, as `pg_array_reg(3)`.
+    fn finalize_with_grid(
+        reg: &mut SchemaRegistry,
+        table: &str,
+        suffixes: &[&str],
+    ) -> Vec<crate::schema::table_schema::TableSchema> {
+        let mut schemas = reg.finalize_before_split();
+        let stats = reg.collect_stats();
+        let list: Vec<String> = suffixes.iter().map(|s| format!("\"{s}\"")).collect();
+        let toml = format!("[{table}]\nsuffix_columns = [{}]\n", list.join(", "));
+        let config: crate::schema::config::SchemaConfig = toml::from_str(&toml).unwrap();
+        crate::schema::config::apply_overrides_complete(&mut schemas, &config).unwrap();
+        let config = RegistryConfig {
+            wide_column_threshold: 3,
+            ..Default::default()
+        };
+        split_wide_tables(&mut schemas, &stats, &config);
+        schemas
+    }
+
     /// Data column names of `schema`, in order.
     fn data_col_names(schema: &crate::schema::table_schema::TableSchema) -> Vec<&str> {
         schema.data_columns().map(|c| c.name.as_str()).collect()
@@ -1790,7 +1789,7 @@ mod tests {
         ] {
             reg.observe_root("root", make_root(&v));
         }
-        let schemas = reg.finalize();
+        let schemas = finalize_with_grid(&mut reg, "root_nut", &["_100g", "_serving"]);
         let find = |name: &str| schemas.iter().find(|s| s.name == name);
 
         let nut = find("root_nut").expect("identity table keeps the original name");
@@ -1847,7 +1846,7 @@ mod tests {
         ] {
             reg.observe_root("item", make_root(&v));
         }
-        let schemas = reg.finalize();
+        let schemas = finalize_with_grid(&mut reg, "item_nutrients", &["_100g", "_serving"]);
         let nutrients = schemas.iter().find(|s| s.name == "item_nutrients").unwrap();
         assert_single_array_col(nutrients, "tags");
         let pivot = schemas
@@ -1863,7 +1862,7 @@ mod tests {
         let v = json!({"nut": {"a_100g": 1, "a_unit": "g", "b_100g": 2, "b_unit": "g",
                                "c_100g": 3, "c_unit": "g", "comp": {"k": 1}}});
         reg.observe_root("root", make_root(&v));
-        let mut schemas = reg.finalize();
+        let mut schemas = finalize_with_grid(&mut reg, "root_nut", &["_100g", "_unit"]);
         assert!(
             schemas.iter().any(|s| s.name == "root_nut_pivot"),
             "companion"
@@ -1879,7 +1878,7 @@ mod tests {
 
     // ── issue #84 : la décision « table large » ne juge que les colonnes scalaires ──
     // Thresholds 10 (IHM) and 15 (CLI), 40 rows (below 10 rows the "high stable ratio → Columns"
-    // branch is skipped). Column names have no `_`, so no StructuredPivot suffix is ever detected.
+    // branch is skipped). No suffix grid is ever applied without the TOML (#200).
 
     fn observe_rows(
         reg: &mut SchemaRegistry,

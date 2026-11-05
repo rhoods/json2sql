@@ -113,7 +113,7 @@ Les stratégies existantes, par origine :
 | `Columns` | par défaut | TOML `columns` | — |
 | `Pivot` | phase 3 (`suggest_wide_strategy`, valeurs d'un seul type) | TOML `pivot`, IHM | non (partie du split, #200) |
 | `Jsonb` | phase 4 seulement (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
-| `StructuredPivot` | phase 3 (suffixes) | TOML `suffix_columns` | `structured_pivot` |
+| `StructuredPivot` | jamais : la grille est proposée par `--suggest-groups` (#200) | TOML `suffix_columns` | — (refusé, plus rien d'automatique) |
 | `SiblingCollapse` | phase 2 (`finalize_cascading`) | TOML `[group.*]` | `sibling` |
 | `SiblingCollapseMulti` | phase 2 | — | `sibling` |
 | `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (le split est obligatoire) |
@@ -139,7 +139,7 @@ Pass 1 (observation)
 └─ SchemaFinalizer::run
    ├─ phase 1  schémas de base, table par table
    ├─ phase 2  finalize_cascading           → SiblingCollapse(Multi)               [sibling]
-   ├─ phase 3  apply_wide_table_strategies  → Pivot, Jsonb, StructuredPivot, AutoSplit [pivot, structured_pivot]
+   ├─ phase 3  apply_wide_table_strategies  → Pivot, AutoSplit (après le TOML, #200)
    └─ phase 4  apply_column_limit_guard (→ Jsonb), puis exclude_absorbed_children
 Overrides : TOML (apply_overrides_complete), IHM (apply_user_overrides)
    → TableSchema::effective_strategy : IHM > TOML > inférée

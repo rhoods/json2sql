@@ -24,6 +24,9 @@ use crate::schema::stats::{ColumnStats, ObservedKeys};
 use crate::schema::table_schema::{SuffixColumn, SuffixSchema};
 use crate::schema::type_tracker::{widen_pg_types, PgType};
 
+/// Minimum fraction of the keys a proposed grid must cover (#163); the grid is only proposed (#200).
+pub const SUFFIX_MIN_COVERAGE: f64 = 0.3;
+
 /// Minimum number of distinct bases a suffix must appear with: two let a pair of dynamic keys
 /// (`en:celery_seed`, `en:mustard_seed`) invent a `_seed` suffix (#163).
 const MIN_BASES: usize = 3;

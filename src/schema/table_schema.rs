@@ -15,7 +15,7 @@
 //! | `Columns` | inferred | default | one column per JSON key |
 //! | `Pivot` | inferred / user | homogeneous values, dynamic keys | `(key TEXT, value T)` EAV |
 //! | `Jsonb` | inferred / user | heterogeneous / irregular structure | single `JSONB` column |
-//! | `StructuredPivot` | inferred | keys share prefix + typed suffixes | one row per prefix group |
+//! | `StructuredPivot` | user (TOML `suffix_columns`) | keys share prefix + typed suffixes | one row per prefix group |
 //! | `SiblingCollapse` | inferred | N sibling tables, same schema | merged table with key column |
 //! | `SiblingCollapseMulti` | inferred | siblings with mixed key shapes | two synthetic pivot tables |
 //! | `AutoSplit` | inferred | root table with bi-modal key frequency | main table + `_wide` companion |
@@ -211,9 +211,10 @@ pub enum InferredStrategy {
 
     /// Structured pivot: keys share a `{base}_{suffix}` pattern; suffixes become typed columns.
     ///
-    /// Trigger: more than `wide_column_threshold` distinct keys (default **100**) AND at least
-    /// `SUFFIX_MIN_COVERAGE` (30%) of those keys follow a `{base}` / `{base}_{suffix}` pattern
-    /// (e.g. `energy`, `energy_100g`, `energy_unit`). One row per base group.
+    /// Trigger: the TOML `suffix_columns` of the table, never the detection, which only proposes
+    /// a grid when `SUFFIX_MIN_COVERAGE` (30%) of the keys follow a `{base}` / `{base}_{suffix}`
+    /// pattern (e.g. `energy`, `energy_100g`, `energy_unit`; `--suggest-groups`, #200). One row
+    /// per base group.
     ///
     /// JSON input (flat object with prefixed keys):
     /// ```text

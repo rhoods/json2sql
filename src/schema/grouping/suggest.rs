@@ -17,6 +17,7 @@
 //! - struct `Suggestion` — les tables analysées, le TOML et le rapport.
 //! - fn `suggest` — propose un découpage pour chaque table éligible du schéma finalisé : échantillon, propositions, sorties.
 //! - fn `proposal_for` — proposition d'une table, à partir de ses colonnes et de ses signaux de données.
+//! - fn `suffix_grid` — les suffixes de la grille que forment les clés d'une table, à proposer (#200, T8).
 //! - fn `most_frequent_columns` — une table réduite à ses `MAX_COLUMNS` clés les plus fréquentes quand elle en a plus (#200).
 //! - struct `ReadPlan` — où lire une table : chemin vers son objet, s'il est atteignable, et chemins de ses colonnes.
 //! - fn `ReadPlan::target` — la cible de l'échantillonneur pour cette table, si son objet est atteignable.
@@ -48,7 +49,8 @@ use super::sample::{
 };
 use super::values::RANK_SAMPLE;
 use crate::error::{J2sError, Result};
-use crate::schema::stats::ColumnStats;
+use crate::schema::stats::{observed_keys_by_table, ColumnStats};
+use crate::schema::suffix_detector::{detect_suffix_schema, SUFFIX_MIN_COVERAGE};
 use crate::schema::table_schema::{ChildKind, ColumnSchema, TableSchema};
 
 /// A table needs at least this many data columns to be worth a proposal.
@@ -104,25 +106,25 @@ pub fn suggest(
         .iter()
         .flat_map(|s| s.column_groups.iter().map(String::as_str))
         .collect();
-    let tables: Vec<&TableSchema> = schemas
+    let trimmed: Vec<TableSchema> = schemas
         .iter()
         .filter(|s| eligible(s) && !made.contains(s.name.as_str()))
+        .map(|t| most_frequent_columns(t, stats))
         .collect();
-    if tables.is_empty() {
+    if trimmed.is_empty() {
         return Err(J2sError::InvalidInput(format!(
             "no table to split: it needs a Columns or AutoSplit strategy and at least {MIN_TABLE_COLUMNS} data columns"
         )));
     }
-    let trimmed: Vec<TableSchema> = tables
-        .iter()
-        .map(|t| most_frequent_columns(t, stats))
-        .collect();
     let tables: Vec<&TableSchema> = trimmed.iter().collect();
     let signals = data_signals(schemas, &tables, input, limit);
     let mut taken: HashSet<String> = schemas.iter().map(|s| s.name.clone()).collect();
+    let observed = observed_keys_by_table(stats);
     let mut proposals = Vec::with_capacity(tables.len());
     for (table, data) in tables.iter().zip(&signals) {
-        proposals.push(proposal_for(table, data, embedder, &mut taken)?);
+        let mut proposal = proposal_for(table, data, embedder, &mut taken)?;
+        proposal.suffixes = suffix_grid(table, observed.get(table.name.as_str()));
+        proposals.push(proposal);
     }
     Ok(Suggestion {
         tables: tables.iter().map(|t| t.name.clone()).collect(),
@@ -190,6 +192,21 @@ fn most_frequent_columns(table: &TableSchema, stats: &[ColumnStats]) -> TableSch
         .columns
         .retain(|c| c.is_generated || kept.contains(c.name.as_str()));
     trimmed
+}
+
+/// The suffixes of the grid the keys of `table` form, read from its Pass 1 keys; none at the root, where the TOML
+/// refuses `suffix_columns` (#172). Only proposed: the names alone find a grid in any domain, absurd ones included
+/// (`user_id` / `created_at`, #200).
+fn suffix_grid(
+    table: &TableSchema,
+    observed: Option<&crate::schema::stats::ObservedKeys>,
+) -> Vec<String> {
+    let Some(observed) = observed.filter(|_| table.parent_table.is_some()) else {
+        return Vec::new();
+    };
+    detect_suffix_schema(observed, SUFFIX_MIN_COVERAGE).map_or_else(Vec::new, |(grid, _)| {
+        grid.suffix_cols.into_iter().map(|c| c.suffix).collect()
+    })
 }
 
 /// A table that can be split (`Columns` or `AutoSplit`) with enough data columns.

@@ -1,16 +1,15 @@
 //! Phase 3 — décision de la stratégie wide-table, par table.
 //!
 //! - fn `apply_wide_table_strategies` — applique la stratégie choisie à chaque table éligible.
-//! - fn `observed_keys_by_table` — les clés scalaires de chaque table, lues dans les stats de la Pass 1 (#200).
 //! - struct `WideStats` — mesures d'une table wide (lignes, colonnes scalaires, ratio stable).
 //! - fn `WideStats::log` — journalise la stratégie choisie pour la table.
 //! - fn `stable_ratio` — part des colonnes scalaires présentes dans assez de lignes.
 //! - fn `apply_wide_strategy` — garde une table large et stable en Columns ; coupe la racine par fréquence
 //!   (`AutoSplit`) et passe une table enfant à `apply_non_autosplit_strategy` (#200).
-//! - fn `apply_non_autosplit_strategy` — split d'une table enfant : grille de suffixes (`StructuredPivot`), split
-//!   identité/compagnon (Pivot) si ses valeurs sont d'un seul type, sinon `AutoSplit` par fréquence.
-//! - fn `apply_structured_pivot_split` — la grille de suffixes part dans un compagnon `_pivot`
-//!   structuré ; le reste (scalaires hors grille, tableaux, enfants) reste sur l'identité (#163).
+//! - fn `apply_non_autosplit_strategy` — split d'une table enfant : identité/compagnon (Pivot) si ses valeurs sont
+//!   d'un seul type, sinon `AutoSplit` par fréquence. Plus de grille de suffixes automatique (#200, T8).
+//! - fn `apply_structured_pivot_split` — la grille de suffixes du TOML (`suffix_columns`) part dans un compagnon
+//!   `_pivot` structuré ; le reste (scalaires hors grille, tableaux, enfants) reste sur l'identité (#163).
 //! - fn `apply_pivot_split` — split identité/compagnon à rétention zéro (toutes les clés
 //!   migrent vers le compagnon `_pivot`), déclenché quand `apply_non_autosplit_strategy`
 //!   choisirait Pivot — que la table soit `Object`- ou `ObjectArray`-parent.
@@ -26,13 +25,9 @@
 //!   (`AutoSplit` racine uniquement ; aucune n'est jetée, #200).
 //! - fn `infer_medium_value_type` — détermine le type de valeur commun d'un jeu de clés.
 //! - fn `build_finalizer_config` — assemble la config figée passée à ces fonctions.
-//! - struct `FinalizerConfig` — config figée (seuils + stratégies désactivées) pour cette phase.
+//! - struct `FinalizerConfig` — config figée (seuils) pour cette phase.
 
-use std::collections::HashMap;
-
-use super::super::stats::{ColumnStats, ObservedKeys};
-use super::super::strategies::StrategyName;
-use super::super::suffix_detector::detect_suffix_schema;
+use super::super::stats::{observed_keys_by_table, ColumnStats, ObservedKeys};
 use super::super::table_schema::SuffixSchema;
 use super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
 use super::super::type_tracker::{widen_pg_types, PgType};
@@ -77,36 +72,16 @@ pub(super) fn apply_wide_table_strategies(
     schemas.extend(extra_schemas);
 }
 
-/// The scalar keys of each table in `stats`, by JSON key. A PG array column (a field also seen as an
-/// array, #48) is not a scalar key; objects and arrays have no statistics.
-fn observed_keys_by_table(stats: &[ColumnStats]) -> HashMap<&str, ObservedKeys> {
-    let mut by_table: HashMap<&str, ObservedKeys> = HashMap::new();
-    for stat in stats
-        .iter()
-        .filter(|s| !matches!(s.pg_type, PgType::Array(_)))
-    {
-        by_table
-            .entry(stat.table_name.as_str())
-            .or_default()
-            .insert(stat.original_name.clone(), stat.clone());
-    }
-    by_table
-}
-
-pub(super) fn build_finalizer_config(finalizer: &SchemaFinalizer) -> FinalizerConfig {
+pub(super) const fn build_finalizer_config(finalizer: &SchemaFinalizer) -> FinalizerConfig {
     FinalizerConfig {
         wide_column_threshold: finalizer.wide_column_threshold,
         stable_threshold: finalizer.stable_threshold,
-        disable_structured_pivot: finalizer
-            .disabled_strategies
-            .contains(&StrategyName::StructuredPivot),
     }
 }
 
 pub(super) struct FinalizerConfig {
     wide_column_threshold: usize,
     stable_threshold: f64,
-    disable_structured_pivot: bool,
 }
 
 /// What `apply_wide_strategy` measured on a wide table, for the strategy branches.
@@ -188,9 +163,9 @@ fn apply_wide_strategy(
     apply_non_autosplit_strategy(schema, observed, config, &stats, existing_names)
 }
 
-/// Chooses the split of a wide child table: `StructuredPivot` when its keys form a suffix grid,
-/// the identity/companion split (Pivot) when its values are all of one type (its keys are data:
-/// currencies, languages…), `AutoSplit` by frequency otherwise (#200).
+/// Chooses the split of a wide child table: the identity/companion split (Pivot) when its values are
+/// all of one type (its keys are data: currencies, languages…), `AutoSplit` by frequency otherwise.
+/// A suffix grid found in the names is only proposed (`--suggest-groups`), never applied here (#200).
 fn apply_non_autosplit_strategy(
     schema: &mut TableSchema,
     observed: &ObservedKeys,
@@ -198,24 +173,6 @@ fn apply_non_autosplit_strategy(
     stats: &WideStats,
     existing_names: &std::collections::HashSet<String>,
 ) -> Option<TableSchema> {
-    let grid = if config.disable_structured_pivot {
-        None
-    } else {
-        detect_suffix_schema(observed, SUFFIX_MIN_COVERAGE)
-    };
-    if let Some((suffix_schema, grid_keys)) = grid {
-        let n = suffix_schema.suffix_cols.len();
-        let strategy = format!("StructuredPivot ({n} suffixes, split identité/compagnon)");
-        stats.log(&schema.name, &strategy);
-        return Some(apply_structured_pivot_split(
-            schema,
-            suffix_schema,
-            grid_keys,
-            config.stable_threshold,
-            existing_names,
-        ));
-    }
-
     if suggest_wide_strategy(observed) == InferredStrategy::Pivot {
         stats.log(&schema.name, "Pivot (split identité/compagnon)");
         return Some(apply_pivot_split(schema, observed, config, existing_names));
@@ -227,8 +184,8 @@ fn apply_non_autosplit_strategy(
 /// row per base) and return it. `schema` keeps its name and every other column (scalars outside
 /// the grid, PG arrays) and becomes the identity table: `AutoSplit` with the grid keys as
 /// `medium_keys`, so its real children are still written through `recurse_children` (#163).
-/// Shared by the detection (Phase 3) and the TOML `suffix_columns` override; `stable_threshold` is
-/// recorded on the `AutoSplit` strategy.
+/// Applied by the TOML `suffix_columns` override; `stable_threshold` is recorded on the `AutoSplit`
+/// strategy.
 pub fn apply_structured_pivot_split(
     schema: &mut TableSchema,
     suffix_schema: SuffixSchema,
@@ -418,9 +375,6 @@ fn build_wide_pivot_schema(
 /// Below this, the table is split or pivoted.
 const WIDE_TABLE_HIGH_STABLE_RATIO: f64 = 0.5;
 
-/// Minimum fraction of columns that must share a common suffix pattern to trigger `StructuredPivot`.
-const SUFFIX_MIN_COVERAGE: f64 = 0.3;
-
 #[cfg(test)]
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
@@ -436,7 +390,6 @@ mod tests {
         FinalizerConfig {
             wide_column_threshold: 2,
             stable_threshold: 0.1,
-            disable_structured_pivot: false,
         }
     }
 

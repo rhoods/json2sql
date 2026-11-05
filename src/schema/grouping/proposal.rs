@@ -225,6 +225,8 @@ pub struct TableProposal {
     pub placements: Vec<Placement>,
     /// Columns left in the table that the data tie to a confirmed group: candidates, never applied.
     pub attachments: Vec<Attachment>,
+    /// Suffixes of the grid the names of the table form, if any (#200): a `suffix_columns` to confirm, never applied.
+    pub suffixes: Vec<String>,
 }
 
 /// The data signals of one table, ready to be asked about pairs of columns.
@@ -399,6 +401,7 @@ pub fn propose(
         data: data_status(data),
         placements: Vec::new(),
         attachments,
+        suffixes: Vec::new(),
     })
 }
 

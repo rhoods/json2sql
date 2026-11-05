@@ -691,28 +691,6 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                             }
                                         }
                                     }
-                                    // Structured pivot checkbox
-                                    {
-                                        let sp_on = !state.read().project.disabled_strategies.contains(&StrategyName::StructuredPivot);
-                                        rsx! {
-                                            label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
-                                                input {
-                                                    r#type: "checkbox",
-                                                    checked: sp_on,
-                                                    onchange: move |e| {
-                                                        if e.value() == "true" {
-                                                            state.write().project.disabled_strategies.remove(&StrategyName::StructuredPivot);
-                                                        } else {
-                                                            state.write().project.disabled_strategies.insert(StrategyName::StructuredPivot);
-                                                        }
-                                                        crate::config::try_save(&state.read().project);
-                                                    },
-                                                }
-                                                span { "Structured pivot " }
-                                                span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(structured_pivot)" }
-                                            }
-                                        }
-                                    }
                                     // Column groups (#91): off by default, unlike the strategies above
                                     {
                                         let groups_on = state.read().project.group_columns;
