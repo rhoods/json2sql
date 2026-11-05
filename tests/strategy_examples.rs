@@ -686,3 +686,99 @@ fn g_measures_in_several_units_stay_columns() {
     assert_eq!(run.shape().len(), 2);
     assert_eq!(run.shape()["products_measures"].len(), 18);
 }
+
+// ---------------------------------------------------------------------------
+// T9 (PR 2) : le split se fait après le TOML et les groupes, qui voient donc toutes les clés de la table.
+// ---------------------------------------------------------------------------
+
+/// 300 objets creux de 36 clés `{base}_{min,max,avg}`, une base par ligne : une table large et creuse.
+fn meteo_stats() -> Vec<Value> {
+    rows_with_obj(|i| {
+        let base = METEO[i % 12];
+        object(["min", "max", "avg"].map(|s| format!("{base}_{s}")), |_| {
+            json!(1.5)
+        })
+    })
+}
+
+// Point réservé 1 : `suffix_columns` s'applique à une table large et creuse, que le split aurait coupée. Sans la
+// grille automatique, la table passe en clé/valeur ; avec la grille du TOML, elle a ses colonnes de suffixes.
+#[test]
+fn t9_suffix_columns_apply_to_a_wide_sparse_table() {
+    let rows = meteo_stats();
+    let args = ["--disable-strategy", "structured_pivot"];
+    let split = dry_run("t", &rows, &args, None);
+    assert_eq!(
+        split.shape(),
+        expected(&[
+            ("t", &["id"]),
+            ("t_obj", &[]),
+            ("t_obj_pivot", &["key", "value"])
+        ])
+    );
+
+    let toml = "[t_obj]\nsuffix_columns = [\"_min\", \"_max\", \"_avg\"]\n";
+    let grid = dry_run("t", &rows, &args, Some(toml));
+    assert_eq!(
+        grid.shape(),
+        expected(&[
+            ("t", &["id"]),
+            ("t_obj", &[]),
+            ("t_obj_pivot", &["name", "avg", "max", "min"]),
+        ])
+    );
+    assert!(!grid.stderr.contains("WARNING"), "{}", grid.stderr);
+}
+
+// Point réservé 2 : un groupe du TOML peut citer des clés rares, qui iraient sans lui en clé/valeur. Le split
+// traite ensuite le reste de la racine.
+#[test]
+fn t9_a_toml_group_takes_keys_the_split_would_send_to_key_value() {
+    let toml = "[events.column_groups]\nmetrics = [\"m_0\", \"m_1\", \"m_2\", \"m_3\"]\n";
+    let run = dry_run("events", &events(false), &[], Some(toml));
+    assert_eq!(
+        run.shape(),
+        expected(&[
+            ("events", &["id", "ts", "type"]),
+            ("events_metrics", &["m_0", "m_1", "m_2", "m_3"]),
+            ("events_wide", &["key", "value"]),
+        ])
+    );
+    assert!(
+        run.stderr.contains("86 medium → events_wide") && !run.stderr.contains("WARNING"),
+        "{}",
+        run.stderr
+    );
+}
+
+// Point réservé 3 : un snapshot se relance avec un autre TOML. Il est sauvé avant le TOML et le split, qui sont
+// refaits au chargement à partir des stats : pas de Pass 1 à refaire.
+#[test]
+fn t9_a_snapshot_reloads_with_another_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = dir.path().join("schema.json");
+    let snapshot = snapshot.to_str().unwrap();
+    let first = "[events.column_groups]\nmetrics = [\"m_0\", \"m_1\", \"m_2\", \"m_3\"]\n";
+    dry_run(
+        "events",
+        &events(false),
+        &["--schema-output", snapshot],
+        Some(first),
+    );
+
+    let second = "[events.column_groups]\nmetrics = [\"m_4\", \"m_5\", \"m_6\"]\n";
+    let run = dry_run(
+        "events",
+        &events(false),
+        &["--schema-input", snapshot],
+        Some(second),
+    );
+    assert_eq!(
+        run.shape(),
+        expected(&[
+            ("events", &["id", "ts", "type"]),
+            ("events_metrics", &["m_4", "m_5", "m_6"]),
+            ("events_wide", &["key", "value"]),
+        ])
+    );
+}

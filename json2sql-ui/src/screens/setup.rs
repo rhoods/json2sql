@@ -370,8 +370,14 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                             let result = pick_file(&[("Schema snapshot", "*.json")]).await;
                                             match result {
                                                 PickResult::Selected(path) => {
+                                                    let config = crate::state::pass1_registry_config(state.read().project.disabled_strategies.clone());
                                                     let res = tokio::task::spawn_blocking(move || {
-                                                        json2sql::schema::persistence::load(&path)
+                                                        // A CLI snapshot is saved before the split (#200); one the UI saved is already split, and splitting again changes nothing.
+                                                        json2sql::schema::persistence::load(&path).map(|mut snap| {
+                                                            let overflow = json2sql::schema::registry::split_wide_tables(&mut snap.schemas, &snap.stats, &config);
+                                                            snap.overflow_warnings.extend(overflow);
+                                                            snap
+                                                        })
                                                     }).await;
                                                     picking_schema.set(false);
                                                     match res {

@@ -16,10 +16,14 @@ files:
   - tests/tc_sibling_collapse.rs
   - tests/tc_wide_table.rs
 symbols:
-  - SchemaRegistry::finalize_with_pg_guard
+  - SchemaRegistry::finalize_before_split
+  - split_wide_tables
   - SchemaFinalizer
   - SchemaFinalizer::new
   - SchemaFinalizer::run
+  - SchemaFinalizer::split
+  - ColumnStats
+  - reindex_stats
   - key_column_name
   - TableEntry
   - NamingRegistry
@@ -94,7 +98,7 @@ symbols:
 
 Carte de la finalisation, pour savoir où intervenir et ce qui casse sans erreur de compilation. Les heuristiques
 (tables larges, suffixes, tables sœurs, noms) sont décrites dans [schema-inference.md](../technical/schema-inference.md) ;
-ce qui précède (lecture, observation, `SchemaRegistry::finalize_with_pg_guard`) dans la carte [pass1.md](pass1.md) ;
+ce qui précède (lecture, observation, `SchemaRegistry::finalize_before_split`) dans la carte [pass1.md](pass1.md) ;
 ajouter une stratégie a sa propre fiche : [ajouter-une-strategie.md](ajouter-une-strategie.md).
 
 ## Rôle
@@ -102,7 +106,11 @@ ajouter une stratégie a sa propre fiche : [ajouter-une-strategie.md](ajouter-un
 La finalisation transforme les observations de la Pass 1 (un `TableEntry` par chemin JSON) en une liste de
 `TableSchema` triés parents avant enfants : noms PostgreSQL, colonnes typées, colonnes générées (`j2s_…`), stratégie
 de chaque table. Elle rend aussi les collisions de noms de colonnes (`ColumnCollision`) et les tables converties par
-la garde des 1 600 colonnes (`OverflowWarning`). Tout se passe dans `SchemaFinalizer::run`. `TableSchema`, défini
+la garde des 1 600 colonnes (`OverflowWarning`). Elle se fait en deux temps (#200) : `SchemaFinalizer::run` construit
+les tables et fusionne les tables sœurs (phases 1 et 2) ; `SchemaFinalizer::split` coupe les tables larges puis
+applique la garde (phases 3 et 4). Entre les deux, la CLI sauve le snapshot, applique le TOML et les groupes de
+colonnes : ils voient ainsi toutes les clés d'une table large. `split_wide_tables` lance le second temps ; il lit les
+clés de chaque table dans les statistiques de la Pass 1 (`ColumnStats`), que le snapshot garde. `TableSchema`, défini
 dans `table_schema.rs`, est le modèle que lisent ensuite les overrides, le DDL, la Pass 2 et l'IHM.
 
 ## 1. Où intervenir
@@ -142,7 +150,7 @@ Les genres de table enfant (champ `child_kind`, vide pour la racine) :
 ## 2. Flux
 
 ```text
-SchemaRegistry::finalize_with_pg_guard (voir pass1.md)
+SchemaRegistry::finalize_before_split (voir pass1.md)
 └─ SchemaFinalizer::run(tables: TableEntry par chemin, NamingRegistry)
    ├─ pré-enregistre le nom de chaque chemin (NamingRegistry::table_name_from_dot_key)
    ├─ phase 1  build_base_schemas (parallèle) : une TableSchema par TableEntry
@@ -150,24 +158,35 @@ SchemaRegistry::finalize_with_pg_guard (voir pass1.md)
    ├─ phase 2  finalize_cascading (sauf --disable-strategy sibling)
    │           run_sibling_wave (vague 0) → drain_cascade_waves (vagues 1+) → vague 0 bis
    │           → run_keyed_pivot_children_wave ; crée des tables synthétiques et des child_routes
-   ├─ doublons de nom retirés, tri par profondeur puis chemin JSON
-   ├─ phase 3  apply_wide_table_strategies : par TableEntry, si la table est encore Columns
+   └─ doublons de nom retirés, tri par profondeur puis chemin JSON
+→ (Vec<TableSchema>, Vec<ColumnCollision>)
+
+   (CLI : snapshot, puis TOML et groupes de colonnes, voir pipeline.rs)
+
+split_wide_tables(schemas, stats: ColumnStats de la Pass 1, RegistryConfig)
+└─ SchemaFinalizer::split
+   ├─ phase 3  apply_wide_table_strategies : par table encore Columns, sans stratégie du TOML ni de l'IHM,
+   │           et qui a des statistiques à son nom
    │           apply_wide_strategy → AutoSplit (racine) ou apply_non_autosplit_strategy
    │           (apply_structured_pivot_split, apply_pivot_split si un seul type, sinon AutoSplit) ;
-   │           compagnons _wide / _pivot
-   │           ajoutés à la fin
+   │           compagnons _wide / _pivot ajoutés à la fin, dans l'ordre des tables
    └─ phase 4  apply_column_limit_guard (si apply_pg_guard), puis exclude_absorbed_children
-→ (Vec<TableSchema>, Vec<ColumnCollision>, Vec<OverflowWarning>)
+→ Vec<OverflowWarning>
 ```
 
 Après la finalisation, les overrides TOML repassent par `exclude_absorbed_children` (`apply_overrides_complete`).
 
 ## 3. Invariants et pièges
 
-- **La phase 3 ne voit que les tables qui ont un `TableEntry`.** `apply_wide_table_strategies` parcourt les chemins
-  observés en Pass 1 et saute toute table qui n'est plus `Columns` (garde de #45 : un chemin peut désigner une table
-  déjà fusionnée). Une table créée par la phase 2 n'a pas de `TableEntry` : elle ne reçoit jamais de stratégie large,
-  quelle que soit sa largeur. Seule la garde des 1 600 colonnes la rattrape.
+- **La phase 3 ne voit que les tables qui ont des statistiques à leur nom.** `apply_wide_table_strategies` lit les
+  clés de chaque table dans les `ColumnStats` de la Pass 1, par clé JSON (`original_name` : deux clés peuvent avoir le
+  même nom de colonne). Elle saute toute table qui n'est plus `Columns` (garde de #45 : les statistiques d'une table
+  fusionnée sont celles des tables d'avant la fusion) et toute table à qui le TOML ou l'IHM donne une stratégie,
+  `columns` compris. Une table créée par la phase 2 n'a pas de statistiques à son nom : elle ne reçoit jamais de
+  stratégie large, quelle que soit sa largeur. Seule la garde des 1 600 colonnes la rattrape. Une table de groupe en a,
+  car `reindex_stats` y déplace celles de ses colonnes : elle est coupée si elle est encore large.
+- **Couper deux fois ne change rien.** Une table déjà coupée n'est plus `Columns`, et ses compagnons n'ont pas de
+  statistiques. Un snapshot que l'IHM a sauvé (déjà coupé) se recharge donc en CLI sans écart.
 - **Une table de même nom qu'une autre est retirée.** Après la phase 1 et après la phase 2, un `retain` ne garde que
   la première table de chaque nom. Deux tables de même chemin sont la même table construite deux fois : la seconde
   disparaît sans message. Deux chemins sous un même nom sont une collision : la cascade retrouve ses tables par leur

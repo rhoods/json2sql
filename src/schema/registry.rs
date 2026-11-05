@@ -13,9 +13,11 @@
 //! - struct `SchemaRegistry` — façade combinant `SchemaObserver` et `SchemaFinalizer`.
 //! - fn `SchemaRegistry::new` — construit observer + naming à partir de `RegistryConfig`.
 //! - fn `SchemaRegistry::observe_root` — délègue à `SchemaObserver::observe_root`.
-//! - fn `SchemaRegistry::finalize` — finalise sans le guard 1600-colonnes.
-//! - fn `SchemaRegistry::finalize_with_pg_guard` — finalise avec le guard (retourne les overflow warnings).
-//! - fn `SchemaRegistry::finalize_inner` — construit le `SchemaFinalizer` et exécute `run()`.
+//! - fn `SchemaRegistry::finalize` — `finalize_before_split`, puis le split d'après les stats, sans le guard 1600-colonnes.
+//! - fn `SchemaRegistry::finalize_before_split` — le schéma avant le split des tables larges (#200).
+//! - fn `SchemaRegistry::split_view` — une copie coupée du schéma, celle qu'échantillonne la Pass 1 (#200).
+//! - fn `SchemaRegistry::finalizer` — le `SchemaFinalizer` aux seuils du registre.
+//! - fn `split_wide_tables` — split des tables larges et guard 1600-colonnes, après les surcharges et les groupes (#200).
 //! - fn `SchemaRegistry::collect_stats` — délègue à `inspector::collect_stats`.
 //! - fn `SchemaRegistry::truncated_names` — accesseur des noms tronqués.
 //! - fn `SchemaRegistry::column_collisions` — accesseur des collisions de colonnes.
@@ -71,6 +73,26 @@ pub struct SchemaRegistry {
     column_collisions: Vec<ColumnCollision>,
 }
 
+/// Split the wide tables of `schemas` and apply the 1600-column guard, at the thresholds of `config` (#200). The
+/// keys of each table are read in `stats`, as Pass 1 saw them, so a snapshot is enough. Runs after the TOML and
+/// the column groups, which then see every key: a table they already changed (a strategy override, a grid) is not
+/// split again, nor is a table already split, so a second call changes nothing. Returns the overflow warnings.
+pub fn split_wide_tables(
+    schemas: &mut Vec<crate::schema::table_schema::TableSchema>,
+    stats: &[ColumnStats],
+    config: &RegistryConfig,
+) -> Vec<OverflowWarning> {
+    SchemaFinalizer::new(
+        config.wide_column_threshold,
+        config.sibling_threshold,
+        config.sibling_jaccard,
+        config.stable_threshold,
+        config.disabled_strategies.clone(),
+        true,
+    )
+    .split(schemas, stats)
+}
+
 impl SchemaRegistry {
     #[must_use]
     pub fn new(config: RegistryConfig) -> Self {
@@ -92,43 +114,45 @@ impl SchemaRegistry {
 
     /// Convert all accumulated observations into finalized `TableSchema` objects,
     /// sorted topologically (parents before children).
-    /// The PG column-limit guard is NOT applied — use `finalize_with_pg_guard` for Pass 1 runs.
+    /// The PG column-limit guard is NOT applied — Pass 1 runs use `split_wide_tables`, which applies it.
     pub fn finalize(&mut self) -> Vec<crate::schema::table_schema::TableSchema> {
-        let (schemas, _overflow) = self.finalize_inner(false);
+        let mut schemas = self.finalize_before_split();
+        let stats = self.collect_stats();
+        self.finalizer(false).split(&mut schemas, &stats);
         schemas
     }
 
-    /// Like `finalize`, but also applies the PG 1600-column guard and returns overflow warnings.
-    /// Used by `runner::build_pass1_result` so the guard runs inside the finalizer, not outside.
-    pub fn finalize_with_pg_guard(
-        &mut self,
-    ) -> (
-        Vec<crate::schema::table_schema::TableSchema>,
-        Vec<OverflowWarning>,
-    ) {
-        self.finalize_inner(true)
+    /// The schema before the split of the wide tables (#200): `split_wide_tables` does it later, once the
+    /// overrides and the column groups have seen every key.
+    pub fn finalize_before_split(&mut self) -> Vec<crate::schema::table_schema::TableSchema> {
+        let (schemas, collisions) = self
+            .finalizer(false)
+            .run(&self.observer.tables, &mut self.naming);
+        self.column_collisions = collisions;
+        schemas
     }
 
-    fn finalize_inner(
-        &mut self,
-        apply_pg_guard: bool,
-    ) -> (
-        Vec<crate::schema::table_schema::TableSchema>,
-        Vec<OverflowWarning>,
-    ) {
-        let finalizer = SchemaFinalizer::new(
+    /// `schemas` split at the registry's thresholds, without the guard: the tables whose rows Pass 1 samples for
+    /// the automatic column groups, which come after the split (#200).
+    pub fn split_view(
+        &self,
+        schemas: &[crate::schema::table_schema::TableSchema],
+        stats: &[ColumnStats],
+    ) -> Vec<crate::schema::table_schema::TableSchema> {
+        let mut split = schemas.to_vec();
+        self.finalizer(false).split(&mut split, stats);
+        split
+    }
+
+    fn finalizer(&self, apply_pg_guard: bool) -> SchemaFinalizer {
+        SchemaFinalizer::new(
             self.wide_column_threshold,
             self.sibling_threshold,
             self.sibling_jaccard,
             self.stable_threshold,
             self.disabled_strategies.clone(),
             apply_pg_guard,
-        );
-        let (mut schemas, collisions) = finalizer.run(&self.observer.tables, &mut self.naming);
-        self.column_collisions = collisions;
-        let stats = self.collect_stats();
-        let overflow = finalizer.split(&mut schemas, &stats);
-        (schemas, overflow)
+        )
     }
 
     /// Collect type distribution statistics for every data column (excluding j2s_ generated columns).
@@ -186,6 +210,31 @@ mod tests {
         assert_eq!(s.name, "users");
         assert!(s.find_by_original("name").is_some());
         assert!(s.find_by_original("age").is_some());
+    }
+
+    /// A schema already split (a snapshot the UI saved) is split again unchanged (#200).
+    #[test]
+    fn splitting_an_already_split_schema_changes_nothing() {
+        let config = RegistryConfig {
+            wide_column_threshold: 5,
+            ..RegistryConfig::default()
+        };
+        let mut reg = SchemaRegistry::new(config.clone());
+        for i in 0..40 {
+            let obj =
+                json!({"id": i, "attrs": {format!("a{}", i % 20): i, format!("b{}", i % 20): "x"}});
+            reg.observe_root("items", make_root(&obj));
+        }
+        let mut schemas = reg.finalize_before_split();
+        let stats = reg.collect_stats();
+        split_wide_tables(&mut schemas, &stats, &config);
+        assert!(
+            schemas.iter().any(|s| s.name == "items_attrs_wide"),
+            "the table is split"
+        );
+        let once = serde_json::to_string(&schemas).unwrap();
+        split_wide_tables(&mut schemas, &stats, &config);
+        assert_eq!(serde_json::to_string(&schemas).unwrap(), once);
     }
 
     #[test]

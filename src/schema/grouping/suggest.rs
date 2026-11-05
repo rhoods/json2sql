@@ -17,6 +17,7 @@
 //! - struct `Suggestion` — les tables analysées, le TOML et le rapport.
 //! - fn `suggest` — propose un découpage pour chaque table éligible du schéma finalisé : échantillon, propositions, sorties.
 //! - fn `proposal_for` — proposition d'une table, à partir de ses colonnes et de ses signaux de données.
+//! - fn `most_frequent_columns` — une table réduite à ses `MAX_COLUMNS` clés les plus fréquentes quand elle en a plus (#200).
 //! - struct `ReadPlan` — où lire une table : chemin vers son objet, s'il est atteignable, et chemins de ses colonnes.
 //! - fn `ReadPlan::target` — la cible de l'échantillonneur pour cette table, si son objet est atteignable.
 //! - fn `read_plans` — où lire chacune des tables.
@@ -34,9 +35,9 @@
 use std::path::Path;
 
 use super::embedding::StaticEmbedder;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use super::lexical::LexicalParams;
+use super::lexical::{LexicalParams, MAX_COLUMNS};
 use super::placement::placements;
 use super::proposal::TableProposal;
 use super::proposal::{avoid_taken_names, propose, ColumnName, DataSignals};
@@ -47,6 +48,7 @@ use super::sample::{
 };
 use super::values::RANK_SAMPLE;
 use crate::error::{J2sError, Result};
+use crate::schema::stats::ColumnStats;
 use crate::schema::table_schema::{ChildKind, ColumnSchema, TableSchema};
 
 /// A table needs at least this many data columns to be worth a proposal.
@@ -86,13 +88,14 @@ pub struct Suggestion {
 
 /// A proposal for every eligible table of the finalized `schemas`, from the rows of `input`; `limit` is
 /// `--limit`: only the first rows of the root table take part in the sample. With an `embedder`, the columns left
-/// in a table also get the two groups nearest to their name.
+/// in a table also get the two groups nearest to their name. The tables are not split yet (#200): a table of more
+/// than `MAX_COLUMNS` columns is proposed from its most frequent keys only, counted in the Pass 1 `stats`.
 ///
 /// # Errors
-/// No table is eligible, or a table has more columns than the lexical grouping accepts. Problems with the data
-/// signals are not errors: they turn them off, with a reason.
+/// No table is eligible. Problems with the data signals are not errors: they turn them off, with a reason.
 pub fn suggest(
     schemas: &[TableSchema],
+    stats: &[ColumnStats],
     input: &Path,
     limit: Option<u64>,
     embedder: Option<&StaticEmbedder>,
@@ -110,6 +113,11 @@ pub fn suggest(
             "no table to split: it needs a Columns or AutoSplit strategy and at least {MIN_TABLE_COLUMNS} data columns"
         )));
     }
+    let trimmed: Vec<TableSchema> = tables
+        .iter()
+        .map(|t| most_frequent_columns(t, stats))
+        .collect();
+    let tables: Vec<&TableSchema> = trimmed.iter().collect();
     let signals = data_signals(schemas, &tables, input, limit);
     let mut taken: HashSet<String> = schemas.iter().map(|s| s.name.clone()).collect();
     let mut proposals = Vec::with_capacity(tables.len());
@@ -150,6 +158,38 @@ pub(super) fn proposal_for(
         proposal.placements = placements(&proposal, embedder);
     }
     Ok(proposal)
+}
+
+/// `table` with only its `MAX_COLUMNS` most frequent data columns when it has more: the lexical grouping is cubic in
+/// the number of columns. The other keys stay out of the proposal; the split sends them to the key/value table.
+fn most_frequent_columns(table: &TableSchema, stats: &[ColumnStats]) -> TableSchema {
+    let count = table.data_columns().count();
+    if count <= MAX_COLUMNS {
+        return table.clone();
+    }
+    let seen: HashMap<&str, u64> = stats
+        .iter()
+        .filter(|s| s.table_name == table.name)
+        .map(|s| (s.original_name.as_str(), s.total_count))
+        .collect();
+    let mut ranked: Vec<&ColumnSchema> = table.data_columns().collect();
+    // A stable sort: keys seen as often keep the table's order.
+    ranked.sort_by_key(|c| {
+        std::cmp::Reverse(seen.get(c.original_name.as_str()).copied().unwrap_or(0))
+    });
+    let kept: HashSet<&str> = ranked[..MAX_COLUMNS]
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    eprintln!(
+        "  {}: {count} columns, only its {MAX_COLUMNS} most frequent keys are proposed in groups",
+        table.name
+    );
+    let mut trimmed = table.clone();
+    trimmed
+        .columns
+        .retain(|c| c.is_generated || kept.contains(c.name.as_str()));
+    trimmed
 }
 
 /// A table that can be split (`Columns` or `AutoSplit`) with enough data columns.
@@ -395,8 +435,37 @@ mod tests {
     use crate::schema::table_schema::InferredStrategy;
     use crate::schema::type_tracker::PgType;
 
+    /// Past `MAX_COLUMNS` columns, the proposal keeps the most frequent keys; the rarest stay out (#200).
+    #[test]
+    fn a_table_past_the_lexical_limit_keeps_its_most_frequent_keys() {
+        let mut table = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        let mut stats = Vec::new();
+        for i in 0..MAX_COLUMNS + 2 {
+            let key = format!("k{i}");
+            table
+                .columns
+                .push(ColumnSchema::data(&key, PgType::Text, false));
+            stats.push(ColumnStats {
+                table_name: "t".to_string(),
+                column_name: key.clone(),
+                original_name: key,
+                pg_type: PgType::Text,
+                total_count: if i < 2 { 1 } else { 5 },
+                null_count: 0,
+                type_histogram: Vec::new(),
+            });
+        }
+        let trimmed = most_frequent_columns(&table, &stats);
+        let names: Vec<&str> = trimmed.data_columns().map(|c| c.name.as_str()).collect();
+        assert_eq!(names.len(), MAX_COLUMNS);
+        assert_eq!(
+            names[0], "k2",
+            "the two rare keys are left out, the order kept"
+        );
+    }
+
     fn run(schemas: &[TableSchema], input: &Path, limit: Option<u64>) -> Result<Suggestion> {
-        suggest(schemas, input, limit, None)
+        suggest(schemas, &[], input, limit, None)
     }
 
     const KIWI: [&str; 6] = ["kiwi_a", "kiwi_b", "kiwi_c", "kiwi_d", "kiwi_e", "kiwi_f"];
@@ -574,9 +643,9 @@ mod tests {
         ]);
         let f = jsonl(60);
         let schemas = schemas(60, ChildKind::Object);
-        let plain = suggest(&schemas, f.path(), None, None).unwrap().report;
+        let plain = suggest(&schemas, &[], f.path(), None, None).unwrap().report;
         assert!(!plain.contains("Where the other columns"), "{plain}");
-        let report = suggest(&schemas, f.path(), None, Some(&embedder))
+        let report = suggest(&schemas, &[], f.path(), None, Some(&embedder))
             .unwrap()
             .report;
         assert!(

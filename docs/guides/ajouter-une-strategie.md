@@ -116,7 +116,7 @@ Les stratégies existantes, par origine :
 | `StructuredPivot` | phase 3 (suffixes) | TOML `suffix_columns` | `structured_pivot` |
 | `SiblingCollapse` | phase 2 (`finalize_cascading`) | TOML `[group.*]` | `sibling` |
 | `SiblingCollapseMulti` | phase 2 | — | `sibling` |
-| `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (`split` est obligatoire) |
+| `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (le split est obligatoire) |
 | `Ignore` | jamais : projection de `UserOverride::Skip` | IHM (`Skip`) | — |
 | `Flatten` | jamais | TOML `flatten` | — |
 

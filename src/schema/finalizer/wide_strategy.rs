@@ -58,8 +58,12 @@ pub(super) fn apply_wide_table_strategies(
 
     for schema in schemas.iter_mut() {
         // [issue #45, finding 6] A table the cascade already fused (SiblingCollapse…) is never
-        // split again: its statistics are those of the pre-fusion tables, not of its columns.
-        if !matches!(schema.inferred_strategy, InferredStrategy::Columns) {
+        // split again: its statistics are those of the pre-fusion tables, not of its columns. Nor
+        // is a table the TOML or the UI gave a strategy, `columns` included (#200).
+        if !matches!(schema.inferred_strategy, InferredStrategy::Columns)
+            || schema.toml_override().is_some()
+            || schema.ui_override().is_some()
+        {
             continue;
         }
         let Some(keys) = observed.get(schema.name.as_str()) else {

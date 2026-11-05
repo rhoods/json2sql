@@ -16,7 +16,7 @@
 //!
 //! Proposition de groupes de colonnes (#78) :
 //! - fn `suggest_groups` — schéma finalisé puis proposition `column_groups` de toutes les tables larges, au lieu d'un import.
-//! - fn `finalized_schema` — stdin → Pass 1 ou snapshot → surcharges : le schéma que partagent import et proposition.
+//! - fn `finalized_schema` — stdin → Pass 1 ou snapshot → surcharges (→ split) : le schéma que partagent import et proposition.
 //!
 //! Résolution d'entrée :
 //! - fn `resolve_input` — bufferise stdin dans un fichier temporaire si aucun chemin n'est fourni.
@@ -24,7 +24,8 @@
 //! Pass 1 :
 //! - fn `load_or_infer_schema` — lance Pass 1 ou restaure un snapshot, affiche le résumé.
 //! - fn `restore_from_snapshot` — charge un `SchemaSnapshot` et ré-applique les overrides persistés.
-//! - fn `run_pass1_workers` — lance Pass 1 séquentiel ou parallèle selon `num_workers`.
+//! - fn `pass1_config` — la config de Pass 1 tirée de la ligne de commande (seuils du split compris).
+//! - fn `run_pass1_workers` — lance Pass 1 séquentiel ou parallèle selon `num_workers`, sans le split des tables larges.
 //! - fn `print_schema_summary` — affiche les tables inférées.
 //!
 //! Warnings Pass 1 :
@@ -36,7 +37,7 @@
 //! - fn `warn_depth` — avertit d'une profondeur de nesting excessive.
 //!
 //! Post-traitement schéma :
-//! - fn `post_process_schema` — dispatch overrides → snapshot → groupes de colonnes → rapport.
+//! - fn `post_process_schema` — dispatch snapshot → overrides → split des tables larges → groupes de colonnes → rapport.
 //! - fn `apply_schema_config` — applique le TOML de surcharges.
 //! - fn `save_schema_snapshot` — sauvegarde le snapshot si demandé.
 //! - fn `apply_group_columns` — stratégie `--group-columns` (#91) : groupes par les noms des tables larges (ou cochées dans le snapshot de l'IHM), après le snapshot ; le TOML l'emporte.
@@ -130,7 +131,7 @@ pub struct PipelineConfig {
 /// Orchestrates stdin buffering → Pass 1 (schema inference or snapshot load) →
 /// schema override application → DDL creation → Pass 2 (data insertion) → reporting.
 pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
-    let (_stdin_temp, input_path, pass1) = finalized_schema(&mut cfg)?;
+    let (_stdin_temp, input_path, pass1) = finalized_schema(&mut cfg, true)?;
 
     if cfg.dry_run {
         print_dry_run_ddl(&pass1.schemas, &cfg.pg_schema, cfg.drop_existing);
@@ -157,8 +158,15 @@ pub async fn run_pipeline(mut cfg: PipelineConfig) -> Result<()> {
 /// the long Pass 1. No database is touched.
 pub fn suggest_groups(mut cfg: PipelineConfig, model: Option<&Path>) -> Result<Suggestion> {
     let embedder = model.map(StaticEmbedder::load).transpose()?;
-    let (_stdin_temp, input_path, pass1) = finalized_schema(&mut cfg)?;
-    suggest(&pass1.schemas, &input_path, cfg.limit, embedder.as_ref())
+    // Before the split: the proposals see every key of the wide tables (#200).
+    let (_stdin_temp, input_path, pass1) = finalized_schema(&mut cfg, false)?;
+    suggest(
+        &pass1.schemas,
+        &pass1.stats,
+        &input_path,
+        cfg.limit,
+        embedder.as_ref(),
+    )
 }
 
 async fn connect_and_create_tables(
@@ -249,15 +257,17 @@ fn finalize_pass2(pass2: &crate::pass2::runner::Pass2Result, cfg: &PipelineConfi
 // Private helpers
 // ---------------------------------------------------------------------------
 
-/// Stdin buffering, Pass 1 (or snapshot) and schema overrides: the finalized schema, with the input path it was
-/// read from. The guard keeps a buffered stdin alive.
+/// Stdin buffering, Pass 1 (or snapshot), schema overrides and, when `split`, the split of the wide tables: the
+/// finalized schema, with the input path it was read from. The guard keeps a buffered stdin alive.
 fn finalized_schema(
     cfg: &mut PipelineConfig,
+    split: bool,
 ) -> Result<(Option<tempfile::NamedTempFile>, PathBuf, Pass1Result)> {
     let (stdin_temp, input_path) = resolve_input(std::mem::take(&mut cfg.input))?;
     let mut pass1 = load_or_infer_schema(cfg, &input_path)?;
+    let warnings = post_process_schema(&mut pass1, cfg, split)?;
     report_pass1_warnings(&pass1, cfg.depth_limit);
-    for w in post_process_schema(&mut pass1, cfg)? {
+    for w in warnings {
         eprintln!("WARNING: {}", w.to_message());
     }
     Ok((stdin_temp, input_path, pass1))
@@ -325,12 +335,8 @@ fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
 }
 
 #[allow(clippy::too_many_lines)] // verbose config struct construction, not multiple responsibilities
-fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Result> {
-    eprintln!(
-        "Pass 1: inferring schema from '{}'...",
-        input_path.display()
-    );
-    let base_cfg = Pass1Config {
+fn pass1_config(cfg: &PipelineConfig) -> Pass1Config {
+    Pass1Config {
         root_table: cfg.root_table.clone(),
         registry: crate::schema::registry::RegistryConfig {
             text_threshold: cfg.text_threshold,
@@ -341,7 +347,15 @@ fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Res
             disabled_strategies: cfg.disabled_strategies.clone(),
         },
         num_workers: None,
-    };
+    }
+}
+
+fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Result> {
+    eprintln!(
+        "Pass 1: inferring schema from '{}'...",
+        input_path.display()
+    );
+    let base_cfg = pass1_config(cfg);
     if cfg.num_workers > 1 {
         let (workers, capped) = crate::pass1::runner::effective_workers(cfg.num_workers);
         if let Some(cap) = capped {
@@ -351,7 +365,7 @@ fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Res
             );
         }
         eprintln!("Using {workers} parallel workers for schema inference.");
-        crate::pass1::runner::run_parallel(
+        crate::pass1::runner::run_parallel_before_split(
             input_path,
             &Pass1Config {
                 num_workers: Some(workers),
@@ -360,7 +374,7 @@ fn run_pass1_workers(input_path: &Path, cfg: &PipelineConfig) -> Result<Pass1Res
             None,
         )
     } else {
-        crate::pass1::runner::run(input_path, &base_cfg, None)
+        crate::pass1::runner::run_before_split(input_path, &base_cfg, None)
     }
 }
 
@@ -478,13 +492,20 @@ fn warn_depth(schemas: &[TableSchema], depth_limit: Option<usize>) {
     }
 }
 
-/// Apply schema config overrides, save snapshot, split into column groups, and emit stats report.
+/// Save the snapshot, apply schema config overrides, split the wide tables (when `split`), split into column groups
+/// and emit the stats report. The snapshot is saved first, before the split: a later run reloads it with another
+/// TOML and splits again from its statistics, without Pass 1. The TOML sees every key of a wide table; the automatic
+/// groups of `--group-columns` come after the split, as the Pass 1 samples they read (#200).
 fn post_process_schema(
     pass1: &mut Pass1Result,
     cfg: &PipelineConfig,
+    split: bool,
 ) -> Result<Vec<crate::schema::config::ConfigWarning>> {
-    let warnings = apply_schema_config(pass1, cfg)?;
     save_schema_snapshot(pass1, cfg)?;
+    let warnings = apply_schema_config(pass1, cfg)?;
+    if split {
+        crate::pass1::runner::split(pass1, &pass1_config(cfg));
+    }
     apply_group_columns(pass1, cfg)?;
     emit_schema_report(pass1, cfg)?;
     Ok(warnings)
@@ -865,7 +886,7 @@ mod tests {
     /// The tables of the finalized schema of `cfg`.
     fn table_names(cfg: PipelineConfig) -> Vec<String> {
         let mut cfg = cfg;
-        let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg, true).unwrap();
         pass1.schemas.iter().map(|s| s.name.clone()).collect()
     }
 
@@ -902,7 +923,7 @@ mod tests {
     fn without_group_columns_nothing_is_split() {
         let file = wide_jsonl(60);
         let mut cfg = cfg_for(&file);
-        let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg, true).unwrap();
         assert_eq!(pass1.schemas.len(), 1);
         assert_eq!(pass1.schemas[0].column_groups.len(), 0);
     }
@@ -946,7 +967,7 @@ mod tests {
     fn the_statistics_of_the_moved_columns_follow_them_to_their_group_table() {
         let file = wide_jsonl(60);
         let mut cfg = grouped(&file);
-        let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg, true).unwrap();
         let tables: Vec<(&str, &str)> = pass1
             .stats
             .iter()
@@ -1015,30 +1036,29 @@ mod tests {
         let file = wide_jsonl(60);
         let direct = {
             let mut cfg = grouped(&file);
-            serde_json::to_string(&finalized_schema(&mut cfg).unwrap().2.schemas).unwrap()
+            serde_json::to_string(&finalized_schema(&mut cfg, true).unwrap().2.schemas).unwrap()
         };
         let snapshot = snapshot_of(grouped(&file));
         let mut cfg = from_snapshot(&snapshot, true);
-        let again = serde_json::to_string(&finalized_schema(&mut cfg).unwrap().2.schemas).unwrap();
+        let again =
+            serde_json::to_string(&finalized_schema(&mut cfg, true).unwrap().2.schemas).unwrap();
         assert_eq!(again, direct);
     }
 
+    /// The snapshot is saved before the TOML (#200): it holds no group, and the TOML given again at the reload makes
+    /// them, while `--group-columns` splits the other tables.
     #[test]
-    fn a_snapshot_split_by_the_toml_keeps_its_groups_and_the_other_tables_are_split() {
+    fn a_snapshot_is_saved_before_the_toml_which_the_reload_applies_again() {
+        const TOML: &str =
+            "[root_props.column_groups]\nmine = [\"fillera\", \"fillerb\", \"fillerc\"]\n";
         let file = two_wide_jsonl(60);
-        let (cfg, _toml) = with_toml(
-            cfg_for(&file),
-            "[root_props.column_groups]\nmine = [\"fillera\", \"fillerb\", \"fillerc\"]\n",
-        );
+        let (cfg, _toml) = with_toml(cfg_for(&file), TOML);
         let snapshot = snapshot_of(cfg);
+        let saved = crate::schema::persistence::load(snapshot.path()).unwrap();
+        assert!(saved.schemas.iter().all(|s| s.column_groups.is_empty()));
+        let (cfg, _toml) = with_toml(from_snapshot(&snapshot, true), TOML);
         assert_eq!(
-            crate::schema::persistence::load(snapshot.path())
-                .unwrap()
-                .version,
-            crate::schema::persistence::COLUMN_GROUPS_FORMAT_VERSION
-        );
-        assert_eq!(
-            sorted(table_names(from_snapshot(&snapshot, true))),
+            sorted(table_names(cfg)),
             [
                 "root",
                 "root_kiwi",
@@ -1128,7 +1148,7 @@ mod tests {
             ("root", 60)
         );
         let mut cfg = from_snapshot(&snapshot, false);
-        let (_temp, _path, pass1) = finalized_schema(&mut cfg).unwrap();
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg, true).unwrap();
         assert_eq!(pass1.samples.len(), 1);
         assert_eq!(pass1.samples[0].columns, saved.samples[0].columns);
     }

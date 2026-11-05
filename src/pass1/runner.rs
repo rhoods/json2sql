@@ -4,9 +4,11 @@
 //! - [`run`] — single-threaded, produces a [`Pass1Result`] with finalized schemas.
 //! - [`run_inspect`] — like `run` but also collects per-column value statistics.
 //! - [`run_parallel`] — multi-worker variant; merges per-worker registries at the end.
+//! - [`run_before_split`], [`run_parallel_before_split`] — the same, wide tables not split yet (#200).
 //!
 //! Wide-table strategies ([`crate::schema::table_schema::InferredStrategy`]) are selected
-//! during `finalize()` at the end of the pass — not row-by-row.
+//! at the end of the pass — not row-by-row — by `split_wide_tables`, which the CLI runs after
+//! the TOML and the column groups.
 //! The resulting [`Pass1Result::schemas`] are sorted topologically (parents before children)
 //! and are ready to be serialized or handed directly to Pass 2.
 //!
@@ -17,11 +19,13 @@
 //! - struct `Pass1Result` — résultat de Pass 1 (schémas, stats, warnings, format détecté).
 //!
 //! Séquentiel :
-//! - fn `run` — orchestre l'ouverture, le scan, la finalisation.
+//! - fn `run` — `run_before_split`, puis le split des tables larges.
+//! - fn `run_before_split` — orchestre l'ouverture, le scan, la finalisation (sans le split).
+//! - fn `split` — split des tables larges d'un `Pass1Result` aux seuils de la config (#200).
 //! - fn `report_progress` — émet la progression (barre CLI et/ou canal IHM).
 //! - fn `flush_final_progress` — émet un dernier événement de progression si nécessaire.
 //! - fn `scan_json_rows` — boucle principale (observe chaque objet racine).
-//! - fn `build_pass1_result` — finalise le registre et construit `Pass1Result`.
+//! - fn `build_pass1_result` — finalise le registre (sans le split) et construit `Pass1Result`.
 //! - fn `samples_of` — échantillons par table des tables larges éligibles, à partir des lignes gardées par le thread de lecture (#91, phase 2).
 //!
 //! Inspection (`run_inspect`, aperçu sans stratégies) :
@@ -32,7 +36,8 @@
 //!
 //! Parallèle (`run_parallel`, N threads + merge) :
 //! - fn `effective_workers` — plafonne au nombre de CPU logiques.
-//! - fn `run_parallel` — orchestre lecteur + workers + merge.
+//! - fn `run_parallel` — `run_parallel_before_split`, puis le split des tables larges.
+//! - fn `run_parallel_before_split` — orchestre lecteur + workers + merge (sans le split).
 //! - fn `spawn_worker_threads` — lance les threads consommant le channel MPMC.
 //! - fn `read_and_dispatch` — thread lecteur, distribue les objets bruts round-robin.
 //! - fn `join_and_merge_workers` — joint tous les threads et fusionne leurs `SchemaRegistry`
@@ -110,12 +115,35 @@ pub struct Pass1Result {
 }
 
 /// Run Pass 1: stream through the entire file and build the schema.
-/// Returns finalized table schemas sorted topologically.
+/// Returns finalized table schemas sorted topologically, wide tables split.
 ///
 /// `progress_tx` — optional channel for streaming progress to the IHM.
 /// Pass `None` for CLI / headless mode (terminal progress bar is used instead).
-#[allow(clippy::needless_pass_by_value)] // public API: callers pass owned Option<ProgressTx>
+#[allow(dead_code)] // library API (IHM, tests); the CLI splits after its overrides
 pub fn run(
+    path: &Path,
+    config: &Pass1Config,
+    progress_tx: Option<ProgressTx>,
+) -> Result<Pass1Result> {
+    let mut result = run_before_split(path, config, progress_tx)?;
+    split(&mut result, config);
+    Ok(result)
+}
+
+/// Split the wide tables of `result` at the thresholds of `config` (#200).
+pub fn split(result: &mut Pass1Result, config: &Pass1Config) {
+    let overflow = crate::schema::registry::split_wide_tables(
+        &mut result.schemas,
+        &result.stats,
+        &config.registry,
+    );
+    result.overflow_warnings.extend(overflow);
+}
+
+/// Like `run`, without the split of the wide tables: the overrides and the column groups see every
+/// key first, then `split` runs (#200).
+#[allow(clippy::needless_pass_by_value)] // public API: callers pass owned Option<ProgressTx>
+pub fn run_before_split(
     path: &Path,
     config: &Pass1Config,
     progress_tx: Option<ProgressTx>,
@@ -238,9 +266,10 @@ fn build_pass1_result(
     progress_tx: Option<&ProgressTx>,
     kept_rows: Vec<SampledRow>,
 ) -> Pass1Result {
-    let (schemas, overflow_warnings) = registry.finalize_with_pg_guard();
-    let samples = samples_of(&schemas, kept_rows);
+    let schemas = registry.finalize_before_split();
     let stats = registry.collect_stats();
+    // The automatic column groups read the samples after the split: they sample the split tables (#200).
+    let samples = samples_of(&registry.split_view(&schemas, &stats), kept_rows);
     let truncated_names = registry.truncated_names().to_vec();
     let column_collisions = registry.column_collisions().to_vec();
     let tables_count = schemas.len();
@@ -259,7 +288,7 @@ fn build_pass1_result(
         stats,
         truncated_names,
         column_collisions,
-        overflow_warnings,
+        overflow_warnings: Vec::new(),
         skip_cascade_warnings: Vec::new(),
         detected_format: Some(format),
         group_columns: Vec::new(),
@@ -394,8 +423,20 @@ pub fn effective_workers(requested: usize) -> (usize, Option<usize>) {
 ///
 /// `config.num_workers = None` or `Some(1)` is equivalent to sequential processing with extra
 /// overhead; prefer `run()` for single-threaded use.
-#[allow(clippy::needless_pass_by_value)] // public API: callers pass owned Option<ProgressTx>
+#[allow(dead_code)] // library API (IHM, tests); the CLI splits after its overrides
 pub fn run_parallel(
+    path: &Path,
+    config: &Pass1Config,
+    progress_tx: Option<ProgressTx>,
+) -> Result<Pass1Result> {
+    let mut result = run_parallel_before_split(path, config, progress_tx)?;
+    split(&mut result, config);
+    Ok(result)
+}
+
+/// Like `run_parallel`, without the split of the wide tables (see `run_before_split`).
+#[allow(clippy::needless_pass_by_value)] // public API: callers pass owned Option<ProgressTx>
+pub fn run_parallel_before_split(
     path: &Path,
     config: &Pass1Config,
     progress_tx: Option<ProgressTx>,
