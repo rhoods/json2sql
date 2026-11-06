@@ -58,10 +58,10 @@ La logique visuelle est définie par des décalages de fond, pas par des traits.
 | Variable | Valeur | Classe | Stratégies |
 |---|---|---|---|
 | `--s-default` | `#6aa9ff` | `.badge.default` | `Columns` |
-| `--s-jsonb` | `#b48cf0` | `.badge.jsonb`, `.badge.jsonbi` | `Jsonb` ; `JsonbFlatten` en `.jsonbi` s'il est inféré, en `.jsonb` s'il est choisi dans l'IHM |
+| `--s-jsonb` | `#b48cf0` | `.badge.jsonb` | `Jsonb` |
 | `--s-flatten` | `#5bcf8e` | `.badge.flatten` | `Flatten` |
 | `--s-pivot` | `#f0b072` | `.badge.pivot` | `Pivot`, `StructuredPivot`, `SiblingCollapse`, `SiblingCollapseMulti` |
-| `--s-norm` | `#f0b072` | `.badge.normalize` | `NormalizeDynamicKeys`, `AutoSplit` |
+| `--s-norm` | `#f0b072` | `.badge.normalize` | `AutoSplit` |
 | `--s-skip` | `#e87862` | `.badge.skip` | `Skip` (IHM), tables absorbées (`Ignore`) |
 
 La correspondance est dans `strategy_badge` et `user_override_badge` (`json2sql-ui/src/screens/common/strategy_badges.rs`).

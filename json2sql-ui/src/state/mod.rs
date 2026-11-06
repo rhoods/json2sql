@@ -14,6 +14,7 @@
 //! - fn `PgConfig::to_url` — construit l'URL de connexion Postgres (retour `Zeroizing<String>`)
 //! - fn `PgConfig::is_complete` — vérifie que les champs de connexion sont renseignés
 //! - fn `format_bytes` — formate un nombre d'octets en unités SI lisibles
+//! - fn `pass1_registry_config` — seuils de la Pass 1 de l'IHM, pour la Pass 1 et le split d'un snapshot chargé (#200)
 //! - struct `Pass1Progress` — état de progression de la Pass 1 (compteurs + logs)
 //! - fn `Pass1Progress::push_log` — ajoute une ligne au ring-buffer de logs
 //! - struct `Pass2Progress` — état de progression de la Pass 2 (compteurs, phases DDL/streaming/contraintes)
@@ -162,8 +163,21 @@ pub const PASS1_SIBLING_THRESHOLD: usize = 3;
 pub const PASS1_SIBLING_JACCARD: f64 = 0.5;
 /// Frequency threshold above which a key is considered "stable" (kept as a column).
 pub const PASS1_STABLE_THRESHOLD: f64 = 0.10;
-/// Frequency threshold below which a key is considered "rare" (excluded entirely).
-pub const PASS1_RARE_THRESHOLD: f64 = 0.001;
+
+/// The Pass 1 thresholds of the UI, with the strategies the project disables: for the Pass 1 itself and for the
+/// split of the wide tables of a loaded snapshot (#200).
+pub const fn pass1_registry_config(
+    disabled_strategies: std::collections::HashSet<json2sql::schema::strategies::StrategyName>,
+) -> json2sql::schema::registry::RegistryConfig {
+    json2sql::schema::registry::RegistryConfig {
+        text_threshold: PASS1_TEXT_THRESHOLD,
+        wide_column_threshold: PASS1_WIDE_COLUMN_THRESHOLD,
+        sibling_threshold: PASS1_SIBLING_THRESHOLD,
+        sibling_jaccard: PASS1_SIBLING_JACCARD,
+        stable_threshold: PASS1_STABLE_THRESHOLD,
+        disabled_strategies,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Pass 1 progress (fed by ProgressEvent stream)

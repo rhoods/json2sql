@@ -127,6 +127,7 @@ mod tests {
             data: DataStatus::Off("test".to_string()),
             placements: Vec::new(),
             attachments: Vec::new(),
+            suffixes: Vec::new(),
         }
     }
 

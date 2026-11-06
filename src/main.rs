@@ -1,7 +1,7 @@
 //! CLI entry point for json2sql.
 //!
 //! Parses arguments via [`cli`], converts to [`pipeline::PipelineConfig`], and dispatches
-//! to [`pipeline::run_pipeline`]. The `inspect` subcommand and `--suggest-groups` are handled inline here.
+//! to [`pipeline::run_pipeline`]. The `inspect` subcommand and `--suggest` are handled inline here.
 //!
 //! Fonctions :
 //! - fn `main` — parse la CLI, dispatch vers `inspect`, la proposition de groupes ou le pipeline d'import complet.
@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
             let disabled_strategies = parse_disabled_strategies(&cli.disable_strategy)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let root_table = cli.root_table_name();
-            let (suggest_groups, embedding_model) = (cli.suggest_groups, cli.embedding_model);
+            let (suggest_groups, embedding_model) = (cli.suggest, cli.embedding_model);
             let cfg = pipeline::PipelineConfig {
                 input: cli.input,
                 root_table,
@@ -80,7 +80,6 @@ async fn main() -> anyhow::Result<()> {
                 sibling_threshold: cli.sibling_threshold,
                 sibling_jaccard: cli.sibling_jaccard,
                 stable_threshold: cli.stable_threshold,
-                rare_threshold: cli.rare_threshold,
                 num_workers: cli.workers,
                 disabled_strategies,
                 parallel: cli.parallel,
@@ -146,7 +145,6 @@ fn run_inspect(
                 sibling_threshold: usize::MAX,
                 sibling_jaccard: 1.0,
                 stable_threshold: 0.0,
-                rare_threshold: 0.0,
                 disabled_strategies: std::collections::HashSet::new(),
             },
             num_workers: None,

@@ -1,7 +1,7 @@
 ---
 type: recette
 sujet: Ajouter une stratégie de matérialisation
-verified_at: db4ec51
+verified_at: 28a6e29
 files:
   - src/schema/table_schema.rs
   - src/schema/strategies.rs
@@ -60,7 +60,6 @@ symbols:
   - apply_group_columns
   - build_effective_schemas
   - DeferredFlatten
-  - DeferredNormalize
   - format_version
   - COLUMN_GROUPS_FORMAT_VERSION
   - insert_object
@@ -84,7 +83,6 @@ symbols:
   - PreviewScreen
   - StrategyScreen
   - SetupScreen
-  - apply_jsonb_flatten
   - apply_pivot_split
   - apply_structured_pivot_split
   - is_pg_array
@@ -113,16 +111,14 @@ Les stratégies existantes, par origine :
 | `InferredStrategy` | Détectée automatiquement | Réglable par l'utilisateur | Désactivable (`--disable-strategy`) |
 |---|---|---|---|
 | `Columns` | par défaut | TOML `columns` | — |
-| `Pivot` | phase 3 (`suggest_wide_strategy`) | TOML `pivot`, IHM | `pivot` (donne `Jsonb` à la place) |
-| `Jsonb` | phase 3 (valeurs hétérogènes), phase 4 (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
-| `StructuredPivot` | phase 3 (suffixes) | TOML `suffix_columns` | `structured_pivot` |
+| `Pivot` | phase 3 (`suggest_wide_strategy`, valeurs d'un seul type) | TOML `pivot`, IHM | non (partie du split, #200) |
+| `Jsonb` | phase 4 seulement (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
+| `StructuredPivot` | jamais : la grille est proposée par `--suggest` (#200) | TOML `suffix_columns` | — (refusé, plus rien d'automatique) |
 | `SiblingCollapse` | phase 2 (`finalize_cascading`) | TOML `[group.*]` | `sibling` |
 | `SiblingCollapseMulti` | phase 2 | — | `sibling` |
-| `AutoSplit` | phase 3 (racine, fréquences bimodales) | — | non (`split` est obligatoire) |
+| `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (le split est obligatoire) |
 | `Ignore` | jamais : projection de `UserOverride::Skip` | IHM (`Skip`) | — |
-| `NormalizeDynamicKeys` | jamais | TOML `normalize_dynamic_keys` | — |
 | `Flatten` | jamais | TOML `flatten` | — |
-| `JsonbFlatten` | jamais | aucun chemin trouvé (voir § 6) | — |
 
 Toute nouvelle stratégie passe par le **socle** (§ 4). Selon ses lignes dans ce tableau, ajoute ensuite :
 
@@ -143,7 +139,7 @@ Pass 1 (observation)
 └─ SchemaFinalizer::run
    ├─ phase 1  schémas de base, table par table
    ├─ phase 2  finalize_cascading           → SiblingCollapse(Multi)               [sibling]
-   ├─ phase 3  apply_wide_table_strategies  → Pivot, Jsonb, StructuredPivot, AutoSplit [pivot, structured_pivot]
+   ├─ phase 3  apply_wide_table_strategies  → Pivot, AutoSplit (après le TOML, #200)
    └─ phase 4  apply_column_limit_guard (→ Jsonb), puis exclude_absorbed_children
 Overrides : TOML (apply_overrides_complete), IHM (apply_user_overrides)
    → TableSchema::effective_strategy : IHM > TOML > inférée
@@ -195,7 +191,7 @@ Le compilateur ne voit pas le reste :
 - [ ] `InferredStrategy::absorbs_children` : la stratégie absorbe-t-elle ses enfants ? (voir § 3)
 - [ ] `InferredStrategy::is_wide` : vrai pour tout sauf `Columns` ; vérifier que c'est voulu.
 - [ ] `TableSchema::takes_column_groups` : la table peut-elle être découpée en groupes de colonnes ? (aujourd'hui
-  `Columns` et `AutoSplit`). `--group-columns`, la case de l'IHM et `--suggest-groups` passent tous par ce test :
+  `Columns` et `AutoSplit`). `--group-columns`, la case de l'IHM et `--suggest` passent tous par ce test :
   une stratégie oubliée ici n'est jamais découpée, sans avertissement.
 - [ ] Pass 2, table racine : `insert_object` traite à part `Jsonb` (`write_root_jsonb`), `SiblingCollapseMulti` et
   `AutoSplit` (`write_autosplit_rows`).
@@ -203,7 +199,7 @@ Le compilateur ne voit pas le reste :
   `j2s_order` (`push_generated_col_insert`). Seul un élément scalaire en `Jsonb` est traité à part par `insert_array`.
 - [ ] Pass 2, cible d'une route par clé (#173, et membre d'un groupe TOML, #171) : `write_keyed_route_row`, appelée
   par `dispatch_child_routes` et `recurse_children`, écrit la ligne d'une clé routée (`fr` → `…_selected_key`,
-  `home` → la table du groupe) si la cible est `SiblingCollapse` ou `NormalizeDynamicKeys`, avec un cas par défaut
+  `home` → la table du groupe) si la cible est `SiblingCollapse`, avec un cas par défaut
   pour le reste.
   Une stratégie qui écrit une ligne par clé y a sa place ; sinon, sur une telle cible (après un override), la valeur
   passe par `insert_child_object`, qui la lit comme un objet de clés sœurs : colonnes en anomalie, sous-clés prises
@@ -233,7 +229,7 @@ Le compilateur ne voit pas le reste :
   `pivot` et `jsonb` (`apply_strategy_override`, `apply_single_user_override`) sauvegardent la valeur avant l'appel et
   la restaurent après ; faire de même.
 - [ ] Si l'application touche d'autres tables que la table visée (comme `flatten`) : passer par le mécanisme différé
-  d'`apply_overrides` (`DeferredFlatten`, `DeferredNormalize`).
+  d'`apply_overrides` (`DeferredFlatten`).
 - [ ] Si la stratégie reconstruit les colonnes : `apply_user_overrides` dissout les groupes de colonnes pour `Pivot` et
   `Jsonb` (`dissolve_column_groups`). Ajouter la variante si besoin.
 - [ ] IHM : les boutons de `StrategyScreen`, écrits à la main override par override (actions en masse comprises), et
@@ -304,11 +300,9 @@ Vues en écrivant la fiche, pas tranchées. Chacune peut devenir une issue de re
    désactivables dans `StrategyError` (deux fois), `src/cli.rs`, `usage.md` et `strategies.md`.
 5. **IHM écrite variante par variante.** Les interrupteurs de `SetupScreen` et les boutons de `StrategyScreen` sont
    recopiés pour chaque stratégie au lieu de parcourir `StrategyName::OPTIONAL`.
-6. **`JsonbFlatten` semble inatteignable.** Seule `apply_jsonb_flatten` le construit, et seuls des tests l'appellent :
-   ni la CLI, ni le TOML, ni l'IHM. Les docs se contredisent (« TOML-only » dans le tableau de `table_schema.rs`, « IHM
-   override only » sur la variante de `UserOverride`).
-7. **Docs existantes déjà décalées.** `architecture.md` décrit un enum `WideStrategy` (variantes `KeyedPivot`,
-   `Ignore`…) qui n'existe plus : c'est `InferredStrategy`. `schema-inference.md` (§ 12) documente
-   `strategy = "ignore"`, que le TOML rejette (`--dry-run` affiche « unknown strategy 'ignore' … ignored »).
+6. **`JsonbFlatten` semblait inatteignable.** (Supprimé : aucun appelant hors des tests, #200.)
+7. **Docs existantes déjà décalées.** (Corrigé : `architecture.md` décrit `InferredStrategy`, et `strategy = "ignore"`,
+   que le TOML rejette, a quitté usage.md et `schema-inference.md` § 12, #200.) `schema-inference.md` § 7 parle encore
+   d'une stratégie « KeyedPivot » (#138).
 8. **Un effet de bord à compenser.** `apply_wide_strategy_columns` écrit `inferred_strategy` en plus des colonnes ;
    chaque override qui l'appelle doit sauvegarder puis restaurer la valeur à la main.

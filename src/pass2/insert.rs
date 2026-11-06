@@ -15,7 +15,7 @@
 //! - fn `write_root_jsonb` — cas spécial racine en stratégie Jsonb : écrit le blob JSON puis recurse ; octet nul →
 //!   `NULL` + anomalie, comme `push_jsonb_col` (#192).
 //! - fn `insert_child_object` — dispatch un objet vers la fonction d'insertion selon son `InferredStrategy`
-//!   (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`, `NormalizeDynamicKeys`, ou insertion standard récursive) ;
+//!   (Pivot, Jsonb, `StructuredPivot`, `SiblingCollapse`, ou insertion standard récursive) ;
 //!   seul aiguillage pour un objet enfant, un élément de tableau et une cible de routage (#172) ; un objet seul dans
 //!   une table `ObjectArray` y est un tableau d'un élément, `j2s_order` 0 (#169).
 //! - fn `recurse_children` — parcourt les champs de l'objet, route chaque enfant (objet/array) vers
@@ -26,6 +26,8 @@
 //! - fn `write_group_rows` — écrit les lignes des tables de groupes de colonnes d'une table (une par groupe qui a au moins une valeur).
 //! - fn `column_value` — valeur JSON d'une colonne de données dans l'objet de sa table (via le champ d'origine si elle vient d'un `Flatten`).
 //! - fn `write_wide_row` — écrit une ligne EAV (clé, valeur) de la table wide compagnon.
+//! - fn `is_scalar` — vrai pour une valeur qui peut aller dans un compagnon (ni objet ni tableau).
+//! - fn `written_as_column` — vrai pour une clé écrite en colonne de la table ou d'un de ses groupes.
 //! - fn `write_autosplit_rows` — écrit les paires clé/valeur de fréquence moyenne en lignes EAV
 //!   dans la table wide compagnon (stratégie `AutoSplit`), ou la grille de suffixes en lignes par
 //!   base quand le compagnon est un `StructuredPivot` (#163).
@@ -51,10 +53,10 @@ use crate::schema::table_schema::{InferredStrategy, TableSchema};
 use crate::schema::PATH_SEP;
 
 use super::traversal::{
-    insert_array, insert_jsonb_object, insert_normalize_dynamic_keys, insert_pivot_object,
-    insert_sibling_collapse_object, insert_structured_pivot_object, keeps_scalars_in_array_column,
-    push_coerced, push_coerced_as, push_text, record_missing_table, route_multi_collapse_children,
-    write_keyed_route_row, write_row,
+    insert_array, insert_jsonb_object, insert_pivot_object, insert_sibling_collapse_object,
+    insert_structured_pivot_object, keeps_scalars_in_array_column, push_coerced, push_coerced_as,
+    push_text, record_missing_table, route_multi_collapse_children, write_keyed_route_row,
+    write_row,
 };
 
 /// Mutable context for the recursive insert pass.
@@ -336,22 +338,12 @@ pub(super) fn insert_child_object<S: RowSink, A: AnomalyCollect>(
             order,
             sibling_schema,
         ),
-        InferredStrategy::NormalizeDynamicKeys { id_column } => insert_normalize_dynamic_keys(
-            sinks,
-            anomalies,
-            child_schema,
-            nested,
-            parent_id,
-            order,
-            id_column,
-        ),
         // insert_object writes the routing row of a SiblingCollapseMulti table, with its order, then routes its keys.
         InferredStrategy::SiblingCollapseMulti(_)
         | InferredStrategy::Columns
         | InferredStrategy::AutoSplit { .. }
         | InferredStrategy::Ignore
-        | InferredStrategy::Flatten { .. }
-        | InferredStrategy::JsonbFlatten => insert_object(
+        | InferredStrategy::Flatten { .. } => insert_object(
             path_map,
             ctx,
             child_schema,
@@ -395,10 +387,10 @@ fn write_wide_row<S: RowSink, A: AnomalyCollect>(
     write_row(ctx.sinks, ctx.anomalies, wide_table_name, wb)
 }
 
-/// Write medium-frequency key-value pairs as EAV rows in the `AutoSplit` companion wide table,
-/// or as one row per base when the companion is a `StructuredPivot` (#163). Stable keys were
-/// already written as schema columns; rare keys are skipped entirely, and so are objects and
-/// arrays, which are not companion values (#69).
+/// Write the keys of an `AutoSplit` table that are not columns as EAV rows in its companion wide table,
+/// or the keys of the grid as one row per base when the companion is a `StructuredPivot` (#163). Stable keys were
+/// already written as schema columns; objects and arrays are not companion values (#69). An EAV companion takes
+/// every other scalar, even one Pass 1 never saw (an older snapshot, a newer file): nothing is lost (#200).
 fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     path_map: &HashMap<String, TableSchema>,
     ctx: &mut InsertCtx<'_, S, A>,
@@ -415,25 +407,48 @@ fn write_autosplit_rows<S: RowSink, A: AnomalyCollect>(
     else {
         return Ok(());
     };
-    let medium = obj.iter().filter(|(k, v)| {
-        medium_keys.contains(k.as_str()) && !matches!(v, Value::Object(_) | Value::Array(_))
-    });
     // The companion is missing only when the user Skip-ed it alone: its keys are dropped on purpose (#167).
     let Some(companion) = path_map.get(wide_table_name.as_str()) else {
         return Ok(());
     };
     if let InferredStrategy::StructuredPivot(ss) = &*companion.effective_strategy() {
+        let grid = obj
+            .iter()
+            .filter(|(k, v)| medium_keys.contains(k.as_str()) && is_scalar(v));
         return insert_structured_pivot_object(
             ctx.sinks,
             ctx.anomalies,
             companion,
-            medium,
+            grid,
             row_id,
             None,
             ss,
         );
     }
-    write_eav_rows(ctx, companion, wide_table_name, medium, row_id)
+    let not_columns = obj
+        .iter()
+        .filter(|(k, v)| is_scalar(v) && !written_as_column(path_map, schema, k));
+    write_eav_rows(ctx, companion, wide_table_name, not_columns, row_id)
+}
+
+/// Objects and arrays have their own tables: they are never companion values (#69).
+const fn is_scalar(v: &Value) -> bool {
+    !matches!(v, Value::Object(_) | Value::Array(_))
+}
+
+/// True when `key` is a column of `schema` or of one of its column groups: written there, not in the companion.
+fn written_as_column(
+    path_map: &HashMap<String, TableSchema>,
+    schema: &TableSchema,
+    key: &str,
+) -> bool {
+    let has = |t: &TableSchema| t.find_by_original(key).is_some();
+    has(schema)
+        || schema
+            .column_groups
+            .iter()
+            .filter_map(|g| path_map.get(g.as_str()))
+            .any(has)
 }
 
 /// One EAV row (`key`, `value`) per medium key of the `AutoSplit` companion `wide_table_name`.
@@ -697,7 +712,6 @@ mod tests {
         );
         parent.inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.1,
-            rare_threshold: 0.001,
             medium_keys: ["fat", "fat_100g", "fat_prepared_100g", "salt_100g"]
                 .map(str::to_string)
                 .into(),
@@ -731,6 +745,47 @@ mod tests {
             recorder.anomalies,
             [("t".to_string(), "salt_100g".to_string(), id)]
         );
+    }
+
+    /// `t` (`a` TEXT) split by frequency: `m` goes to the key/value companion `t_wide` (`key`, `value` TEXT).
+    fn eav_split_table() -> HashMap<String, TableSchema> {
+        let mut parent = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
+        parent
+            .columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        parent.columns.push(column("a", "a", PgType::Text));
+        parent.inferred_strategy = InferredStrategy::AutoSplit {
+            stable_threshold: 0.1,
+            medium_keys: ["m".to_string()].into(),
+            wide_table_name: "t_wide".to_string(),
+        };
+        let mut wide = TableSchema::new("t_wide".to_string(), vec!["t_wide".to_string()], 1);
+        wide.parent_table = Some("t".to_string());
+        wide.columns
+            .push(ColumnSchema::generated("j2s_id", PgType::Uuid));
+        wide.columns.push(ColumnSchema::parent_fk("t"));
+        wide.columns.push(column("key", "key", PgType::Text));
+        wide.columns.push(column("value", "value", PgType::Text));
+        wide.inferred_strategy = InferredStrategy::Pivot;
+        HashMap::from([("t".to_string(), parent), ("t_wide".to_string(), wide)])
+    }
+
+    #[test]
+    fn a_key_unknown_to_pass_1_goes_to_the_key_value_companion() {
+        // An older snapshot, or a newer file: `unseen` is neither a column nor a medium key (#200).
+        let mut recorder = Recorder::default();
+        let rows = write(
+            &eav_split_table(),
+            r#"{"a": "A", "m": "1", "unseen": "2"}"#,
+            &mut recorder,
+        );
+        let mut keys: Vec<(&str, &str)> = rows["t_wide"]
+            .iter()
+            .map(|r| (r[2].as_str(), r[3].as_str()))
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, [("m", "1"), ("unseen", "2")]);
+        assert_eq!(recorder.anomalies, Vec::new());
     }
 
     #[test]
@@ -1076,7 +1131,7 @@ mod tests {
         let selected = by_name("p_images_selected");
         let key_table = by_name("p_images_selected_key");
         assert!(
-            matches!(&*key_table.effective_strategy(), InferredStrategy::SiblingCollapse(s) if s.key_col_name == "lang_code"),
+            matches!(&*key_table.effective_strategy(), InferredStrategy::SiblingCollapse(s) if s.key_col_name == "key"),
             "the fixture must reach the keyed post-pass: {:?}",
             key_table.inferred_strategy
         );
@@ -1123,7 +1178,7 @@ mod tests {
         let key_rows = cells(&key_table.name);
         assert_eq!(key_rows.len(), 9, "3 image types × 3 lang codes");
         let (lang, imgid, rev) = (
-            col(key_table, "lang_code"),
+            col(key_table, "key"),
             col(key_table, "imgid"),
             col(key_table, "rev"),
         );

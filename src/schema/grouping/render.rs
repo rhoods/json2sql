@@ -9,7 +9,9 @@
 //!
 //! Fonctions :
 //! - fn `to_toml` — sections `column_groups` de toutes les tables : groupes actifs, fusions à confirmer en commentaire.
-//! - fn `table_toml` — section TOML d'une table.
+//! - fn `table_toml` — section TOML d'une table : sa grille de suffixes, puis ses groupes.
+//! - fn `suffixes_toml` — la grille de suffixes d'une table, en `suffix_columns` commenté (#200, T8).
+//! - fn `suffixes_markdown` — la grille de suffixes d'une table dans le rapport.
 //! - fn `group_toml` — lignes TOML d'un groupe, avec son commentaire de preuves.
 //! - fn `key` — clé TOML : nue si possible, entre guillemets sinon.
 //! - fn `quoted` — chaîne TOML entre guillemets.
@@ -34,29 +36,51 @@ use super::proposal::{
 /// Widest line of the TOML.
 const WIDTH: usize = 100;
 
-const TOML_HEADER: &str = "# Suggested by `json2sql --suggest-groups`: review, edit, then apply with --schema-config.\n\
+const TOML_HEADER: &str =
+    "# Suggested by `json2sql --suggest`: review, edit, then apply with --schema-config.\n\
 # Active lines are groups the names justify as they are. A commented block is a fusion that no\n\
-# data signal confirms: it replaces the active groups it names, so delete their lines to use it.\n\n";
+# data signal confirms: it replaces the active groups it names, so delete their lines to use it.\n\
+# A commented `suffix_columns` is a suffix grid the names form: uncomment it to apply it.\n\n";
 
 /// The `column_groups` sections of all the tables that have a group. Confirmed groups are active, fusions to
 /// confirm are commented.
 pub fn to_toml(proposals: &[TableProposal]) -> String {
     let sections: Vec<String> = proposals
         .iter()
-        .filter(|p| !p.groups.is_empty())
+        .filter(|p| !p.groups.is_empty() || !p.suffixes.is_empty())
         .map(table_toml)
         .collect();
     format!("{TOML_HEADER}{}", sections.join("\n"))
 }
 
-/// `[table.column_groups]` and its groups.
+/// The suffix grid of a table, commented (#200), then `[table.column_groups]` and its groups.
 fn table_toml(proposal: &TableProposal) -> String {
-    let mut out = format!("[{}.column_groups]\n", key(&proposal.table));
+    use std::fmt::Write as _;
+    let mut out = suffixes_toml(proposal);
+    if proposal.groups.is_empty() {
+        return out;
+    }
+    // writing to a String cannot fail
+    let _ = writeln!(out, "[{}.column_groups]", key(&proposal.table));
     for (at, group) in proposal.groups.iter().enumerate() {
         out.push_str(&group_toml(proposal, group));
         out.push_str(&candidates_toml(proposal, at));
     }
     out
+}
+
+/// `[table]` with its suffix grid as a commented `suffix_columns`: to confirm, the names alone find grids in any
+/// domain (#200). Nothing without a grid.
+fn suffixes_toml(proposal: &TableProposal) -> String {
+    if proposal.suffixes.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = proposal.suffixes.iter().map(|s| quoted(s)).collect();
+    format!(
+        "[{}]\n# suffix grid: to confirm, the names alone form it; its keys then leave the groups below\n# suffix_columns = [{}]\n\n",
+        key(&proposal.table),
+        list.join(", ")
+    )
 }
 
 /// One comment line per column the data tie to the group at `at`, after it: a candidate, never an active member.
@@ -144,14 +168,16 @@ pub fn to_markdown(proposals: &[TableProposal]) -> String {
 fn table_markdown(proposal: &TableProposal) -> String {
     if proposal.groups.is_empty() {
         return format!(
-            "## Table `{}`\n\n{} columns; no group found.\n",
+            "## Table `{}`\n\n{} columns; no group found.\n{}",
             proposal.table,
-            proposal.columns.len()
+            proposal.columns.len(),
+            suffixes_markdown(proposal)
         );
     }
     format!(
-        "{}### Groups\n\n{}\n### Columns that stay in the table ({})\n\n{}\n{}{}",
+        "{}{}### Groups\n\n{}\n### Columns that stay in the table ({})\n\n{}\n{}{}",
         table_summary(proposal),
+        suffixes_markdown(proposal),
         proposal
             .groups
             .iter()
@@ -161,6 +187,18 @@ fn table_markdown(proposal: &TableProposal) -> String {
         column_list(proposal, &proposal.ungrouped),
         attachments_markdown(proposal) + &placements_markdown(proposal),
         families_markdown(proposal)
+    )
+}
+
+/// The suffix grid of the table, to confirm; nothing without one.
+fn suffixes_markdown(proposal: &TableProposal) -> String {
+    if proposal.suffixes.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = proposal.suffixes.iter().map(|s| format!("`{s}`")).collect();
+    format!(
+        "\nSuffix grid to confirm: {} (`suffix_columns`, commented in the TOML).\n\n",
+        list.join(", ")
     )
 }
 
@@ -403,6 +441,7 @@ mod tests {
                 rows: 500,
                 informative: 9,
             },
+            suffixes: Vec::new(),
         }
     }
 
@@ -417,6 +456,24 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect()
+    }
+
+    /// A table whose names form a suffix grid: a `[table]` section with the grid commented, valid TOML that applies
+    /// nothing as it is (#200, T8).
+    #[test]
+    fn a_suffix_grid_is_proposed_commented() {
+        let mut only_grid = proposal("nut");
+        only_grid.groups.clear();
+        only_grid.suffixes = vec!["_100g".to_string(), "_unit".to_string()];
+        let text = to_toml(&[only_grid]);
+        assert!(
+            text.contains("[nut]\n") && text.contains("# suffix_columns = [\"_100g\", \"_unit\"]"),
+            "{text}"
+        );
+        assert!(!parse(&text)["nut"]
+            .as_table()
+            .unwrap()
+            .contains_key("suffix_columns"));
     }
 
     #[test]

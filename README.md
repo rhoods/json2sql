@@ -49,12 +49,10 @@ CREATE TABLE IF NOT EXISTS "public"."products_stores" (       -- tableau d'objet
 
 - **Pass 1** : scan complet du fichier pour inférer le schéma. Le type retenu est le plus large observé (`INTEGER` → `BIGINT` → `DOUBLE PRECISION` → texte), pas le plus fréquent ; des chaînes très rares (moins de 0,1 % des valeurs) ne décident pas du type.
 - **Pass 2** : pipeline *diskless*. N workers parsent le JSON (`simd_json`) et forment les lignes COPY en mémoire ; un flusher les envoie à PostgreSQL au fil de l'eau. Aucun fichier temporaire, RAM bornée par contre-pression.
-- **Tables larges** : détection automatique de structures à clés dynamiques (pivot EAV, fusion de tables sœurs, JSONB, *AutoSplit*), surchargeable par un fichier TOML.
+- **Tables larges** : une table large et creuse est coupée d'après sa structure (clés fréquentes en colonnes, les autres en clé/valeur, aucune jetée), les objets frères de même forme sont fusionnés ; les grilles de suffixes et les groupes de colonnes sont proposés par `--suggest`, puis validés dans un fichier TOML.
 - **Anomalies** : une valeur non convertible vers le type inféré est insérée en `NULL` et tracée dans un rapport JSON/CSV ; `--max-anomaly-rate` fait échouer l'import au-delà d'un seuil.
 
-Sur l'export OpenFoodFacts (base ouverte de produits alimentaires), la table racine expose 189 881 clés distinctes : *AutoSplit* en garde 125 en colonnes, 184 dans une table EAV `_wide` et écarte les 189 572 restantes (voir ci-dessous).
-
-> ⚠️ **Clés rares non importées.** Sur une table très large, *AutoSplit* écarte les clés présentes dans moins de `--rare-threshold` des lignes (défaut 0,1 %). Elles sont listées dans un `WARNING` sur stderr. Pour tout conserver : `--rare-threshold 0`.
+Sur l'export OpenFoodFacts (base ouverte de produits alimentaires), la table racine expose 189 881 clés distinctes : *AutoSplit* en garde 125 en colonnes et range toutes les autres dans une table EAV `_wide` (clé, valeur) : aucune clé n'est écartée.
 
 ## Installation
 

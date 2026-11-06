@@ -21,7 +21,6 @@ fn base_config(url: String, schema: String) -> PipelineConfig {
         sibling_threshold: 3,
         sibling_jaccard: 0.5,
         stable_threshold: 0.10,
-        rare_threshold: 0.001,
         num_workers: 1,
         disabled_strategies: HashSet::new(),
         parallel: 1,

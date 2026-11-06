@@ -5,11 +5,11 @@
 //! debugging an unexpected layout or forcing a specific materialization.
 //!
 //! Fonctions :
-//! - enum `StrategyName` — stratégies optionnelles désactivables (Sibling, Pivot, `StructuredPivot`).
+//! - enum `StrategyName` — stratégies optionnelles désactivables (Sibling seulement depuis #200).
 //! - fn `StrategyName::as_str` — nom TOML/CLI de la stratégie.
 //! - fn `StrategyName::try_from` — implémente `TryFrom<&str>` ; parse une chaîne, distingue stratégie
-//!   inconnue vs. obligatoire (non désactivable).
-//! - enum `StrategyError` — erreur de parsing d'un nom de stratégie (Mandatory/Unknown).
+//!   inconnue, obligatoire (non désactivable) ou seulement proposée (`structured_pivot`).
+//! - enum `StrategyError` — erreur de parsing d'un nom de stratégie (Mandatory/Proposed/Unknown).
 //! - fn `parse_disabled_strategies` — valide une liste de flags `--disable-strategy` (CLI).
 
 use std::collections::HashSet;
@@ -17,21 +17,17 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StrategyName {
     Sibling,
-    Pivot,
-    StructuredPivot,
 }
 
 impl StrategyName {
     #[allow(dead_code)] // used in tests + available as public API
-    pub const OPTIONAL: &'static [Self] = &[Self::Sibling, Self::Pivot, Self::StructuredPivot];
+    pub const OPTIONAL: &'static [Self] = &[Self::Sibling];
 
     #[allow(dead_code)] // used by json2sql-ui::config for TOML serialization
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Sibling => "sibling",
-            Self::Pivot => "pivot",
-            Self::StructuredPivot => "structured_pivot",
         }
     }
 }
@@ -42,9 +38,10 @@ impl TryFrom<&str> for StrategyName {
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         match s {
             "sibling" => Ok(Self::Sibling),
-            "pivot" => Ok(Self::Pivot),
-            "structured_pivot" => Ok(Self::StructuredPivot),
-            "split" => Err(StrategyError::Mandatory(s.to_string())),
+            // The suffix grid is only proposed since #200: there is nothing automatic left to disable.
+            "structured_pivot" => Err(StrategyError::Proposed(s.to_string())),
+            // The pivot is part of the split since #200: the split chooses it when the values are of one type.
+            "split" | "pivot" => Err(StrategyError::Mandatory(s.to_string())),
             _ => Err(StrategyError::Unknown(s.to_string())),
         }
     }
@@ -52,9 +49,11 @@ impl TryFrom<&str> for StrategyName {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StrategyError {
-    #[error("strategy '{0}' is mandatory and cannot be disabled\n  → mandatory strategies: split\n  → optional strategies: sibling, pivot, structured_pivot")]
+    #[error("strategy '{0}' is mandatory and cannot be disabled\n  → mandatory strategies: split, pivot (part of the split)\n  → to store one table as JSONB: strategy = \"jsonb\" in its --schema-config section\n  → optional strategies: sibling")]
     Mandatory(String),
-    #[error("unknown strategy '{0}'\n  → optional strategies: sibling, pivot, structured_pivot")]
+    #[error("strategy '{0}' is no longer automatic, there is nothing to disable\n  → --suggest proposes the suffix grids; suffix_columns in a --schema-config section applies one\n  → optional strategies: sibling")]
+    Proposed(String),
+    #[error("unknown strategy '{0}'\n  → optional strategies: sibling")]
     Unknown(String),
 }
 
@@ -96,10 +95,24 @@ mod tests {
 
     #[test]
     fn test_parse_valid_set() {
-        let raw = vec!["sibling".to_string(), "pivot".to_string()];
-        let result = parse_disabled_strategies(&raw).unwrap();
+        let result = parse_disabled_strategies(&["sibling".to_string()]).unwrap();
         assert!(result.contains(&StrategyName::Sibling));
-        assert!(result.contains(&StrategyName::Pivot));
+    }
+
+    #[test]
+    fn test_structured_pivot_is_only_proposed_now() {
+        // #200: the suffix grid is never applied automatically; the error says where it went.
+        let err = StrategyName::try_from("structured_pivot").unwrap_err();
+        assert!(matches!(err, StrategyError::Proposed(_)));
+        assert!(err.to_string().contains("suffix_columns"), "{err}");
+    }
+
+    #[test]
+    fn test_pivot_is_part_of_the_mandatory_split() {
+        // #200: the split of a wide table decides by itself between pivot and frequency; JSONB is asked in the TOML.
+        let err = StrategyName::try_from("pivot").unwrap_err();
+        assert!(matches!(err, StrategyError::Mandatory(_)));
+        assert!(err.to_string().contains("strategy = \"jsonb\""), "{err}");
     }
 
     #[test]

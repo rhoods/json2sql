@@ -79,7 +79,7 @@ Une table est dite **large** si le nombre de ses colonnes **scalaires** (hors co
 
 ## 4. Garde ratio_stable (P1)
 
-**Fichier :** `src/schema/registry.rs` — condition [3a]
+**Fichier :** `src/schema/finalizer/wide_strategy.rs` — `apply_wide_strategy()`, `stable_ratio()`
 
 Avant d'appliquer une stratégie wide, on vérifie :
 
@@ -93,40 +93,39 @@ Si `ratio_stable > 0.5` **et** que la table contient au moins 10 lignes, le sch�
 
 Cela permet aux schémas réellement denses (ex. table de métriques avec 200 indicateurs tous remplis) de ne pas être faussement identifiés comme "trop larges".
 
-Une table dense gardée en `Columns` (ou en `AutoSplit`) peut ensuite être découpée en tables 1:1 thématiques : `--suggest-groups` propose les groupes pour les tables d'au moins 20 colonnes de données, et la clé `column_groups` de la config les applique (§12) ; la stratégie `--group-columns` applique directement ceux que les noms confirment (#91).
+Une table dense gardée en `Columns` (ou en `AutoSplit`) peut ensuite être découpée en tables 1:1 thématiques : `--suggest` propose les groupes pour les tables d'au moins 20 colonnes de données, et la clé `column_groups` de la config les applique (§12) ; la stratégie `--group-columns` applique directement ceux que les noms confirment (#91).
 
 ---
 
-## 5. AutoSplit pour la table racine
+## 5. AutoSplit : les clés fréquentes en colonnes, les autres en clé/valeur
 
-**Fichier :** `src/schema/registry.rs` — branche [3c]
-**Paramètres CLI :** `--stable-threshold` (défaut : 0.10), `--rare-threshold` (défaut : 0.001)
+**Fichier :** `src/schema/finalizer/wide_strategy.rs` — `apply_autosplit_strategy()`
+**Paramètre CLI :** `--stable-threshold` (défaut : 0.10)
 
-S'applique uniquement à la **table racine** qui possède des tables enfants (objets imbriqués). La table racine est classifiée en trois zones selon la fréquence d'apparition de chaque clé :
+S'applique à une table large et creuse (§ 4) : toujours à la **table racine**, dont les lignes sont les enregistrements du fichier et les clés des champs, et à une **table enfant** dont les valeurs mélangent plusieurs types (§ 8). Chaque clé va dans l'une des deux zones, selon sa fréquence d'apparition :
 
 | Zone | Critère | Destination |
 |---|---|---|
 | **Stable** | fréquence ≥ `stable_threshold` | colonne dans la table principale |
-| **Médium** | fréquence entre `rare_threshold` et `stable_threshold` | ligne dans la table `{nom}_wide` (EAV : `key`, `value`) |
-| **Rare** | fréquence < `rare_threshold` | **non importée** (ni schéma, ni données) — un `WARNING` sur stderr liste les clés concernées |
+| **Autre** | fréquence < `stable_threshold`, même une seule ligne | ligne dans la table `{nom}_wide` (EAV : `key`, `value`) |
 
 La table `_wide` est une table EAV synthétique générée automatiquement avec les colonnes `j2s_id`, `j2s_parent_id`, `j2s_order`, `key`, `value`. Elle est liée à la table principale via une clé étrangère.
 
-Les colonnes tableau ne sont ni médiums ni rares : elles restent dans la table principale.
+Les colonnes tableau restent toujours dans la table principale.
 
-**Exemple OpenFoodFacts :** 189 881 clés observées → 125 stables, 184 médiums, 189 572 rares supprimées.
+**Exemple OpenFoodFacts :** 189 881 clés observées → 125 stables, les 189 756 autres dans `{nom}_wide`.
 
-> ⚠️ **Perte de données volontaire.** Les clés rares sont écartées pour éviter une table EAV de centaines de milliers de clés quasi vides. Pour tout conserver, passer `--rare-threshold 0` : toutes les clés non stables vont alors dans `{nom}_wide`.
+> Aucune clé n'est écartée (#200) : jusqu'à la version précédente, les clés présentes dans moins de `--rare-threshold` des lignes (0,1 % par défaut) n'étaient pas importées. L'option n'existe plus ; un script qui la passe échoue au lancement.
 
 ---
 
-## 6. Détection de suffixes structurés (StructuredPivot)
+## 6. Grille de suffixes (StructuredPivot) : proposée, puis appliquée par le TOML
 
 **Fichier :** `src/schema/suffix_detector.rs`
 
-Pour les tables larges non-racines dont les colonnes suivent un pattern `{base}_{suffixe}` (ex. `calcium_100g`, `calcium_unit`, `calcium_serving`), un pivot structuré est auto-détecté.
+Les colonnes d'une table large peuvent suivre un pattern `{base}_{suffixe}` (ex. `calcium_100g`, `calcium_unit`, `calcium_serving`). Depuis #200, la grille n'est plus appliquée seule : les noms trouvent une grille dans n'importe quel domaine, absurde parfois (`user_id`, `created_at`, `user_name`). `--suggest` la cherche (algorithme ci-dessous) dans chaque table d'au moins 20 colonnes de données et l'écrit en commentaire (`# suffix_columns = [...]` sous `[table]`) ; `suffix_columns` du TOML l'applique, avant le split.
 
-La table n'est pas vidée : seules les clés de la grille (clés suffixées et clés nues qui en sont les bases) partent dans un compagnon `{table}_pivot` (`unique_pivot_name`), une ligne par base. La table garde son nom, ses scalaires hors grille, ses colonnes PG array et ses vraies tables filles ; elle prend `AutoSplit` avec les clés de la grille en `medium_keys` et le compagnon en `wide_table_name`, comme le split Pivot (§ 8). En Pass 2, `write_autosplit_rows` voit que le compagnon est un `StructuredPivot` et regroupe les clés par base (#163).
+Appliquée, la table n'est pas vidée : seules les clés de la grille (clés suffixées et clés nues qui en sont les bases) partent dans un compagnon `{table}_pivot` (`unique_companion_name`), une ligne par base. La table garde son nom, ses scalaires hors grille, ses colonnes PG array et ses vraies tables filles ; elle prend `AutoSplit` avec les clés de la grille en `medium_keys` et le compagnon en `wide_table_name`, comme le split Pivot (§ 8). En Pass 2, `write_autosplit_rows` voit que le compagnon est un `StructuredPivot` et regroupe les clés par base (#163).
 
 ### Algorithme
 
@@ -138,7 +137,7 @@ La table n'est pas vidée : seules les clés de la grille (clés suffixées et c
 
 > **Limite.** L'élargissement se fait colonne par colonne. Une colonne de suffixe très creuse avec une chaîne (par exemple 3 valeurs, dont 1 chaîne : 33 %) reste en `VARCHAR`, et toute la colonne du pivot passe en `TEXT`. Les unions de tables sœurs (`wide_strategies.rs`) suivent la même règle.
 
-Ce comportement peut être forcé manuellement dans le fichier de config TOML via `strategy = "structured_pivot"` et `suffix_columns = ["_100g", "_unit"]`. L'override passe par le même découpage (`apply_structured_pivot_split`) ; le rejouer sur un snapshot qui a déjà le compagnon ne change rien. Les colonnes de suffixe sont typées d'après les types déjà résolus des clés : un `VARCHAR(n)` garde sa longueur, avec la marge de 20 % (#117) ; les colonnes tableau PG et `JSONB` restent sur la table d'identité.
+Le TOML l'applique avec `suffix_columns = ["_100g", "_unit"]` (la forme `strategy = "structured_pivot"` avec `suffix_columns` est encore lue). L'override passe par `apply_structured_pivot_split`, avant le split : une table large et creuse qui a une grille garde ses colonnes de suffixes ; le rejouer sur un snapshot qui a déjà le compagnon ne change rien. Les colonnes de suffixe sont typées d'après les types déjà résolus des clés : un `VARCHAR(n)` garde sa longueur, avec la marge de 20 % (#117) ; les colonnes tableau PG et `JSONB` restent sur la table d'identité.
 
 ---
 
@@ -161,7 +160,7 @@ Quand une table parent a ≥ `sibling_threshold` tables enfants directes avec de
 
 Les tables sœurs sont supprimées. La table parent devient une table **KeyedPivot** avec :
 
-- Une colonne clé (`key`, `lang_code`, ou `key_id` selon la forme des clés)
+- Une colonne clé `key`, quelle que soit la forme des clés (`j2s_key` si un champ des sœurs s'appelle déjà `key`)
 - L'union des colonnes de données des sœurs (peut être vide si les sœurs sont des conteneurs purs)
 - Une colonne **`j2s_data JSONB`** contenant l'objet enfant brut (ou l'élément du tableau pour ObjectArray). Cette colonne est toujours présente et préserve la structure complète, y compris les données imbriquées qui ne seraient pas représentables en colonnes plates.
 - Pour les ObjectArray : une colonne `j2s_order BIGINT` pour conserver l'ordre des éléments
@@ -172,27 +171,30 @@ Quand les tables sœurs sont elles-mêmes des conteneurs purs (ex. `genome → c
 
 ### Types de clés détectés (`KeyShape`)
 
-| Forme | Exemple | Colonne générée |
-|---|---|---|
-| Numeric | `0`, `1`, `2` | `key_id` |
-| IsoLang | `fr`, `en`, `de` | `lang_code` |
-| Slug | `en:organic`, `fr:bio` | `key` |
-| Mixed | mélange | `key` |
+La forme des clés ne change pas le nom de la colonne clé (#200) : elle sert aux journaux et à la coupure des clés
+numériques et texte en deux tables.
+
+| Forme | Exemple |
+|---|---|
+| Numeric | `0`, `1`, `2` |
+| IsoLang | `fr`, `en`, `de` |
+| Slug | `en:organic`, `fr:bio` |
+| Mixed | mélange |
 
 ---
 
 ## 8. Stratégies wide alternatives (Pivot, Jsonb)
 
-**Fichier :** `src/schema/registry.rs` — `suggest_wide_strategy()`
+**Fichier :** `src/schema/wide_strategies.rs` — `suggest_wide_strategy()`
 
-Pour les tables larges non-racines qui ne correspondent ni à un StructuredPivot ni à un AutoSplit, deux stratégies sont proposées :
+Une table enfant large et creuse, sans grille `suffix_columns` dans le TOML (§ 6), est coupée selon les types de ses valeurs :
 
 | Stratégie | Critère | Stockage |
 |---|---|---|
-| **Pivot** | colonnes de types homogènes | table EAV `(parent_id, key, value)` |
-| **Jsonb** | colonnes hétérogènes ou objet complexe | colonne JSONB unique dans la table parent |
+| **Pivot** | toutes les valeurs d'un seul type : les clés sont des données (devises, langues…) | toutes les clés dans le compagnon `{nom}_pivot` (EAV : `key`, `value`) |
+| **AutoSplit** | types mélangés : les clés sont des champs | clés fréquentes en colonnes, les autres dans `{nom}_wide` (§ 5) |
 
-Ces stratégies peuvent être forcées dans le TOML de config.
+JSONB n'est plus choisi automatiquement (#200), sauf au-delà de 1 600 colonnes ; il se demande dans le TOML (`strategy = "jsonb"`), comme `pivot`.
 
 ---
 
@@ -232,8 +234,8 @@ Les stratégies **Pivot**, **Jsonb**, **StructuredPivot** et **KeyedPivot** abso
 `AutoSplit` n'absorbe **pas** ses enfants : les tables enfants (ex. `_nutriments`, `_ingredients`) restent indépendantes.
 
 Cette passe est exécutée **deux fois** :
-1. Dans `finalize()` — après la construction du schéma initial
-2. Dans `main.rs` après `apply_overrides()` — pour prendre en compte les stratégies définies manuellement dans le TOML
+1. Dans `apply_overrides_complete()` — après les stratégies définies manuellement dans le TOML
+2. Dans `SchemaFinalizer::split()` — après le split des tables larges et la garde des 1600 colonnes
 
 ---
 
@@ -248,10 +250,9 @@ Le fichier TOML permet de forcer des décisions que l'inférence automatique ne 
 [nom_table]
 strategy = "jsonb"          # forcer une stratégie
 # strategy = "pivot"
-# strategy = "structured_pivot"
 # strategy = "columns"
-# strategy = "ignore"
-suffix_columns = ["_100g", "_unit"]  # suffixes explicites pour structured_pivot
+# strategy = "flatten"
+suffix_columns = ["_100g", "_unit"]  # la grille de suffixes (proposée par --suggest)
 
 [nom_table.columns]
 ma_colonne = "INTEGER"      # forcer un type de colonne
@@ -259,7 +260,7 @@ ma_colonne = "INTEGER"      # forcer un type de colonne
 
 Les types forçables sont scalaires : une surcharge sur une colonne tableau est ignorée avec un avertissement. Forcer un type numérique sur une colonne de chaînes n'est pas une conversion : chaque chaîne devient `NULL` + anomalie (§ 1).
 
-Les surcharges sont appliquées après `finalize()` et suivies d'une nouvelle passe d'exclusion.
+Les surcharges sont appliquées après la Pass 1 et la sauvegarde du snapshot, **avant** le split des tables larges (#200), et suivies d'une nouvelle passe d'exclusion. Une table que le TOML règle (`strategy`, y compris `columns`) n'est pas coupée par le split.
 
 ### Groupes de colonnes (`column_groups`, #78)
 
@@ -274,9 +275,9 @@ Une table à stratégie `Columns` ou `AutoSplit` range chaque groupe dans une ta
 
 Un groupe est ignoré avec un avertissement (`ConfigWarning::ColumnGroup*`) pour une colonne inconnue, générée ou déjà dans un autre groupe, un groupe de moins de 3 colonnes, un nom de table déjà pris ou un parent qui n'aurait plus de colonne de données. Réappliquer la même config ne change rien ; une table de groupe existante avec d'autres colonnes est une erreur. Un snapshot qui contient des groupes est écrit en version 3 (`load` accepte 2 et 3).
 
-**Stratégie `--group-columns` (#91).** Après le TOML, les overrides de l'IHM et la sauvegarde du snapshot, `grouping::auto::apply_name_groups` propose par les noms seuls chaque table éligible (comme `--suggest-groups`, sans échantillon) et applique ses groupes confirmés par le même chemin qu'une config. Elle saute les tables déjà découpées (relancer la proposition sur le reste d'une table donnerait d'autres groupes : les seuils des noms dépendent des colonnes de la table), les tables de groupe (la Pass 2 ne remplit que les groupes d'une table écrite depuis son objet) et les tables dont le TOML a une clé `column_groups`. Les colonnes sont triées par nom avant la proposition, si bien que le résultat ne dépend pas de l'ordre des colonnes (#90). Le snapshot n'en contient jamais le résultat, seulement les tables cochées dans l'IHM (`SchemaSnapshot.group_columns`).
+**Stratégie `--group-columns` (#91).** Après la sauvegarde du snapshot, le TOML, les overrides de l'IHM et le split, `grouping::auto::apply_name_groups` propose par les noms seuls chaque table éligible (comme `--suggest`, sans échantillon) et applique ses groupes confirmés par le même chemin qu'une config. Elle saute les tables déjà découpées (relancer la proposition sur le reste d'une table donnerait d'autres groupes : les seuils des noms dépendent des colonnes de la table), les tables de groupe (la Pass 2 ne remplit que les groupes d'une table écrite depuis son objet) et les tables dont le TOML a une clé `column_groups`. Les colonnes sont triées par nom avant la proposition, si bien que le résultat ne dépend pas de l'ordre des colonnes (#90). Le snapshot n'en contient jamais le résultat, seulement les tables cochées dans l'IHM (`SchemaSnapshot.group_columns`).
 
-**Signaux de données depuis le snapshot (#91, phase 2).** Pendant la Pass 1, le thread de lecture garde un échantillon borné et déterministe des lignes racine (`pass1/row_sample.rs`) ; après la finalisation, `grouping::suggest::samples_of_rows` en tire la présence et les valeurs de chaque table éligible, colonnes triées par nom, lignes analysées une à une, et les range dans `Pass1Result.samples` puis dans le snapshot. La stratégie construit les `DataSignals` d'une table depuis cet échantillon si ses colonnes sont celles du Pass 1 : la règle des deux signaux confirme alors les fusions de familles, comme `--suggest-groups`. Les colonnes laissées dans la table qu'un lift ajusté par richesse rapproche d'un groupe sont des candidats (`TableProposal.attachments`), affichés et jamais appliqués : sur OFF, la co-présence (φ) ne rattachait rien, les colonnes orphelines étant rares.
+**Signaux de données depuis le snapshot (#91, phase 2).** Pendant la Pass 1, le thread de lecture garde un échantillon borné et déterministe des lignes racine (`pass1/row_sample.rs`) ; après la finalisation, `grouping::suggest::samples_of_rows` en tire la présence et les valeurs de chaque table éligible, colonnes triées par nom, lignes analysées une à une, et les range dans `Pass1Result.samples` puis dans le snapshot. La stratégie construit les `DataSignals` d'une table depuis cet échantillon si ses colonnes sont celles du Pass 1 : la règle des deux signaux confirme alors les fusions de familles, comme `--suggest`. Les colonnes laissées dans la table qu'un lift ajusté par richesse rapproche d'un groupe sont des candidats (`TableProposal.attachments`), affichés et jamais appliqués : sur OFF, la co-présence (φ) ne rattachait rien, les colonnes orphelines étant rares.
 
 **Pass 2.** `insert_object` écrit la ligne du parent, puis, pour chaque table de groupe, une ligne dont `j2s_id` et la clé étrangère valent l'id de la ligne du parent. La ligne n'est écrite que si une colonne du groupe a une valeur (`is_present` : ni `null`, ni `""`, ni `[]`, ni `{}`) ; chaque ligne écrite compte dans le taux d'anomalies. Les enfants ordinaires restent rattachés à la ligne d'origine. Cela vaut pour la racine, un enfant objet et les éléments d'un tableau d'objets.
 

@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Pass 1, lecture du fichier, observation des types et échantillon
-verified_at: db4ec51
+verified_at: 28a6e29
 files:
   - src/pass1/
   - src/io/reader.rs
@@ -25,6 +25,8 @@ symbols:
   - AnalysisScreen
   - run
   - run_parallel
+  - run_before_split
+  - run_parallel_before_split
   - run_inspect
   - effective_workers
   - scan_json_rows
@@ -49,7 +51,9 @@ symbols:
   - TableSchema
   - SchemaRegistry
   - SchemaRegistry::merge
-  - SchemaRegistry::finalize_with_pg_guard
+  - SchemaRegistry::finalize_before_split
+  - split_wide_tables
+  - SchemaRegistry::split_view
   - SchemaRegistry::collect_stats
   - SchemaFinalizer
   - SchemaObserver
@@ -92,11 +96,14 @@ Carte de la Pass 1, pour savoir où intervenir et ce qui casse sans erreur de co
 
 La Pass 1 lit le fichier une fois, en entier, et **observe** chaque objet racine : pour chaque champ de chaque table,
 un `TypeTracker` compte les types vus. Elle garde aussi un échantillon borné de lignes (`RowSampler`, pour les groupes
-de colonnes, #91). Elle ne décide rien elle-même : à la fin, `SchemaRegistry::finalize_with_pg_guard` passe la main à
-la finalisation (`SchemaFinalizer` : noms, stratégies, tables sœurs), qui produit les `TableSchema` de la Pass 2.
+de colonnes, #91). Elle ne décide rien elle-même : à la fin, `SchemaRegistry::finalize_before_split` passe la main à
+la finalisation (`SchemaFinalizer` : noms, tables sœurs), qui produit les `TableSchema` **avant le split des tables
+larges** (#200). `run` et `run_parallel` coupent ensuite les tables larges (`split_wide_tables`) ; la CLI appelle
+`run_before_split` / `run_parallel_before_split` et ne coupe qu'après le snapshot et le TOML. Les échantillons sont pris
+sur une copie coupée (`SchemaRegistry::split_view`) : les groupes automatiques qui les lisent viennent après le split.
 
 `registry.rs` est la **frontière** : `SchemaRegistry` réunit l'observation (`SchemaObserver`) et la finalisation. Cette
-fiche le décrit comme point d'entrée ; ce qui se passe après `finalize_with_pg_guard` relève de la finalisation.
+fiche le décrit comme point d'entrée ; ce qui se passe après `finalize_before_split` relève de la finalisation.
 
 ## 1. Où intervenir
 
@@ -150,8 +157,10 @@ run_parallel
   ├─ spawn_worker_threads : N threads, un SchemaRegistry chacun, parse puis observe_root
   └─ join_and_merge_workers : SchemaRegistry::merge → TableEntry::merge → TypeTracker::merge
 
-build_pass1_result (les deux) : finalize_with_pg_guard, puis samples_of, collect_stats, noms tronqués, collisions
-  → Pass1Result
+build_pass1_result (les deux) : finalize_before_split, collect_stats, samples_of (sur split_view), noms tronqués, collisions
+  → Pass1Result, tables larges pas encore coupées
+
+run / run_parallel : le même, puis split (split_wide_tables, guard des 1 600 colonnes)
 ```
 
 Le worker de l'IHM (`json2sql-worker`) ne fait jamais de Pass 1 : il reçoit les schémas déjà finalisés.
@@ -183,7 +192,7 @@ Le worker de l'IHM (`json2sql-worker`) ne fait jamais de Pass 1 : il reçoit les
   compact, `read_and_dispatch` les octets bruts du fichier. Le budget en octets de `RowSampler` est donc atteint plus
   tôt en parallèle sur un fichier indenté, et les lignes gardées peuvent différer.
 - **L'ordre des appels de `build_pass1_result` compte.** `SchemaRegistry::collect_stats` et les noms tronqués lisent le
-  `NamingRegistry` que remplit la finalisation : ils doivent venir après `finalize_with_pg_guard`.
+  `NamingRegistry` que remplit la finalisation : ils doivent venir après `finalize_before_split`.
 - **`ColumnStats` est écrit dans le snapshot sans `#[serde(default)]`.** Un champ ajouté sans ce défaut rend illisibles
   les snapshots déjà enregistrés. Les noms des variantes d'`InferredType` y sont aussi écrits (histogramme de
   `make_stat`, en `{:?}`) : renommer une variante change le contenu des snapshots.

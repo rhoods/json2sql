@@ -26,7 +26,6 @@ fn base_config(
         sibling_threshold: 3,
         sibling_jaccard: 0.5,
         stable_threshold: 0.10,
-        rare_threshold: 0.001,
         num_workers: 1,
         disabled_strategies: HashSet::new(),
         parallel: 1,
@@ -87,13 +86,14 @@ async fn test_pg_array_autosplit_keeps_arrays_e2e() {
         let result = run_pipeline(base_config(url, schema.clone(), "tc_pg_array_autosplit.jsonl", 2)).await;
         assert!(result.is_ok(), "pg_array_autosplit pipeline failed: {result:?}");
 
-        // the root must really be AutoSplit (3 scalars > threshold 2), else this test checks nothing (#84)
+        // the root must really be AutoSplit (wide, with keys for its companion: r4..r7 in 1 row out of 12), else this
+        // test checks nothing (#84, #200)
         let sql = "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'products_wide')";
         let wide_exists: bool = client.query_one(sql, &[&schema]).await.unwrap().get(0);
         assert!(wide_exists, "AutoSplit companion `products_wide` missing: the root was not split");
 
         let sql = format!(
-            "SELECT array_to_string(\"pure\", ','), array_to_string(\"mixed\", ',') FROM \"{schema}\".\"products\" ORDER BY \"id\""
+            "SELECT array_to_string(\"pure\", ','), array_to_string(\"mixed\", ',') FROM \"{schema}\".\"products\" WHERE \"id\" <= 3 ORDER BY \"id\""
         );
         let rows: Vec<(String, String)> = client.query(&sql, &[]).await.unwrap().iter().map(|r| (r.get(0), r.get(1))).collect();
         let expected = [("a", "s"), ("b,c", "t,u"), ("d", "v")].map(|(p, m)| (p.to_string(), m.to_string()));
@@ -120,12 +120,16 @@ async fn test_pg_array_pivot_split_keeps_arrays_e2e() {
     .await;
 }
 
-/// Issues #85, #163 — wide object with suffix keys and an array: the suffix grid goes to the
+/// Issues #85, #163 — wide object with suffix keys and an array: the suffix grid of the TOML (#200, T8) goes to the
 /// `_pivot` companion, the pg-array field stays on the identity table.
 #[tokio::test]
 async fn test_pg_array_structured_pivot_keeps_arrays_e2e() {
     integration::with_pg_container(|client, schema, url| async move {
-        let result = run_pipeline(base_config(url, schema.clone(), "tc_pg_array_structured_pivot.jsonl", 3)).await;
+        let config = PipelineConfig {
+            schema_config: Some(integration::fixture("tc_pg_array_structured_pivot.toml")),
+            ..base_config(url, schema.clone(), "tc_pg_array_structured_pivot.jsonl", 3)
+        };
+        let result = run_pipeline(config).await;
         assert!(result.is_ok(), "pg_array_structured_pivot pipeline failed: {result:?}");
 
         let sql = format!(

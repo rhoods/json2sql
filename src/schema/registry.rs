@@ -13,9 +13,11 @@
 //! - struct `SchemaRegistry` — façade combinant `SchemaObserver` et `SchemaFinalizer`.
 //! - fn `SchemaRegistry::new` — construit observer + naming à partir de `RegistryConfig`.
 //! - fn `SchemaRegistry::observe_root` — délègue à `SchemaObserver::observe_root`.
-//! - fn `SchemaRegistry::finalize` — finalise sans le guard 1600-colonnes.
-//! - fn `SchemaRegistry::finalize_with_pg_guard` — finalise avec le guard (retourne les overflow warnings).
-//! - fn `SchemaRegistry::finalize_inner` — construit le `SchemaFinalizer` et exécute `run()`.
+//! - fn `SchemaRegistry::finalize` — `finalize_before_split`, puis le split d'après les stats, sans le guard 1600-colonnes.
+//! - fn `SchemaRegistry::finalize_before_split` — le schéma avant le split des tables larges (#200).
+//! - fn `SchemaRegistry::split_view` — une copie coupée du schéma, celle qu'échantillonne la Pass 1 (#200).
+//! - fn `SchemaRegistry::finalizer` — le `SchemaFinalizer` aux seuils du registre.
+//! - fn `split_wide_tables` — split des tables larges et guard 1600-colonnes, après les surcharges et les groupes (#200).
 //! - fn `SchemaRegistry::collect_stats` — délègue à `inspector::collect_stats`.
 //! - fn `SchemaRegistry::truncated_names` — accesseur des noms tronqués.
 //! - fn `SchemaRegistry::column_collisions` — accesseur des collisions de colonnes.
@@ -42,7 +44,6 @@ pub struct RegistryConfig {
     pub sibling_threshold: usize,
     pub sibling_jaccard: f64,
     pub stable_threshold: f64,
-    pub rare_threshold: f64,
     pub disabled_strategies: HashSet<StrategyName>,
 }
 
@@ -54,7 +55,6 @@ impl Default for RegistryConfig {
             sibling_threshold: 3,
             sibling_jaccard: 0.5,
             stable_threshold: 0.10,
-            rare_threshold: 0.001,
             disabled_strategies: HashSet::new(),
         }
     }
@@ -69,9 +69,28 @@ pub struct SchemaRegistry {
     sibling_threshold: usize,
     sibling_jaccard: f64,
     stable_threshold: f64,
-    rare_threshold: f64,
     disabled_strategies: HashSet<StrategyName>,
     column_collisions: Vec<ColumnCollision>,
+}
+
+/// Split the wide tables of `schemas` and apply the 1600-column guard, at the thresholds of `config` (#200). The
+/// keys of each table are read in `stats`, as Pass 1 saw them, so a snapshot is enough. Runs after the TOML and
+/// the column groups, which then see every key: a table they already changed (a strategy override, a grid) is not
+/// split again, nor is a table already split, so a second call changes nothing. Returns the overflow warnings.
+pub fn split_wide_tables(
+    schemas: &mut Vec<crate::schema::table_schema::TableSchema>,
+    stats: &[ColumnStats],
+    config: &RegistryConfig,
+) -> Vec<OverflowWarning> {
+    SchemaFinalizer::new(
+        config.wide_column_threshold,
+        config.sibling_threshold,
+        config.sibling_jaccard,
+        config.stable_threshold,
+        config.disabled_strategies.clone(),
+        true,
+    )
+    .split(schemas, stats)
 }
 
 impl SchemaRegistry {
@@ -84,7 +103,6 @@ impl SchemaRegistry {
             sibling_threshold: config.sibling_threshold,
             sibling_jaccard: config.sibling_jaccard,
             stable_threshold: config.stable_threshold,
-            rare_threshold: config.rare_threshold,
             disabled_strategies: config.disabled_strategies,
             column_collisions: Vec::new(),
         }
@@ -96,43 +114,45 @@ impl SchemaRegistry {
 
     /// Convert all accumulated observations into finalized `TableSchema` objects,
     /// sorted topologically (parents before children).
-    /// The PG column-limit guard is NOT applied — use `finalize_with_pg_guard` for Pass 1 runs.
+    /// The PG column-limit guard is NOT applied — Pass 1 runs use `split_wide_tables`, which applies it.
     pub fn finalize(&mut self) -> Vec<crate::schema::table_schema::TableSchema> {
-        let (schemas, _overflow) = self.finalize_inner(false);
+        let mut schemas = self.finalize_before_split();
+        let stats = self.collect_stats();
+        self.finalizer(false).split(&mut schemas, &stats);
         schemas
     }
 
-    /// Like `finalize`, but also applies the PG 1600-column guard and returns overflow warnings.
-    /// Used by `runner::build_pass1_result` so the guard runs inside the finalizer, not outside.
-    pub fn finalize_with_pg_guard(
-        &mut self,
-    ) -> (
-        Vec<crate::schema::table_schema::TableSchema>,
-        Vec<OverflowWarning>,
-    ) {
-        self.finalize_inner(true)
+    /// The schema before the split of the wide tables (#200): `split_wide_tables` does it later, once the
+    /// overrides and the column groups have seen every key.
+    pub fn finalize_before_split(&mut self) -> Vec<crate::schema::table_schema::TableSchema> {
+        let (schemas, collisions) = self
+            .finalizer(false)
+            .run(&self.observer.tables, &mut self.naming);
+        self.column_collisions = collisions;
+        schemas
     }
 
-    fn finalize_inner(
-        &mut self,
-        apply_pg_guard: bool,
-    ) -> (
-        Vec<crate::schema::table_schema::TableSchema>,
-        Vec<OverflowWarning>,
-    ) {
-        let finalizer = SchemaFinalizer::new(
+    /// `schemas` split at the registry's thresholds, without the guard: the tables whose rows Pass 1 samples for
+    /// the automatic column groups, which come after the split (#200).
+    pub fn split_view(
+        &self,
+        schemas: &[crate::schema::table_schema::TableSchema],
+        stats: &[ColumnStats],
+    ) -> Vec<crate::schema::table_schema::TableSchema> {
+        let mut split = schemas.to_vec();
+        self.finalizer(false).split(&mut split, stats);
+        split
+    }
+
+    fn finalizer(&self, apply_pg_guard: bool) -> SchemaFinalizer {
+        SchemaFinalizer::new(
             self.wide_column_threshold,
             self.sibling_threshold,
             self.sibling_jaccard,
             self.stable_threshold,
-            self.rare_threshold,
             self.disabled_strategies.clone(),
             apply_pg_guard,
-        );
-        let (schemas, collisions, overflow) =
-            finalizer.run(&self.observer.tables, &mut self.naming);
-        self.column_collisions = collisions;
-        (schemas, overflow)
+        )
     }
 
     /// Collect type distribution statistics for every data column (excluding j2s_ generated columns).
@@ -172,9 +192,7 @@ mod tests {
     use crate::schema::finalizer::*;
     use crate::schema::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
     use crate::schema::type_tracker::PgType;
-    use crate::schema::wide_strategies::{
-        apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys,
-    };
+    use crate::schema::wide_strategies::apply_flatten;
     use serde_json::json;
 
     fn make_root(value: &Value) -> &serde_json::Map<String, Value> {
@@ -192,6 +210,31 @@ mod tests {
         assert_eq!(s.name, "users");
         assert!(s.find_by_original("name").is_some());
         assert!(s.find_by_original("age").is_some());
+    }
+
+    /// A schema already split (a snapshot the UI saved) is split again unchanged (#200).
+    #[test]
+    fn splitting_an_already_split_schema_changes_nothing() {
+        let config = RegistryConfig {
+            wide_column_threshold: 5,
+            ..RegistryConfig::default()
+        };
+        let mut reg = SchemaRegistry::new(config.clone());
+        for i in 0..40 {
+            let obj =
+                json!({"id": i, "attrs": {format!("a{}", i % 20): i, format!("b{}", i % 20): "x"}});
+            reg.observe_root("items", make_root(&obj));
+        }
+        let mut schemas = reg.finalize_before_split();
+        let stats = reg.collect_stats();
+        split_wide_tables(&mut schemas, &stats, &config);
+        assert!(
+            schemas.iter().any(|s| s.name == "items_attrs_wide"),
+            "the table is split"
+        );
+        let once = serde_json::to_string(&schemas).unwrap();
+        split_wide_tables(&mut schemas, &stats, &config);
+        assert_eq!(serde_json::to_string(&schemas).unwrap(), once);
     }
 
     #[test]
@@ -298,8 +341,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_object_jsonb_heterogeneous() {
-        // Mixed types (string + numeric) → should get InferredStrategy::Jsonb
+    fn test_wide_object_heterogeneous_without_rare_key_stays_columns() {
+        // Mixed types (string + numeric) → split by frequency (#200); on one row every key is frequent:
+        // nothing would go to the companion, so the table stays Columns, with no empty `_wide`.
         let mut reg = SchemaRegistry::new(RegistryConfig {
             wide_column_threshold: 2,
             ..Default::default()
@@ -318,10 +362,9 @@ mod tests {
         let meta = schemas.iter().find(|s| s.name == "item_meta");
         assert!(meta.is_some(), "meta table should exist");
         let m = meta.unwrap();
-        assert_eq!(m.inferred_strategy, InferredStrategy::Jsonb);
-        // Should have j2s_id, j2s_parent_id, data
-        assert!(m.find_by_original("data").is_some());
-        assert_eq!(m.data_columns().count(), 1);
+        assert_eq!(m.inferred_strategy, InferredStrategy::Columns);
+        assert_eq!(m.data_columns().count(), 3);
+        assert!(!schemas.iter().any(|s| s.name == "item_meta_wide"));
     }
 
     #[test]
@@ -668,7 +711,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // apply_normalize_dynamic_keys / apply_flatten / apply_jsonb_flatten
+    // apply_flatten
     // -------------------------------------------------------------------------
 
     fn make_parent_child(parent_name: &str, child_name: &str) -> Vec<TableSchema> {
@@ -710,32 +753,6 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_normalize_table_not_found_returns_err() {
-        let mut schemas = make_parent_child("users", "en");
-        let result = apply_normalize_dynamic_keys(&mut schemas, "nonexistent", "lang".to_string());
-        assert!(result.is_err(), "should return Err when table not found");
-    }
-
-    #[test]
-    fn test_apply_normalize_no_children_returns_err() {
-        let mut schemas = make_parent_child("users", "en");
-        // Remove the child — users has no Object children
-        schemas.retain(|s| s.name != "en");
-        let result = apply_normalize_dynamic_keys(&mut schemas, "users", "lang".to_string());
-        assert!(
-            result.is_err(),
-            "should return Err when no Object children found"
-        );
-    }
-
-    #[test]
-    fn test_apply_normalize_success() {
-        let mut schemas = make_parent_child("users", "en");
-        let result = apply_normalize_dynamic_keys(&mut schemas, "users", "lang".to_string());
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn test_apply_flatten_table_not_found_returns_err() {
         let mut schemas = make_parent_child("users", "addr");
         let result = apply_flatten(&mut schemas, "nonexistent", "", 1);
@@ -764,37 +781,6 @@ mod tests {
         assert!(
             !schemas.iter().any(|s| s.name == "addr"),
             "child should be removed after flatten"
-        );
-    }
-
-    #[test]
-    fn test_apply_jsonb_flatten_table_not_found_returns_err() {
-        let mut schemas = make_parent_child("users", "meta");
-        let result = apply_jsonb_flatten(&mut schemas, "nonexistent");
-        assert!(
-            result.is_err(),
-            "should return Err when child table not found"
-        );
-    }
-
-    #[test]
-    fn test_apply_jsonb_flatten_root_table_returns_err() {
-        let mut schemas = make_parent_child("users", "meta");
-        let result = apply_jsonb_flatten(&mut schemas, "users");
-        assert!(
-            result.is_err(),
-            "should return Err when inlining a root table"
-        );
-    }
-
-    #[test]
-    fn test_apply_jsonb_flatten_success() {
-        let mut schemas = make_parent_child("users", "meta");
-        let result = apply_jsonb_flatten(&mut schemas, "meta");
-        assert!(result.is_ok());
-        assert!(
-            !schemas.iter().any(|s| s.name == "meta"),
-            "child should be removed after jsonb flatten"
         );
     }
 
@@ -941,17 +927,11 @@ mod tests {
         use indexmap::IndexMap;
         use std::collections::HashSet;
 
-        let finalizer = SchemaFinalizer::new(
-            256,
-            3,
-            0.5,
-            0.10,
-            0.001,
-            HashSet::<StrategyName>::new(),
-            true,
-        );
+        let finalizer =
+            SchemaFinalizer::new(256, 3, 0.5, 0.10, HashSet::<StrategyName>::new(), true);
         let mut naming = NamingRegistry::default();
-        let (schemas, _collisions, warnings) = finalizer.run(&IndexMap::new(), &mut naming);
+        let (mut schemas, _collisions) = finalizer.run(&IndexMap::new(), &mut naming);
+        let warnings = finalizer.split(&mut schemas, &[]);
         // Empty input: no schemas, no warnings.
         assert!(schemas.is_empty());
         assert!(warnings.is_empty());
@@ -966,17 +946,11 @@ mod tests {
 
         // Guard disabled: run() must not produce OverflowWarnings even for wide tables.
         // (The actual wide-table conversion is tested via apply_column_limit_guard directly.)
-        let finalizer = SchemaFinalizer::new(
-            256,
-            3,
-            0.5,
-            0.10,
-            0.001,
-            HashSet::<StrategyName>::new(),
-            false,
-        );
+        let finalizer =
+            SchemaFinalizer::new(256, 3, 0.5, 0.10, HashSet::<StrategyName>::new(), false);
         let mut naming = NamingRegistry::default();
-        let (_schemas, _collisions, warnings) = finalizer.run(&IndexMap::new(), &mut naming);
+        let (mut schemas, _collisions) = finalizer.run(&IndexMap::new(), &mut naming);
+        let warnings = finalizer.split(&mut schemas, &[]);
         assert!(warnings.is_empty());
     }
 
@@ -992,7 +966,6 @@ mod tests {
         let mut parent = make_wide_schema("products", None, 1601);
         parent.inferred_strategy = InferredStrategy::AutoSplit {
             stable_threshold: 0.5,
-            rare_threshold: 0.01,
             medium_keys: std::collections::HashSet::new(),
             wide_table_name: "products_wide".to_string(),
         };
@@ -1548,55 +1521,6 @@ mod tests {
     }
 
     #[test]
-    fn test_disable_pivot_gives_jsonb() {
-        let obj = json!({ "nutrients": { "vit_c": 10.5, "iron": 2.3, "calcium": 50.0 } });
-
-        let mut reg_normal = SchemaRegistry::new(RegistryConfig {
-            wide_column_threshold: 2,
-            ..Default::default()
-        });
-        reg_normal.observe_root("item", make_root(&obj));
-        let schemas_normal = reg_normal.finalize();
-        // Pivot enabled → identité/compagnon split (issue #45) : identité en AutoSplit,
-        // compagnon "item_nutrients_pivot" en Pivot.
-        let nutrients_normal = schemas_normal
-            .iter()
-            .find(|s| s.name == "item_nutrients")
-            .unwrap();
-        assert!(
-            matches!(
-                &nutrients_normal.inferred_strategy,
-                InferredStrategy::AutoSplit { .. }
-            ),
-            "pivot enabled → identity split into AutoSplit expected"
-        );
-        assert!(
-            schemas_normal
-                .iter()
-                .any(|s| s.name == "item_nutrients_pivot"
-                    && s.inferred_strategy == InferredStrategy::Pivot),
-            "pivot enabled → companion item_nutrients_pivot expected"
-        );
-
-        let mut reg_disabled = SchemaRegistry::new(RegistryConfig {
-            wide_column_threshold: 2,
-            disabled_strategies: HashSet::from([StrategyName::Pivot]),
-            ..Default::default()
-        });
-        reg_disabled.observe_root("item", make_root(&obj));
-        let schemas_disabled = reg_disabled.finalize();
-        let nutrients_disabled = schemas_disabled
-            .iter()
-            .find(|s| s.name == "item_nutrients")
-            .unwrap();
-        assert_eq!(
-            nutrients_disabled.inferred_strategy,
-            InferredStrategy::Jsonb,
-            "pivot disabled → Jsonb for homogeneous wide table"
-        );
-    }
-
-    #[test]
     fn no_duplicate_table_names_after_cascade() {
         // Regression test for the "multiple primary keys" bug (42P16).
         // Structure mimics OpenFoodFacts images.cluster_X.sizes.{0,1,num}:
@@ -1655,8 +1579,9 @@ mod tests {
     }
 
     #[test]
-    fn test_disable_structured_pivot_falls_through_to_pivot_or_jsonb() {
-        // nutrients has 9 cols with suffix patterns _100g / _serving over 3 bases → StructuredPivot normally
+    fn a_suffix_grid_is_never_applied_automatically() {
+        // #200, T8: nutrients has 9 cols with suffix patterns _100g / _serving over 3 bases. The grid is only
+        // proposed (`--suggest`); the split decides alone: one type of value → key/value companion.
         let obj = json!({
             "nutrients": {
                 "calories": 100, "calories_100g": 200, "calories_serving": 150,
@@ -1664,44 +1589,21 @@ mod tests {
                 "salt": 1, "salt_100g": 2, "salt_serving": 3
             }
         });
-
-        // Default: StructuredPivot expected
-        let mut reg_normal = SchemaRegistry::new(RegistryConfig {
+        let mut reg = SchemaRegistry::new(RegistryConfig {
             wide_column_threshold: 3,
             sibling_threshold: usize::MAX,
             ..Default::default()
         });
-        reg_normal.observe_root("products", make_root(&obj));
-        let schemas_normal = reg_normal.finalize();
-        // The grid goes to the `_pivot` companion of products_nutrients (#163).
-        let nutrients_normal = schemas_normal
-            .iter()
-            .find(|s| s.name == "products_nutrients_pivot")
-            .unwrap();
+        reg.observe_root("products", make_root(&obj));
+        let schemas = reg.finalize();
         assert!(
-            matches!(
-                nutrients_normal.inferred_strategy,
-                InferredStrategy::StructuredPivot(_)
-            ),
-            "structured_pivot enabled → StructuredPivot expected, got: {:?}",
-            nutrients_normal.inferred_strategy
-        );
-
-        // With structured_pivot disabled: fall through to Pivot or Jsonb
-        let mut reg_disabled = SchemaRegistry::new(RegistryConfig {
-            wide_column_threshold: 3,
-            sibling_threshold: usize::MAX,
-            disabled_strategies: HashSet::from([StrategyName::StructuredPivot]),
-            ..Default::default()
-        });
-        reg_disabled.observe_root("products", make_root(&obj));
-        let schemas_disabled = reg_disabled.finalize();
-        assert!(
-            !schemas_disabled
+            !schemas
                 .iter()
                 .any(|s| matches!(s.inferred_strategy, InferredStrategy::StructuredPivot(_))),
-            "structured_pivot disabled → no StructuredPivot table"
+            "no StructuredPivot table without the TOML"
         );
+        assert!(schemas.iter().any(|s| s.name == "products_nutrients_pivot"
+            && s.inferred_strategy == InferredStrategy::Pivot));
     }
 
     // ── issue #48 : tableaux de scalaires + occurrences mixtes scalaire/array ──
@@ -1777,16 +1679,49 @@ mod tests {
         ] {
             reg.observe_root("root", make_root(&v));
         }
+        // 9 more rows, 4 of them with a rare key (1 row out of 12): the root has keys for its `_wide` companion.
+        for i in 4..13 {
+            let mut v = json!({"id": i, "n1": i, "n2": i, "child": {"x": i}, "pure": ["e"]});
+            if i < 8 {
+                v[format!("r{i}")] = json!(i);
+            }
+            reg.observe_root("root", make_root(&v));
+        }
         let schemas = reg.finalize();
         let root = schemas.iter().find(|s| s.name == "root").unwrap();
         let InferredStrategy::AutoSplit { medium_keys, .. } = &root.inferred_strategy else {
             panic!("root must be AutoSplit, got {:?}", root.inferred_strategy);
         };
+        assert!(medium_keys.contains("r4"), "{medium_keys:?}");
         assert_single_array_col(root, "pure");
         assert_single_array_col(root, "mixed");
         assert!(
             !medium_keys.contains("pure") && !medium_keys.contains("mixed"),
             "array fields leaked into medium_keys: {medium_keys:?}"
+        );
+    }
+
+    #[test]
+    fn autosplit_keeps_a_key_seen_in_one_row_out_of_two_thousand() {
+        // #200 T2: no key is dropped any more, however rare: it goes to the companion with the medium ones.
+        // 20 medium keys at 5 % each keep the root unstable, so that it is split (AutoSplit).
+        let mut reg = pg_array_reg(2);
+        for i in 0..2000 {
+            let mut v = json!({"id": i, "child": {"x": i}});
+            v[format!("m{}", i % 20)] = json!(i);
+            if i == 0 {
+                v["rare"] = json!("x");
+            }
+            reg.observe_root("root", make_root(&v));
+        }
+        let schemas = reg.finalize();
+        let root = schemas.iter().find(|s| s.name == "root").unwrap();
+        let InferredStrategy::AutoSplit { medium_keys, .. } = &root.inferred_strategy else {
+            panic!("root must be AutoSplit, got {:?}", root.inferred_strategy);
+        };
+        assert!(
+            medium_keys.contains("rare"),
+            "rare key dropped: {medium_keys:?}"
         );
     }
 
@@ -1813,6 +1748,27 @@ mod tests {
         );
     }
 
+    /// `reg` finalized as the CLI does with `[table] suffix_columns = suffixes` in its TOML: the TOML before the split
+    /// (#200, T8: the grid is never applied automatically). The wide-table threshold is 3, as `pg_array_reg(3)`.
+    fn finalize_with_grid(
+        reg: &mut SchemaRegistry,
+        table: &str,
+        suffixes: &[&str],
+    ) -> Vec<crate::schema::table_schema::TableSchema> {
+        let mut schemas = reg.finalize_before_split();
+        let stats = reg.collect_stats();
+        let list: Vec<String> = suffixes.iter().map(|s| format!("\"{s}\"")).collect();
+        let toml = format!("[{table}]\nsuffix_columns = [{}]\n", list.join(", "));
+        let config: crate::schema::config::SchemaConfig = toml::from_str(&toml).unwrap();
+        crate::schema::config::apply_overrides_complete(&mut schemas, &config).unwrap();
+        let config = RegistryConfig {
+            wide_column_threshold: 3,
+            ..Default::default()
+        };
+        split_wide_tables(&mut schemas, &stats, &config);
+        schemas
+    }
+
     /// Data column names of `schema`, in order.
     fn data_col_names(schema: &crate::schema::table_schema::TableSchema) -> Vec<&str> {
         schema.data_columns().map(|c| c.name.as_str()).collect()
@@ -1833,7 +1789,7 @@ mod tests {
         ] {
             reg.observe_root("root", make_root(&v));
         }
-        let schemas = reg.finalize();
+        let schemas = finalize_with_grid(&mut reg, "root_nut", &["_100g", "_serving"]);
         let find = |name: &str| schemas.iter().find(|s| s.name == name);
 
         let nut = find("root_nut").expect("identity table keeps the original name");
@@ -1890,7 +1846,7 @@ mod tests {
         ] {
             reg.observe_root("item", make_root(&v));
         }
-        let schemas = reg.finalize();
+        let schemas = finalize_with_grid(&mut reg, "item_nutrients", &["_100g", "_serving"]);
         let nutrients = schemas.iter().find(|s| s.name == "item_nutrients").unwrap();
         assert_single_array_col(nutrients, "tags");
         let pivot = schemas
@@ -1906,7 +1862,7 @@ mod tests {
         let v = json!({"nut": {"a_100g": 1, "a_unit": "g", "b_100g": 2, "b_unit": "g",
                                "c_100g": 3, "c_unit": "g", "comp": {"k": 1}}});
         reg.observe_root("root", make_root(&v));
-        let mut schemas = reg.finalize();
+        let mut schemas = finalize_with_grid(&mut reg, "root_nut", &["_100g", "_unit"]);
         assert!(
             schemas.iter().any(|s| s.name == "root_nut_pivot"),
             "companion"
@@ -1922,7 +1878,7 @@ mod tests {
 
     // ── issue #84 : la décision « table large » ne juge que les colonnes scalaires ──
     // Thresholds 10 (IHM) and 15 (CLI), 40 rows (below 10 rows the "high stable ratio → Columns"
-    // branch is skipped). Column names have no `_`, so no StructuredPivot suffix is ever detected.
+    // branch is skipped). No suffix grid is ever applied without the TOML (#200).
 
     fn observe_rows(
         reg: &mut SchemaRegistry,
@@ -2027,7 +1983,8 @@ mod tests {
     fn pg_array_mixed_field_scalar_side_does_not_count_as_stable() {
         // 11 scalars (5 stable, 6 rare) + 2 mixed fields that are scalar on 38 rows out of 40.
         // Counting the mixed fields' scalar side gave 7/13 = 54 % stable → kept as Columns;
-        // judged on the 11 scalars alone it is 5/11 = 45 % → split, the arrays staying on the identity table.
+        // judged on the 11 scalars alone it is 5/11 = 45 % → split by frequency (the root, #200): the 6 rare
+        // scalars go to the companion, the 5 stable ones and the arrays stay.
         let mut reg = pg_array_reg(10);
         observe_rows(&mut reg, "root", 40, |i| {
             let mut obj = serde_json::Map::new();
@@ -2050,15 +2007,18 @@ mod tests {
         let schemas = reg.finalize();
         let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(
-            names.contains(&"root_pivot"),
-            "the 11 scalars must go to a companion, got {names:?}"
+            names.contains(&"root_wide"),
+            "the 6 rare scalars must go to a companion, got {names:?}"
         );
         let root = schemas.iter().find(|s| s.name == "root").unwrap();
-        assert_eq!(root.data_columns().count(), 2);
-        assert!(
-            root.data_columns()
-                .all(|c| matches!(c.pg_type, PgType::Array(_))),
-            "identity keeps only the arrays"
+        let arrays = root
+            .data_columns()
+            .filter(|c| matches!(c.pg_type, PgType::Array(_)))
+            .count();
+        assert_eq!(
+            (root.data_columns().count(), arrays),
+            (7, 2),
+            "5 stable scalars + the 2 arrays"
         );
     }
 

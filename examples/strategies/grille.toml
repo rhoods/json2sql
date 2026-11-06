@@ -1,0 +1,3 @@
+# grille.toml : la grille de suffixes de products_nutrients (voir docs/functional/strategies.md)
+[products_nutrients]
+suffix_columns = ["_100g", "_serving"]

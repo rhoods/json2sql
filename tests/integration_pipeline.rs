@@ -34,7 +34,6 @@ fn base_config(root: &str, input: &str) -> PipelineConfig {
         sibling_threshold: 2,
         sibling_jaccard: 0.5,
         stable_threshold: 0.10,
-        rare_threshold: 0.001,
         num_workers: 1,
         disabled_strategies: HashSet::new(),
         parallel: 1,

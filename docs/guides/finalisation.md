@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Finalisation du schéma, des observations de la Pass 1 aux TableSchema
-verified_at: db4ec51
+verified_at: 28a6e29
 files:
   - src/schema/finalizer/
   - src/schema/cascading/
@@ -16,10 +16,15 @@ files:
   - tests/tc_sibling_collapse.rs
   - tests/tc_wide_table.rs
 symbols:
-  - SchemaRegistry::finalize_with_pg_guard
+  - SchemaRegistry::finalize_before_split
+  - split_wide_tables
   - SchemaFinalizer
   - SchemaFinalizer::new
   - SchemaFinalizer::run
+  - SchemaFinalizer::split
+  - ColumnStats
+  - reindex_stats
+  - key_column_name
   - TableEntry
   - NamingRegistry
   - NamingRegistry::table_name_from_dot_key
@@ -68,7 +73,7 @@ symbols:
   - unique_cluster_suffix
   - pick_unique_suffix
   - rename_shared_pivots
-  - unique_pivot_name
+  - unique_companion_name
   - classify_key_shape
   - build_union_columns
   - apply_wide_table_strategies
@@ -93,7 +98,7 @@ symbols:
 
 Carte de la finalisation, pour savoir où intervenir et ce qui casse sans erreur de compilation. Les heuristiques
 (tables larges, suffixes, tables sœurs, noms) sont décrites dans [schema-inference.md](../technical/schema-inference.md) ;
-ce qui précède (lecture, observation, `SchemaRegistry::finalize_with_pg_guard`) dans la carte [pass1.md](pass1.md) ;
+ce qui précède (lecture, observation, `SchemaRegistry::finalize_before_split`) dans la carte [pass1.md](pass1.md) ;
 ajouter une stratégie a sa propre fiche : [ajouter-une-strategie.md](ajouter-une-strategie.md).
 
 ## Rôle
@@ -101,7 +106,12 @@ ajouter une stratégie a sa propre fiche : [ajouter-une-strategie.md](ajouter-un
 La finalisation transforme les observations de la Pass 1 (un `TableEntry` par chemin JSON) en une liste de
 `TableSchema` triés parents avant enfants : noms PostgreSQL, colonnes typées, colonnes générées (`j2s_…`), stratégie
 de chaque table. Elle rend aussi les collisions de noms de colonnes (`ColumnCollision`) et les tables converties par
-la garde des 1 600 colonnes (`OverflowWarning`). Tout se passe dans `SchemaFinalizer::run`. `TableSchema`, défini
+la garde des 1 600 colonnes (`OverflowWarning`). Elle se fait en deux temps (#200) : `SchemaFinalizer::run` construit
+les tables et fusionne les tables sœurs (phases 1 et 2) ; `SchemaFinalizer::split` coupe les tables larges puis
+applique la garde (phases 3 et 4). Entre les deux, la CLI sauve le snapshot, applique le TOML et ses groupes de
+colonnes : ils voient ainsi toutes les clés d'une table large (les groupes de `--group-columns` viennent après le
+split). `split_wide_tables` lance le second temps ; il lit les
+clés de chaque table dans les statistiques de la Pass 1 (`ColumnStats`), que le snapshot garde. `TableSchema`, défini
 dans `table_schema.rs`, est le modèle que lisent ensuite les overrides, le DDL, la Pass 2 et l'IHM.
 
 ## 1. Où intervenir
@@ -110,7 +120,8 @@ dans `table_schema.rs`, est le modèle que lisent ensuite les overrides, le DDL,
 |---|---|---|
 | Nouvelle stratégie | la fiche [ajouter-une-strategie.md](ajouter-une-strategie.md) | en partie |
 | Nouveau seuil ou réglage | `SchemaFinalizer::new` (sept arguments par position, voir #112), puis `FinalizerConfig` et `build_finalizer_config` pour la phase 3 | oui pour l'ajout, **non** pour l'ordre des arguments de même type |
-| Choix de stratégie d'une table large | `apply_wide_strategy`, `apply_non_autosplit_strategy`, `suggest_wide_strategy`, `detect_suffix_schema` | non |
+| Choix de stratégie d'une table large | `apply_wide_strategy`, `apply_non_autosplit_strategy`, `suggest_wide_strategy` | non |
+| Grille de suffixes proposée | `detect_suffix_schema` (appelée par `--suggest`) ; appliquée par le TOML `suffix_columns` | non |
 | Fusion de tables sœurs | `finalize_cascading` et les vagues de `cascading/detection/` | non |
 | Forme des clés des tables sœurs | `KeyShape`, `classify_key_shape`, et le nom de colonne clé (§ 4) | **non** |
 | Nom d'une table ou d'une colonne | `NamingRegistry`, `ColumnNameRegistry` (`naming.rs`) | non |
@@ -120,14 +131,16 @@ dans `table_schema.rs`, est le modèle que lisent ensuite les overrides, le DDL,
 | Nouveau champ de `TableSchema` | `TableSchema`, `TableSchema::new` (§ 4) | oui pour `TableSchema::new`, non pour les snapshots |
 | Fusion manuelle depuis l'IHM | `build_sibling_collapse_from_siblings` (`cascading/merge.rs`) | non |
 
-Les formes de clé des tables sœurs, et la colonne clé qu'elles donnent :
+La colonne clé d'une table fusionnée s'appelle toujours `"key"`, ou `"j2s_key"` quand un champ des objets fusionnés
+s'appelle déjà `"key"` (`key_column_name`, #200). Les formes de clé des tables sœurs ne servent plus qu'aux journaux et
+à la coupure numérique / texte (`SiblingCollapseMulti`) :
 
-| `KeyShape` | Clés | Colonne clé |
-|---|---|---|
-| `Numeric` | entiers (`0`, `1`, `42`) | `key_id` |
-| `IsoLang` | codes de 2 ou 3 lettres (`fr`, `deu`) | `lang_code` |
-| `Slug` | autres chaînes (`en_glass`) | `"key"` |
-| `Mixed` | entiers et codes mêlés | `"key"` |
+| `KeyShape` | Clés |
+|---|---|
+| `Numeric` | entiers (`0`, `1`, `42`) |
+| `IsoLang` | codes de 2 ou 3 lettres (`fr`, `deu`) |
+| `Slug` | autres chaînes (`en_glass`) |
+| `Mixed` | entiers et codes mêlés |
 
 Les genres de table enfant (champ `child_kind`, vide pour la racine) :
 
@@ -139,7 +152,7 @@ Les genres de table enfant (champ `child_kind`, vide pour la racine) :
 ## 2. Flux
 
 ```text
-SchemaRegistry::finalize_with_pg_guard (voir pass1.md)
+SchemaRegistry::finalize_before_split (voir pass1.md)
 └─ SchemaFinalizer::run(tables: TableEntry par chemin, NamingRegistry)
    ├─ pré-enregistre le nom de chaque chemin (NamingRegistry::table_name_from_dot_key)
    ├─ phase 1  build_base_schemas (parallèle) : une TableSchema par TableEntry
@@ -147,23 +160,36 @@ SchemaRegistry::finalize_with_pg_guard (voir pass1.md)
    ├─ phase 2  finalize_cascading (sauf --disable-strategy sibling)
    │           run_sibling_wave (vague 0) → drain_cascade_waves (vagues 1+) → vague 0 bis
    │           → run_keyed_pivot_children_wave ; crée des tables synthétiques et des child_routes
-   ├─ doublons de nom retirés, tri par profondeur puis chemin JSON
-   ├─ phase 3  apply_wide_table_strategies : par TableEntry, si la table est encore Columns
+   └─ doublons de nom retirés, tri par profondeur puis chemin JSON
+→ (Vec<TableSchema>, Vec<ColumnCollision>)
+
+   (CLI : snapshot, puis TOML et ses groupes de colonnes, voir pipeline.rs ; --group-columns après le split)
+
+split_wide_tables(schemas, stats: ColumnStats de la Pass 1, RegistryConfig)
+└─ SchemaFinalizer::split
+   ├─ phase 3  apply_wide_table_strategies : par table encore Columns, sans stratégie du TOML ni de l'IHM,
+   │           et qui a des statistiques à son nom
    │           apply_wide_strategy → AutoSplit (racine) ou apply_non_autosplit_strategy
-   │           (apply_structured_pivot_split, apply_pivot_split, Jsonb) ; compagnons _wide / _pivot
-   │           ajoutés à la fin
+   │           (apply_pivot_split si un seul type, sinon AutoSplit ; jamais de grille de suffixes,
+   │           seulement proposée par --suggest, #200) ;
+   │           compagnons _wide / _pivot ajoutés à la fin, dans l'ordre des tables
    └─ phase 4  apply_column_limit_guard (si apply_pg_guard), puis exclude_absorbed_children
-→ (Vec<TableSchema>, Vec<ColumnCollision>, Vec<OverflowWarning>)
+→ Vec<OverflowWarning>
 ```
 
-Après la finalisation, les overrides TOML repassent par `exclude_absorbed_children` (`apply_overrides_complete`).
+Les overrides TOML, appliqués entre les deux temps, passent aussi par `exclude_absorbed_children` (`apply_overrides_complete`).
 
 ## 3. Invariants et pièges
 
-- **La phase 3 ne voit que les tables qui ont un `TableEntry`.** `apply_wide_table_strategies` parcourt les chemins
-  observés en Pass 1 et saute toute table qui n'est plus `Columns` (garde de #45 : un chemin peut désigner une table
-  déjà fusionnée). Une table créée par la phase 2 n'a pas de `TableEntry` : elle ne reçoit jamais de stratégie large,
-  quelle que soit sa largeur. Seule la garde des 1 600 colonnes la rattrape.
+- **La phase 3 ne voit que les tables qui ont des statistiques à leur nom.** `apply_wide_table_strategies` lit les
+  clés de chaque table dans les `ColumnStats` de la Pass 1, par clé JSON (`original_name` : deux clés peuvent avoir le
+  même nom de colonne). Elle saute toute table qui n'est plus `Columns` (garde de #45 : les statistiques d'une table
+  fusionnée sont celles des tables d'avant la fusion) et toute table à qui le TOML ou l'IHM donne une stratégie,
+  `columns` compris. Une table créée par la phase 2 n'a pas de statistiques à son nom : elle ne reçoit jamais de
+  stratégie large, quelle que soit sa largeur. Seule la garde des 1 600 colonnes la rattrape. Une table de groupe en a,
+  car `reindex_stats` y déplace celles de ses colonnes : elle est coupée si elle est encore large.
+- **Couper deux fois ne change rien.** Une table déjà coupée n'est plus `Columns`, et ses compagnons n'ont pas de
+  statistiques. Un snapshot que l'IHM a sauvé (déjà coupé) se recharge donc en CLI sans écart.
 - **Une table de même nom qu'une autre est retirée.** Après la phase 1 et après la phase 2, un `retain` ne garde que
   la première table de chaque nom. Deux tables de même chemin sont la même table construite deux fois : la seconde
   disparaît sans message. Deux chemins sous un même nom sont une collision : la cascade retrouve ses tables par leur
@@ -171,7 +197,7 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
   l'annonce par un `WARNING` (et un `debug_assert` en test, #180). Sur OFF, avant #180, `nutriscore.<année>.data`
   écrivait ainsi dans la table du champ racine `nutriscore_data`. Les noms synthétiques se rendent donc uniques à leur
   création : `unique_cluster_suffix` (phase 2, et la passe keyed-pivot), `pick_unique_suffix` (`make_subgroup`),
-  `unique_derived_table_name` (tables fusionnées de `cascade.rs`), `unique_pivot_name` (phase 3). Unique aussi
+  `unique_derived_table_name` (tables fusionnées de `cascade.rs`), `unique_companion_name` (phase 3, compagnons `_pivot` et `_wide`). Unique aussi
   contre les tables créées plus tôt dans la même vague (#136) : deux parents longs qui ne diffèrent que par les
   premiers mots que `derived_table_name` retire tirent le même nom de table pivot. La vague 0 choisit les noms de
   tous ses parents avant d'en créer une seule : `rename_shared_pivots` donne ensuite un hash du nom brut au doublon,
@@ -231,8 +257,8 @@ Après la finalisation, les overrides TOML repassent par `exclude_absorbed_child
 - **Un chemin non pré-enregistré n'est vu qu'en debug.** `NamingRegistry::table_name_lookup_from_dot_key` a un
   `debug_assert` ; en release, il recalcule un nom qui peut différer de celui du registre (sans troncature à 53, sans
   suffixe d'unicité).
-- **Les seuils arrivent par position.** `SchemaFinalizer::new` prend trois `f64` voisins (`sibling_jaccard`,
-  `stable_threshold`, `rare_threshold`) : les intervertir compile (#112).
+- **Les seuils arrivent par position.** `SchemaFinalizer::new` prend deux `f64` voisins (`sibling_jaccard`,
+  `stable_threshold`) : les intervertir compile (#112).
 
 ## 4. Points d'extension
 
@@ -248,7 +274,7 @@ Les endroits prévus sont listés au § 1. Trois changements demandent des étap
 
 **Nouvelle table créée par la finalisation** (une table qui ne vient pas d'un chemin observé).
 
-- [ ] un nom unique contre toutes les tables déjà connues (`unique_cluster_suffix`, `unique_pivot_name`), y compris
+- [ ] un nom unique contre toutes les tables déjà connues (`unique_cluster_suffix`, `unique_companion_name`), y compris
   celles créées plus tôt dans la même vague (§ 3), sinon le dédoublonnage la retire ;
 - [ ] un nom passé par `derived_table_name` (53 octets au plus), et la colonne parente par `ColumnSchema::parent_fk` ;
 - [ ] `parent_table`, `child_kind`, `depth` et `path` remplis : la Pass 2 retrouve la table par son chemin ;
@@ -290,16 +316,17 @@ Vues en écrivant la fiche, pas tranchées. Déjà suivies ailleurs : réglages 
 finaliseur dans `registry.rs` (#113), décisions en `matches!` et effet de bord sur `inferred_strategy` (odeurs 3 et 8
 de la fiche des stratégies).
 
-1. **Colonne clé choisie en trois copies** (#135). `KeyShape` → `key_id` / `lang_code` / `"key"` est écrit trois fois avec un
-   cas par défaut. Une méthode de `KeyShape` sans cas par défaut ferait signaler une forme oubliée.
+1. **Colonne clé choisie en trois copies** (#135). (Une seule fonction, `key_column_name`, depuis #200 : la colonne
+   s'appelle toujours `"key"`.)
 2. **Colonne parente écrite à la main** (#147). #136 a mesuré la phase 2 contre PostgreSQL : aucun nom coupé (les
    noms passent par `derived_table_name`, 53 octets au plus, depuis #180 ; `pk_name` / `fk_name` coupent à 63 avec un
    hash, #179), mais deux tables pivot qui prenaient le même nom, corrigées (§ 3). Reste la colonne parente :
    `make_pivot_preamble` et d'autres constructeurs de la cascade l'écrivent en littéral, sans l'assertion de
    `ColumnSchema::parent_fk`. Sans effet aujourd'hui : un parent fait 53 octets au plus, donc `j2s_…_id` au plus 60.
-3. **La phase 3 parcourt les `TableEntry` pré-fusion** (#137) au lieu des schémas, d'où la garde de #45 et les tables
-   synthétiques jamais élargies. `build_base_schemas` garde aussi un paramètre inutilisé.
+3. **La phase 3 lit des statistiques pré-fusion** (#137). Depuis #200 elle part des schémas et des `ColumnStats`,
+   plus des `TableEntry`, mais les statistiques restent celles des tables d'avant la fusion : d'où la garde de #45 et
+   les tables synthétiques jamais coupées. `build_base_schemas` garde aussi un paramètre inutilisé.
 4. **Docs décalées** (#138). `schema-inference.md` situe la finalisation dans `registry.rs` (`finalize_siblings`, aujourd'hui
-   `finalize_cascading`), parle de stratégie « KeyedPivot » et d'une colonne `j2s_data` qui n'existe pas, et dit que
-   l'exclusion des tables absorbées tourne dans `main.rs`. La doc d'`apply_column_limit_guard` (enfants gardés) et
+   `finalize_cascading`), parle de stratégie « KeyedPivot » et d'une colonne `j2s_data` qui n'existe pas, (l'exclusion des tables absorbées
+   dans `main.rs` est corrigée depuis #200). La doc d'`apply_column_limit_guard` (enfants gardés) et
    celle du champ `inferred_strategy` (jamais modifié) sont fausses (§ 3).

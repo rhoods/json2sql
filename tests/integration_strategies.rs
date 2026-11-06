@@ -5,8 +5,7 @@ use json2sql::schema::registry::RegistryConfig;
 use json2sql::schema::table_schema::{InferredStrategy, SiblingSchema, SuffixColumn, SuffixSchema};
 use json2sql::schema::type_tracker::PgType;
 use json2sql::schema::wide_strategies::{
-    apply_flatten, apply_jsonb_flatten, apply_normalize_dynamic_keys,
-    apply_structured_pivot_columns, apply_wide_strategy_columns,
+    apply_flatten, apply_structured_pivot_columns, apply_wide_strategy_columns,
 };
 use json2sql::{db, pass1, pass2};
 
@@ -584,10 +583,10 @@ async fn test_structured_pivot_strategy() {
 // Colonnes scalaires :
 //   - id, name         → stables (5/5 = 100% ≥ 80%)
 //   - tag_a, tag_b     → medium  (3/5 = 60%, entre 30% et 80%)
-//   - rare_key         → rare    (1/5 = 20% < 30%) → ignoré
-// Après AutoSplit (wide_column_threshold=3, stable=0.80, rare=0.30) :
+//   - rare_key         → rare    (1/5 = 20%) → dans products_wide aussi : aucune clé n'est jetée (#200)
+// Après AutoSplit (wide_column_threshold=3, stable=0.80) :
 //   - products     : j2s_id, id, name seulement (colonnes stables)
-//   - products_wide : EAV (key, value) pour tag_a/tag_b — 6 lignes
+//   - products_wide : EAV (key, value) pour tag_a/tag_b/rare_key — 7 lignes
 //   - products_details : color TEXT — 5 lignes
 // ---------------------------------------------------------------------------
 #[tokio::test]
@@ -595,7 +594,7 @@ async fn test_auto_split_strategy() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("auto_split.jsonl");
         // wide_column_threshold=3 : 5 colonnes scalaires > 3 → wide
-        // stable_threshold=0.80, rare_threshold=0.30
+        // stable_threshold=0.80
         let p1 = pass1::runner::run(
             &path,
             &pass1::runner::Pass1Config {
@@ -603,7 +602,6 @@ async fn test_auto_split_strategy() {
                 registry: RegistryConfig {
                     wide_column_threshold: 3,
                     stable_threshold: 0.80,
-                    rare_threshold: 0.30,
                     ..Default::default()
                 },
                 num_workers: None,
@@ -668,8 +666,8 @@ async fn test_auto_split_strategy() {
 
         assert_eq!(*p2.rows_per_table.get("products").unwrap(), 5);
         assert_eq!(*p2.rows_per_table.get("products_details").unwrap(), 5);
-        // Widget+Gadget+Doohickey × 2 medium keys (tag_a, tag_b) = 6
-        assert_eq!(*p2.rows_per_table.get("products_wide").unwrap(), 6);
+        // Widget+Gadget+Doohickey × 2 medium keys (tag_a, tag_b) + Whatsit × rare_key = 7
+        assert_eq!(*p2.rows_per_table.get("products_wide").unwrap(), 7);
         assert_eq!(common::row_count(&client, &schema, "products").await, 5);
         assert_eq!(
             common::row_count(&client, &schema, "products_details").await,
@@ -677,7 +675,7 @@ async fn test_auto_split_strategy() {
         );
         assert_eq!(
             common::row_count(&client, &schema, "products_wide").await,
-            6
+            7
         );
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
 
@@ -723,11 +721,12 @@ async fn test_auto_split_strategy() {
             "Thingamajig ne doit pas avoir de lignes dans products_wide"
         );
 
-        // rare_key (Whatsit) ne doit pas apparaître dans products_wide
+        // rare_key (Whatsit) est gardée dans products_wide, avec sa valeur
         let rare_key_count: i64 = client
             .query_one(
                 &format!(
-                    "SELECT COUNT(*) FROM \"{schema}\".\"products_wide\" WHERE key = 'rare_key'"
+                    "SELECT COUNT(*) FROM \"{schema}\".\"products_wide\" \
+                     WHERE key = 'rare_key' AND value = 'rare_value'"
                 ),
                 &[],
             )
@@ -735,8 +734,8 @@ async fn test_auto_split_strategy() {
             .unwrap()
             .get(0);
         assert_eq!(
-            rare_key_count, 0,
-            "rare_key ne doit pas être écrit dans products_wide"
+            rare_key_count, 1,
+            "rare_key doit être écrite dans products_wide"
         );
     })
     .await;
@@ -750,12 +749,12 @@ async fn test_auto_split_strategy() {
 //
 // Conditions auto-détection (sibling_threshold=3, jaccard=0.5) :
 //   - products_translations_fr/en/de → 3 siblings de même schéma (Jaccard=1.0)
-//   - products_translations fusionné → (j2s_id, j2s_products_id, lang_code, label, desc)
+//   - products_translations fusionné → (j2s_id, j2s_products_id, key, label, desc)
 //   - tables fr/en/de supprimées du schéma final
 //
 // Assertions :
 //   - 2 schemas (products + products_translations)
-//   - products_translations a SiblingCollapse, lang_code TEXT, label TEXT, desc TEXT
+//   - products_translations a SiblingCollapse, key TEXT, label TEXT, desc TEXT (colonne clé `key` : #200)
 //   - 2 lignes dans products, 6 dans products_translations
 //   - Widget/fr → label="Bonjour", desc="Rouge"
 //   - Gadget/de → desc="Blau"
@@ -798,8 +797,8 @@ async fn test_keyed_pivot_strategy() {
 
         let data_cols: Vec<_> = translations_schema.data_columns().collect();
         assert!(
-            data_cols.iter().any(|c| c.name == "lang_code"),
-            "colonne lang_code absente"
+            data_cols.iter().any(|c| c.name == "key"),
+            "colonne key absente"
         );
         assert!(
             data_cols.iter().any(|c| c.name == "label"),
@@ -858,7 +857,7 @@ async fn test_keyed_pivot_strategy() {
                     "SELECT t.label, t.desc \
                  FROM \"{schema}\".\"products_translations\" t \
                  JOIN \"{schema}\".\"products\" p ON t.j2s_products_id = p.j2s_id \
-                 WHERE p.name = 'Widget' AND t.lang_code = 'fr'",
+                 WHERE p.name = 'Widget' AND t.key = 'fr'",
                 ),
                 &[],
             )
@@ -873,7 +872,7 @@ async fn test_keyed_pivot_strategy() {
                 &format!(
                     "SELECT t.desc FROM \"{schema}\".\"products_translations\" t \
                  JOIN \"{schema}\".\"products\" p ON t.j2s_products_id = p.j2s_id \
-                 WHERE p.name = 'Gadget' AND t.lang_code = 'de'",
+                 WHERE p.name = 'Gadget' AND t.key = 'de'",
                 ),
                 &[],
             )
@@ -967,221 +966,6 @@ async fn test_keyed_pivot_pure_container() {
         assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
     })
     .await;
-}
-
-// ---------------------------------------------------------------------------
-// InferredStrategy::NormalizeDynamicKeys sur une table intermédiaire.
-// Fixture : 3 produits avec un objet `images` à clés dynamiques (image IDs).
-// Chaque clé mappe vers un objet {url, width}.
-//
-// Différence avec SiblingCollapse : appliqué manuellement (pas auto-détecté),
-// le nom de la colonne ID est libre ("image_id").
-//
-// sibling_threshold=10 → empêche l'auto-détection SiblingCollapse (5 < 10)
-// apply_normalize_dynamic_keys → products_images : image_id TEXT, url TEXT, width INT
-// Les 5 tables images enfants sont absorbées et supprimées.
-//
-// Assertions :
-//   - 2 schemas après application (products + products_images)
-//   - products_images : NormalizeDynamicKeys, colonnes image_id/url/width
-//   - 3 lignes products, 5 lignes products_images
-//   - Widget a 2 images
-//   - img_789 → url="http://c.com", width=1024
-// ---------------------------------------------------------------------------
-#[tokio::test]
-async fn test_normalize_dynamic_keys_strategy() {
-    common::with_schema_url(|client, schema, url| async move {
-        let path = common::fixture("normalize_dynamic_keys.jsonl");
-        // sibling_threshold=10 : 5 tables images < 10 → pas d'auto-détection SiblingCollapse
-        let p1 = pass1::runner::run(
-            &path,
-            &pass1::runner::Pass1Config {
-                root_table: "products".to_string(),
-                registry: RegistryConfig {
-                    sibling_threshold: 10,
-                    ..Default::default()
-                },
-                num_workers: None,
-            },
-            None,
-        )
-        .unwrap();
-
-        assert!(
-            p1.schemas.iter().any(|s| s.name == "products_images"),
-            "products_images doit exister après pass1"
-        );
-
-        let mut schemas = p1.schemas;
-        apply_normalize_dynamic_keys(&mut schemas, "products_images", "image_id".to_string())
-            .unwrap();
-
-        // Les 5 tables images enfants doivent être absorbées
-        assert_eq!(
-            schemas.len(),
-            2,
-            "2 schemas attendus après absorption des enfants"
-        );
-        assert!(
-            schemas.iter().any(|s| s.name == "products"),
-            "products manquant"
-        );
-        assert!(
-            schemas.iter().any(|s| s.name == "products_images"),
-            "products_images manquant"
-        );
-
-        let images_schema = schemas
-            .iter()
-            .find(|s| s.name == "products_images")
-            .unwrap();
-        assert!(
-            matches!(
-                images_schema.inferred_strategy,
-                InferredStrategy::NormalizeDynamicKeys { .. }
-            ),
-            "products_images doit avoir la stratégie NormalizeDynamicKeys"
-        );
-
-        let data_cols: Vec<_> = images_schema.data_columns().collect();
-        assert!(
-            data_cols.iter().any(|c| c.name == "image_id"),
-            "colonne image_id absente"
-        );
-        assert!(
-            data_cols.iter().any(|c| c.name == "url"),
-            "colonne url absente"
-        );
-        assert!(
-            data_cols.iter().any(|c| c.name == "width"),
-            "colonne width absente"
-        );
-
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None)
-            .await
-            .unwrap();
-
-        let p2 = pass2::runner::run(
-            &path,
-            &schemas,
-            &client,
-            &url,
-            &common::pass2_config("products", &schema),
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(*p2.rows_per_table.get("products").unwrap(), 3);
-        // Widget:2 + Gadget:1 + Doohickey:2 = 5
-        assert_eq!(*p2.rows_per_table.get("products_images").unwrap(), 5);
-        assert_eq!(common::row_count(&client, &schema, "products").await, 3);
-        assert_eq!(
-            common::row_count(&client, &schema, "products_images").await,
-            5
-        );
-        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
-
-        // Widget a bien 2 images
-        let widget_count: i64 = client
-            .query_one(
-                &format!(
-                    "SELECT COUNT(*) FROM \"{schema}\".\"products_images\" i \
-                 JOIN \"{schema}\".\"products\" p ON i.j2s_products_id = p.j2s_id \
-                 WHERE p.name = 'Widget'",
-                ),
-                &[],
-            )
-            .await
-            .unwrap()
-            .get(0);
-        assert_eq!(
-            widget_count, 2,
-            "Widget doit avoir 2 lignes dans products_images"
-        );
-
-        // img_789 → url="http://c.com", width=1024
-        let img_789 = client
-            .query_one(
-                &format!(
-                    "SELECT i.url, i.width FROM \"{schema}\".\"products_images\" i \
-                 WHERE i.image_id = 'img_789'",
-                ),
-                &[],
-            )
-            .await
-            .unwrap();
-        assert_eq!(img_789.get::<_, &str>("url"), "http://c.com");
-        assert_eq!(img_789.get::<_, i32>("width"), 1024);
-    })
-    .await;
-}
-
-// ---------------------------------------------------------------------------
-// InferredStrategy::JsonbFlatten : données enfant inlinées en JSONB dans le parent.
-// Fixture : 3 produits avec un objet enfant `dims` (width, height, depth).
-// Après apply_jsonb_flatten("products_dims") :
-//   - products_dims est supprimé des schémas
-//   - products gagne la colonne `products_dims JSONB`
-//   - Les données brutes sont stockées dans la colonne JSONB
-// ---------------------------------------------------------------------------
-#[tokio::test]
-async fn test_jsonb_flatten_strategy() {
-    common::with_schema_url(|client, schema, url| async move {
-        let path = common::fixture("flatten_nested.jsonl");
-        let p1 = pass1::runner::run(&path, &common::pass1_config("products"), None).unwrap();
-
-        assert_eq!(p1.schemas.len(), 2);
-        assert!(p1.schemas.iter().any(|s| s.name == "products_dims"));
-
-        let mut schemas = p1.schemas;
-        apply_jsonb_flatten(&mut schemas, "products_dims").unwrap();
-
-        // Child table removed
-        assert_eq!(schemas.len(), 1);
-        assert!(schemas.iter().all(|s| s.name != "products_dims"));
-
-        // Parent gains a JSONB column named after the child table
-        let products_schema = schemas.iter().find(|s| s.name == "products").unwrap();
-        let jsonb_col = products_schema.columns.iter().find(|c| c.name == "products_dims");
-        assert!(jsonb_col.is_some(), "products doit avoir une colonne products_dims JSONB");
-        assert_eq!(jsonb_col.unwrap().pg_type, PgType::Jsonb);
-
-        db::ddl::create_tables_no_constraints(&client, &schemas, &schema, false, None).await.unwrap();
-
-        let dims_absent: i64 = client
-            .query_one("SELECT COUNT(*) FROM information_schema.tables \
-                 WHERE table_schema = $1 AND table_name = 'products_dims'", &[&schema])
-            .await.unwrap().get("count");
-        assert_eq!(dims_absent, 0, "products_dims ne doit pas être créé");
-
-        let jsonb_col_present: i64 = client
-            .query_one("SELECT COUNT(*) FROM information_schema.columns \
-                 WHERE table_schema = $1 AND table_name = 'products' AND column_name = 'products_dims'",
-                 &[&schema])
-            .await.unwrap().get("count");
-        assert_eq!(jsonb_col_present, 1, "products doit avoir une colonne products_dims");
-
-        pass2::runner::run(&path, &schemas, &client, &url, &common::pass2_config("products", &schema), None).await.unwrap();
-
-        // Widget : dims = {"width": 10, "height": 20, "depth": 5}
-        let widget = client.query_one(
-            &format!("SELECT products_dims::text FROM \"{schema}\".\"products\" WHERE id = 1"),
-            &[],
-        ).await.unwrap();
-        let dims: serde_json::Value = serde_json::from_str(widget.get::<_, &str>("products_dims")).unwrap();
-        assert_eq!(dims["width"], serde_json::json!(10));
-        assert_eq!(dims["height"], serde_json::json!(20));
-
-        // Doohickey : dims partial (no depth)
-        let doohickey = client.query_one(
-            &format!("SELECT products_dims::text FROM \"{schema}\".\"products\" WHERE id = 3"),
-            &[],
-        ).await.unwrap();
-        let dims3: serde_json::Value = serde_json::from_str(doohickey.get::<_, &str>("products_dims")).unwrap();
-        assert_eq!(dims3["width"], serde_json::json!(5));
-        assert!(dims3.get("depth").is_none() || dims3["depth"].is_null());
-    }).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1476,193 +1260,37 @@ async fn test_jsonb_strategy_root_table() {
     .await;
 }
 
-// disable pivot → InferredStrategy::Jsonb au lieu de Pivot pour les tables homogènes.
-// wide_column_threshold=3 : nutrients a 4 colonnes homogènes (int) → Pivot automatique.
+// ---------------------------------------------------------------------------
+// #200, T8 — la grille de suffixes n'est plus appliquée sans le TOML : la table, large et d'un seul type de valeur,
+// passe par le split identité/compagnon (Pivot), et `--disable-strategy structured_pivot` est refusé.
+// ---------------------------------------------------------------------------
 #[test]
-fn test_disable_pivot_gives_jsonb_integration() {
+fn test_suffix_grid_is_not_applied_without_the_toml_integration() {
     use json2sql::schema::strategies::StrategyName;
     use json2sql::schema::table_schema::InferredStrategy;
-    use std::collections::HashSet;
-
-    let path = common::fixture("pivot_eav.jsonl");
-    // Config avec wide_column_threshold=3 pour déclencher la détection wide sur nutrients
-    let base_config = pass1::runner::Pass1Config {
-        registry: RegistryConfig {
-            wide_column_threshold: 3,
-            ..Default::default()
-        },
-        ..common::pass1_config("products")
-    };
-
-    // Avec pivot activé : Pivot attendu sur products_nutrients
-    let p1_normal = pass1::runner::run(&path, &base_config, None).unwrap();
-    assert!(
-        p1_normal
-            .schemas
-            .iter()
-            .any(|s| s.inferred_strategy == InferredStrategy::Pivot),
-        "pivot enabled → InferredStrategy::Pivot attendu sur products_nutrients"
-    );
-
-    // Avec pivot désactivé : Jsonb à la place
-    let config_disabled = pass1::runner::Pass1Config {
-        registry: RegistryConfig {
-            disabled_strategies: HashSet::from([StrategyName::Pivot]),
-            wide_column_threshold: 3,
-            ..Default::default()
-        },
-        ..common::pass1_config("products")
-    };
-    let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
-    assert!(
-        !p1_disabled
-            .schemas
-            .iter()
-            .any(|s| s.inferred_strategy == InferredStrategy::Pivot),
-        "pivot disabled → aucun InferredStrategy::Pivot, Jsonb attendu"
-    );
-    assert!(
-        p1_disabled
-            .schemas
-            .iter()
-            .any(|s| s.inferred_strategy == InferredStrategy::Jsonb),
-        "pivot disabled → InferredStrategy::Jsonb attendu"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// #163 — StructuredPivot détecté automatiquement : la grille part dans le compagnon
-// products_nut_pivot (une ligne par base), la table fille objet `comp`, le tableau `tags` et le
-// scalaire `brand` restent avec products_nut. Widget → 3 lignes de pivot, Gadget → 3 (serving NULL).
-// ---------------------------------------------------------------------------
-#[tokio::test]
-async fn test_structured_pivot_split_keeps_children_arrays_and_other_scalars() {
-    common::with_schema_url(|client, schema, url| async move {
-        let path = common::fixture("structured_pivot_split.jsonl");
-        let config = pass1::runner::Pass1Config {
-            registry: RegistryConfig {
-                wide_column_threshold: 3,
-                ..Default::default()
-            },
-            ..common::pass1_config("products")
-        };
-        let p1 = pass1::runner::run(&path, &config, None).unwrap();
-        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
-            .await
-            .unwrap();
-        let p2 = pass2::runner::run(
-            &path,
-            &p1.schemas,
-            &client,
-            &url,
-            &common::pass2_config("products", &schema),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(p2.anomaly_collector.total_anomalies(), 0);
-        for (table, rows) in [
-            ("products", 2),
-            ("products_nut", 2),
-            ("products_nut_pivot", 6),
-            ("products_nut_comp", 2),
-        ] {
-            assert_eq!(common::row_count(&client, &schema, table).await, rows, "{table}");
-        }
-        assert_eq!(common::array_elements(&client, &schema, "products_nut", "tags").await, 3);
-
-        let widget = |select: &str, from_nut: &str| {
-            format!(
-                "SELECT {select} FROM \"{schema}\".\"products\" p \
-                 JOIN \"{schema}\".\"products_nut\" n ON n.j2s_products_id = p.j2s_id \
-                 {from_nut} WHERE p.name = 'Widget'"
-            )
-        };
-        let fat = client
-            .query_one(
-                &widget(
-                    "v.value, v._100g, v.serving",
-                    &format!(
-                        "JOIN \"{schema}\".\"products_nut_pivot\" v \
-                         ON v.j2s_products_nut_id = n.j2s_id AND v.name = 'fat'"
-                    ),
-                ),
-                &[],
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            (fat.get::<_, Option<i32>>(0), fat.get::<_, Option<i32>>(1), fat.get::<_, Option<i32>>(2)),
-            (Some(1), Some(2), Some(3))
-        );
-        let comp = client
-            .query_one(
-                &widget(
-                    "n.brand, c.k",
-                    &format!(
-                        "JOIN \"{schema}\".\"products_nut_comp\" c ON c.j2s_products_nut_id = n.j2s_id"
-                    ),
-                ),
-                &[],
-            )
-            .await
-            .unwrap();
-        assert_eq!(comp.get::<_, Option<String>>(0).as_deref(), Some("acme"));
-        assert_eq!(comp.get::<_, Option<i32>>(1), Some(1));
-    })
-    .await;
-}
-
-// disable structured_pivot → suffix detection skippée → fallback suggest_wide_strategy.
-// Fixture : nutrients avec 9 colonnes numériques à pattern _100g/_serving (3 bases).
-// wide_column_threshold=4 : 9 colonnes > 4 → wide detection active.
-// Activé : StructuredPivot. Désactivé : Pivot (all-numeric fallback).
-#[test]
-fn test_disable_structured_pivot_gives_pivot_integration() {
-    use json2sql::schema::strategies::StrategyName;
-    use json2sql::schema::table_schema::InferredStrategy;
-    use std::collections::HashSet;
 
     let path = common::fixture("structured_pivot.jsonl");
-    let base_config = pass1::runner::Pass1Config {
+    let config = pass1::runner::Pass1Config {
         registry: RegistryConfig {
             wide_column_threshold: 4,
             ..Default::default()
         },
         ..common::pass1_config("products")
     };
-
-    // structured_pivot activé : StructuredPivot attendu sur products_nutrients
-    let p1_normal = pass1::runner::run(&path, &base_config, None).unwrap();
+    let p1 = pass1::runner::run(&path, &config, None).unwrap();
     assert!(
-        p1_normal.schemas.iter().any(|s| matches!(s.inferred_strategy, InferredStrategy::StructuredPivot(_))),
-        "structured_pivot enabled → InferredStrategy::StructuredPivot attendu sur products_nutrients"
-    );
-
-    // structured_pivot désactivé : aucun StructuredPivot, Pivot à la place (all-numeric)
-    let config_disabled = pass1::runner::Pass1Config {
-        registry: RegistryConfig {
-            disabled_strategies: HashSet::from([StrategyName::StructuredPivot]),
-            wide_column_threshold: 4,
-            ..Default::default()
-        },
-        ..common::pass1_config("products")
-    };
-    let p1_disabled = pass1::runner::run(&path, &config_disabled, None).unwrap();
-    assert!(
-        !p1_disabled
-            .schemas
+        !p1.schemas
             .iter()
             .any(|s| matches!(s.inferred_strategy, InferredStrategy::StructuredPivot(_))),
-        "structured_pivot disabled → aucun InferredStrategy::StructuredPivot"
+        "no StructuredPivot without suffix_columns"
     );
     assert!(
-        p1_disabled
-            .schemas
+        p1.schemas
             .iter()
             .any(|s| s.inferred_strategy == InferredStrategy::Pivot),
-        "structured_pivot disabled → InferredStrategy::Pivot attendu (fallback all-numeric)"
+        "InferredStrategy::Pivot attendu (valeurs toutes numériques)"
     );
+    assert!(StrategyName::try_from("structured_pivot").is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -1673,7 +1301,7 @@ fn test_disable_structured_pivot_gives_pivot_integration() {
 // Fixture : racine `produits` (id, name — stables, reste en Columns), enfant
 // `nutriments` (ChildKind::Object) avec 2 clés stables (calcium, iron,
 // présentes dans les 10 lignes) et 3 clés rares (selenium/iodine/zinc,
-// chacune présente dans 1 seule ligne sur 10 → sous rare_threshold=0.15).
+// chacune présente dans 1 seule ligne sur 10).
 //
 // Design attendu (voir issue #45, section "Design final validé") :
 //   - `produits` reste Columns (2 colonnes stables, aucun split — ratio
@@ -1684,8 +1312,7 @@ fn test_disable_structured_pivot_gives_pivot_integration() {
 //     compagnon.
 //   - `produits_nutriments_pivot` (compagnon) : (key, value) EAV, FK vers
 //     l'identité — TOUTES les clés y arrivent, y compris les rares (aucune
-//     ne doit être droppée silencieusement comme le ferait l'ancien
-//     mécanisme AutoSplit `collect_medium_keys`).
+//     ne doit être droppée silencieusement).
 //
 // État avant les tâches 3/4 : ce test est ROUGE — `apply_non_autosplit_strategy`
 // pivote aujourd'hui `produits_nutriments` sur place (une seule table, pas de
@@ -1704,7 +1331,6 @@ async fn test_pivot_identity_companion_split_no_real_child() {
                 registry: RegistryConfig {
                     wide_column_threshold: 1,
                     stable_threshold: 0.5,
-                    rare_threshold: 0.15,
                     ..Default::default()
                 },
                 num_workers: None,
@@ -1970,7 +1596,6 @@ async fn test_pivot_split_with_real_object_array_child() {
                 registry: RegistryConfig {
                     wide_column_threshold: 1,
                     stable_threshold: 0.5,
-                    rare_threshold: 0.15,
                     ..Default::default()
                 },
                 num_workers: None,
@@ -2192,20 +1817,15 @@ async fn test_pivot_split_object_array_parent_with_real_grandchild() {
 }
 
 // ---------------------------------------------------------------------------
-// [issue #45, tâche 11] `ObjectArray` hétérogène → Jsonb (Problème 2b).
+// [issue #45, tâche 11 ; #200, T3] `ObjectArray` large aux types mélangés.
 //
-// Ferme la boucle des tâches 3/9/10 : une table `ObjectArray`-parent dont les clés
-// sont hétérogènes (int + string + bool → plusieurs catégories de type,
-// `suggest_wide_strategy` choisit Jsonb au lieu de Pivot) doit produire un DDL à
-// 4 colonnes (j2s_id, parent_fk, j2s_order, data JSONB), un blob round-trip
-// correct par élément, et `j2s_order` peuplé selon la position dans l'array.
-//
-// Avant #45 : `avis` restait bloquée en `Columns` (tâche 3) ; même une fois
-// éligible, `insert_array` aurait écrit `NULL` dans `data` pour chaque élément
-// (tâche 10, confirmé par test unitaire rouge).
+// Une table `ObjectArray`-parent dont les clés sont hétérogènes (int + string + bool) passe
+// par le split par fréquence (#200) : ici toutes ses clés sont présentes dans chaque élément,
+// donc rien ne part en clé/valeur et elle garde ses colonnes typées, avec `j2s_order`
+// peuplé selon la position dans l'array. (Avant #200 : un blob JSONB par élément.)
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn test_object_array_heterogeneous_jsonb_end_to_end() {
+async fn test_object_array_heterogeneous_keeps_typed_columns_end_to_end() {
     common::with_schema_url(|client, schema, url| async move {
         let path = common::fixture("wide_object_array_jsonb.jsonl");
         let p1 = pass1::runner::run(
@@ -2229,20 +1849,17 @@ async fn test_object_array_heterogeneous_jsonb_end_to_end() {
             .expect("produits_avis manquant");
         assert_eq!(
             avis.inferred_strategy,
-            InferredStrategy::Jsonb,
-            "score/comment/verified hétérogènes → Jsonb attendu"
+            InferredStrategy::Columns,
+            "toutes les clés sont fréquentes : rien pour un compagnon, la table reste en colonnes"
         );
-        assert_eq!(avis.data_columns().count(), 1, "une seule colonne data");
-        assert!(avis.find_by_original("data").is_some());
-        // DDL : j2s_id, j2s_produits_id, j2s_order, data — 4 colonnes au total.
-        assert_eq!(
-            avis.columns.len(),
-            4,
-            "j2s_id + parent_fk + j2s_order + data"
+        assert_eq!(avis.data_columns().count(), 3, "score, comment, verified");
+        assert!(
+            !p1.schemas.iter().any(|s| s.name == "produits_avis_wide"),
+            "pas de compagnon vide"
         );
         assert!(
             avis.columns.iter().any(|c| c.original_name == "j2s_order"),
-            "j2s_order doit être présent sur une table ObjectArray, même en Jsonb"
+            "j2s_order doit être présent sur une table ObjectArray"
         );
 
         let schemas = p1.schemas.clone();
@@ -2275,9 +1892,9 @@ async fn test_object_array_heterogeneous_jsonb_end_to_end() {
             .query(
                 &format!(
                     "SELECT a.j2s_order, \
-                        a.data->>'score'    AS score, \
-                        a.data->>'comment'  AS comment, \
-                        a.data->>'verified' AS verified \
+                        a.score::text    AS score, \
+                        a.comment        AS comment, \
+                        a.verified::text AS verified \
                  FROM \"{schema}\".\"produits_avis\" a \
                  JOIN \"{schema}\".\"produits\" p ON a.j2s_produits_id = p.j2s_id \
                  WHERE p.name = 'P2' ORDER BY a.j2s_order",

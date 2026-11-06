@@ -4,112 +4,84 @@
 //! - struct `WideStats` — mesures d'une table wide (lignes, colonnes scalaires, ratio stable).
 //! - fn `WideStats::log` — journalise la stratégie choisie pour la table.
 //! - fn `stable_ratio` — part des colonnes scalaires présentes dans assez de lignes.
-//! - fn `apply_wide_strategy` — décide Columns/`StructuredPivot`/Pivot/Jsonb/`AutoSplit` selon le
-//!   ratio de colonnes stables.
-//! - fn `apply_non_autosplit_strategy` — split identité/compagnon structuré (`StructuredPivot`),
-//!   Jsonb, ou split identité/compagnon (Pivot).
-//! - fn `apply_structured_pivot_split` — la grille de suffixes part dans un compagnon `_pivot`
-//!   structuré ; le reste (scalaires hors grille, tableaux, enfants) reste sur l'identité (#163).
+//! - fn `apply_wide_strategy` — garde une table large et stable en Columns ; coupe la racine par fréquence
+//!   (`AutoSplit`) et passe une table enfant à `apply_non_autosplit_strategy` (#200).
+//! - fn `apply_non_autosplit_strategy` — split d'une table enfant : identité/compagnon (Pivot) si ses valeurs sont
+//!   d'un seul type, sinon `AutoSplit` par fréquence. Plus de grille de suffixes automatique (#200, T8).
+//! - fn `apply_structured_pivot_split` — la grille de suffixes du TOML (`suffix_columns`) part dans un compagnon
+//!   `_pivot` structuré ; le reste (scalaires hors grille, tableaux, enfants) reste sur l'identité (#163).
 //! - fn `apply_pivot_split` — split identité/compagnon à rétention zéro (toutes les clés
 //!   migrent vers le compagnon `_pivot`), déclenché quand `apply_non_autosplit_strategy`
 //!   choisirait Pivot — que la table soit `Object`- ou `ObjectArray`-parent.
-//! - fn `unique_pivot_name` — nom du compagnon `_pivot`, unique contre toutes les tables déjà
-//!   connues (fallback `_pivot_eav` sur auto-collision, `_pivot_2`/`_pivot_3`/... sur collision
-//!   externe).
-//! - fn `autosplit_wide_name` — nom du compagnon `_wide` (repli `_eav`).
-//! - fn `apply_autosplit_strategy` — construit la table EAV compagnon `_wide` (racine + vrai
-//!   enfant `Object` — partition par fréquence, inchangé).
+//! - fn `unique_companion_name` — nom du compagnon `_pivot` ou `_wide`, unique contre toutes les tables déjà
+//!   connues (repli `_{suffixe}_eav` sur auto-collision, `_{suffixe}_2`/`_3`/... sur collision externe).
+//! - fn `apply_autosplit_strategy` — partition par fréquence : clés fréquentes en colonnes, les autres dans le
+//!   compagnon EAV `_wide` ; pas de compagnon (la table reste Columns) quand toutes les clés sont fréquentes.
 //! - fn `build_wide_pivot_schema` — construit la table EAV compagnon (réutilisée par
 //!   `apply_autosplit_strategy` et `apply_pivot_split`, qui diffèrent seulement par la
 //!   politique de rétention et le jeu de clés envoyé en compagnon).
 //! - fn `is_pg_array` — vrai pour une colonne PG array, jamais envoyée en compagnon EAV (#48).
-//! - fn `collect_medium_keys` — sélectionne les clés de fréquence moyenne (`AutoSplit` racine
-//!   uniquement).
+//! - fn `collect_medium_keys` — les clés scalaires sous le seuil de stabilité, toutes envoyées au compagnon
+//!   (`AutoSplit` racine uniquement ; aucune n'est jetée, #200).
 //! - fn `infer_medium_value_type` — détermine le type de valeur commun d'un jeu de clés.
 //! - fn `build_finalizer_config` — assemble la config figée passée à ces fonctions.
-//! - struct `FinalizerConfig` — config figée (seuils + stratégies désactivées) pour cette phase.
+//! - struct `FinalizerConfig` — config figée (seuils) pour cette phase.
 
-use indexmap::IndexMap;
-
-use super::super::naming::NamingRegistry;
-use super::super::observer::TableEntry;
-use super::super::strategies::StrategyName;
-use super::super::suffix_detector::detect_suffix_schema;
+use super::super::stats::{observed_keys_by_table, ColumnStats, ObservedKeys};
 use super::super::table_schema::SuffixSchema;
 use super::super::table_schema::{ChildKind, ColumnSchema, InferredStrategy, TableSchema};
 use super::super::type_tracker::{widen_pg_types, PgType};
-use super::super::wide_strategies::{
-    apply_wide_strategy_columns, structured_pivot_companion, suggest_wide_strategy,
-};
-use super::base::is_scalar_column;
+use super::super::wide_strategies::{structured_pivot_companion, suggest_wide_strategy};
 use super::SchemaFinalizer;
 
 /// Phase 3: apply per-table wide strategies (Pivot, Jsonb, `StructuredPivot`, `AutoSplit`)
-/// to all remaining tables after fusion is complete.
+/// to all remaining tables after fusion is complete. The keys of a table are read in the Pass 1
+/// `stats`, which a snapshot keeps (#200): a table with no statistics under its name (a table the
+/// cascade made) is never split.
 pub(super) fn apply_wide_table_strategies(
     schemas: &mut Vec<TableSchema>,
-    tables: &IndexMap<String, TableEntry>,
-    naming: &NamingRegistry,
+    stats: &[ColumnStats],
     config: &FinalizerConfig,
-    tables_with_object_children: &std::collections::HashSet<String>,
 ) {
+    let observed = observed_keys_by_table(stats);
     let mut extra_schemas: Vec<TableSchema> = Vec::new();
-    let schema_map: std::collections::HashMap<String, usize> = schemas
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.name.clone(), i))
-        .collect();
     // Toutes les tables déjà nommées à ce stade — sert à garantir l'unicité des noms de
     // compagnon `_pivot` synthétiques (mis à jour au fil des créations pour couvrir aussi
     // les collisions entre deux compagnons créés dans le même passage).
     let mut existing_names: std::collections::HashSet<String> =
         schemas.iter().map(|s| s.name.clone()).collect();
 
-    for (path_key, entry) in tables {
-        let pg_name = naming.table_name_lookup_from_dot_key(path_key);
-        if let Some(&idx) = schema_map.get(&pg_name) {
-            // [issue #45, finding 6] `tables` liste les chemins PRÉ-fusion (Phase 1) ; un
-            // chemin pré-fusion peut se résoudre, via NamingRegistry, vers une table que la
-            // Phase 2 (finalize_cascading) a déjà fusionnée (SiblingCollapse/SiblingCollapseMulti/
-            // ...). Retraiter cette table avec le TableEntry pré-fusion associé au chemin corrompt
-            // la table déjà fusionnée (colonnes/medium_keys issus d'une autre observation) —
-            // confirmé empiriquement en production (medium_keys peuplé de colonnes étrangères).
-            if !matches!(schemas[idx].inferred_strategy, InferredStrategy::Columns) {
-                continue;
-            }
-            if let Some(extra) = apply_wide_strategy(
-                &mut schemas[idx],
-                entry,
-                config,
-                tables_with_object_children,
-                &existing_names,
-            ) {
-                existing_names.insert(extra.name.clone());
-                extra_schemas.push(extra);
-            }
+    for schema in schemas.iter_mut() {
+        // [issue #45, finding 6] A table the cascade already fused (SiblingCollapse…) is never
+        // split again: its statistics are those of the pre-fusion tables, not of its columns. Nor
+        // is a table the TOML or the UI gave a strategy, `columns` included (#200).
+        if !matches!(schema.inferred_strategy, InferredStrategy::Columns)
+            || schema.toml_override().is_some()
+            || schema.ui_override().is_some()
+        {
+            continue;
+        }
+        let Some(keys) = observed.get(schema.name.as_str()) else {
+            continue;
+        };
+        if let Some(extra) = apply_wide_strategy(schema, keys, config, &existing_names) {
+            existing_names.insert(extra.name.clone());
+            extra_schemas.push(extra);
         }
     }
     schemas.extend(extra_schemas);
 }
 
-pub(super) fn build_finalizer_config(finalizer: &SchemaFinalizer) -> FinalizerConfig {
+pub(super) const fn build_finalizer_config(finalizer: &SchemaFinalizer) -> FinalizerConfig {
     FinalizerConfig {
         wide_column_threshold: finalizer.wide_column_threshold,
         stable_threshold: finalizer.stable_threshold,
-        rare_threshold: finalizer.rare_threshold,
-        disable_pivot: finalizer.disabled_strategies.contains(&StrategyName::Pivot),
-        disable_structured_pivot: finalizer
-            .disabled_strategies
-            .contains(&StrategyName::StructuredPivot),
     }
 }
 
 pub(super) struct FinalizerConfig {
     wide_column_threshold: usize,
     stable_threshold: f64,
-    rare_threshold: f64,
-    disable_pivot: bool,
-    disable_structured_pivot: bool,
 }
 
 /// What `apply_wide_strategy` measured on a wide table, for the strategy branches.
@@ -132,33 +104,30 @@ impl WideStats {
 
 /// Share of the scalar columns present in at least `stable_threshold` of the rows.
 fn stable_ratio(
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     row_count: f64,
     stable_threshold: f64,
     scalar_cols: usize,
 ) -> f64 {
-    let stable_count = entry
-        .columns
-        .iter()
-        .filter(|(field, t)| is_scalar_column(entry, field, t))
-        .filter(|(_, t)| t.total_count as f64 / row_count >= stable_threshold)
+    let stable_count = observed
+        .values()
+        .filter(|k| k.total_count as f64 / row_count >= stable_threshold)
         .count();
     stable_count as f64 / scalar_cols as f64
 }
 
 /// Apply a wide-table strategy to `schema` if its scalar column count exceeds the threshold.
 ///
-/// Eligible for Object and `ObjectArray` children.
-/// Returns a companion `_wide` table if the `AutoSplit` strategy is chosen.
+/// Eligible for the root and for Object and `ObjectArray` children. Returns the companion table
+/// of the split (`_wide` or `_pivot`), if any.
 fn apply_wide_strategy(
     schema: &mut TableSchema,
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     config: &FinalizerConfig,
-    tables_with_object_children: &std::collections::HashSet<String>,
     existing_names: &std::collections::HashSet<String>,
 ) -> Option<TableSchema> {
     let is_wide_eligible = matches!(
-        entry.child_kind,
+        schema.child_kind,
         Some(ChildKind::Object | ChildKind::ObjectArray) | None
     );
     // Only scalar columns make a table wide. PG array columns stay on the table whatever the
@@ -169,86 +138,65 @@ fn apply_wide_strategy(
         return None;
     }
 
-    let row_count = entry.row_count.max(1) as f64;
-    let ratio_stable = stable_ratio(entry, row_count, config.stable_threshold, scalar_col_count);
+    let row_count = schema.row_count.max(1) as f64;
+    let ratio_stable = stable_ratio(
+        observed,
+        row_count,
+        config.stable_threshold,
+        scalar_col_count,
+    );
     let stats = WideStats {
         row_count,
         scalar_col_count,
         ratio_stable,
     };
 
-    if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && entry.row_count >= 10 {
+    if ratio_stable > WIDE_TABLE_HIGH_STABLE_RATIO && schema.row_count >= 10 {
         let strategy = "Columns (high stable ratio — legitimate schema, not key explosion)";
         stats.log(&schema.name, strategy);
         return None;
     }
-    if entry.parent_key.is_empty() && tables_with_object_children.contains(&entry.path_key) {
-        return Some(apply_autosplit_strategy(schema, entry, config, &stats));
+    // The rows of the root are the records of the file: its keys are fields, kept by frequency (#200).
+    if schema.parent_table.is_none() {
+        return apply_autosplit_strategy(schema, observed, config, &stats, existing_names);
     }
-    apply_non_autosplit_strategy(schema, entry, config, &stats, existing_names)
+    apply_non_autosplit_strategy(schema, observed, config, &stats, existing_names)
 }
 
-/// Chooses `StructuredPivot`, Jsonb, or the identity/companion split (Pivot) for a table that
-/// is not `is_root && has_object_children` — i.e. every wide-eligible table except the P5
-/// `AutoSplit` root case, which `apply_autosplit_strategy` handles separately and unchanged.
+/// Chooses the split of a wide child table: the identity/companion split (Pivot) when its values are
+/// all of one type (its keys are data: currencies, languages…), `AutoSplit` by frequency otherwise.
+/// A suffix grid found in the names is only proposed (`--suggest`), never applied here (#200).
 fn apply_non_autosplit_strategy(
     schema: &mut TableSchema,
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     config: &FinalizerConfig,
     stats: &WideStats,
     existing_names: &std::collections::HashSet<String>,
 ) -> Option<TableSchema> {
-    let grid = if config.disable_structured_pivot {
-        None
-    } else {
-        detect_suffix_schema(entry, SUFFIX_MIN_COVERAGE)
-    };
-    if let Some((suffix_schema, grid_keys)) = grid {
-        let n = suffix_schema.suffix_cols.len();
-        let strategy = format!("StructuredPivot ({n} suffixes, split identité/compagnon)");
-        stats.log(&schema.name, &strategy);
-        let thresholds = (config.stable_threshold, config.rare_threshold);
-        return Some(apply_structured_pivot_split(
-            schema,
-            suffix_schema,
-            grid_keys,
-            thresholds,
-            existing_names,
-        ));
-    }
-
-    let strategy = if config.disable_pivot {
-        InferredStrategy::Jsonb
-    } else {
-        suggest_wide_strategy(entry)
-    };
-    if strategy == InferredStrategy::Pivot {
+    if suggest_wide_strategy(observed) == InferredStrategy::Pivot {
         stats.log(&schema.name, "Pivot (split identité/compagnon)");
-        return Some(apply_pivot_split(schema, entry, config, existing_names));
+        return Some(apply_pivot_split(schema, observed, config, existing_names));
     }
-
-    stats.log(&schema.name, &format!("{strategy:?}"));
-    apply_wide_strategy_columns(schema, strategy);
-    None
+    apply_autosplit_strategy(schema, observed, config, stats, existing_names)
 }
 
 /// Move the keys of the suffix grid of `schema` to a structured companion `_pivot` table (one
 /// row per base) and return it. `schema` keeps its name and every other column (scalars outside
 /// the grid, PG arrays) and becomes the identity table: `AutoSplit` with the grid keys as
 /// `medium_keys`, so its real children are still written through `recurse_children` (#163).
-/// Shared by the detection (Phase 3) and the TOML `suffix_columns` override; `thresholds` are the
-/// (stable, rare) thresholds recorded on the `AutoSplit` strategy.
+/// Applied by the TOML `suffix_columns` override; `stable_threshold` is recorded on the `AutoSplit`
+/// strategy.
 pub fn apply_structured_pivot_split(
     schema: &mut TableSchema,
     suffix_schema: SuffixSchema,
     grid_keys: std::collections::HashSet<String>,
-    thresholds: (f64, f64),
+    stable_threshold: f64,
     existing_names: &std::collections::HashSet<String>,
 ) -> TableSchema {
     schema
         .columns
         .retain(|c| c.is_generated || !grid_keys.contains(&c.original_name));
-    let companion_name = unique_pivot_name(&schema.name, existing_names);
+    let companion_name = unique_companion_name(&schema.name, "pivot", existing_names);
     // A key ending with no suffix is a bare base: it fills `value`.
     let has_bare_keys = grid_keys.iter().any(|k| {
         !suffix_schema
@@ -259,8 +207,7 @@ pub fn apply_structured_pivot_split(
     let companion =
         structured_pivot_companion(schema, companion_name.clone(), suffix_schema, has_bare_keys);
     schema.inferred_strategy = InferredStrategy::AutoSplit {
-        stable_threshold: thresholds.0,
-        rare_threshold: thresholds.1,
+        stable_threshold,
         medium_keys: grid_keys,
         wide_table_name: companion_name,
     };
@@ -278,7 +225,7 @@ pub fn apply_structured_pivot_split(
 /// which never recursed into them.
 fn apply_pivot_split(
     schema: &mut TableSchema,
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     config: &FinalizerConfig,
     existing_names: &std::collections::HashSet<String>,
 ) -> TableSchema {
@@ -288,29 +235,32 @@ fn apply_pivot_split(
         .map(|c| c.original_name.clone())
         .collect();
     schema.columns.retain(|c| c.is_generated || is_pg_array(c));
-    let wide_name = unique_pivot_name(&schema.name, existing_names);
-    let value_type = infer_medium_value_type(entry, &all_keys);
+    let wide_name = unique_companion_name(&schema.name, "pivot", existing_names);
+    let value_type = infer_medium_value_type(observed, &all_keys);
     build_wide_pivot_schema(schema, wide_name, value_type, all_keys, config)
 }
 
-/// Companion name for `apply_pivot_split` and `apply_structured_pivot_split`: `{base}_pivot`, falling back to `{base}_pivot_eav`
-/// on self-collision (schema already named `..._pivot`) and to an incremental `_pivot_2`,
-/// `_pivot_3`, ... on collision with any other already-known table name.
-fn unique_pivot_name(
+/// Companion name of a split, `{base}_{suffix}` (`_pivot` or `_wide`), falling back to
+/// `{base}_{suffix}_eav` on self-collision (schema already named `..._{suffix}`) and to an incremental
+/// `_{suffix}_2`, `_{suffix}_3`, ... on collision with any other already-known table name.
+fn unique_companion_name(
     schema_name: &str,
+    suffix: &str,
     existing_names: &std::collections::HashSet<String>,
 ) -> String {
-    let base_name = schema_name.strip_suffix("_pivot").unwrap_or(schema_name);
-    let candidate = crate::schema::naming::derived_table_name(&format!("{base_name}_pivot"));
+    let derived = crate::schema::naming::derived_table_name;
+    let base_name = schema_name
+        .strip_suffix(&format!("_{suffix}"))
+        .unwrap_or(schema_name);
+    let candidate = derived(&format!("{base_name}_{suffix}"));
     let mut candidate = if candidate == schema_name {
-        crate::schema::naming::derived_table_name(&format!("{base_name}_pivot_eav"))
+        derived(&format!("{base_name}_{suffix}_eav"))
     } else {
         candidate
     };
     let mut suffix_n = 2;
     while existing_names.contains(&candidate) {
-        candidate =
-            crate::schema::naming::derived_table_name(&format!("{base_name}_pivot_{suffix_n}"));
+        candidate = derived(&format!("{base_name}_{suffix}_{suffix_n}"));
         suffix_n += 1;
     }
     candidate
@@ -321,132 +271,72 @@ const fn is_pg_array(col: &ColumnSchema) -> bool {
     matches!(col.pg_type, PgType::Array(_))
 }
 
-/// Apply the P5 `AutoSplit` strategy: retain stable columns on the main table,
-/// build a companion `_wide` EAV table for medium-frequency keys.
+/// The scalar keys of an `AutoSplit` table below `stable_threshold`: they all go to the `_wide` companion,
+/// however rare (#200).
 fn collect_medium_keys(
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     row_count: f64,
-    rare_threshold: f64,
     stable_threshold: f64,
 ) -> std::collections::HashSet<String> {
-    entry
-        .columns
+    observed
         .iter()
-        .filter(|(k, t)| {
-            !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k)
-        })
-        .filter(|(_, t)| {
-            let freq = t.total_count as f64 / row_count;
-            freq >= rare_threshold && freq < stable_threshold
-        })
+        .filter(|(_, t)| (t.total_count as f64 / row_count) < stable_threshold)
         .map(|(k, _)| k.clone())
         .collect()
 }
 
 fn infer_medium_value_type(
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     medium_keys: &std::collections::HashSet<String>,
 ) -> PgType {
     medium_keys
         .iter()
-        .filter_map(|k| entry.columns.get(k))
+        .filter_map(|k| observed.get(k))
         .fold(None::<PgType>, |acc, t| {
-            Some(acc.map_or_else(|| t.to_pg_type(), |a| widen_pg_types(a, &t.to_pg_type())))
+            Some(acc.map_or_else(|| t.pg_type.clone(), |a| widen_pg_types(a, &t.pg_type)))
         })
         .unwrap_or(PgType::Text)
 }
 
-/// Rare keys are dropped by `AutoSplit` (data loss): name them on stderr so the drop is never silent.
-fn warn_rare_keys(
-    entry: &TableEntry,
-    row_count: f64,
-    rare_threshold: f64,
-    table: &str,
-    wide_name: &str,
-) {
-    let mut rare_keys: Vec<&str> = entry
-        .columns
-        .iter()
-        .filter(|(k, t)| {
-            !t.is_object_field() && !t.is_array_field() && !entry.array_columns.contains_key(*k)
-        })
-        .filter(|(_, t)| (t.total_count as f64 / row_count) < rare_threshold)
-        .map(|(k, _)| k.as_str())
-        .collect();
-    if rare_keys.is_empty() {
-        return;
-    }
-    rare_keys.sort_unstable();
-    let shown = rare_keys
-        .iter()
-        .take(10)
-        .copied()
-        .collect::<Vec<_>>()
-        .join(", ");
-    let more = rare_keys.len().saturating_sub(10);
-    let more = if more > 0 {
-        format!(" (+{more} more)")
-    } else {
-        String::new()
-    };
-    eprintln!(
-        "  WARNING: {} rare key(s) in '{table}' are NOT imported (frequency < --rare-threshold {rare_threshold}): \
-        {shown}{more}. Use --rare-threshold 0 to keep them in '{wide_name}'.",
-        rare_keys.len(),
-    );
-}
-
-/// Name of the `AutoSplit` companion: `{base}_wide`, without doubling an existing `_wide`
-/// suffix, and `{base}_eav` when that would be the table's own name.
-fn autosplit_wide_name(schema_name: &str) -> String {
-    let base_name = schema_name.strip_suffix("_wide").unwrap_or(schema_name);
-    let wide_candidate = format!("{base_name}_wide");
-    if wide_candidate == schema_name {
-        format!("{base_name}_eav")
-    } else {
-        wide_candidate
-    }
-}
-
 fn apply_autosplit_strategy(
     schema: &mut TableSchema,
-    entry: &TableEntry,
+    observed: &ObservedKeys,
     config: &FinalizerConfig,
     stats: &WideStats,
-) -> TableSchema {
+    existing_names: &std::collections::HashSet<String>,
+) -> Option<TableSchema> {
     let (row_count, stable) = (stats.row_count, config.stable_threshold);
-    let medium_keys = collect_medium_keys(entry, row_count, config.rare_threshold, stable);
+    let medium_keys = collect_medium_keys(observed, row_count, stable);
+    // Every key is frequent (few rows): no companion to build, the table stays Columns.
+    if medium_keys.is_empty() {
+        stats.log(&schema.name, "Columns (every key is frequent)");
+        return None;
+    }
     // pg-array columns are kept unconditionally: their tracker counts elements, not occurrences,
     // and the scalar EAV companion cannot hold them (issue #48).
     schema.columns.retain(|c| {
         c.is_generated
             || is_pg_array(c)
-            || entry
-                .columns
+            || observed
                 .get(&c.original_name)
                 .is_some_and(|t| t.total_count as f64 / row_count >= stable)
     });
-    // Scalars only, like `scalar_col_count`: the kept pg-array columns would otherwise hide rare keys.
+    // Scalars only, like `scalar_col_count`: the kept pg-array columns are not stable keys.
     let stable_col_count = schema.data_columns().filter(|c| !is_pg_array(c)).count();
-    let rare_count = stats
-        .scalar_col_count
-        .saturating_sub(stable_col_count)
-        .saturating_sub(medium_keys.len());
-    let wide_name = autosplit_wide_name(&schema.name);
+    let wide_name = unique_companion_name(&schema.name, "wide", existing_names);
     let medium = medium_keys.len();
     stats.log(
         &schema.name,
-        &format!("AutoSplit ({stable_col_count} stable cols, {medium} medium → {wide_name}, {rare_count} rare dropped)"),
+        &format!("AutoSplit ({stable_col_count} stable cols, {medium} medium → {wide_name})"),
     );
-    warn_rare_keys(
-        entry,
-        row_count,
-        config.rare_threshold,
-        &schema.name,
-        &wide_name,
-    );
-    let value_type = infer_medium_value_type(entry, &medium_keys);
-    build_wide_pivot_schema(schema, wide_name, value_type, medium_keys, config)
+    let value_type = infer_medium_value_type(observed, &medium_keys);
+    Some(build_wide_pivot_schema(
+        schema,
+        wide_name,
+        value_type,
+        medium_keys,
+        config,
+    ))
 }
 
 fn build_wide_pivot_schema(
@@ -475,7 +365,6 @@ fn build_wide_pivot_schema(
     wide_schema.inferred_strategy = InferredStrategy::Pivot;
     schema.inferred_strategy = InferredStrategy::AutoSplit {
         stable_threshold: config.stable_threshold,
-        rare_threshold: config.rare_threshold,
         medium_keys,
         wide_table_name: wide_name,
     };
@@ -485,9 +374,6 @@ fn build_wide_pivot_schema(
 /// A wide table with this fraction or more of stable columns is kept as-is (Columns strategy).
 /// Below this, the table is split or pivoted.
 const WIDE_TABLE_HIGH_STABLE_RATIO: f64 = 0.5;
-
-/// Minimum fraction of columns that must share a common suffix pattern to trigger `StructuredPivot`.
-const SUFFIX_MIN_COVERAGE: f64 = 0.3;
 
 #[cfg(test)]
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
@@ -504,10 +390,39 @@ mod tests {
         FinalizerConfig {
             wide_column_threshold: 2,
             stable_threshold: 0.1,
-            rare_threshold: 0.001,
-            disable_pivot: false,
-            disable_structured_pivot: false,
         }
+    }
+
+    fn stat(table: &str, key: &str, pg_type: PgType) -> ColumnStats {
+        ColumnStats {
+            table_name: table.to_string(),
+            column_name: NamingRegistry::column_name(key),
+            original_name: key.to_string(),
+            pg_type,
+            total_count: 3,
+            null_count: 0,
+            type_histogram: Vec::new(),
+        }
+    }
+
+    /// The split reads the keys by their JSON name: two keys of one column name stay two keys, and
+    /// a PG array column is not a scalar key (#200).
+    #[test]
+    fn observed_keys_are_the_scalar_json_keys_of_each_table() {
+        let stats = [
+            stat("t", "energy-kcal", PgType::Integer),
+            stat("t", "energy_kcal", PgType::DoublePrecision),
+            stat("t", "tags", PgType::Array(Box::new(PgType::Text))),
+            stat("u", "x", PgType::Text),
+        ];
+        let by_table = observed_keys_by_table(&stats);
+        let keys: Vec<&str> = by_table["t"].keys().map(String::as_str).collect();
+        assert_eq!(keys, ["energy-kcal", "energy_kcal"]);
+        assert_eq!(
+            by_table["t"]["energy_kcal"].pg_type,
+            PgType::DoublePrecision
+        );
+        assert_eq!(by_table["u"].len(), 1);
     }
 
     // ---------------------------------------------------------------------------
@@ -565,13 +480,8 @@ mod tests {
         }
         let mut schemas = vec![fused];
 
-        apply_wide_table_strategies(
-            &mut schemas,
-            &observer.tables,
-            &naming,
-            &make_config(),
-            &std::collections::HashSet::new(),
-        );
+        let stats = crate::schema::inspector::collect_stats(&observer, &mut naming);
+        apply_wide_table_strategies(&mut schemas, &stats, &make_config());
 
         assert_eq!(
             schemas.len(),

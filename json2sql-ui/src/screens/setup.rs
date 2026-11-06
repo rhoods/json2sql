@@ -370,8 +370,14 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                             let result = pick_file(&[("Schema snapshot", "*.json")]).await;
                                             match result {
                                                 PickResult::Selected(path) => {
+                                                    let config = crate::state::pass1_registry_config(state.read().project.disabled_strategies.clone());
                                                     let res = tokio::task::spawn_blocking(move || {
-                                                        json2sql::schema::persistence::load(&path)
+                                                        // A CLI snapshot is saved before the split (#200); one the UI saved is already split, and splitting again changes nothing.
+                                                        json2sql::schema::persistence::load(&path).map(|mut snap| {
+                                                            let overflow = json2sql::schema::registry::split_wide_tables(&mut snap.schemas, &snap.stats, &config);
+                                                            snap.overflow_warnings.extend(overflow);
+                                                            snap
+                                                        })
                                                     }).await;
                                                     picking_schema.set(false);
                                                     match res {
@@ -682,50 +688,6 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                                 }
                                                 span { "Sibling collapse " }
                                                 span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(sibling)" }
-                                            }
-                                        }
-                                    }
-                                    // Pivot inference checkbox
-                                    {
-                                        let pivot_on = !state.read().project.disabled_strategies.contains(&StrategyName::Pivot);
-                                        rsx! {
-                                            label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
-                                                input {
-                                                    r#type: "checkbox",
-                                                    checked: pivot_on,
-                                                    onchange: move |e| {
-                                                        if e.value() == "true" {
-                                                            state.write().project.disabled_strategies.remove(&StrategyName::Pivot);
-                                                        } else {
-                                                            state.write().project.disabled_strategies.insert(StrategyName::Pivot);
-                                                        }
-                                                        crate::config::try_save(&state.read().project);
-                                                    },
-                                                }
-                                                span { "Pivot inference " }
-                                                span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(pivot)" }
-                                            }
-                                        }
-                                    }
-                                    // Structured pivot checkbox
-                                    {
-                                        let sp_on = !state.read().project.disabled_strategies.contains(&StrategyName::StructuredPivot);
-                                        rsx! {
-                                            label { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:var(--fs-sm);",
-                                                input {
-                                                    r#type: "checkbox",
-                                                    checked: sp_on,
-                                                    onchange: move |e| {
-                                                        if e.value() == "true" {
-                                                            state.write().project.disabled_strategies.remove(&StrategyName::StructuredPivot);
-                                                        } else {
-                                                            state.write().project.disabled_strategies.insert(StrategyName::StructuredPivot);
-                                                        }
-                                                        crate::config::try_save(&state.read().project);
-                                                    },
-                                                }
-                                                span { "Structured pivot " }
-                                                span { style: "color:var(--fg-3);font-size:var(--fs-xs);", "(structured_pivot)" }
                                             }
                                         }
                                     }

@@ -16,11 +16,7 @@ use dioxus::prelude::*;
 use json2sql::io::progress_event::ProgressEvent;
 
 use crate::screens::{progress_pct, strategy_badge, ProgressBar};
-use crate::state::{
-    format_bytes, AppScreen, AppState, PASS1_RARE_THRESHOLD, PASS1_SIBLING_JACCARD,
-    PASS1_SIBLING_THRESHOLD, PASS1_STABLE_THRESHOLD, PASS1_TEXT_THRESHOLD,
-    PASS1_WIDE_COLUMN_THRESHOLD,
-};
+use crate::state::{format_bytes, AppScreen, AppState, PASS1_WIDE_COLUMN_THRESHOLD};
 
 #[allow(clippy::cast_precision_loss)]
 fn format_count(n: u64) -> String {
@@ -84,15 +80,7 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         let handle = tokio::task::spawn_blocking(move || {
             let config = json2sql::pass1::runner::Pass1Config {
                 root_table,
-                registry: json2sql::schema::registry::RegistryConfig {
-                    text_threshold: PASS1_TEXT_THRESHOLD,
-                    wide_column_threshold: PASS1_WIDE_COLUMN_THRESHOLD,
-                    sibling_threshold: PASS1_SIBLING_THRESHOLD,
-                    sibling_jaccard: PASS1_SIBLING_JACCARD,
-                    stable_threshold: PASS1_STABLE_THRESHOLD,
-                    rare_threshold: PASS1_RARE_THRESHOLD,
-                    disabled_strategies,
-                },
+                registry: crate::state::pass1_registry_config(disabled_strategies),
                 num_workers: Some(workers),
             };
             if workers > 1 {

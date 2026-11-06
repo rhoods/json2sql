@@ -139,9 +139,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub parallel: usize,
 
-    /// Tables with more data columns than this threshold are automatically assigned a `InferredStrategy`
-    /// (Pivot or Jsonb). Override per table via --schema-config with `strategy = "pivot"|"jsonb"`.
-    /// Set to 0 to disable automatic wide-table detection.
+    /// Tables with more scalar columns than this threshold, and sparse, are split: frequent keys stay columns,
+    /// the others go to a key/value companion table (all of them when the values are of one type). Override per
+    /// table via --schema-config (`strategy = "columns"|"pivot"|"jsonb"`).
     #[arg(long, default_value_t = 15, value_name = "N")]
     pub wide_column_threshold: usize,
 
@@ -156,16 +156,11 @@ pub struct Cli {
     #[arg(long, default_value_t = 0.8, value_name = "F")]
     pub sibling_jaccard: f64,
 
-    /// Fraction of rows a key must appear in to be kept as a stable column in the main table
-    /// (`AutoSplit` strategy). Keys below this threshold but above --rare-threshold go to
-    /// the companion `{table}_wide` EAV table.
+    /// Fraction of rows a key must appear in to count as stable: it stays a column when the split cuts a
+    /// wide table, root or child. Every other key goes to the key/value companion table (`_wide` or
+    /// `_pivot`): none is dropped.
     #[arg(long, default_value_t = 0.10, value_name = "F")]
     pub stable_threshold: f64,
-
-    /// Fraction of rows below which a key is dropped entirely (`AutoSplit` + Ignore strategy).
-    /// Keys appearing in fewer rows than this fraction are excluded from all schemas and data.
-    #[arg(long, default_value_t = 0.001, value_name = "F")]
-    pub rare_threshold: f64,
 
     /// Number of worker threads for parallel Pass 1 schema inference (default: 1, sequential).
     /// Values > 1 distribute schema inference across N threads; useful for large files on multi-core machines.
@@ -173,8 +168,9 @@ pub struct Cli {
     pub workers: usize,
 
     /// Disable an optional inference strategy. Repeatable.
-    /// Valid values: sibling, pivot, `structured_pivot`.
-    /// Mandatory strategies (split) cannot be disabled — exits non-zero with explicit error.
+    /// Valid values: sibling.
+    /// Mandatory strategies (split, pivot) cannot be disabled, and `structured_pivot` is only proposed (#200):
+    /// exits non-zero with explicit error.
     #[arg(long = "disable-strategy", value_name = "STRATEGY")]
     pub disable_strategy: Vec<String>,
 
@@ -196,19 +192,20 @@ pub struct Cli {
     pub tune_wal: bool,
 
     /// Instead of importing, propose a split of every wide table (`Columns` or `AutoSplit`, at least 20 data columns)
-    /// into 1:1 thematic tables: write the `column_groups` TOML to FILE and print the report. No database is needed.
+    /// into 1:1 thematic tables, and the suffix grids its names form (commented): write the TOML to FILE and print
+    /// the report. No database is needed. Was `--suggest-groups` before #200.
     #[arg(long, value_name = "FILE", conflicts_with = "dry_run")]
-    pub suggest_groups: Option<PathBuf>,
+    pub suggest: Option<PathBuf>,
 
     /// Split every wide table (`Columns` or `AutoSplit`, at least 20 data columns) into 1:1 tables of the column groups
     /// its names confirm, after the schema snapshot is saved. Off by default; a `column_groups` key in the
     /// --schema-config section of a table wins (`column_groups = {}` keeps the table whole).
-    #[arg(long, default_value_t = false, conflicts_with = "suggest_groups")]
+    #[arg(long, default_value_t = false, conflicts_with = "suggest")]
     pub group_columns: bool,
 
-    /// With --suggest-groups: folder of a static embedding model (`Model2Vec`, `WordPiece` tokenizer, for example
+    /// With --suggest: folder of a static embedding model (`Model2Vec`, `WordPiece` tokenizer, for example
     /// `potion-base-8M`) used to suggest the two nearest groups for each column left in a table. Never downloaded.
-    #[arg(long, value_name = "DIR", requires = "suggest_groups")]
+    #[arg(long, value_name = "DIR", requires = "suggest")]
     pub embedding_model: Option<PathBuf>,
 }
 
@@ -302,6 +299,7 @@ mod tests {
             "pivot",
         ])
         .unwrap();
+        // clap keeps every value; their check comes later (`parse_disabled_strategies`).
         assert_eq!(cli.disable_strategy, vec!["sibling", "pivot"]);
     }
 
@@ -312,9 +310,24 @@ mod tests {
     }
 
     #[test]
+    fn test_suggest_groups_is_renamed_suggest() {
+        // #200, T10: the option proposes the suffix grids too; the old name fails and clap points to the new one.
+        let err = Cli::try_parse_from([
+            "json2sql",
+            "--input",
+            "data.json",
+            "--suggest-groups",
+            "groups.toml",
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("'--suggest'"), "{err}");
+    }
+
+    #[test]
     fn test_suggest_groups_default_is_off() {
         let cli = Cli::try_parse_from(["json2sql", "--input", "data.json"]).unwrap();
-        assert!(cli.suggest_groups.is_none());
+        assert!(cli.suggest.is_none());
     }
 
     #[test]
@@ -323,11 +336,11 @@ mod tests {
             "json2sql",
             "--input",
             "data.json",
-            "--suggest-groups",
+            "--suggest",
             "groups.toml",
         ])
         .unwrap();
-        assert_eq!(cli.suggest_groups, Some(PathBuf::from("groups.toml")));
+        assert_eq!(cli.suggest, Some(PathBuf::from("groups.toml")));
     }
 
     #[test]
@@ -336,7 +349,7 @@ mod tests {
             "json2sql",
             "--input",
             "data.json",
-            "--suggest-groups",
+            "--suggest",
             "groups.toml",
             "--embedding-model",
             "models/potion",
@@ -359,7 +372,7 @@ mod tests {
             "json2sql",
             "--input",
             "data.json",
-            "--suggest-groups",
+            "--suggest",
             "groups.toml",
             "--dry-run",
         ])
@@ -388,7 +401,7 @@ mod tests {
             "--input",
             "data.json",
             "--group-columns",
-            "--suggest-groups",
+            "--suggest",
             "groups.toml",
         ])
         .is_err());

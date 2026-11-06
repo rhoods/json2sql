@@ -4,7 +4,7 @@
 //! **Pivot** : chaque clé JSON distincte devient une colonne (`key_fr`, `key_en`…).
 //! **Structured pivot** : variante où les colonnes sont groupées par suffixe détecté.
 //! **Keyed pivot** : pivot où la clé pivot est une colonne explicite (ex: code langue).
-//! **Flatten / `JsonbFlatten`** : les colonnes de la table enfant remontent dans le parent.
+//! **Flatten** : les colonnes de la table enfant remontent dans le parent.
 //! **`NormalizeDynamicKeys`** : les clés dynamiques sont normalisées en table EAV.
 //!
 //! Frontière avec `finalizer/` : ce module génère les colonnes résultantes d'une
@@ -23,23 +23,19 @@
 //! - fn `widen_union_type` — `widen_pg_types` où un côté pg-array l'emporte (`Array(widen(elem, scalaire))`, #61).
 //! - fn `build_union_columns` — union des colonnes de données de plusieurs tables enfants (types élargis).
 //! - fn `classify_key_shape` — classe un ensemble de clés (Numeric/`IsoLang`/Mixed/Slug).
-//! - fn `find_object_child_indices` — résout les indices des enfants Object d'une table.
-//! - fn `rebuild_normalize_columns` — reconstruit les colonnes après normalisation des clés dynamiques.
-//! - fn `apply_normalize_dynamic_keys` — fusionne les enfants Object en une table normalisée
 //!   `id_column` + colonnes union.
 //! - fn `resolve_child_info` — résout enfant/parent pour `apply_flatten`.
 //! - fn `collect_flatten_info` — résout les colonnes à inliner pour `apply_flatten`.
 //! - fn `apply_flatten` — inline les colonnes scalaires d'un enfant dans le parent (avec préfixe).
-//! - fn `apply_jsonb_flatten` — inline un enfant comme colonne JSONB unique sur le parent.
 
 use std::sync::Arc;
 
 use indexmap::IndexMap;
 
 use super::finalizer::exclude_absorbed_children;
-use super::observer::TableEntry;
+use super::stats::ObservedKeys;
 use super::table_schema::{
-    ChildKind, ColumnSchema, InferredStrategy, KeyShape, SuffixSchema, TableSchema, UserOverride,
+    ChildKind, ColumnSchema, InferredStrategy, KeyShape, SuffixSchema, TableSchema,
 };
 use super::type_tracker::{widen_pg_types, PgType};
 use crate::error::{J2sError, Result};
@@ -49,17 +45,14 @@ use crate::error::{J2sError, Result};
 const KEY_SHAPE_DOMINANT_RATIO: f64 = 0.8;
 
 /// Determine whether a wide table's values are type-homogeneous (→ Pivot) or not (→ Jsonb).
-pub fn suggest_wide_strategy(entry: &TableEntry) -> InferredStrategy {
+pub fn suggest_wide_strategy(observed: &ObservedKeys) -> InferredStrategy {
     let mut has_string = false;
     let mut has_numeric = false;
     let mut has_boolean = false;
     let mut has_date_like = false;
 
-    for tracker in entry.columns.values() {
-        if tracker.is_object_field() || tracker.is_array_field() {
-            continue;
-        }
-        match tracker.to_pg_type() {
+    for key in observed.values() {
+        match key.pg_type {
             PgType::Text | PgType::VarChar(_) | PgType::Array(_) | PgType::Jsonb => {
                 has_string = true;
             }
@@ -119,11 +112,9 @@ pub fn apply_wide_strategy_columns(schema: &mut TableSchema, strategy: InferredS
         | InferredStrategy::SiblingCollapse(_)
         | InferredStrategy::AutoSplit { .. }
         | InferredStrategy::Ignore
-        | InferredStrategy::NormalizeDynamicKeys { .. }
-        | InferredStrategy::Flatten { .. }
-        | InferredStrategy::JsonbFlatten => {
+        | InferredStrategy::Flatten { .. } => {
             // Applied elsewhere: SiblingCollapse via finalize_siblings(), AutoSplit/Ignore inline
-            // in finalize(), NormalizeDynamicKeys/Flatten/JsonbFlatten via dedicated apply_* fns.
+            // in finalize(), Flatten via apply_flatten.
         }
         InferredStrategy::Pivot => {
             apply_pivot_columns(schema);
@@ -301,85 +292,6 @@ pub fn classify_key_shape<K: AsRef<str>>(keys: &[K]) -> KeyShape {
     }
 }
 
-/// Apply `NormalizeDynamicKeys` strategy to a table: collapse all its direct Object children
-/// into a single normalized table with `id_column` TEXT + union of value columns.
-///
-/// Equivalent to a user-triggered `SiblingCollapse` with a custom ID column name.
-/// Call `exclude_absorbed_children` after to remove the now-absorbed child tables.
-fn find_object_child_indices(schemas: &[TableSchema], table_name: &str) -> Result<Vec<usize>> {
-    let indices: Vec<usize> = schemas
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| {
-            s.parent_table.as_deref() == Some(table_name)
-                && matches!(s.child_kind, Some(ChildKind::Object))
-        })
-        .map(|(i, _)| i)
-        .collect();
-    if indices.is_empty() {
-        return Err(J2sError::Schema(format!(
-            "apply_normalize_dynamic_keys: no Object children found for '{table_name}'; strategy not applied"
-        )));
-    }
-    Ok(indices)
-}
-
-fn rebuild_normalize_columns(
-    target: &mut TableSchema,
-    union_cols: Vec<ColumnSchema>,
-    id_column: &str,
-) {
-    target.columns.retain(|c| c.is_generated);
-    target.columns.push(ColumnSchema {
-        name: id_column.to_string(),
-        original_name: id_column.to_string(),
-        pg_type: PgType::Text,
-        not_null: true,
-        is_generated: false,
-        is_parent_fk: false,
-    });
-    target.columns.extend(union_cols);
-}
-
-pub fn apply_normalize_dynamic_keys(
-    schemas: &mut Vec<TableSchema>,
-    table_name: &str,
-    id_column: String,
-) -> Result<()> {
-    let target_idx = schemas
-        .iter()
-        .position(|s| s.name == table_name)
-        .ok_or_else(|| {
-            J2sError::Schema(format!(
-                "apply_normalize_dynamic_keys: table '{table_name}' not found"
-            ))
-        })?;
-    let child_indices = find_object_child_indices(schemas, table_name)?;
-    let children: Vec<&TableSchema> = child_indices.iter().map(|&i| &schemas[i]).collect();
-    let union_cols = build_union_columns(&children);
-    let keys: Vec<String> = child_indices
-        .iter()
-        .map(|&i| schemas[i].path.last().cloned().unwrap_or_default())
-        .collect();
-    let key_shape = classify_key_shape(&keys);
-    rebuild_normalize_columns(&mut schemas[target_idx], union_cols, &id_column);
-    eprintln!(
-        "  NormalizeDynamicKeys: {} ({} child tables → 1, id_col: {} [{}])",
-        table_name,
-        child_indices.len(),
-        id_column,
-        key_shape,
-    );
-    schemas[target_idx].inferred_strategy = InferredStrategy::NormalizeDynamicKeys {
-        id_column: id_column.into(),
-    };
-    exclude_absorbed_children(schemas);
-    Ok(())
-}
-
-/// Apply Flatten strategy to a child table: inline its scalar columns into the parent table
-/// with the given prefix. The child table is removed from the schema after inlining.
-///
 fn resolve_child_info(
     schemas: &[TableSchema],
     child_table_name: &str,
@@ -472,85 +384,11 @@ pub fn apply_flatten(
     Ok(())
 }
 
-/// Inline a child table as a single JSONB column on the parent table.
-/// The child table is removed from the schema; the parent gains `{child_table_name} JSONB`.
-/// Used for `InferredStrategy::JsonbFlatten` (IHM override "JSONB inline").
-#[allow(dead_code)] // pub API consumed by json2sql-ui (separate crate, invisible to binary dead_code lint)
-pub fn apply_jsonb_flatten(schemas: &mut Vec<TableSchema>, child_table_name: &str) -> Result<()> {
-    let (_, parent_name, field_name) =
-        resolve_child_info(schemas, child_table_name, "apply_jsonb_flatten")?;
-
-    // Mark child as JsonbFlatten (via ui_override) so absorbs_children() excludes its descendants.
-    if let Some(child) = schemas.iter_mut().find(|s| s.name == child_table_name) {
-        child.set_ui_override(Some(UserOverride::JsonbFlatten));
-    }
-
-    // Remove any nested children of the child table
-    exclude_absorbed_children(schemas);
-
-    // Add JSONB column to parent (SQL name = child table name, original = JSON field name).
-    if let Some(parent) = schemas.iter_mut().find(|s| s.name == parent_name) {
-        if !parent.columns.iter().any(|c| c.name == child_table_name) {
-            parent.columns.push(ColumnSchema {
-                name: child_table_name.to_string(),
-                original_name: field_name,
-                pg_type: PgType::Jsonb,
-                not_null: false,
-                is_generated: false,
-                is_parent_fk: false,
-            });
-        }
-    } else {
-        return Err(J2sError::Schema(format!(
-            "apply_jsonb_flatten: parent table '{parent_name}' not found for '{child_table_name}'"
-        )));
-    }
-
-    // Remove the child table and its absorbed descendants
-    schemas.retain(|s| !matches!(*s.effective_strategy(), InferredStrategy::JsonbFlatten));
-    Ok(())
-}
-
 #[cfg(test)]
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::*;
     use crate::schema::type_tracker::PgType;
-
-    fn gen_col(name: &str, is_parent_fk: bool) -> ColumnSchema {
-        ColumnSchema {
-            name: name.to_string(),
-            original_name: name.to_string(),
-            pg_type: PgType::Text,
-            not_null: false,
-            is_generated: true,
-            is_parent_fk,
-        }
-    }
-
-    fn data_col(name: &str) -> ColumnSchema {
-        ColumnSchema {
-            name: name.to_string(),
-            original_name: name.to_string(),
-            pg_type: PgType::Text,
-            not_null: false,
-            is_generated: false,
-            is_parent_fk: false,
-        }
-    }
-
-    fn make_parent_child(parent_name: &str, child_name: &str) -> (TableSchema, TableSchema) {
-        use crate::schema::table_schema::ChildKind;
-        let parent = TableSchema::new(parent_name.to_string(), vec![parent_name.to_string()], 0);
-        let mut child = TableSchema::new(
-            child_name.to_string(),
-            vec![parent_name.to_string(), child_name.to_string()],
-            1,
-        );
-        child.parent_table = Some(parent_name.to_string());
-        child.child_kind = Some(ChildKind::Object);
-        (parent, child)
-    }
 
     #[test]
     fn apply_wide_strategy_columns_updates_effective_strategy_to_jsonb() {
@@ -564,36 +402,6 @@ mod tests {
         let mut schema = TableSchema::new("t".to_string(), vec!["t".to_string()], 1);
         apply_wide_strategy_columns(&mut schema, InferredStrategy::Pivot);
         assert_eq!(*schema.effective_strategy(), InferredStrategy::Pivot);
-    }
-
-    #[test]
-    fn apply_normalize_dynamic_keys_updates_effective_strategy() {
-        let (parent, child) = make_parent_child("products", "products_images");
-        let mut schemas = vec![parent, child];
-
-        apply_normalize_dynamic_keys(&mut schemas, "products", "image_id".to_string()).unwrap();
-
-        assert_eq!(
-            *schemas[0].effective_strategy(),
-            InferredStrategy::NormalizeDynamicKeys {
-                id_column: "image_id".into()
-            },
-        );
-    }
-
-    #[test]
-    fn apply_jsonb_flatten_removes_child() {
-        let (parent, child) = make_parent_child("products", "products_tags");
-        let mut schemas = vec![parent, child];
-
-        apply_jsonb_flatten(&mut schemas, "products_tags").unwrap();
-
-        assert_eq!(
-            schemas.len(),
-            1,
-            "child must be removed once ui_override=JsonbFlatten is set"
-        );
-        assert_eq!(schemas[0].name, "products");
     }
 
     #[test]
@@ -614,61 +422,6 @@ mod tests {
         assert_eq!(
             *schema.effective_strategy(),
             InferredStrategy::StructuredPivot(suffix_schema)
-        );
-    }
-
-    #[test]
-    fn apply_jsonb_flatten_sets_ui_override_not_inferred_strategy() {
-        let (parent, child) = make_parent_child("products", "products_tags");
-        let mut schemas = vec![parent, child];
-        apply_jsonb_flatten(&mut schemas, "products_tags").unwrap();
-        // child must be removed; only parent survives
-        assert_eq!(schemas.len(), 1);
-        assert_eq!(schemas[0].name, "products");
-        // inferred_strategy on child was not mutated (child is gone, but we test via parent)
-        assert_eq!(
-            schemas[0].inferred_strategy,
-            InferredStrategy::Columns,
-            "parent inferred unchanged"
-        );
-    }
-
-    #[test]
-    fn apply_jsonb_flatten_adds_jsonb_column_to_parent() {
-        let (mut parent, child) = make_parent_child("products", "products_tags");
-        parent
-            .columns
-            .push(ColumnSchema::generated("j2s_id", PgType::BigInt));
-        let mut schemas = vec![parent, child];
-        apply_jsonb_flatten(&mut schemas, "products_tags").unwrap();
-        assert!(schemas[0]
-            .columns
-            .iter()
-            .any(|c| c.name == "products_tags" && c.pg_type == PgType::Jsonb));
-    }
-
-    #[test]
-    fn test_rebuild_normalize_columns_retains_generated_and_adds_id_and_union() {
-        let mut target = TableSchema::new("t".to_string(), vec!["t".to_string()], 0);
-        target.columns.push(gen_col("j2s_id", false));
-        target.columns.push(gen_col("j2s_parent_id", true));
-        target.columns.push(data_col("old_data")); // non-generated, must be dropped
-
-        let union = vec![data_col("col_a"), data_col("col_b")];
-        rebuild_normalize_columns(&mut target, union, "image_id");
-
-        let names: Vec<&str> = target.columns.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"j2s_id"), "generated col must be kept");
-        assert!(
-            names.contains(&"j2s_parent_id"),
-            "generated col must be kept"
-        );
-        assert!(names.contains(&"image_id"), "id_column must be added");
-        assert!(names.contains(&"col_a"), "union col must be added");
-        assert!(names.contains(&"col_b"), "union col must be added");
-        assert!(
-            !names.contains(&"old_data"),
-            "non-generated col must be dropped"
         );
     }
 

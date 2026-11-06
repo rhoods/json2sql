@@ -183,6 +183,8 @@ SELECT name, cardinality(tags) AS n, tags[1] AS premier FROM products;
 
 **Anomalies.** Un élément qui ne peut pas être stocké (chaîne plus longue que le `VARCHAR(n)` de la colonne, valeur qui n'a pas le type des éléments, octet nul dans un texte…) devient `NULL` dans le tableau, et l'import continue. La cellule compte pour **une seule** anomalie, même si plusieurs éléments sont fautifs : le rapport donne la colonne (le tableau) et le premier élément fautif.
 
+> **Changement (#200).** `--rare-threshold` n'existe plus : les clés rares d'une table coupée par le split vont dans la table clé/valeur au lieu d'être jetées. Un script qui passe encore l'option échoue (`unexpected argument '--rare-threshold' found`, code de sortie 2), comme `--suggest-groups` (devenu `--suggest`) et `--disable-strategy pivot` ou `structured_pivot`. La stratégie TOML `normalize_dynamic_keys` est ignorée avec un avertissement (la fusion `sibling` fait le même travail), et la colonne clé d'une fusion `sibling` s'appelle toujours `key` (`j2s_key` si un champ s'appelle déjà `key`) : les requêtes sur `lang_code` ou `key_id` sont à reprendre.
+
 > **Changement.** L'option `--array-as-pg-array` et la case « Arrays as PG arrays » de l'IHM n'existent plus : ce comportement est le seul. Un script qui passe encore l'option échoue (`error: unexpected argument '--array-as-pg-array' found`, code de sortie 2). Un snapshot de schéma ancien qui contient des tables de jonction est refusé avec un message qui demande de relancer la Pass 1 ; un snapshot fait avec l'option est accepté tel quel.
 
 ---
@@ -198,27 +200,26 @@ SELECT name, cardinality(tags) AS n, tags[1] AS premier FROM products;
 | `--schema` | `public` | Schéma PostgreSQL cible |
 | `--table` | dérivé du nom de fichier | Nom de la table racine |
 | `--dry-run` | false | Affiche le DDL sans se connecter |
-| `--drop-existing` | false | Supprime les tables existantes avant création |
+| `--drop-existing` | false | Supprime les tables existantes avant création. Sans elle, une table qui existe déjà garde son ancien schéma (`CREATE TABLE IF NOT EXISTS`) : un réimport dans une base créée par une version d'avant #200 échoue au chargement sur les tables qui changent de forme (colonne `key` au lieu de `lang_code` ou `key_id`, table `_wide` qui reçoit les clés rares, table JSONB devenue split). Passer `--drop-existing`, ou importer dans un autre `--schema` |
 | `--schema-config` | aucun | Fichier TOML de surcharges manuelles |
-| `--schema-output` | aucun | Sauvegarde le schéma de la Pass 1 (JSON) |
+| `--schema-output` | aucun | Sauvegarde le schéma de la Pass 1 (JSON), **avant** le TOML et le split (#200) : rechargé par `--schema-input`, il se relance avec un autre TOML et voit toutes les clés. Il ne garde donc plus les surcharges du TOML : repasser `--schema-config` au rechargement |
 | `--schema-input` | aucun | Charge un schéma sauvegardé et saute la Pass 1 |
-| `--suggest-groups` | aucun | Au lieu d'importer, propose un découpage de toutes les tables larges en tables 1:1 thématiques : écrit le TOML `column_groups` (une section par table qui a un groupe) dans le fichier donné et affiche le rapport (Markdown) sur la sortie standard. Une table est éligible si sa stratégie est `Columns` ou `AutoSplit` et qu'elle a au moins 20 colonnes de données ; les colonnes sans groupe restent dans la table d'origine, qui garde le lien avec les tables enfants issues des objets. Aucune base n'est nécessaire ; incompatible avec `--dry-run`. `--limit N` borne les lignes racine relues (`0` éteint les signaux de données). Un groupe dont la table existerait déjà (un objet imbriqué `nutrition` donne déjà la table `{table}_nutrition`) est proposé avec le suffixe `_cols` (`nutrition_cols`, puis `nutrition_cols_2` si ce nom est pris aussi), pour que le TOML s'applique tel quel. Les colonnes d'un groupe sont listées par ordre de nom. Les tableaux de scalaires (`*_tags`…) sont des colonnes de la table analysée, comme les autres. Le TOML se réutilise tel quel avec `--schema-config` (clé `column_groups`, voir plus bas). Incompatible avec `--group-columns` |
-| `--group-columns` | désactivé | Stratégie « groupes de colonnes » (#91) : découpe chaque table large (`Columns` ou `AutoSplit`, au moins 20 colonnes de données) en tables 1:1, une par famille de colonnes que ses noms confirment, sans relire le fichier ni proposer de TOML. S'applique aussi à un snapshot chargé par `--schema-input`. Une table dont la section de `--schema-config` a une clé `column_groups` garde ceux du TOML (`column_groups = {}` la laisse entière). Voir « Découper une table en groupes de colonnes » plus bas |
-| `--embedding-model` | aucun | Avec `--suggest-groups` : dossier d'un modèle d'embeddings statiques (Model2Vec à tokenizer WordPiece, par exemple `potion-base-8M` : `model.safetensors` et `tokenizer.json`). Pour chaque colonne laissée dans une table, le rapport donne les deux groupes dont le centre est le plus proche de son nom, avec un score (cosinus). C'est une indication : rien n'est déplacé ni fusionné sur ce signal. Le modèle est fourni par l'utilisateur, json2sql ne le télécharge jamais ; un tokenizer d'un autre type (le modèle multilingue est de type Unigram) est refusé avec un message clair |
+| `--suggest` | aucun | Ancien nom : `--suggest-groups` (#200), qui échoue au lancement en proposant `--suggest`. Au lieu d'importer, propose un découpage de toutes les tables larges en tables 1:1 thématiques, et la grille de suffixes que forment leurs noms : écrit le TOML `column_groups` (une section par table qui a un groupe ou une grille), avec la grille **en commentaire** (`# suffix_columns = [...]` sous `[table]` : enlever le `#` l'applique), dans le fichier donné et affiche le rapport (Markdown) sur la sortie standard. Une table est éligible si sa stratégie est `Columns` ou `AutoSplit` et qu'elle a au moins 20 colonnes de données. Les propositions sont calculées avant le split : elles voient toutes les clés, même celles que le split enverrait en clé/valeur ; au-delà de 2000 colonnes, seules les 2000 clés les plus fréquentes sont proposées ; les colonnes sans groupe restent dans la table d'origine, qui garde le lien avec les tables enfants issues des objets. Aucune base n'est nécessaire ; incompatible avec `--dry-run`. `--limit N` borne les lignes racine relues (`0` éteint les signaux de données). Un groupe dont la table existerait déjà (un objet imbriqué `nutrition` donne déjà la table `{table}_nutrition`) est proposé avec le suffixe `_cols` (`nutrition_cols`, puis `nutrition_cols_2` si ce nom est pris aussi), pour que le TOML s'applique tel quel. Les colonnes d'un groupe sont listées par ordre de nom. Les tableaux de scalaires (`*_tags`…) sont des colonnes de la table analysée, comme les autres. Le TOML se réutilise tel quel avec `--schema-config` (clé `column_groups`, voir plus bas). Incompatible avec `--group-columns` |
+| `--group-columns` | désactivé | Stratégie « groupes de colonnes » (#91) : découpe chaque table large (`Columns` ou `AutoSplit`, au moins 20 colonnes de données) en tables 1:1, une par famille de colonnes que ses noms confirment, sans relire le fichier ni proposer de TOML. Passe après le split, sur les colonnes qui restent ; n'applique jamais de grille de suffixes, qui se confirme dans le TOML. S'applique aussi à un snapshot chargé par `--schema-input`. Une table dont la section de `--schema-config` a une clé `column_groups` garde ceux du TOML (`column_groups = {}` la laisse entière). Voir « Découper une table en groupes de colonnes » plus bas |
+| `--embedding-model` | aucun | Avec `--suggest` : dossier d'un modèle d'embeddings statiques (Model2Vec à tokenizer WordPiece, par exemple `potion-base-8M` : `model.safetensors` et `tokenizer.json`). Pour chaque colonne laissée dans une table, le rapport donne les deux groupes dont le centre est le plus proche de son nom, avec un score (cosinus). C'est une indication : rien n'est déplacé ni fusionné sur ce signal. Le modèle est fourni par l'utilisateur, json2sql ne le télécharge jamais ; un tokenizer d'un autre type (le modèle multilingue est de type Unigram) est refusé avec un message clair |
 
 ### Paramètres d'inférence
 
 | Paramètre | Défaut | Description |
 |---|---|---|
 | `--text-threshold` | 256 | Longueur max avant TEXT (sinon VARCHAR) |
-| `--wide-column-threshold` | 15 | Seuil de détection des tables larges, compté en colonnes **scalaires** : les colonnes tableau ne comptent pas |
-| `--stable-threshold` | 0.10 | Fréquence min pour colonne stable (AutoSplit) |
-| `--rare-threshold` | 0.001 | Fréquence sous laquelle une clé n'est **pas importée** (AutoSplit). `0` = tout conserver |
+| `--wide-column-threshold` | 15 | Seuil de détection des tables larges, compté en colonnes **scalaires** : les colonnes tableau ne comptent pas. Une table plus large et creuse passe par le split ([strategies.md](strategies.md#le-split--les-tables-larges-et-creuses)) |
+| `--stable-threshold` | 0.10 | Part des lignes où une clé doit apparaître pour compter comme stable, et rester une colonne quand le split coupe la table. Vaut pour toutes les tables larges, racine et enfants (avant #200 : la racine seule) |
 | `--sibling-threshold` | 2 | Nb min de tables sœurs pour fusion |
 | `--sibling-jaccard` | 0.8 | Similarité min des colonnes sœurs |
 | `--depth-limit` | aucun | Avertissement si imbrication dépasse N niveaux |
 | `--workers` | 1 | Threads de la Pass 1 (inférence parallèle) |
-| `--disable-strategy` | aucun | Désactive une stratégie d'inférence optionnelle. Répétable. Valeurs : `sibling`, `pivot`, `structured_pivot`. La stratégie `split` (wide-table) est obligatoire et ne peut pas être désactivée. |
+| `--disable-strategy` | aucun | Désactive une stratégie d'inférence optionnelle. Répétable. Seule valeur : `sibling`. Le split des tables larges (`split`, dont `pivot` fait partie) est obligatoire : `pivot` est refusé, avec un message qui renvoie à `strategy = "jsonb"` dans le TOML. `structured_pivot` est refusé aussi : la grille de suffixes n'est plus appliquée seule, `--suggest` la propose et `suffix_columns` l'applique. |
 
 ### Paramètres de chargement
 
@@ -267,11 +268,10 @@ Le fichier TOML permet de forcer des stratégies de stockage ou des types de col
 
 ```toml
 [nom_table]
-strategy = "jsonb"          # jsonb | pivot | structured_pivot | columns | ignore
+strategy = "jsonb"          # jsonb | pivot | columns | flatten
 
 [nom_table_nutrients]
-strategy = "structured_pivot"
-suffix_columns = ["_100g", "_unit", "_serving"]
+suffix_columns = ["_100g", "_unit", "_serving"]   # la grille de suffixes (proposée par --suggest)
 
 [nom_table.columns]
 ma_colonne = "INTEGER"      # forcer un type : INTEGER | BIGINT | TEXT | VARCHAR(N) | etc.
@@ -281,7 +281,7 @@ Ces types sont scalaires : une surcharge de type sur une colonne tableau est ign
 
 ### Découper une table en groupes de colonnes (`column_groups`)
 
-La clé `column_groups` d'une table range des colonnes dans des tables filles 1:1, une par groupe. C'est le format que produit `--suggest-groups` ; les noms de colonnes sont ceux de PostgreSQL.
+La clé `column_groups` d'une table range des colonnes dans des tables filles 1:1, une par groupe. C'est le format que produit `--suggest` ; les noms de colonnes sont ceux de PostgreSQL.
 
 ```toml
 [openfoodfacts.column_groups]
@@ -290,25 +290,25 @@ packaging = ["packaging_materials_tags", "packaging_recycling_tags", "packaging_
 ```
 
 - La table du groupe s'appelle `{table}_{groupe}` (53 octets au plus, un hash si c'est plus long). Elle reprend l'identifiant de la table d'origine (`j2s_id`) et une clé étrangère vers elle ; la table d'origine garde les colonnes qui ne sont dans aucun groupe, ainsi que ses autres tables enfants.
-- Les groupes sont appliqués après les surcharges de types, de stratégie et `flatten`, dans l'ordre alphabétique de leurs noms.
+- Les groupes sont appliqués après les surcharges de types, de stratégie et `flatten`, dans l'ordre alphabétique de leurs noms, et **avant** le split : un groupe peut prendre des clés que le split aurait envoyées en clé/valeur, et une table de groupe encore large et creuse passe à son tour par le split.
 - Un groupe est ignoré, avec un avertissement, si une colonne est inconnue, générée par json2sql (`j2s_*`), déjà dans un autre groupe, si le groupe a moins de 3 colonnes ou si le nom de table qu'il aurait existe déjà. Une table dont la stratégie n'est ni `columns` ni `AutoSplit`, ou dont toutes les colonnes partiraient, n'est pas découpée.
-- À l'import, la table d'un groupe reçoit une ligne par objet de la table d'origine qui a au moins une valeur dans les colonnes du groupe. Une valeur est tout sauf `null`, `""`, `[]` et `{}` (la règle de `--suggest-groups`). La ligne reprend le `j2s_id` de la ligne d'origine : `LEFT JOIN {table}_{groupe} USING (j2s_id)` redonne la table de départ. Quand toutes les colonnes d'un groupe sont vides, il n'y a pas de ligne et la jointure rend ces colonnes à `NULL`, y compris celles qui contenaient `""` ou `[]`. `--dry-run` affiche le DDL.
+- À l'import, la table d'un groupe reçoit une ligne par objet de la table d'origine qui a au moins une valeur dans les colonnes du groupe. Une valeur est tout sauf `null`, `""`, `[]` et `{}` (la règle de `--suggest`). La ligne reprend le `j2s_id` de la ligne d'origine : `LEFT JOIN {table}_{groupe} USING (j2s_id)` redonne la table de départ. Quand toutes les colonnes d'un groupe sont vides, il n'y a pas de ligne et la jointure rend ces colonnes à `NULL`, y compris celles qui contenaient `""` ou `[]`. `--dry-run` affiche le DDL.
 - Une valeur de groupe qui ne rentre pas dans le type de sa colonne est une anomalie de la table du groupe (fichier d'anomalies au nom de cette table) ; chaque ligne de groupe écrite compte dans le taux de `--max-anomaly-rate`, au même titre que les lignes des autres tables.
-- Réappliquer la même config à un schéma déjà découpé (`--schema-input` d'un snapshot) ne change rien. Un snapshot qui contient des groupes est écrit en version 3 : un json2sql plus ancien le refuse.
+- Le snapshot de `--schema-output` est écrit avant le TOML : il ne contient pas les groupes, qu'on réapplique en repassant `--schema-config` avec `--schema-input`. Un snapshot qui contient des groupes est écrit en version 3 : un json2sql plus ancien le refuse.
 
 #### Groupes automatiques (`--group-columns`, #91)
 
 Au lieu d'écrire les groupes, on peut laisser json2sql les trouver dans les noms des colonnes : c'est une stratégie, désactivée par défaut, comme les autres.
 
-- **CLI** : `--group-columns`. Chaque table large (stratégie effective `Columns` ou `AutoSplit`, au moins 20 colonnes de données) reçoit les groupes que ses noms confirment : une famille de colonnes qui partagent leur premier mot (`allergens`, `allergens_from_user`, `allergens_tags`…), d'au moins 3 colonnes. Une fusion de plusieurs familles (`nutrition_*` et `nutriscore_*`) n'est appliquée que si les données la confirment (voir plus bas) ; sinon `--suggest-groups` la montre « à confirmer ».
-- **Ordre** : la stratégie passe après la Pass 1 (ou le chargement du snapshot), le TOML et les choix Pivot/Jsonb/Skip, puis le DDL et la Pass 2 écrivent les tables de groupe comme celles d'un TOML. `--dry-run` les montre.
+- **CLI** : `--group-columns`. Chaque table large (stratégie effective `Columns` ou `AutoSplit`, au moins 20 colonnes de données) reçoit les groupes que ses noms confirment : une famille de colonnes qui partagent leur premier mot (`allergens`, `allergens_from_user`, `allergens_tags`…), d'au moins 3 colonnes. Une fusion de plusieurs familles (`nutrition_*` et `nutriscore_*`) n'est appliquée que si les données la confirment (voir plus bas) ; sinon `--suggest` la montre « à confirmer ».
+- **Ordre** : la stratégie passe après la Pass 1 (ou le chargement du snapshot), le TOML, les choix Pivot/Jsonb/Skip et le split, puis le DDL et la Pass 2 écrivent les tables de groupe comme celles d'un TOML. `--dry-run` les montre. Les clés que le split a envoyées en clé/valeur n'y sont plus.
 - **Le TOML l'emporte** : une table dont la section a une clé `column_groups` garde ceux du TOML, même si tous sont rejetés ; `column_groups = {}` la garde entière. Une table déjà découpée, ou une table de groupe, ne l'est jamais une seconde fois.
 - **Snapshot** : le snapshot écrit par `--schema-output` ne contient jamais les groupes automatiques ; ils sont recalculés à chaque chargement avec `--group-columns` (quelques secondes sur OFF), et toujours de la même façon, quel que soit le nombre de workers.
 - **Noms** : `{table}_{mot}`. Si cette table existe déjà (un objet ou un tableau imbriqué du même nom, comme `ingredients`), le groupe devient `{mot}_cols`, puis `{mot}_cols_2`…
 - **IHM** : la case « Column groups » de Setup (Strategy selection), décochée par défaut, coche après la Pass 1 toutes les tables découpables ; l'écran Strategy garde une case par table, avec l'aperçu des tables de groupe ou la raison de leur absence. Les tables cochées sont enregistrées dans le snapshot (`group_columns`), et la CLI qui charge ce snapshot les découpe aussi, même sans `--group-columns`.
 - Les avertissements de la stratégie commencent par `group-columns:` (par exemple une table dont toutes les colonnes partiraient n'est pas découpée).
-- **Signaux de données** : chaque Pass 1 garde un échantillon des lignes, au plus 20 000 et 256 Mo, une ligne tous les `taille / 20 000` octets, le même quel que soit le nombre de workers. Il en tire, pour chaque table large, la présence et les valeurs de ses colonnes, et les range dans le snapshot (champ optionnel `samples`, lu sans erreur par une version antérieure qui l'ignore ; environ 10 Mo de plus sur le snapshot d'OFF). Avec ces signaux, la stratégie applique les fusions que les données confirment, comme `--suggest-groups`, sans relire le fichier. Une table dont les colonnes ont changé depuis la Pass 1 (un `flatten` du TOML) ou un snapshot plus ancien se contente des noms.
-- **Candidats à confirmer** : une colonne laissée dans la table que les données rapprochent nettement d'un groupe (le groupe est rempli avec elle bien plus souvent que la richesse des fiches ne l'explique : lift moyen d'au moins 2, avec 30 % d'avance sur le groupe suivant, sur au moins 1 % des lignes) est signalée, jamais déplacée : dans le rapport `--suggest-groups`, en commentaire sous son groupe dans le TOML (`# might join …, to confirm`), et dans l'aperçu de l'écran Strategy (« might join, to confirm »). Sur OFF complet il y en a 13 (`manufacturing_places`, vitamines et minéraux vers `additives`…), certains discutables : c'est une indication.
+- **Signaux de données** : chaque Pass 1 garde un échantillon des lignes, au plus 20 000 et 256 Mo, une ligne tous les `taille / 20 000` octets, le même quel que soit le nombre de workers. Il en tire, pour chaque table large, la présence et les valeurs de ses colonnes, et les range dans le snapshot (champ optionnel `samples`, lu sans erreur par une version antérieure qui l'ignore ; environ 10 Mo de plus sur le snapshot d'OFF). Avec ces signaux, la stratégie applique les fusions que les données confirment, comme `--suggest`, sans relire le fichier. Une table dont les colonnes ont changé depuis la Pass 1 (un `flatten` du TOML) ou un snapshot plus ancien se contente des noms.
+- **Candidats à confirmer** : une colonne laissée dans la table que les données rapprochent nettement d'un groupe (le groupe est rempli avec elle bien plus souvent que la richesse des fiches ne l'explique : lift moyen d'au moins 2, avec 30 % d'avance sur le groupe suivant, sur au moins 1 % des lignes) est signalée, jamais déplacée : dans le rapport `--suggest`, en commentaire sous son groupe dans le TOML (`# might join …, to confirm`), et dans l'aperçu de l'écran Strategy (« might join, to confirm »). Sur OFF complet il y en a 13 (`manufacturing_places`, vitamines et minéraux vers `additives`…), certains discutables : c'est une indication.
 
 ### Fusionner des tables sœurs (`[group.*]`)
 
@@ -332,7 +332,7 @@ members = ["people_home", "people_work"]
 - Ne nommez pas le groupe comme la clé JSON d'un de ses membres (`[group.home]`) : ce membre ne serait pas importé et
   laisserait des anomalies.
 - Les groupes sont appliqués après les surcharges de chaque table et avant `column_groups`. L'IHM ne lit pas le TOML ;
-  un snapshot écrit par `--schema-output` garde la table fusionnée.
+  un snapshot écrit par `--schema-output` est pris avant le TOML et ne garde pas la table fusionnée.
 
 ### Stratégies disponibles
 
@@ -343,8 +343,8 @@ Exemples de schémas SQL avec et sans chaque stratégie : [strategies.md](strate
 | `columns` | Une colonne par champ JSON (défaut) |
 | `jsonb` | L'objet entier en une colonne JSONB |
 | `pivot` | EAV générique `(parent_id, key, value)` |
-| `structured_pivot` | Les clés à suffixes dans une table `{table}_pivot` : `(parent_id, name, value, suffixe1, ...)` ; les autres colonnes restent |
-| `ignore` | La clé est supprimée (ni schéma, ni données) |
+| `suffix_columns = [...]` | La grille de suffixes : les clés à suffixes dans une table `{table}_pivot` : `(parent_id, name, value, suffixe1, ...)` ; les autres colonnes restent. Ancienne forme, toujours lue : `strategy = "structured_pivot"` avec `suffix_columns` |
+| `flatten` | L'objet enfant remonté en colonnes préfixées dans sa table parente (`prefix`, `max_depth`) |
 
 ### Exemple réel — OpenFoodFacts
 
@@ -354,7 +354,6 @@ json2sql \
   --db-url $DATABASE_URL \
   --wide-column-threshold 50 \
   --stable-threshold 0.10 \
-  --rare-threshold 0.001 \
   --schema-config openfoodfacts.toml \
   --drop-existing \
   --parallel 4
@@ -367,15 +366,16 @@ json2sql \
 [openfoodfacts_products_images]
 strategy = "jsonb"
 
-# nutriments: pattern calcium_100g / calcium_unit → StructuredPivot auto-détecté
-# (pas besoin d'override, sauf pour forcer des suffixes explicites)
+# nutriments: pattern calcium_100g / calcium_unit, proposé en commentaire par --suggest
+[openfoodfacts_products_nutriments]
+suffix_columns = ["_100g", "_serving", "_unit", "_value"]
 
 # ecoscore_extended_data: dépasse la limite 1600 colonnes de PostgreSQL
 [openfoodfacts_products_ecoscore_extended_data]
 strategy = "jsonb"
 ```
 
-Résultat : 125 colonnes stables dans la table principale, 184 clés médium dans `_wide` (EAV), 189 572 clés rares **non importées** (listées dans un `WARNING` sur stderr ; `--rare-threshold 0` pour tout garder).
+Résultat : 125 colonnes stables dans la table principale ; toutes les autres clés vont dans `_wide` (EAV), aucune n'est écartée.
 
 ---
 

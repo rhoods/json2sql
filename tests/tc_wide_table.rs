@@ -21,7 +21,6 @@ fn base_config(url: String, schema: String) -> PipelineConfig {
         sibling_threshold: 3,
         sibling_jaccard: 0.5,
         stable_threshold: 0.10,
-        rare_threshold: 0.001,
         num_workers: 1,
         disabled_strategies: HashSet::new(),
         parallel: 1,
@@ -41,7 +40,8 @@ fn base_config(url: String, schema: String) -> PipelineConfig {
     }
 }
 
-/// Wide table — 57 columns triggers Jsonb strategy; 3 rows inserted, columns collapsed.
+/// Wide table — 57 columns, all of them in every row: nothing is rare, so the table keeps its typed columns and has
+/// no key/value companion (#200; it went to one JSONB column before).
 #[tokio::test]
 async fn test_wide_table_e2e() {
     integration::with_pg_container(|client, schema, url| async move {
@@ -51,8 +51,7 @@ async fn test_wide_table_e2e() {
         let count = integration::row_count(&client, &schema, "metrics").await;
         assert_eq!(count, 3, "expected 3 rows in metrics");
 
-        // Wide strategy collapses the 55 attr_XX columns — the table must have
-        // far fewer columns than the original 57 (j2s_id + name + 1 JSONB at most).
+        // j2s_id + the 57 data columns, and no `metrics_wide` companion.
         let col_count: i64 = client
             .query_one(
                 "SELECT COUNT(*) FROM information_schema.columns \
@@ -62,10 +61,17 @@ async fn test_wide_table_e2e() {
             .await
             .unwrap()
             .get(0);
-        assert!(
-            col_count < 57,
-            "wide strategy must reduce column count below 57, got {col_count}"
-        );
+        assert_eq!(col_count, 58, "j2s_id + the 57 data columns");
+        let wide: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
+                 WHERE table_schema = $1 AND table_name = 'metrics_wide')",
+                &[&schema],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!wide, "no companion when every key is frequent");
     })
     .await;
 }
