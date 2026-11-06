@@ -242,6 +242,8 @@ ALTER SYSTEM SET max_wal_senders = 0;
 
 `max_wal_senders = 0`, `archive_mode = off` et, à partir de PG 17, `summarize_wal = off` sont obligatoires avec `minimal`, sinon PostgreSQL refuse de démarrer. À réserver à une base locale d'analyse : la réplication, la restauration à un instant donné (PITR) et `pg_basebackup` ne fonctionnent plus. Pour revenir en arrière : `ALTER SYSTEM RESET wal_level; ALTER SYSTEM RESET max_wal_senders;`, puis redémarrer.
 
+**Sur disque dur** (mesuré le 2026-11-06, #200). OpenFoodFacts 70 GB (4,4 M produits), PostgreSQL 16 en conteneur (`wal_level = minimal`, `shared_buffers = 2GB`), données de la base et fichier source sur le même disque à plateaux, `--parallel 8 --workers 8` : import complet, contraintes comprises, en **2 h 27** (2 h 42 avant #200), dont 8 min de Pass 1. Le disque est saturé du début à la fin ; le `VACUUM (ANALYZE)` des grandes tables et leurs contraintes en prennent la plus grosse part (plus d'une heure pour la seule racine avant #200). Sur SSD, voir les chiffres ci-dessus.
+
 ### Paramètres d'anomalies
 
 | Paramètre | Défaut | Description |
