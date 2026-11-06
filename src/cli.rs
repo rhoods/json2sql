@@ -139,9 +139,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub parallel: usize,
 
-    /// Tables with more data columns than this threshold are automatically assigned a `InferredStrategy`
-    /// (Pivot or Jsonb). Override per table via --schema-config with `strategy = "pivot"|"jsonb"`.
-    /// Set to 0 to disable automatic wide-table detection.
+    /// Tables with more scalar columns than this threshold, and sparse, are split: frequent keys stay columns,
+    /// the others go to a key/value companion table (all of them when the values are of one type). Override per
+    /// table via --schema-config (`strategy = "columns"|"pivot"|"jsonb"`).
     #[arg(long, default_value_t = 15, value_name = "N")]
     pub wide_column_threshold: usize,
 
@@ -156,9 +156,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 0.8, value_name = "F")]
     pub sibling_jaccard: f64,
 
-    /// Fraction of rows a key must appear in to be kept as a stable column in the main table
-    /// (`AutoSplit` strategy). Every other key goes to the companion `{table}_wide` EAV table:
-    /// none is dropped.
+    /// Fraction of rows a key must appear in to count as stable: it stays a column when the split cuts a
+    /// wide table, root or child. Every other key goes to the key/value companion table (`_wide` or
+    /// `_pivot`): none is dropped.
     #[arg(long, default_value_t = 0.10, value_name = "F")]
     pub stable_threshold: f64,
 

@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Base de données, création des tables, contraintes, réglages du serveur et connexions
-verified_at: db4ec51
+verified_at: 28a6e29
 files:
   - src/db/connection.rs
   - src/db/ddl.rs
@@ -173,6 +173,9 @@ Les deux points d'entrée (CLI et worker de l'IHM) créent les tables chacun de 
   sont trouvées par type dans `pg_constraint`, pas par nom. (#146)
 - **Une table existante garde ses anciennes colonnes.** Avec `IF NOT EXISTS`, un schéma qui a changé n'est pas
   appliqué : le `COPY` liste ses colonnes, donc une colonne absente le fait échouer, une colonne en trop reste `NULL`.
+  C'est le cas d'un réimport dans une base créée avant #200 : colonne « key » au lieu de « lang_code » ou « key_id », une table
+  `_wide` qui reçoit les clés rares, une ancienne table JSONB devenue split. Rien ne compare les colonnes avant le
+  `COPY` : l'import échoue sur l'erreur de PostgreSQL. Documenté dans usage.md (`--drop-existing`).
 - **`DROP … CASCADE` emporte aussi les objets de l'utilisateur** qui dépendent des tables (vues, FK d'autres tables).
 - **Noms de contraintes à la limite.** Les contraintes s'appellent `pk_<table>` et `fk_<table>_parent`, construits
   par `pk_name` et `fk_name`. `NamingRegistry` limite un nom de table à `PG_TABLE_MAX_IDENT` (53) caractères :

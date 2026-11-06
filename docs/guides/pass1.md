@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Pass 1, lecture du fichier, observation des types et échantillon
-verified_at: db4ec51
+verified_at: 28a6e29
 files:
   - src/pass1/
   - src/io/reader.rs

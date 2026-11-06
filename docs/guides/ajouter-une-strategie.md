@@ -1,7 +1,7 @@
 ---
 type: recette
 sujet: Ajouter une stratégie de matérialisation
-verified_at: db4ec51
+verified_at: 28a6e29
 files:
   - src/schema/table_schema.rs
   - src/schema/strategies.rs
@@ -301,8 +301,8 @@ Vues en écrivant la fiche, pas tranchées. Chacune peut devenir une issue de re
 5. **IHM écrite variante par variante.** Les interrupteurs de `SetupScreen` et les boutons de `StrategyScreen` sont
    recopiés pour chaque stratégie au lieu de parcourir `StrategyName::OPTIONAL`.
 6. **`JsonbFlatten` semblait inatteignable.** (Supprimé : aucun appelant hors des tests, #200.)
-7. **Docs existantes déjà décalées.** `architecture.md` décrit un enum `WideStrategy` (variantes `KeyedPivot`,
-   `Ignore`…) qui n'existe plus : c'est `InferredStrategy`. `schema-inference.md` (§ 12) documente
-   `strategy = "ignore"`, que le TOML rejette (`--dry-run` affiche « unknown strategy 'ignore' … ignored »).
+7. **Docs existantes déjà décalées.** (Corrigé : `architecture.md` décrit `InferredStrategy`, et `strategy = "ignore"`,
+   que le TOML rejette, a quitté usage.md et `schema-inference.md` § 12, #200.) `schema-inference.md` § 7 parle encore
+   d'une stratégie « KeyedPivot » (#138).
 8. **Un effet de bord à compenser.** `apply_wide_strategy_columns` écrit `inferred_strategy` en plus des colonnes ;
    chaque override qui l'appelle doit sauvegarder puis restaurer la valeur à la main.

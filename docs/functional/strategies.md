@@ -13,11 +13,17 @@ Rappel des colonnes générées :
 - `j2s_<parent>_id` : la ligne parente (clé étrangère) ;
 - `j2s_order` : la position de l'élément dans un tableau d'objets.
 
-Les stratégies `sibling`, `pivot` et `structured_pivot` sont détectées automatiquement ; `sibling` et
-`structured_pivot` se désactivent avec `--disable-strategy` ou dans Setup > Strategy selection. `pivot` et `AutoSplit`
-forment le split des tables larges, toujours appliqué, qui dépend des seuils `--wide-column-threshold` et
-`--stable-threshold`. Les autres se demandent : dans le TOML `--schema-config` (`strategy = …`),
-dans l'écran Strategy de l'IHM, ou avec `--group-columns` pour les groupes de colonnes.
+Ce que json2sql décide seul, d'après la **structure** du JSON (#200) :
+
+- le **split** des tables larges et creuses (voir [plus bas](#le-split--les-tables-larges-et-creuses)), toujours
+  appliqué, réglé par `--wide-column-threshold` et `--stable-threshold` ;
+- la fusion **`sibling`** des objets de même forme, qui se désactive avec `--disable-strategy sibling` ou dans
+  Setup > Strategy selection.
+
+Ce que json2sql **propose** d'après les **noms** des clés, sans l'appliquer : la grille de suffixes et les groupes de
+colonnes. `--suggest` les écrit dans un TOML ; l'utilisateur garde ce qui lui convient et relance avec
+`--schema-config`. Le reste se demande table par table : dans le TOML (`strategy = …`), dans l'écran Strategy de
+l'IHM, ou avec `--group-columns` pour les groupes de colonnes. JSONB n'est jamais choisi seul.
 
 ---
 
@@ -105,13 +111,18 @@ CREATE TABLE scores_scores (
 );
 ```
 
-json2sql choisit seul le pivot quand un objet a beaucoup de clés peu remplies (au-delà de `--wide-column-threshold`).
+Sans TOML, le split fait presque la même chose sur une table large et creuse aux valeurs d'un seul type : la table
+garde son nom, vide, et les lignes clé/valeur vont dans un compagnon `scores_scores_pivot` (voir
+[le split](#le-split--les-tables-larges-et-creuses)). `strategy = "pivot"` les met dans la table elle-même, et la table
+absorbe ses tables enfants.
 
 ---
 
 ## `jsonb` : l'objet entier dans une colonne JSONB
 
 Pour un objet trop irrégulier pour des colonnes, que l'on interrogera avec les opérateurs JSON de PostgreSQL.
+Seulement sur demande : json2sql ne choisit plus JSONB seul (#200), une table large aux types mélangés passe par le
+split.
 
 ```bash
 json2sql --input examples/strategies/products.jsonl --schema-config examples/strategies/jsonb.toml --dry-run
@@ -140,7 +151,7 @@ rapport d'anomalies n'en garde que les 200 premiers caractères.
 
 ---
 
-## `structured_pivot` : des clés à suffixes en lignes typées
+## Grille de suffixes (`suffix_columns`) : des clés à suffixes en lignes typées
 
 Pour des clés qui combinent un nom et un suffixe répété (`calories`, `calories_100g`, `calories_serving`, `fat`,
 `fat_100g`…). Ces clés forment une grille : des noms (`calories`, `fat`, `salt`) croisés avec des suffixes (`_100g`,
@@ -152,12 +163,23 @@ Pour des clés qui combinent un nom et un suffixe répété (`calories`, `calori
                                  "salt": 1, "salt_100g": 2, "salt_serving": 3}}
 ```
 
+La grille n'est **jamais appliquée seule** (#200) : les noms trouvent une grille dans n'importe quel domaine, y compris
+des grilles absurdes (`user_id`, `created_at`, `user_name` donnent les suffixes `_id`, `_at`, `_name`). Elle s'applique
+quand le TOML la demande :
+
 ```bash
-json2sql --input tests/fixtures/structured_pivot.jsonl --table products --dry-run                             # sans
-json2sql --input tests/fixtures/structured_pivot.jsonl --table products --wide-column-threshold 4 --dry-run  # avec
+json2sql --input tests/fixtures/structured_pivot.jsonl --table products --dry-run                                # sans
+json2sql --input tests/fixtures/structured_pivot.jsonl --table products --schema-config examples/strategies/grille.toml --dry-run  # avec
 ```
 
-Sans (l'objet a moins de colonnes que le seuil des tables larges) : une colonne par clé dans `products_nutrients`.
+```toml
+# examples/strategies/grille.toml
+[products_nutrients]
+suffix_columns = ["_100g", "_serving"]
+```
+
+Sans : une colonne par clé dans `products_nutrients` (l'objet a moins de colonnes que le seuil des tables larges ; plus
+large et creux, il passerait par le split).
 
 Avec : la grille part dans une table `products_nutrients_pivot`, avec une ligne par nom et une colonne par suffixe.
 `products_nutrients` garde son nom et tout ce qui n'est pas dans la grille.
@@ -184,12 +206,13 @@ CREATE TABLE products_nutrients_pivot (
   `norm_name`, pour ne pas se confondre avec les colonnes `value` et `name`.
 - `value` n'existe que si l'objet a des clés sans suffixe (`calories` seul).
 - Une clé va au suffixe le plus long qui la termine : `fat_prepared_100g` va dans `prepared_100g`, pas dans `_100g`.
-- La grille n'est retenue que si chaque suffixe revient avec au moins trois noms, et si elle couvre au moins 30 % des
-  clés de l'objet. Deux clés comme `en:celery_seed` et `en:mustard_seed` ne suffisent pas à créer un suffixe `_seed`.
+- La grille du TOML passe avant le split : une table large et creuse qui a une grille garde ses colonnes de suffixes.
 
-Les suffixes peuvent aussi être donnés dans le TOML : `strategy = "structured_pivot"` et
-`suffix_columns = ["_100g", "_serving"]`. Le découpage est le même : seules les clés de la grille partent dans la
-table `_pivot`.
+**La proposer.** `--suggest FICHIER` cherche une grille dans chaque table d'au moins 20 colonnes de données et l'écrit
+**en commentaire** sous la section de la table : `# suffix_columns = ["_100g", "_serving"]`. Enlever le `#` l'applique.
+Une grille n'est proposée que si chaque suffixe revient avec au moins trois noms, et si elle couvre au moins 30 % des
+clés de l'objet : deux clés comme `en:celery_seed` et `en:mustard_seed` ne suffisent pas à créer un suffixe `_seed`.
+L'ancienne forme `strategy = "structured_pivot"` avec `suffix_columns` est toujours lue.
 
 ---
 
@@ -241,9 +264,29 @@ CREATE TABLE images_images (
 
 ---
 
-## `AutoSplit` : les clés fréquentes en colonnes, les autres en clé/valeur
+## Le split : les tables larges et creuses
 
-Pour une table où quelques clés sont toujours là et beaucoup d'autres n'apparaissent que parfois.
+json2sql coupe seul une table **large et creuse** : beaucoup de clés, chacune présente dans peu de lignes. C'est la même
+règle pour la table racine et pour une table enfant, qu'elle ait des sous-objets ou non :
+
+```
+1. Table large ?   plus de --wide-column-threshold colonnes de valeurs simples (15 par défaut)
+   └─ non → une colonne par clé
+2. Table stable ?  au moins 10 lignes, et plus de la moitié des colonnes présentes dans au moins
+                   --stable-threshold des lignes (10 % par défaut)
+   └─ oui → une colonne par clé
+3. Sinon, le split :
+   - table enfant aux valeurs d'un seul type (toutes des nombres, toutes du texte…) : les clés sont des
+     données (devises, langues…), toutes partent en lignes clé/valeur dans un compagnon {table}_pivot ;
+   - table racine, ou types mélangés : les clés présentes dans au moins --stable-threshold des lignes
+     restent des colonnes, les autres partent dans un compagnon {table}_wide.
+```
+
+Aucune clé n'est jetée : même une clé vue une seule fois va dans le compagnon (`--rare-threshold` n'existe plus, #200).
+Les colonnes tableau PostgreSQL et les objets enfants restent sur la table. Une table qui a une stratégie dans le TOML
+ou dans l'IHM (`strategy = "columns"` compris) n'est pas coupée.
+
+**Types mélangés : les clés fréquentes en colonnes.**
 
 ```json
 {"id": 1, "name": "Widget", "details": {"color": "red"}, "tag_a": "x1", "tag_b": "y1"}
@@ -271,7 +314,7 @@ CREATE TABLE products (
 ```
 
 Avec : les clés présentes dans au moins 80 % des lignes restent des colonnes ; toutes les autres vont dans
-`products_wide`, même `rare_key`, vue dans une seule ligne : aucune clé n'est écartée.
+`products_wide`, même `rare_key`, vue dans une seule ligne.
 
 ```sql
 CREATE TABLE products (
@@ -288,6 +331,32 @@ CREATE TABLE products_wide (
 ```
 
 `products_details` (l'objet `details`) est la même dans les deux cas.
+
+Le type de `value` est celui qui accepte toutes les valeurs du compagnon ; des types mélangés donnent `TEXT`, où
+`false` devient `'false'`.
+
+**Un seul type : toutes les clés en clé/valeur.** Avec le fichier de l'exemple `pivot` (3 lignes : sous 10 lignes, une
+table n'est jamais jugée stable, d'où le split malgré « 100% stable » dans le journal) :
+
+```bash
+json2sql --input examples/strategies/scores.jsonl --dry-run --wide-column-threshold 3
+```
+
+```sql
+CREATE TABLE scores_scores (
+    j2s_id UUID NOT NULL,
+    j2s_scores_id UUID NOT NULL
+);
+CREATE TABLE scores_scores_pivot (
+    j2s_id UUID NOT NULL,
+    j2s_scores_scores_id UUID NOT NULL,
+    key TEXT,          -- 'fr', 'de'…
+    value INTEGER
+);
+```
+
+**`--stable-threshold` vaut pour toutes les tables.** Avant #200, il ne réglait que la racine ; il règle maintenant
+aussi le split des tables enfants, et un réglage personnalisé change leur schéma.
 
 ---
 
@@ -442,7 +511,8 @@ Les données de la Pass 1 (un échantillon des lignes, gardé dans le snapshot) 
 
 Les mêmes groupes s'écrivent à la main dans le TOML (`[foods.column_groups]`, voir
 [usage.md](usage.md#découper-une-table-en-groupes-de-colonnes-column_groups)), et `--suggest` les propose
-avec un rapport.
+avec un rapport. Les groupes du TOML passent avant le split ; ceux de `--group-columns` après lui, sur les colonnes qui
+restent.
 
 ---
 

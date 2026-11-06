@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Groupes de colonnes, proposition (--suggest) et application (TOML, --group-columns, IHM)
-verified_at: db4ec51
+verified_at: 28a6e29
 files:
   - src/schema/grouping/
   - src/schema/column_groups.rs
@@ -22,6 +22,7 @@ files:
   - tests/column_groups/mod.rs
   - tests/tc_column_groups.rs
 symbols:
+  - TomlStrategy::rebuilds_columns
   - TableSchema
   - TableSchema::takes_column_groups
   - TableSchema::data_columns
@@ -116,7 +117,7 @@ dans la [carte Pass 1](pass1.md).
 
 ## Rôle
 
-Un groupe de colonnes est une **couche posée après la finalisation** : il découpe une table `Columns` ou `AutoSplit`
+Un groupe de colonnes est une **couche posée sur le schéma de la Pass 1** : il découpe une table `Columns` ou `AutoSplit`
 (`TableSchema::takes_column_groups`) en tables 1:1, une par thème de colonnes. La table garde sa stratégie. La zone
 fait deux choses :
 
@@ -162,8 +163,9 @@ le rapport où iraient les colonnes restées dans la table, sans rien confirmer 
 
 ```text
 CLI : post_process_schema (pipeline.rs)
+  ├─ save_schema_snapshot                       ← avant le TOML : ni groupes du TOML, ni groupes automatiques
   ├─ apply_schema_config → apply_overrides_complete → apply_column_groups (TOML), reindex_stats
-  ├─ save_schema_snapshot                       ← le snapshot ne garde jamais de groupes automatiques
+  ├─ split (pass1::runner)                      ← les groupes du TOML passent avant, ceux de --group-columns après
   └─ apply_group_columns (--group-columns, ou tables cochées dans le snapshot de l'IHM ;
      sauf tables dont le TOML a une clé column_groups : toml_column_group_tables)
        └─ apply_name_groups (auto.rs)
@@ -174,7 +176,7 @@ CLI : post_process_schema (pipeline.rs)
             └─ confirmed_config → apply_column_groups
        └─ reindex_stats
 
---suggest : suggest_groups → suggest (suggest.rs)
+--suggest : suggest_groups → finalized_schema (sans le split : toutes les clés) → suggest (suggest.rs)
   ├─ data_signals : relit le fichier (sample_tables, DEFAULT_BUDGET lignes à pas régulier)
   ├─ proposal_for pour chaque table eligible (+ placements avec un modèle)
   └─ Suggestion { toml: to_toml, report: to_markdown }
@@ -206,8 +208,10 @@ par `RowSampler` ; il est sauvé dans le snapshot (`SchemaSnapshot`, champ `samp
 - **La liste des signaux est écrite en dur.** `DataSignals::evidence` parcourt un tableau fixe des variantes de
   `Signal`. Le compilateur signale `DataSignals::verdict` et `evidence_text` (des `match` sans cas par défaut), pas ce
   tableau : un signal oublié là compile, et n'est jamais calculé.
-- **Ordre en CLI.** `apply_group_columns` vient après `save_schema_snapshot` : un snapshot ne contient que les groupes
-  d'un TOML, jamais les automatiques. Une clé `column_groups` dans la section TOML d'une table, **même vide**, coupe les
+- **Ordre en CLI** (#200). `save_schema_snapshot`, puis le TOML, puis le split, puis `apply_group_columns` : un
+  snapshot de la CLI ne contient aucun groupe. Un groupe du TOML voit toutes les clés, même celles que le split aurait
+  envoyées en clé/valeur, et une table de groupe encore large et creuse passe à son tour par le split. Les groupes
+  automatiques, eux, ne voient que ce que le split a laissé ; leurs échantillons sont pris sur une copie coupée. Une clé `column_groups` dans la section TOML d'une table, **même vide**, coupe les
   groupes automatiques pour cette table.
 - **Les groupes automatiques sont recalculés à chaque chargement.** Changer un seuil, `normalize` ou un signal change
   en silence ce qu'importe un snapshot existant (cases cochées, `--group-columns`). Un TOML déjà produit par
@@ -224,7 +228,8 @@ par `RowSampler` ; il est sauvé dans le snapshot (`SchemaSnapshot`, champ `samp
   donnent un avertissement ; le reste du TOML s'applique.
 - **Une stratégie qui reconstruit les colonnes défait les groupes** (`dissolve_column_groups`) : dans l'IHM,
   `apply_user_overrides` le fait pour `Pivot` et `Jsonb` ; dans le TOML, `rebuilds_columns` décide (stratégies `pivot`,
-  `jsonb`, `normalize_dynamic_keys`, `flatten`, ou `suffix_columns`), deux listes à tenir ensemble. Après un `Skip`,
+  `jsonb`, `flatten`, ou `suffix_columns` ; `TomlStrategy::rebuilds_columns`, un `match` sans cas par défaut), deux
+  listes à tenir ensemble. Après un `Skip`,
   `prune_missing_groups` retire les noms des tables de groupe disparues.
 - **`reindex_stats` suit chaque application en CLI**, sinon les statistiques d'une colonne déplacée restent rangées
   sous l'ancienne table. L'IHM ne l'appelle pas : elle sauve les schémas d'origine, sans groupes.

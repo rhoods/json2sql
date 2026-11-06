@@ -33,6 +33,23 @@ users_orders_items       → imbrication profonde
 
 Un tableau de scalaires ne crée pas de table : c'est une colonne tableau de sa table parente (`tags VARCHAR(n)[]`, `INTEGER[]`, etc.). Dans `users`, `"tags": ["rust", "sql"]` donne `{rust,sql}`, `[]` donne `{}`, un tableau absent ou `null` donne `NULL`, et l'ordre est l'index du tableau. Un champ tantôt scalaire, tantôt tableau (`"bio"` puis `["bio", "vegan"]`) devient une seule colonne tableau : chaque valeur scalaire y est stockée comme un tableau à un élément (`{bio}`), et le type des éléments est élargi si besoin (entier + texte → texte). Exemples de requêtes : [usage.md](usage.md#tableaux-de-scalaires).
 
+### Tables larges : la structure décide, les noms proposent
+
+Certains objets ont des clés qui sont des données (devises, langues, identifiants) : une colonne par clé donnerait des
+centaines de colonnes presque vides. json2sql les met en forme selon un principe (#200) :
+
+- **la structure décide seule** : une table large et creuse (plus de `--wide-column-threshold` colonnes, peu présentes
+  ligne à ligne) passe par le **split** : ses clés fréquentes restent des colonnes, les autres vont dans une table
+  clé/valeur ; si ses valeurs sont toutes du même type, toutes ses clés y vont. Des objets frères de même forme sont
+  fusionnés en une table, avec une colonne `key` ;
+- **les noms proposent** : la grille de suffixes (`sugars`, `sugars_100g`, `sugars_unit`…) et les groupes de colonnes
+  (`packaging_*`, `origin_*`…) ne s'appliquent pas d'eux-mêmes. `--suggest` les écrit dans un TOML, que l'utilisateur
+  valide et passe avec `--schema-config` ;
+- **aucune clé n'est jetée** : une erreur de détection donne au pire un schéma moins lisible, qu'on corrige dans le TOML
+  ou dans l'IHM.
+
+JSONB n'est jamais choisi seul. Exemples : [strategies.md](strategies.md).
+
 ### Clés générées (préfixe `j2s_`)
 
 Toutes les tables reçoivent des colonnes synthétiques réservées :
