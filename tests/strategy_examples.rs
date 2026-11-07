@@ -628,10 +628,10 @@ fn suffix_grid_of_prefixed_statistics_is_upside_down() {
     assert_split(&dry_run("t", &rows, &[], None), "t_obj_pivot");
 }
 
-// Le piège : des identifiants, des dates et des noms d'objets sans rapport donnent une grille absurde. Elle n'est plus
-// appliquée (T8) : la table, aux types mélangés, est coupée par fréquence ; la grille n'est que proposée, commentée.
+// Le piège : des identifiants, des dates et des noms d'objets sans rapport donnaient une grille absurde. Elle n'est plus
+// appliquée (T8) : la table, aux types mélangés, est coupée par fréquence ; elle n'est plus proposée non plus (#199).
 #[test]
-fn suffix_trap_of_ids_and_dates_gives_an_absurd_grid() {
+fn suffix_trap_of_ids_and_dates_gives_no_grid() {
     let keys = [
         "user_id",
         "order_id",
@@ -671,10 +671,8 @@ fn suffix_trap_of_ids_and_dates_gives_an_absurd_grid() {
     });
     assert_split(&dry_run("t", &rows, &[], None), "t_obj_wide");
     let proposed = suggest_toml("t", &rows);
-    assert!(
-        proposed.contains("# suffix_columns = [\"_at\", \"_id\", \"_name\"]"),
-        "{proposed}"
-    );
+    // #199 : `_at` date d'autres noms que `_id` et `_name` ; sans lui, la grille couvre 7 clés sur 24, trop peu.
+    assert!(!proposed.contains("# suffix_columns = ["), "{proposed}");
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,8 @@
 //! - fn `assign_keys` — attribue chaque clé au suffixe le plus long qui la termine.
 //! - fn `detect_suffix_schema` — détecte automatiquement la grille bases × suffixes et ses clés.
 //! - fn `grid_keys` — clés nues et clés de la grille d'une attribution.
-//! - fn `retained_assignment` — attribution des clés aux suffixes qui gardent assez de bases.
+//! - fn `retained_assignment` — attribution des clés aux suffixes d'une seule grille, chacun avec assez de bases.
+//! - fn `one_grid` — les suffixes d'une grille : ceux dont les bases sont celles de la grille (#199).
 //! - fn `build_suffix_cols_and_value_type` — construit les `SuffixColumn` + type de la colonne `value` de base.
 //! - fn `widest_type` — type le plus large des clés observées (`TEXT` s'il n'y en a pas).
 //! - fn `suffix_col_name` — nom de colonne d'un suffixe (`norm_value` pour `value`).
@@ -66,9 +67,9 @@ fn assign_keys<'a>(keys: &[&'a str], suffixes: &[String]) -> BTreeMap<String, Ve
 }
 
 /// The grid of a wide table, from its scalar keys (objects and arrays are child tables or PG array columns, never
-/// part of a grid): suffixes shared by at least `MIN_BASES` bases and by at least
-/// `coverage_threshold` of all the bases, with the keys it covers (suffixed keys and bare bases).
-/// The grid must also cover `coverage_threshold` of the table's scalar columns.
+/// part of a grid): suffixes shared by at least `MIN_BASES` bases and of the same bases (see [`one_grid`]), with the
+/// keys it covers (suffixed keys and bare bases). The grid must cover `coverage_threshold` of the table's scalar
+/// columns.
 ///
 /// Returns `None` if no grid is found above threshold.
 #[must_use]
@@ -77,7 +78,7 @@ pub fn detect_suffix_schema(
     coverage_threshold: f64,
 ) -> Option<(SuffixSchema, HashSet<String>)> {
     let keys: Vec<&str> = observed.keys().map(String::as_str).collect();
-    let assigned = retained_assignment(&keys, coverage_threshold);
+    let assigned = retained_assignment(&keys);
     if assigned.is_empty() {
         return None;
     }
@@ -113,38 +114,55 @@ fn grid_keys<'a>(
     (bare, grid)
 }
 
-/// Assignment of the keys to the suffixes that keep `MIN_BASES` bases and `coverage_threshold`
-/// of all the bases. Assigning keys to their longest suffix can leave a shorter one with too few
-/// bases: it is dropped and the keys are assigned again, until nothing changes (the set of
-/// suffixes only shrinks).
-fn retained_assignment<'a>(
-    keys: &[&'a str],
-    coverage_threshold: f64,
-) -> BTreeMap<String, Vec<&'a str>> {
+/// Assignment of the keys to the suffixes of one grid (see [`one_grid`]), each suffix with `MIN_BASES` bases.
+/// Assigning keys to their longest suffix can leave a shorter one with too few bases, and dropping a suffix moves
+/// its keys: the keys are assigned again until nothing changes (the set of suffixes only shrinks).
+fn retained_assignment<'a>(keys: &[&'a str]) -> BTreeMap<String, Vec<&'a str>> {
     let mut suffixes: Vec<String> = build_suffix_to_bases(keys)
         .into_iter()
         .filter(|(_, bases)| bases.len() >= MIN_BASES)
         .map(|(suffix, _)| suffix)
         .collect();
     loop {
-        let assigned = assign_keys(keys, &suffixes);
-        let all_bases: HashSet<&str> = assigned
-            .iter()
-            .flat_map(|(s, ks)| ks.iter().map(move |k| &k[..k.len() - s.len()]))
-            .collect();
-        let kept: Vec<String> = assigned
-            .iter()
-            .filter(|(_, ks)| {
-                ks.len() >= MIN_BASES
-                    && ks.len() as f64 / all_bases.len() as f64 >= coverage_threshold
-            })
-            .map(|(s, _)| s.clone())
-            .collect();
+        let mut assigned = assign_keys(keys, &suffixes);
+        assigned.retain(|_, ks| ks.len() >= MIN_BASES);
+        let kept = one_grid(&assigned);
         if kept.len() == suffixes.len() {
             return assigned;
         }
         suffixes = kept;
     }
+}
+
+/// The suffixes of one grid among the assigned ones (#199): from a seed, a suffix joins when most of its bases are
+/// bases of the grid so far, so that suffixes of other names (`_at` of `created`, `_id` of `user`) stay out, rare
+/// ones of the same names (`_label`) join. Every suffix is tried as the seed; the grid with the most keys wins.
+fn one_grid(assigned: &BTreeMap<String, Vec<&str>>) -> Vec<String> {
+    let bases: Vec<(&String, HashSet<&str>)> = assigned
+        .iter()
+        .map(|(s, ks)| (s, ks.iter().map(|k| &k[..k.len() - s.len()]).collect()))
+        .collect();
+    let grid_from = |seed: usize| {
+        let mut grid_bases = bases[seed].1.clone();
+        let mut grid = vec![seed];
+        for (at, (_, b)) in bases.iter().enumerate() {
+            if at != seed && 2 * b.intersection(&grid_bases).count() > b.len() {
+                grid_bases.extend(b);
+                grid.push(at);
+            }
+        }
+        grid
+    };
+    let keys_of = |grid: &[usize]| grid.iter().map(|&at| bases[at].1.len()).sum::<usize>();
+    // `max_by_key` keeps the last of equal grids: reversed, the first seed in suffix order wins.
+    let best = (0..bases.len())
+        .rev()
+        .map(grid_from)
+        .max_by_key(|g| keys_of(g))
+        .unwrap_or_default();
+    let mut suffixes: Vec<String> = best.into_iter().map(|at| bases[at].0.clone()).collect();
+    suffixes.sort();
+    suffixes
 }
 
 /// Build `SuffixColumn` entries (in suffix order) and the base `value` column type, each typed
@@ -297,6 +315,41 @@ mod tests {
             }
         }
         cols
+    }
+
+    /// The suffixes of the grid detected in `cols`, in order; empty without a grid.
+    fn suffixes_of(cols: IndexMap<String, TypeTracker>) -> Vec<String> {
+        detect_suffix_schema(&entry_of(cols), SUFFIX_MIN_COVERAGE)
+            .map_or_else(Vec::new, |(s, _)| {
+                s.suffix_cols.into_iter().map(|c| c.suffix).collect()
+            })
+    }
+
+    #[test]
+    fn a_suffix_whose_names_are_not_those_of_the_grid_stays_out() {
+        // The #199 trap: `_at` dates other names than `_id` and `_name`, which share `user`, `product`…
+        let mut cols = grid(&["user", "order", "product", "store", "shop"], &["_id"]);
+        cols.extend(grid(&["user", "product", "store", "shop"], &["_name"]));
+        cols.extend(grid(&["created", "updated", "shipped", "paid"], &["_at"]));
+        cols.extend(["status", "amount", "note"].map(|k| (k.to_string(), make_text_tracker())));
+        assert_eq!(suffixes_of(cols), ["_id", "_name"]);
+    }
+
+    #[test]
+    fn a_rare_suffix_of_the_names_of_the_grid_joins_it() {
+        // OFF `nutriments`: `_label` has 26 names of ~100, all of them names of the grid; 30 % of the names is too much.
+        let bases: Vec<String> = (0..20).map(|i| format!("n{i}")).collect();
+        let bases: Vec<&str> = bases.iter().map(String::as_str).collect();
+        let mut cols = grid(&bases, &["", "_100g", "_unit"]);
+        cols.extend(grid(&bases[..4], &["_label"]));
+        assert_eq!(suffixes_of(cols), ["_100g", "_label", "_unit"]);
+    }
+
+    #[test]
+    fn two_grids_of_other_names_give_the_one_with_more_keys() {
+        let mut cols = grid(&["a", "b", "c", "d"], &["_min", "_max"]);
+        cols.extend(grid(&["p", "q", "r"], &["_x", "_y"]));
+        assert_eq!(suffixes_of(cols), ["_max", "_min"]);
     }
 
     #[test]
