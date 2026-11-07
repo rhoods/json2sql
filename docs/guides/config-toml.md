@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Config TOML, overrides de l'IHM et snapshot du schéma
-verified_at: 28a6e29
+verified_at: 0c42853
 files:
   - src/schema/config.rs
   - src/schema/persistence.rs
@@ -251,8 +251,8 @@ IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snap
   comme `tests/fixtures/`). La forme `[table.columns]` des deux docs donne une clé `columns` dont la valeur est une
   table : `apply_column_type_overrides` saute toute valeur qui n'est pas une chaîne. Vérifié : aucun override, aucun
   avertissement. De même `age = 5`, un `max_depth` hors de 0..255 (remplacé par 1), un `suffix_columns` sans chaîne.
-- **Des noms réservés.** `strategy`, `suffix_columns`, `id_column`, `prefix`, `max_depth` et `column_groups` sont des
-  clés de la table : une colonne qui porte un de ces noms ne peut pas être typée. Une table nommée `group` ne peut pas
+- **Des noms réservés.** `strategy`, `suffix_columns`, `prefix_columns`, `id_column`, `prefix`, `max_depth` et
+  `column_groups` sont des clés de la table : une colonne qui porte un de ces noms ne peut pas être typée. Une table nommée `group` ne peut pas
   être configurée : `[group]` est lu comme les groupes de fusion (erreur de lecture du TOML, vérifié).
 - **Les docs annonçaient ce que le TOML refuse.** `strategy = "ignore"` donne `UnknownStrategy` (vérifié) ; Skip
   n'existe que dans l'IHM. usage.md et schema-inference.md ne citent plus `ignore` depuis #200 ; usage.md ne décrit

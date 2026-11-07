@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Finalisation du schéma, des observations de la Pass 1 aux TableSchema
-verified_at: 28a6e29
+verified_at: 0c42853
 files:
   - src/schema/finalizer/
   - src/schema/cascading/
@@ -16,6 +16,7 @@ files:
   - tests/tc_sibling_collapse.rs
   - tests/tc_wide_table.rs
 symbols:
+  - GridSide::base_of
   - SchemaRegistry::finalize_before_split
   - split_wide_tables
   - SchemaFinalizer
@@ -121,7 +122,7 @@ dans `table_schema.rs`, est le modèle que lisent ensuite les overrides, le DDL,
 | Nouvelle stratégie | la fiche [ajouter-une-strategie.md](ajouter-une-strategie.md) | en partie |
 | Nouveau seuil ou réglage | `SchemaFinalizer::new` (sept arguments par position, voir #112), puis `FinalizerConfig` et `build_finalizer_config` pour la phase 3 | oui pour l'ajout, **non** pour l'ordre des arguments de même type |
 | Choix de stratégie d'une table large | `apply_wide_strategy`, `apply_non_autosplit_strategy`, `suggest_wide_strategy` | non |
-| Grille de suffixes proposée | `detect_suffix_schema` (appelée par `--suggest`) ; appliquée par le TOML `suffix_columns` | non |
+| Grille de suffixes proposée | `detect_suffix_schema` (appelée par `--suggest`, qui la vérifie sur l'échantillon dans `grouping/suffixes.rs`, #199) ; appliquée par le TOML `suffix_columns` ou `prefix_columns`. Une clé est découpée par `GridSide::base_of`, en Pass 1 comme en Pass 2 | non |
 | Fusion de tables sœurs | `finalize_cascading` et les vagues de `cascading/detection/` | non |
 | Forme des clés des tables sœurs | `KeyShape`, `classify_key_shape`, et le nom de colonne clé (§ 4) | **non** |
 | Nom d'une table ou d'une colonne | `NamingRegistry`, `ColumnNameRegistry` (`naming.rs`) | non |

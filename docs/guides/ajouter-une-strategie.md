@@ -1,7 +1,7 @@
 ---
 type: recette
 sujet: Ajouter une stratégie de matérialisation
-verified_at: 28a6e29
+verified_at: 0c42853
 files:
   - src/schema/table_schema.rs
   - src/schema/strategies.rs
@@ -113,7 +113,7 @@ Les stratégies existantes, par origine :
 | `Columns` | par défaut | TOML `columns` | — |
 | `Pivot` | phase 3 (`suggest_wide_strategy`, valeurs d'un seul type) | TOML `pivot`, IHM | non (partie du split, #200) |
 | `Jsonb` | phase 4 seulement (plus de 1 600 colonnes) | TOML `jsonb`, IHM | — |
-| `StructuredPivot` | jamais : la grille est proposée par `--suggest` (#200) | TOML `suffix_columns` | — (refusé, plus rien d'automatique) |
+| `StructuredPivot` | jamais : la grille est proposée par `--suggest` (#200) | TOML `suffix_columns`, ou `prefix_columns` pour des parties en début de clé (`SuffixSchema.side`, #199) | — (refusé, plus rien d'automatique) |
 | `SiblingCollapse` | phase 2 (`finalize_cascading`) | TOML `[group.*]` | `sibling` |
 | `SiblingCollapseMulti` | phase 2 | — | `sibling` |
 | `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (le split est obligatoire) |
