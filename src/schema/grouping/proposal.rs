@@ -29,6 +29,7 @@
 //! - fn `DataSignals::verdict` — un signal soutient-il une paire ? `None` s'il n'est pas défini pour elle.
 //! - fn `DataSignals::backing` — paires soutenues et paires où le signal est défini, sur une liste de paires.
 //! - fn `DataSignals::background` — part des paires informatives liées par la seule richesse des fiches.
+//! - fn `DataSignals::presence` — la présence de l'échantillon (suffixes remplis ensemble, #199).
 //! - fn `DataSignals::lift` — lignes où une colonne est présente, et lift ajusté par richesse d'une autre sachant celle-ci.
 //! - fn `DataSignals::evidence` — preuves de données sur une liste de paires, pour les signaux définis.
 //! - fn `background_rate` — part des paires informatives dont le φ atteint le seuil de lien, sans rien d'autre en commun.
@@ -60,6 +61,7 @@ use super::numeric::{rank_correlations, shape, Shape};
 use super::presence::{PhiMatrix, Presence, PresenceStrata};
 use super::sample::TableSample;
 use super::shared::{shared_value_pairs, MIN_DISTINCT};
+use super::suffixes::CheckedGrid;
 use super::values::Nature;
 use crate::error::Result;
 use crate::schema::column_groups::MIN_GROUP_COLUMNS;
@@ -225,8 +227,9 @@ pub struct TableProposal {
     pub placements: Vec<Placement>,
     /// Columns left in the table that the data tie to a confirmed group: candidates, never applied.
     pub attachments: Vec<Attachment>,
-    /// Suffixes of the grid the names of the table form, if any (#200): a `suffix_columns` to confirm, never applied.
-    pub suffixes: Vec<String>,
+    /// Suffixes of the grid the names of the table form, if any (#200): a `suffix_columns` to confirm, never applied;
+    /// and the alternative suffixes the sample leaves out of it (#199).
+    pub suffixes: CheckedGrid,
 }
 
 /// The data signals of one table, ready to be asked about pairs of columns.
@@ -280,6 +283,11 @@ impl DataSignals {
             presence: sample.presence.clone(),
             strata: sample.presence.strata(),
         }
+    }
+
+    /// The presence of the sample (#199: suffixes filled together).
+    pub const fn presence(&self) -> &Presence {
+        &self.presence
     }
 
     /// Rows where `a` is present, and the richness-adjusted lift of `b` given `a` with the rows where both are.
@@ -401,7 +409,7 @@ pub fn propose(
         data: data_status(data),
         placements: Vec::new(),
         attachments,
-        suffixes: Vec::new(),
+        suffixes: CheckedGrid::default(),
     })
 }
 

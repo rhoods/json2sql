@@ -13,6 +13,7 @@
 //! - [`render`] — sorties d'une proposition : TOML `column_groups` et rapport Markdown (T1e)
 //! - [`sample`] — échantillon à pas régulier des lignes d'une table, relu dans le fichier d'entrée (T1c)
 //! - [`shared`] — valeurs partagées entre colonnes texte : contenance pondérée par la rareté (T1d)
+//! - [`suffixes`] — suffixes alternatifs d'une grille proposée, repérés par la co-occurrence (#199)
 //! - [`suggest`] — l'exécution de `--suggest` : choix d'une table, échantillon, proposition, sorties (T1e)
 //! - [`values`] — valeurs échantillonnées des colonnes (vocabulaire, nombres), pour les signaux de données (T1d)
 
@@ -28,5 +29,6 @@ pub mod proposal;
 pub mod render;
 pub mod sample;
 pub mod shared;
+pub mod suffixes;
 pub mod suggest;
 pub mod values;

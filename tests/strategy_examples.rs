@@ -502,6 +502,11 @@ fn assert_split(run: &DryRun, companion: &str) {
 
 /// Le fichier de propositions de `json2sql --suggest` sur `rows` (T8 : les grilles y sont proposées).
 fn suggest_toml(table: &str, rows: &[Value]) -> String {
+    suggest(table, rows).0
+}
+
+/// Le fichier de propositions et le rapport (la sortie standard) de `json2sql --suggest` sur `rows`.
+fn suggest(table: &str, rows: &[Value]) -> (String, String) {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.jsonl");
     let lines: String = rows.iter().map(|row| format!("{row}\n")).collect();
@@ -519,7 +524,20 @@ fn suggest_toml(table: &str, rows: &[Value]) -> String {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    std::fs::read_to_string(&toml).unwrap()
+    let report = String::from_utf8_lossy(&out.stdout).into_owned();
+    (std::fs::read_to_string(&toml).unwrap(), report)
+}
+
+/// Aucune grille proposée (#199) : les suffixes, jamais remplis ensemble, sont nommés comme alternatifs dans le rapport.
+fn assert_alternatives(rows: &[Value], alternatives: &[&str]) {
+    let (proposed, report) = suggest("t", rows);
+    assert!(!proposed.contains("# suffix_columns = ["), "{proposed}");
+    let list: Vec<String> = alternatives.iter().map(|s| format!("`{s}`")).collect();
+    let line = format!(
+        "Alternative suffixes, never filled together: {}",
+        list.join(", ")
+    );
+    assert!(report.contains(&line), "{report}");
 }
 
 const METEO: [&str; 12] = [
@@ -556,7 +574,8 @@ fn suffix_grid_of_statistics() {
     );
 }
 
-// Unités alternatives, une par objet : une grille serait trouvée (coupée sur `_temp_c`…), 2 colonnes sur 3 vides.
+// Unités alternatives, une par objet : la grille ferait 2 colonnes vides sur 3. Elle n'est plus proposée (#199). Huit
+// mesures, 24 clés : `--suggest` ne regarde que les tables d'au moins 20 colonnes.
 #[test]
 fn suffix_grid_of_alternative_units() {
     let temps = [
@@ -566,19 +585,24 @@ fn suffix_grid_of_alternative_units() {
         "engine_temp",
         "oil_temp",
         "cabin_temp",
+        "brake_temp",
+        "tyre_temp",
     ];
     let rows = rows_with_obj(|i| {
-        let key = format!("{}_{}", temps[i % 6], ["c", "f", "k"][i / 6 % 3]);
+        let key = format!("{}_{}", temps[i % 8], ["c", "f", "k"][i / 8 % 3]);
         object([key], |_| json!(21.5))
     });
     assert_split(&dry_run("t", &rows, &[], None), "t_obj_pivot");
+    // Coupés sur le suffixe le plus long qui a trois noms : `_temp_c`, pas `_c`.
+    assert_alternatives(&rows, &["_temp_c", "_temp_f", "_temp_k"]);
 }
 
 const LANGS: [&str; 15] = [
     "fr", "en", "de", "es", "it", "pt", "nl", "sv", "pl", "cs", "ro", "hu", "el", "fi", "da",
 ];
 
-// Traductions, une langue par objet : la grille ferait une colonne par langue, 14 vides sur 15 par ligne.
+// Traductions, une langue par objet : la grille ferait une colonne par langue, 14 vides sur 15 par ligne. Elle n'est
+// plus proposée (#199).
 #[test]
 fn suffix_grid_of_languages() {
     let rows = rows_with_obj(|i| {
@@ -587,9 +611,13 @@ fn suffix_grid_of_languages() {
         object(fields.map(|f| format!("{f}_{lang}")), |k| json!(k))
     });
     assert_split(&dry_run("t", &rows, &[], None), "t_obj_pivot");
+    let mut langs: Vec<String> = LANGS.iter().map(|l| format!("_{l}")).collect();
+    langs.sort();
+    assert_alternatives(&rows, &langs.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
-// Séries annuelles, une année par objet : la grille ferait une colonne par année (`_2015`…).
+// Séries annuelles, une année par objet : la grille ferait une colonne par année (`_2015`…). Elle n'est plus proposée
+// (#199).
 #[test]
 fn suffix_grid_of_years() {
     let bases = ["revenue", "cost", "margin", "headcount", "capex", "opex"];
@@ -599,6 +627,8 @@ fn suffix_grid_of_years() {
         })
     });
     assert_split(&dry_run("t", &rows, &[], None), "t_obj_pivot");
+    let years: Vec<String> = (2015..=2025).map(|y| format!("_{y}")).collect();
+    assert_alternatives(&rows, &years.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 // Statistiques en préfixe (`min_temperature`) : la grille serait trouvée à l'envers, une ligne par statistique.

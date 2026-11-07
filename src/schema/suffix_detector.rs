@@ -52,7 +52,7 @@ fn build_suffix_to_bases(all_keys: &[&str]) -> HashMap<String, HashSet<String>> 
 
 /// Suffix → keys ending with it, each key under the longest suffix that ends it with a non-empty
 /// base (`fat_prepared_100g` goes to `_prepared_100g`, not `_100g`). Pass 2 matches the same way.
-fn assign_keys<'a>(keys: &[&'a str], suffixes: &[String]) -> BTreeMap<String, Vec<&'a str>> {
+pub fn assign_keys<'a>(keys: &[&'a str], suffixes: &[String]) -> BTreeMap<String, Vec<&'a str>> {
     let mut assigned: BTreeMap<String, Vec<&'a str>> = BTreeMap::new();
     for &key in keys {
         let longest = suffixes
