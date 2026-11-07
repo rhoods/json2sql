@@ -176,7 +176,8 @@ pub fn structured_pivot_companion(
 }
 
 /// `name TEXT NOT NULL`, then `value` when `with_value`, then one column per suffix whose
-/// `original_name` is the suffix itself, so Pass 2 can look it up.
+/// `original_name` is the suffix itself, so Pass 2 can look it up. A `_value` suffix keeps `value`, and the bare keys
+/// take `bare_value` (#199, #93): Pass 2 finds them by their original name, `value`.
 fn push_structured_pivot_columns(
     columns: &mut Vec<ColumnSchema>,
     suffix_schema: &SuffixSchema,
@@ -184,11 +185,15 @@ fn push_structured_pivot_columns(
 ) {
     columns.push(ColumnSchema::data("name", PgType::Text, true));
     if with_value {
-        columns.push(ColumnSchema::data(
-            "value",
-            suffix_schema.value_type.clone(),
-            false,
-        ));
+        let taken = suffix_schema
+            .suffix_cols
+            .iter()
+            .any(|sc| sc.col_name == "value");
+        let mut bare = ColumnSchema::data("value", suffix_schema.value_type.clone(), false);
+        if taken {
+            bare.name = "bare_value".to_string();
+        }
+        columns.push(bare);
     }
     for sc in &suffix_schema.suffix_cols {
         columns.push(ColumnSchema {
@@ -423,6 +428,53 @@ mod tests {
         assert_eq!(
             *schema.effective_strategy(),
             InferredStrategy::StructuredPivot(suffix_schema)
+        );
+    }
+
+    /// `(PG name, original name)` of the pivot columns of a grid of `suffixes` with bare keys.
+    fn pivot_columns(suffixes: &[(&str, &str)]) -> Vec<(String, String)> {
+        use crate::schema::table_schema::{GridSide, SuffixColumn};
+        let ss = SuffixSchema {
+            suffix_cols: suffixes
+                .iter()
+                .map(|(suffix, col)| SuffixColumn {
+                    suffix: (*suffix).to_string(),
+                    col_name: (*col).to_string(),
+                    pg_type: PgType::Integer,
+                })
+                .collect(),
+            value_type: PgType::Integer,
+            side: GridSide::Suffix,
+        };
+        let mut columns = Vec::new();
+        push_structured_pivot_columns(&mut columns, &ss, true);
+        columns
+            .into_iter()
+            .map(|c| (c.name, c.original_name))
+            .collect()
+    }
+
+    /// #199 (#93): with a `_value` suffix, `fat_value` fills `value` and the bare `fat` `bare_value`; without one, the
+    /// bare key keeps `value`.
+    #[test]
+    fn the_bare_column_gives_way_to_a_value_suffix() {
+        let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+                .collect()
+        };
+        assert_eq!(
+            pivot_columns(&[("_points", "points"), ("_value", "value")]),
+            pairs(&[
+                ("name", "name"),
+                ("bare_value", "value"),
+                ("points", "_points"),
+                ("value", "_value")
+            ])
+        );
+        assert_eq!(
+            pivot_columns(&[("_unit", "unit")]),
+            pairs(&[("name", "name"), ("value", "value"), ("unit", "_unit")])
         );
     }
 

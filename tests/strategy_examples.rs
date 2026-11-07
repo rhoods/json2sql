@@ -458,7 +458,8 @@ fn nutrient_scores() -> Vec<Value> {
 
 // ---------------------------------------------------------------------------
 // F. Grille nom × suffixe dans une table dense : aujourd'hui 21 colonnes, la grille n'est pas cherchée ; forcée dans
-// le TOML, `name, value, points, norm_value` (`value` vient de `sugars`, `norm_value` de `sugars_value`, #93).
+// le TOML, `name, bare_value, points, value` : `value` vient de `sugars_value`, `bare_value` de `sugars` (#199, #93 ; avant,
+// `value` et `norm_value`, que l'on confondait).
 // T8 : la grille est proposée (`--suggest`), jamais appliquée seule, et jamais une table par nom.
 // ---------------------------------------------------------------------------
 #[test]
@@ -476,7 +477,7 @@ fn f_dense_name_suffix_grid_stays_columns_unless_the_toml_asks() {
             ("nutri_score", &[]),
             (
                 "nutri_score_pivot",
-                &["name", "norm_value", "points", "value"]
+                &["bare_value", "name", "points", "value"]
             ),
         ])
     );

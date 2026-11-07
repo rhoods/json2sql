@@ -14,7 +14,7 @@
 //! - fn `one_grid` — les suffixes d'une grille : ceux dont les bases sont celles de la grille (#199).
 //! - fn `build_suffix_cols_and_value_type` — construit les `SuffixColumn` + type de la colonne `value` de base.
 //! - fn `widest_type` — type le plus large des clés observées (`TEXT` s'il n'y en a pas).
-//! - fn `suffix_col_name` — nom de colonne d'un suffixe ou d'un préfixe (`norm_value` pour `value`).
+//! - fn `suffix_col_name` — nom de colonne d'un suffixe ou d'un préfixe (`norm_name` pour `name`).
 //! - fn `declared_suffixes` — les `suffix_columns` (ou `prefix_columns`) d'une config TOML, avec leur `_` côté base.
 //! - fn `build_suffix_schema_from_list` — variante explicite (TOML `suffix_columns` ou `prefix_columns`) : parties déclarées et clés de la grille.
 
@@ -205,13 +205,12 @@ fn widest_type<'a>(keys: impl Iterator<Item = &'a ColumnStats>) -> PgType {
 }
 
 /// Column name of a suffix or a prefix: the part without its `_` (`_unit`, `min_`), as an identifier. A part that
-/// starts with a digit keeps a leading `_` (`_100g`, not the opaque `c_100g`). `value` and `name`
-/// would clash with the pivot's own columns: `norm_value`, `norm_name`.
+/// starts with a digit keeps a leading `_` (`_100g`, not the opaque `c_100g`). `name` would clash
+/// with the pivot's own column: `norm_name`. `value` stays: the bare keys then take `bare_value` (#199).
 fn suffix_col_name(suffix: &str) -> String {
     let bare = suffix.trim_matches('_');
     let s = sanitize_identifier(bare);
     match s.as_str() {
-        "value" => "norm_value".to_string(),
         "name" => "norm_name".to_string(),
         _ if bare.starts_with(|c: char| c.is_ascii_digit()) => {
             // sanitize_identifier prefixed `c_` to the digit.
@@ -413,8 +412,8 @@ mod tests {
         assert_eq!(suffix_col_name("_100g"), "_100g");
         assert_eq!(suffix_col_name("_100"), "_100");
         assert_eq!(suffix_col_name("_unit"), "unit");
-        // Reserved by the pivot's own `name` / `value` columns.
-        assert_eq!(suffix_col_name("_value"), "norm_value");
+        // `value` is the suffix's (#199); `name` is the pivot's own column.
+        assert_eq!(suffix_col_name("_value"), "value");
         assert_eq!(suffix_col_name("_name"), "norm_name");
         // A prefix (#199).
         assert_eq!(suffix_col_name("min_"), "min");
@@ -543,30 +542,20 @@ mod tests {
     }
 
     #[test]
-    fn test_value_suffix_renamed_to_norm_value() {
+    fn the_value_suffix_is_the_value_column() {
+        // #199: `fat_value` fills `value`; the bare `fat` gets `bare_value` (wide_strategies), not the reverse.
         let mut cols: IndexMap<String, TypeTracker> = IndexMap::new();
         for base in ["calcium", "iron", "zinc"] {
             cols.insert(base.to_string(), make_float_tracker());
             cols.insert(format!("{base}_value"), make_float_tracker());
         }
-
-        let result = detect_suffix_schema(&entry_of(cols), 0.3);
-        assert!(result.is_some());
-        let (schema, _) = result.unwrap();
+        let (schema, _) = detect_suffix_schema(&entry_of(cols), 0.3).expect("grid");
         let col_names: Vec<&str> = schema
             .suffix_cols
             .iter()
             .map(|s| s.col_name.as_str())
             .collect();
-        // `_value` suffix must be renamed to avoid collision with base `value` column
-        assert!(
-            !col_names.contains(&"value"),
-            "should not have raw 'value' col name"
-        );
-        assert!(
-            col_names.contains(&"norm_value"),
-            "should have 'norm_value'"
-        );
+        assert_eq!(col_names, ["value"]);
     }
 
     /// Cas `OpenFoodFacts` : une chaîne rare dans une colonne de suffixe ne passe plus la colonne
