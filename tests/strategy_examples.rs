@@ -656,6 +656,54 @@ fn suffix_grid_of_prefixed_statistics_is_upside_down() {
         )
     });
     assert_split(&dry_run("t", &rows, &[], None), "t_obj_pivot");
+    // Une mesure par objet : `_temperature` et `_wind` ne sont jamais remplis ensemble (#199).
+    let (proposed, report) = suggest("t", &rows);
+    assert!(!proposed.contains("# suffix_columns = ["), "{proposed}");
+    assert!(report.contains("Alternative suffixes"), "{report}");
+}
+
+// Les 36 clés dans chaque objet : les 12 mesures sont remplies ensemble, et la grille a plus de suffixes (les mesures)
+// que de noms (`min`, `max`, `avg`). Elle est à l'envers : elle est proposée en `prefix_columns` (#199), une ligne par
+// mesure et une colonne par statistique.
+#[test]
+fn suffix_grid_of_dense_prefixed_statistics_is_proposed_as_prefixes() {
+    let measures = [
+        "temperature",
+        "pressure",
+        "humidity",
+        "wind",
+        "rain",
+        "snow",
+        "uv",
+        "dew",
+        "cloud",
+        "fog",
+        "hail",
+        "sun",
+    ];
+    let rows = rows_with_obj(|i| {
+        let keys = ["min", "max", "avg"]
+            .iter()
+            .flat_map(|s| measures.map(|m| format!("{s}_{m}")));
+        object(keys, |_| json!(3.5 + f64::from(u32::try_from(i).unwrap())))
+    });
+    let (proposed, report) = suggest("t", &rows);
+    assert!(
+        proposed.contains("[t_obj]\n")
+            && proposed.contains("# prefix_columns = [\"avg_\", \"max_\", \"min_\"]"),
+        "{proposed}"
+    );
+    assert!(report.contains("Prefix grid to confirm"), "{report}");
+    let toml = "[t_obj]\nprefix_columns = [\"avg_\", \"max_\", \"min_\"]\n";
+    let run = dry_run("t", &rows, &[], Some(toml));
+    assert_eq!(
+        run.shape(),
+        expected(&[
+            ("t", &["id"]),
+            ("t_obj", &[]),
+            ("t_obj_pivot", &["avg", "max", "min", "name"]),
+        ])
+    );
 }
 
 // Le piège : des identifiants, des dates et des noms d'objets sans rapport donnaient une grille absurde. Elle n'est plus

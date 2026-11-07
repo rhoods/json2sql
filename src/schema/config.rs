@@ -16,13 +16,13 @@
 //! - fn `flatten_refusal` — pourquoi une table ne peut pas être aplatie (`FlattenRefused`) : racine, tableau d'objets,
 //!   stratégie autre que `Columns`, tables, routes ou colonnes aplaties à elle, qui seraient perdues (#170).
 //! - fn `toml_str` — helper de lecture d'une clé TOML en `String`.
-//! - fn `has_nonempty_suffix_columns` — vrai si `suffix_columns` est un array TOML non vide.
+//! - fn `has_nonempty_suffix_columns` — vrai si `suffix_columns` ou `prefix_columns` est un array TOML non vide.
 //! - fn `conflicting_strategy_override` — détecte un conflit `strategy` vs `suffix_columns`
 //!   (#31, `suffix_columns` gagne toujours).
 //! - fn `apply_strategy_override` — applique la clé `strategy` (`pivot`/`jsonb`/`columns`/`structured_pivot`/
 //!   `flatten`).
 //! - fn `refused_at_root` — vrai si la stratégie demande à la racine une ligne par clé (#172).
-//! - fn `suffix_list_of` — les `suffix_columns` d'une table dans la config.
+//! - fn `suffix_list_of` — les `suffix_columns` (ou `prefix_columns`, #199) d'une table dans la config, avec leur côté.
 //! - fn `apply_suffix_columns_override` — applique `suffix_columns` : la grille part dans un compagnon `_pivot` (#163).
 //! - fn `suffix_columns_already_applied` — vrai si la table est déjà l'identité de ces `suffix_columns` (#129).
 //! - fn `require_columns_strategy` — refuse un override qui suppose une table encore en `Columns`.
@@ -78,7 +78,8 @@ use crate::schema::column_groups::{
 use crate::schema::finalizer::apply_structured_pivot_split;
 use crate::schema::suffix_detector::{build_suffix_schema_from_list, declared_suffixes};
 use crate::schema::table_schema::{
-    ChildKind, ColumnSchema, InferredStrategy, KeyShape, SiblingSchema, TableSchema, UserOverride,
+    ChildKind, ColumnSchema, GridSide, InferredStrategy, KeyShape, SiblingSchema, TableSchema,
+    UserOverride,
 };
 use crate::schema::type_tracker::PgType;
 use crate::schema::wide_strategies::{
@@ -183,6 +184,10 @@ pub enum ConfigWarning {
     ConflictingOverride {
         table: String,
         ignored_strategy: String,
+    },
+    /// Both `suffix_columns` and `prefix_columns` were set for the same table (#199): `suffix_columns` is applied.
+    BothGrids {
+        table: String,
     },
     /// A type override targets a PG array column. `parse_pg_type` only builds scalar types, so applying
     /// it would turn the column into a scalar one that Pass 2 fills with NULL: it is ignored (#84).
@@ -312,6 +317,8 @@ impl ConfigWarning {
                 format!("schema-config: table '{table}' is {strategy}: only Columns and AutoSplit tables can be split, its column groups are ignored"),
             Self::ColumnGroupEmptiesParent { table } =>
                 format!("schema-config: the column groups of '{table}' would take all its data columns, they are ignored"),
+            Self::BothGrids { table } =>
+                format!("schema-config: table '{table}' has both 'suffix_columns' and 'prefix_columns' set — suffix_columns is applied, prefix_columns ignored"),
             Self::FlattenRefused { table, reason } =>
                 format!("schema-config: '{table}' cannot be flattened, {reason}: it stays a table of its own"),
         }
@@ -450,9 +457,10 @@ fn flatten_refusal(schemas: &[TableSchema], table: &str) -> Option<ConfigWarning
 
 /// The keys of a table section that are not column names (#132). `id_column` belonged to the removed
 /// `normalize_dynamic_keys` (#200): an older TOML that still has it is not taken for a column.
-const RESERVED_KEYS: [&str; 6] = [
+const RESERVED_KEYS: [&str; 7] = [
     "strategy",
     "suffix_columns",
+    "prefix_columns",
     "id_column",
     "prefix",
     "max_depth",
@@ -606,9 +614,9 @@ fn toml_str(map: &HashMap<String, toml::Value>, key: &str) -> Option<String> {
     })
 }
 
+/// True when the table has a non-empty `suffix_columns` or `prefix_columns` (#199): a grid to apply.
 fn has_nonempty_suffix_columns(col_overrides: &HashMap<String, toml::Value>) -> bool {
-    matches!(col_overrides.get("suffix_columns"), Some(toml::Value::Array(arr))
-        if arr.iter().any(|v| matches!(v, toml::Value::String(_))))
+    suffix_list_of(col_overrides).is_some()
 }
 
 /// Returns the `strategy` value to ignore if this table's config combines a recognized,
@@ -712,16 +720,22 @@ fn apply_strategy_override(
     vec![]
 }
 
-/// The `suffix_columns` of a table's config, `None` when there is none.
-fn suffix_list_of(col_overrides: &HashMap<String, toml::Value>) -> Option<Vec<String>> {
-    let Some(toml::Value::Array(arr)) = col_overrides.get("suffix_columns") else {
-        return None;
+/// The grid of a table's config and its side: `suffix_columns`, else `prefix_columns` (#199); `None` when there is
+/// none.
+fn suffix_list_of(col_overrides: &HashMap<String, toml::Value>) -> Option<(Vec<String>, GridSide)> {
+    let list_of = |key: &str| {
+        let Some(toml::Value::Array(arr)) = col_overrides.get(key) else {
+            return None;
+        };
+        let list: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        (!list.is_empty()).then_some(list)
     };
-    let list: Vec<String> = arr
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    (!list.is_empty()).then_some(list)
+    list_of("suffix_columns")
+        .map(|l| (l, GridSide::Suffix))
+        .or_else(|| list_of("prefix_columns").map(|l| (l, GridSide::Prefix)))
 }
 
 /// Moves the suffix grid of `schema` to a `_pivot` companion, returned to be added to the
@@ -732,20 +746,27 @@ fn apply_suffix_columns_override(
     col_overrides: &HashMap<String, toml::Value>,
     existing_names: &HashSet<String>,
 ) -> (Vec<ConfigWarning>, Option<TableSchema>) {
-    let Some(suffix_list) = suffix_list_of(col_overrides) else {
+    let Some((suffix_list, side)) = suffix_list_of(col_overrides) else {
         return (vec![], None);
     };
+    let both =
+        (side == GridSide::Suffix && col_overrides.contains_key("prefix_columns")).then(|| {
+            ConfigWarning::BothGrids {
+                table: table_name.to_string(),
+            }
+        });
     if let Some(warning) =
         require_columns_strategy(schema, table_name, TomlStrategy::StructuredPivot.name())
     {
         return (vec![warning], None);
     }
-    let (suffix_schema, grid) = build_suffix_schema_from_list(&suffix_list, &type_map_of(schema));
-    eprintln!("  Override strategy: {table_name} → StructuredPivot (suffixes: {suffix_list:?})");
+    let (suffix_schema, grid) =
+        build_suffix_schema_from_list(&suffix_list, side, &type_map_of(schema));
+    eprintln!("  Override strategy: {table_name} → StructuredPivot ({side:?}: {suffix_list:?})");
     let stable = crate::schema::registry::RegistryConfig::default().stable_threshold;
     let companion =
         apply_structured_pivot_split(schema, suffix_schema, grid, stable, existing_names);
-    (vec![], Some(companion))
+    (both.into_iter().collect(), Some(companion))
 }
 
 /// #129: `table_name` is already the identity table of these `suffix_columns` (a snapshot saved
@@ -756,7 +777,9 @@ fn suffix_columns_already_applied(
     table_name: &str,
     col_overrides: &HashMap<String, toml::Value>,
 ) -> bool {
-    let Some(wanted) = suffix_list_of(col_overrides).map(|l| declared_suffixes(&l)) else {
+    let Some((wanted, side)) =
+        suffix_list_of(col_overrides).map(|(l, side)| (declared_suffixes(&l, side), side))
+    else {
         return false;
     };
     let strategy = schemas
@@ -774,7 +797,7 @@ fn suffix_columns_already_applied(
         .find(|s| &s.name == wide_table_name)
         .is_some_and(|c| {
             matches!(&c.inferred_strategy, InferredStrategy::StructuredPivot(ss)
-            if ss.suffix_cols.iter().map(|sc| &sc.suffix).eq(wanted.iter()))
+            if ss.side == side && ss.suffix_cols.iter().map(|sc| &sc.suffix).eq(wanted.iter()))
         })
 }
 
@@ -1959,6 +1982,82 @@ mod tests {
 
     fn data_names(t: &TableSchema) -> Vec<&str> {
         t.data_columns().map(|c| c.name.as_str()).collect()
+    }
+
+    /// `nutrients` with `min_{m}` / `max_{m}` keys for three measures, and `brand`.
+    fn prefixed_table() -> TableSchema {
+        let mut t = TableSchema::new("nutrients".to_string(), vec!["nutrients".to_string()], 1);
+        t.parent_table = Some("root".to_string());
+        for prefix in ["min_", "max_"] {
+            for measure in ["temp", "wind", "rain"] {
+                let key = format!("{prefix}{measure}");
+                t.columns
+                    .push(ColumnSchema::data(&key, PgType::DoublePrecision, false));
+            }
+        }
+        t.columns
+            .push(ColumnSchema::data("brand", PgType::Text, false));
+        t
+    }
+
+    fn grid_config(entries: &[(&str, &[&str])]) -> SchemaConfig {
+        let cols = entries
+            .iter()
+            .map(|(key, list)| {
+                let list = list
+                    .iter()
+                    .map(|s| toml::Value::String((*s).to_string()))
+                    .collect();
+                ((*key).to_string(), toml::Value::Array(list))
+            })
+            .collect();
+        SchemaConfig {
+            tables: HashMap::from([("nutrients".to_string(), cols)]),
+            group: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn toml_prefix_columns_give_one_column_per_prefix() {
+        let mut schemas = vec![prefixed_table()];
+        let config = grid_config(&[("prefix_columns", &["min_", "max"])]);
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(data_names(&schemas[0]), ["brand"]);
+        let pivot = schemas
+            .iter()
+            .find(|s| s.name == "nutrients_pivot")
+            .expect("companion");
+        assert_eq!(data_names(pivot), ["name", "min", "max"]);
+        assert!(matches!(
+            &pivot.inferred_strategy,
+            InferredStrategy::StructuredPivot(ss) if ss.side == GridSide::Prefix
+        ));
+        // Applied again on its own result (a snapshot reloaded with the same TOML, #129): nothing moves.
+        let again = apply_overrides(&mut schemas, &config).unwrap();
+        assert!(again.is_empty(), "{again:?}");
+        assert_eq!(schemas.len(), 2);
+    }
+
+    #[test]
+    fn toml_suffix_columns_win_over_prefix_columns() {
+        let mut schemas = vec![nutrients_table(true)];
+        let config = grid_config(&[
+            ("suffix_columns", &["_100g", "_unit"]),
+            ("prefix_columns", &["min_"]),
+        ]);
+        let warnings = apply_overrides(&mut schemas, &config).unwrap();
+        assert_eq!(
+            warnings,
+            [ConfigWarning::BothGrids {
+                table: "nutrients".to_string()
+            }]
+        );
+        let pivot = schemas
+            .iter()
+            .find(|s| s.name == "nutrients_pivot")
+            .expect("companion");
+        assert_eq!(data_names(pivot), ["name", "value", "_100g", "unit"]);
     }
 
     #[test]

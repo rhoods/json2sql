@@ -139,6 +139,7 @@ Ce que chaque avertissement laisse de côté. Tous sont des avertissements : rie
 | `InvalidOverride` | `columns` ou `suffix_columns` sur une table dont la stratégie inférée n'est pas `Columns` | l'override |
 | `AlreadyOverridden` | `strategy` ou `suffix_columns` sur une table qui a déjà un autre override (IHM, ou TOML gardé par le snapshot) ; le même override est ignoré sans avertissement (#129) | `strategy` et `suffix_columns` |
 | `ConflictingOverride` | `strategy` (reconnue, autre que `structured_pivot`) avec `suffix_columns` | `strategy` |
+| `BothGrids` | `suffix_columns` et `prefix_columns` dans la même section (#199) | `prefix_columns` |
 | `ArrayColumnOverride` | un type forcé sur une colonne tableau (#84) | ce type |
 | `RootOverride` | `strategy = "pivot"` sur la table racine, qui n'a pas de ligne parente (#172) | la stratégie |
 | `ColumnGroupsMalformed` | `column_groups` qui n'est pas une table de listes | les groupes de la table |

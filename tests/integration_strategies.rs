@@ -447,6 +447,7 @@ async fn test_structured_pivot_strategy() {
                 },
             ],
             value_type: PgType::Integer,
+            side: json2sql::schema::table_schema::GridSide::Suffix,
         };
 
         let mut schemas = p1.schemas;

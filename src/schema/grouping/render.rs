@@ -41,14 +41,18 @@ const TOML_HEADER: &str =
     "# Suggested by `json2sql --suggest`: review, edit, then apply with --schema-config.\n\
 # Active lines are groups the names justify as they are. A commented block is a fusion that no\n\
 # data signal confirms: it replaces the active groups it names, so delete their lines to use it.\n\
-# A commented `suffix_columns` is a suffix grid the names form: uncomment it to apply it.\n\n";
+# A commented `suffix_columns` or `prefix_columns` is a grid the names form: uncomment to apply.\n\n";
 
 /// The `column_groups` sections of all the tables that have a group. Confirmed groups are active, fusions to
 /// confirm are commented.
 pub fn to_toml(proposals: &[TableProposal]) -> String {
     let sections: Vec<String> = proposals
         .iter()
-        .filter(|p| !p.groups.is_empty() || !p.suffixes.aspects.is_empty())
+        .filter(|p| {
+            !p.groups.is_empty()
+                || !p.suffixes.aspects.is_empty()
+                || !p.suffixes.prefixes.is_empty()
+        })
         .map(table_toml)
         .collect();
     format!("{TOML_HEADER}{}", sections.join("\n"))
@@ -70,20 +74,21 @@ fn table_toml(proposal: &TableProposal) -> String {
     out
 }
 
-/// `[table]` with its suffix grid as a commented `suffix_columns`: to confirm, the names alone find grids in any
-/// domain (#200). Nothing without a grid.
+/// `[table]` with its grid as a commented `suffix_columns`, or `prefix_columns` for a grid upside down (#199): to
+/// confirm, the names alone find grids in any domain (#200). Nothing without a grid.
 fn suffixes_toml(proposal: &TableProposal) -> String {
-    if proposal.suffixes.aspects.is_empty() {
+    let grid = &proposal.suffixes;
+    let (toml_key, parts) = if grid.aspects.is_empty() {
+        ("prefix_columns", &grid.prefixes)
+    } else {
+        ("suffix_columns", &grid.aspects)
+    };
+    if parts.is_empty() {
         return String::new();
     }
-    let list: Vec<String> = proposal
-        .suffixes
-        .aspects
-        .iter()
-        .map(|s| quoted(s))
-        .collect();
+    let list: Vec<String> = parts.iter().map(|s| quoted(s)).collect();
     format!(
-        "[{}]\n# suffix grid: to confirm, the names alone form it; its keys then leave the groups below\n# suffix_columns = [{}]\n\n",
+        "[{}]\n# suffix grid: to confirm, the names alone form it; its keys then leave the groups below\n# {toml_key} = [{}]\n\n",
         key(&proposal.table),
         list.join(", ")
     )
@@ -196,8 +201,8 @@ fn table_markdown(proposal: &TableProposal) -> String {
     )
 }
 
-/// The suffix grid of the table, to confirm, and the alternative suffixes left out of it (#199); nothing without
-/// either. A grid found while the data signals are off comes from the names alone.
+/// The suffix grid of the table, to confirm, the alternative suffixes left out of it and the prefixes of a grid upside
+/// down (#199); nothing without any. A grid found while the data signals are off comes from the names alone.
 fn suffixes_markdown(proposal: &TableProposal) -> String {
     let grid = &proposal.suffixes;
     let names_only = if matches!(proposal.data, DataStatus::Off(_)) {
@@ -216,6 +221,12 @@ fn suffixes_markdown(proposal: &TableProposal) -> String {
         lines.push(format!(
             "Alternative suffixes, never filled together: {} (no grid column for them: they stay in the key/value table).",
             code_list(&grid.alternatives)
+        ));
+    }
+    if !grid.prefixes.is_empty() {
+        lines.push(format!(
+            "Prefix grid to confirm: {} (`prefix_columns`, commented in the TOML{names_only}): more suffixes than names, so the prefixes are the columns.",
+            code_list(&grid.prefixes)
         ));
     }
     if lines.is_empty() {
@@ -517,11 +528,31 @@ mod tests {
                 && !on.contains("names alone"),
             "{on}"
         );
+        p.suffixes.prefixes = vec!["max_".to_string(), "min_".to_string()];
+        assert!(
+            suffixes_markdown(&p)
+                .contains("Prefix grid to confirm: `max_`, `min_` (`prefix_columns`"),
+            "{}",
+            suffixes_markdown(&p)
+        );
         p.data = DataStatus::Off("unknown row count".to_string());
         assert!(
             suffixes_markdown(&p).contains("commented in the TOML, from the names alone"),
             "{}",
             suffixes_markdown(&p)
+        );
+    }
+
+    /// A grid upside down is proposed as a commented `prefix_columns` (#199).
+    #[test]
+    fn a_prefix_grid_is_proposed_commented() {
+        let mut only_grid = proposal("meteo");
+        only_grid.groups.clear();
+        only_grid.suffixes.prefixes = vec!["max_".to_string(), "min_".to_string()];
+        let text = to_toml(&[only_grid]);
+        assert!(
+            text.contains("[meteo]\n") && text.contains("# prefix_columns = [\"max_\", \"min_\"]"),
+            "{text}"
         );
     }
 

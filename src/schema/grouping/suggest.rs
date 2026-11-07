@@ -18,6 +18,7 @@
 //! - fn `suggest` — propose un découpage pour chaque table éligible du schéma finalisé : échantillon, propositions, sorties.
 //! - fn `proposal_for` — proposition d'une table, à partir de ses colonnes et de ses signaux de données.
 //! - fn `suffix_grid` — la grille que forment les clés d'une table, à proposer (#200, T8), sans ses suffixes alternatifs (#199).
+//! - fn `alternatives_left_out` — la grille sans les suffixes alternatifs que trouve l'échantillon (#199).
 //! - fn `most_frequent_columns` — une table réduite à ses `MAX_COLUMNS` clés les plus fréquentes quand elle en a plus (#200).
 //! - struct `ReadPlan` — où lire une table : chemin vers son objet, s'il est atteignable, et chemins de ses colonnes.
 //! - fn `ReadPlan::target` — la cible de l'échantillonneur pour cette table, si son objet est atteignable.
@@ -54,7 +55,7 @@ use crate::schema::stats::{observed_keys_by_table, ColumnStats};
 use crate::schema::suffix_detector::{
     build_suffix_schema_from_list, detect_suffix_schema, SUFFIX_MIN_COVERAGE,
 };
-use crate::schema::table_schema::{ChildKind, ColumnSchema, TableSchema};
+use crate::schema::table_schema::{ChildKind, ColumnSchema, GridSide, TableSchema};
 
 /// A table needs at least this many data columns to be worth a proposal.
 pub const MIN_TABLE_COLUMNS: usize = 20;
@@ -201,7 +202,8 @@ fn most_frequent_columns(table: &TableSchema, stats: &[ColumnStats]) -> TableSch
 /// The suffixes of the grid the keys of `table` form, read from its Pass 1 keys; none at the root, where the TOML
 /// refuses `suffix_columns` (#172). Only proposed: the names alone find a grid in any domain (#200). With the data
 /// signals, the suffixes never filled together with the grid's are alternatives and leave it (#199); what is left
-/// must still cover `SUFFIX_MIN_COVERAGE` of the keys.
+/// must still cover `SUFFIX_MIN_COVERAGE` of the keys. A grid with more suffixes than bases is upside down: its prefixes
+/// are reported instead.
 fn suffix_grid(
     table: &TableSchema,
     observed: Option<&crate::schema::stats::ObservedKeys>,
@@ -214,17 +216,31 @@ fn suffix_grid(
         return CheckedGrid::default();
     };
     let suffixes: Vec<String> = grid.suffix_cols.into_iter().map(|c| c.suffix).collect();
-    let Some(data) = data else {
-        return CheckedGrid {
+    let keys: Vec<&str> = observed.keys().map(String::as_str).collect();
+    let mut checked = match data {
+        Some(data) => alternatives_left_out(table, observed, &keys, &suffixes, data),
+        None => CheckedGrid {
             aspects: suffixes,
-            alternatives: Vec::new(),
-        };
+            ..CheckedGrid::default()
+        },
     };
+    checked.turn_if_upside_down(&keys);
+    checked
+}
+
+/// The grid `suffixes` without the alternatives the sample of `table` finds (#199); none when what is left no longer
+/// covers `SUFFIX_MIN_COVERAGE` of the `keys`.
+fn alternatives_left_out(
+    table: &TableSchema,
+    observed: &crate::schema::stats::ObservedKeys,
+    keys: &[&str],
+    suffixes: &[String],
+    data: &DataSignals,
+) -> CheckedGrid {
     let columns = data_columns_by_name(table);
     let column_of = |key: &str| columns.iter().position(|c| c.original_name == key);
-    let keys: Vec<&str> = observed.keys().map(String::as_str).collect();
-    let mut checked = split_alternatives(&suffixes, &keys, column_of, data.presence());
-    let (_, kept) = build_suffix_schema_from_list(&checked.aspects, observed);
+    let mut checked = split_alternatives(suffixes, keys, column_of, data.presence());
+    let (_, kept) = build_suffix_schema_from_list(&checked.aspects, GridSide::Suffix, observed);
     #[allow(clippy::cast_precision_loss)]
     if (kept.len() as f64) < SUFFIX_MIN_COVERAGE * keys.len() as f64 {
         checked.aspects.clear();

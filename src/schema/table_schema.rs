@@ -27,7 +27,9 @@
 //!
 //! Fonctions :
 //! - struct `SuffixColumn` — une colonne de suffixe dans une table `StructuredPivot`.
-//! - struct `SuffixSchema` — décomposition de suffixes détectée pour une table `StructuredPivot`.
+//! - enum `GridSide` — le bout des clés où sont les parties d'une grille : suffixe ou préfixe (#199).
+//! - fn `GridSide::base_of` — la base d'une clé qui a une partie à ce bout.
+//! - struct `SuffixSchema` — décomposition de suffixes (ou de préfixes) pour une table `StructuredPivot`.
 //! - enum `KeyShape` — forme des clés sibling (Numeric/`IsoLang`/Slug/Mixed), nomme la colonne clé.
 //! - struct `SiblingSchema` — métadonnées d'une table `SiblingCollapse`.
 //! - struct `SiblingGroup` — un sous-groupe de forme de clé au sein d'un parent `SiblingCollapseMulti`.
@@ -76,13 +78,37 @@ pub struct SuffixColumn {
     pub pg_type: PgType,
 }
 
+/// Which end of the keys holds the parts of a grid (#199): `fat_100g` (`_100g`, a suffix) or `min_temperature`
+/// (`min_`, a prefix). What is left of a key is its base, the `name` of its row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GridSide {
+    #[default]
+    Suffix,
+    Prefix,
+}
+
+impl GridSide {
+    /// The base of `key` when it has `part` at this end, with something left: `fat` for `fat_100g` and `_100g`.
+    #[must_use]
+    pub fn base_of<'k>(self, key: &'k str, part: &str) -> Option<&'k str> {
+        match self {
+            Self::Suffix => key.strip_suffix(part),
+            Self::Prefix => key.strip_prefix(part),
+        }
+        .filter(|base| !base.is_empty())
+    }
+}
+
 /// Describes the suffix decomposition detected for a `StructuredPivot` table.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SuffixSchema {
-    /// Detected suffix columns, sorted by suffix string
+    /// Detected suffix columns, sorted by suffix string; prefixes when `side` is `Prefix`
     pub suffix_cols: Vec<SuffixColumn>,
     /// `PostgreSQL` type for the "base value" column (key with no suffix)
     pub value_type: PgType,
+    /// The end of the keys `suffix_cols` match (#199); a snapshot written before has suffixes.
+    #[serde(default)]
+    pub side: GridSide,
 }
 
 /// Shape of the sibling keys — used to name the key column semantically.

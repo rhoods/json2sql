@@ -416,6 +416,7 @@ mod tests {
                 pg_type: PgType::Integer,
             }],
             value_type: PgType::Integer,
+            side: crate::schema::table_schema::GridSide::Suffix,
         };
         apply_structured_pivot_columns(&mut schema, suffix_schema.clone());
 

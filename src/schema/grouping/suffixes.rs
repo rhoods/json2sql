@@ -11,16 +11,18 @@
 //!
 //! Fonctions :
 //! - const `ASPECT_MIN_OVERLAP` — part des lignes de la clé la plus rare où deux suffixes d'un nom sont remplis ensemble.
-//! - struct `CheckedGrid` — les suffixes gardés (aspects) et les suffixes alternatifs écartés.
+//! - struct `CheckedGrid` — les suffixes gardés (aspects), les suffixes alternatifs écartés, les préfixes d'une grille à l'envers.
 //! - fn `split_alternatives` — sépare les aspects des alternatives d'une grille, d'après l'échantillon.
 //! - fn `CheckedGrid::new` — une grille d'aspects et ses alternatives ; un seul aspect parmi des alternatives en est une.
+//! - fn `CheckedGrid::turn_if_upside_down` — une grille qui a plus de suffixes que de bases devient ses préfixes (#199, point 5).
 //! - fn `sampled_bases` — base → colonne de l'échantillon, par suffixe.
 //! - fn `overlap` — part des lignes de la clé la plus rare où deux suffixes sont remplis ensemble, sur leurs noms communs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::presence::Presence;
 use crate::schema::suffix_detector::assign_keys;
+use crate::schema::table_schema::GridSide;
 
 /// Two suffixes of a name filled together in at least this share of the rows of the rarer key are aspects. On OFF
 /// `nutriments` the aspects reach 0.71 (`_modifier` with `_100g`) to 1.00; alternatives stay near 0.
@@ -33,6 +35,9 @@ pub struct CheckedGrid {
     pub aspects: Vec<String>,
     /// Suffixes never filled together with the most filled one, in the order of the grid; all of them when no suffix is.
     pub alternatives: Vec<String>,
+    /// Prefixes of a grid upside down (#199, point 5), sorted: more suffixes than bases, so the bases (`min_`,
+    /// `max_`) are the columns, proposed as `prefix_columns`.
+    pub prefixes: Vec<String>,
 }
 
 /// The aspects and the alternatives of the grid `suffixes` of `keys`: a suffix filled together with the most filled
@@ -75,13 +80,27 @@ impl CheckedGrid {
             alternatives.extend(aspects);
             alternatives.sort();
             return Self {
-                aspects: Vec::new(),
                 alternatives,
+                ..Self::default()
             };
         }
         Self {
             aspects,
             alternatives,
+            prefixes: Vec::new(),
+        }
+    }
+
+    /// Turns the grid into prefixes when it has more suffixes than bases among `keys` (`min_temperature`,
+    /// `max_wind`…): the bases are then the columns, one row per suffix.
+    pub fn turn_if_upside_down(&mut self, keys: &[&str]) {
+        let bases: BTreeSet<&str> = assign_keys(keys, &self.aspects, GridSide::Suffix)
+            .into_iter()
+            .flat_map(|(s, ks)| ks.into_iter().map(move |k| &k[..k.len() - s.len()]))
+            .collect();
+        if self.aspects.len() > bases.len() {
+            self.prefixes = bases.into_iter().map(|b| format!("{b}_")).collect();
+            self.aspects.clear();
         }
     }
 }
@@ -92,7 +111,7 @@ fn sampled_bases<'s>(
     keys: &[&'s str],
     column_of: impl Fn(&str) -> Option<usize>,
 ) -> BTreeMap<&'s String, BTreeMap<&'s str, usize>> {
-    assign_keys(keys, suffixes)
+    assign_keys(keys, suffixes, GridSide::Suffix)
         .into_iter()
         .filter_map(|(suffix, ks)| {
             let suffix = suffixes.iter().find(|s| **s == suffix)?;
@@ -164,6 +183,30 @@ mod tests {
         );
         assert_eq!(grid.aspects, strings(&["_max", "_min"]));
         assert_eq!(grid.alternatives, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_grid_with_more_suffixes_than_bases_is_upside_down() {
+        // `min_temperature`, `max_wind`…: the bases `min` / `max` / `avg` should be the columns.
+        let measures = ["_temp", "_wind", "_rain", "_snow"];
+        let keys: Vec<String> = ["min", "max", "avg"]
+            .iter()
+            .flat_map(|p| measures.iter().map(move |m| format!("{p}{m}")))
+            .collect();
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let mut grid = CheckedGrid::new(strings(&measures), Vec::new());
+        grid.turn_if_upside_down(&keys);
+        assert_eq!(grid.aspects, Vec::<String>::new());
+        assert_eq!(grid.prefixes, strings(&["avg_", "max_", "min_"]));
+    }
+
+    #[test]
+    fn a_grid_with_as_many_bases_as_suffixes_stays() {
+        let keys = ["a_x", "a_y", "b_x", "b_y"];
+        let mut grid = CheckedGrid::new(strings(&["_x", "_y"]), Vec::new());
+        grid.turn_if_upside_down(&keys);
+        assert_eq!(grid.aspects, strings(&["_x", "_y"]));
+        assert_eq!(grid.prefixes, Vec::<String>::new());
     }
 
     #[test]
