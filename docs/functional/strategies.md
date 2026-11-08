@@ -25,6 +25,18 @@ colonnes. `--suggest` les écrit dans un TOML ; l'utilisateur garde ce qui lui c
 `--schema-config`. Le reste se demande table par table : dans le TOML (`strategy = …`), dans l'écran Strategy de
 l'IHM, ou avec `--group-columns` pour les groupes de colonnes. JSONB n'est jamais choisi seul.
 
+> **TOML ou snapshot : deux fichiers différents.**
+>
+> | | TOML (`--schema-config`) | Snapshot (JSON) |
+> |---|---|---|
+> | Contenu | des règles : `strategy`, `suffix_columns`, `prefix_columns`, `column_groups`, `flatten`, `[group.*]`, types | le résultat de la Pass 1, et les choix faits dans l'IHM (Pivot, Jsonb, Skip, groupes de colonnes cochés) |
+> | Écrit par | l'utilisateur, ou `--suggest` | la CLI (`--schema-output`), l'IHM (Save) |
+> | Lu par | **la CLI seulement** | la CLI (`--schema-input`), l'IHM (Load) |
+>
+> L'IHM ne lit pas le TOML : les grilles, les `column_groups` du TOML, `flatten` et les fusions `[group.*]` ne
+> s'appliquent qu'en CLI. La CLI écrit son snapshot **avant** d'appliquer le TOML : chargé dans l'IHM, il ne contient
+> pas ce que le TOML a fait.
+
 ---
 
 ## Par défaut : une table par objet (`columns`)
@@ -321,7 +333,7 @@ règle pour la table racine et pour une table enfant, qu'elle ait des sous-objet
 
 Aucune clé n'est jetée : même une clé vue une seule fois va dans le compagnon (`--rare-threshold` n'existe plus, #200).
 Les colonnes tableau PostgreSQL et les objets enfants restent sur la table. Une table qui a une stratégie dans le TOML
-ou dans l'IHM (`strategy = "columns"` compris) n'est pas coupée.
+(`strategy = "columns"` compris) ou un choix dans l'IHM (Pivot, Jsonb) n'est pas coupée.
 
 **Types mélangés : les clés fréquentes en colonnes.**
 
