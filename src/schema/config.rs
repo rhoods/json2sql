@@ -20,7 +20,7 @@
 //! - fn `conflicting_strategy_override` — détecte un conflit `strategy` vs `suffix_columns`
 //!   (#31, `suffix_columns` gagne toujours).
 //! - fn `apply_strategy_override` — applique la clé `strategy` (`pivot`/`jsonb`/`columns`/`structured_pivot`/
-//!   `flatten`).
+//!   `flatten`/`skip`, ces deux derniers reportés après la boucle).
 //! - fn `refused_at_root` — vrai si la stratégie demande à la racine une ligne par clé (#172).
 //! - fn `suffix_list_of` — les `suffix_columns` (ou `prefix_columns`, #199) d'une table dans la config, avec leur côté.
 //! - fn `apply_suffix_columns_override` — applique `suffix_columns` : la grille part dans un compagnon `_pivot` (#163).
@@ -37,7 +37,7 @@
 //! - fn `TomlStrategy::name` — le nom TOML de la valeur.
 //! - fn `TomlStrategy::parse` — lit une valeur, quelle que soit sa casse ; une inconnue revient en chaîne.
 //! - fn `TomlStrategy::of` — la `strategy` d'une section, si c'est une chaîne.
-//! - fn `TomlStrategy::one_row_per_key` — une ligne par clé : refusée sur la racine (#172).
+//! - fn `TomlStrategy::refused_on_root` — refusée sur la racine : une ligne par clé (#172), ou `skip` (217b).
 //! - fn `TomlStrategy::rebuilds_columns` — reconstruit ou déplace les colonnes de la table (#78).
 //! - fn `TomlStrategy::conflicts_with_suffix_columns` — incompatible avec `suffix_columns` (#31).
 //! - fn `TomlStrategy::user_override` — l'override que la valeur pose sur la table, s'il y en a un.
@@ -52,6 +52,8 @@
 //!   d'un snapshot ; `Skip` retire aussi la table `_wide` compagnon d'un `AutoSplit` et tout vrai
 //!   enfant cascadant depuis l'un ou l'autre, à toute profondeur ; retire enfin les tables enfants
 //!   absorbées (`exclude_absorbed_children`), comme le chemin TOML (#130).
+//! - fn `remove_skipped` — retire les tables `Skip`, leurs compagnons `_wide` et vrais enfants, et note leurs clés sur
+//!   les parents restants (#167) : commun au Skip de l'IHM et au `skip` du TOML (217b).
 //! - fn `apply_single_user_override` — dispatch `Pivot`/`Jsonb`/`Columns` pour une seule table.
 //! - fn `kept_toml_rebuild` — garde l'override TOML d'un run précédent qui a déjà reconstruit les colonnes,
 //!   contre un `Pivot`/`Columns` de l'IHM (#129).
@@ -297,6 +299,8 @@ impl ConfigWarning {
                 format!("schema-config: table '{table}' has both 'strategy' and 'suffix_columns' set — suffix_columns takes precedence, ignoring strategy = '{ignored_strategy}'"),
             Self::ArrayColumnOverride { table, column, type_str } =>
                 format!("schema-config: '{table}.{column}' is a PG array column, its type cannot be overridden (got '{type_str}'), ignored"),
+            Self::RootOverride { table, strategy } if strategy == "skip" =>
+                format!("schema-config: '{table}' is the root table, skipping it would import nothing, ignored"),
             Self::RootOverride { table, strategy } =>
                 format!("schema-config: '{table}' is the root table, strategy '{strategy}' would cut its rows from the line they come from, ignored"),
             Self::ColumnGroupsMalformed { table } =>
@@ -344,6 +348,7 @@ pub fn apply_overrides(
 ) -> crate::error::Result<Vec<ConfigWarning>> {
     let mut warnings: Vec<ConfigWarning> = Vec::new();
     let mut deferred_flatten: Vec<DeferredFlatten> = Vec::new();
+    let mut deferred_skip: HashMap<String, UserOverride> = HashMap::new();
     // `suffix_columns` creates a `_pivot` companion: its name must be unique among all tables.
     let mut existing_names: HashSet<String> = schemas.iter().map(|s| s.name.clone()).collect();
     let mut companions: Vec<TableSchema> = Vec::new();
@@ -388,6 +393,7 @@ pub fn apply_overrides(
                         table_name,
                         col_overrides,
                         &mut deferred_flatten,
+                        &mut deferred_skip,
                     )),
                 }
                 if !suffix_applied {
@@ -421,6 +427,14 @@ pub fn apply_overrides(
             Some(refused) => warnings.push(refused),
             None => apply_flatten(schemas, &op.table_name, &op.prefix, op.max_depth)?,
         }
+    }
+    // Last: a table flattened into a skipped parent goes with it, a skipped one is no longer there to flatten.
+    for w in remove_skipped(schemas, &deferred_skip) {
+        eprintln!(
+            "  Override strategy: {} → Skip, with its tables {}",
+            w.removed_table,
+            w.cascaded_children.join(", ")
+        );
     }
     Ok(warnings)
 }
@@ -478,17 +492,20 @@ enum TomlStrategy {
     Columns,
     StructuredPivot,
     Flatten,
+    /// The table and its children are not imported, as the IHM Skip (217b).
+    Skip,
     /// Removed (#200): kept to give its own warning.
     NormalizeDynamicKeys,
 }
 
 impl TomlStrategy {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Pivot,
         Self::Jsonb,
         Self::Columns,
         Self::StructuredPivot,
         Self::Flatten,
+        Self::Skip,
         Self::NormalizeDynamicKeys,
     ];
 
@@ -499,6 +516,7 @@ impl TomlStrategy {
             Self::Columns => "columns",
             Self::StructuredPivot => "structured_pivot",
             Self::Flatten => "flatten",
+            Self::Skip => "skip",
             Self::NormalizeDynamicKeys => "normalize_dynamic_keys",
         }
     }
@@ -519,10 +537,11 @@ impl TomlStrategy {
         toml_str(col_overrides, "strategy").map(|s| Self::parse(&s))
     }
 
-    /// Writes one row per key: refused on the root, which has no parent row to tie them to (#172).
-    const fn one_row_per_key(self) -> bool {
+    /// Refused on the root: one row per key has no parent row to tie them to (#172), and a skipped root would
+    /// leave nothing to import.
+    const fn refused_on_root(self) -> bool {
         match self {
-            Self::Pivot => true,
+            Self::Pivot | Self::Skip => true,
             Self::Jsonb
             | Self::Columns
             | Self::StructuredPivot
@@ -536,14 +555,15 @@ impl TomlStrategy {
     const fn rebuilds_columns(self) -> bool {
         match self {
             Self::Pivot | Self::Jsonb | Self::Flatten => true,
-            Self::Columns | Self::StructuredPivot | Self::NormalizeDynamicKeys => false,
+            // the group tables of a skipped table go with it (real children)
+            Self::Columns | Self::StructuredPivot | Self::Skip | Self::NormalizeDynamicKeys => false,
         }
     }
 
     /// Cannot be combined with `suffix_columns`, which always wins (#31).
     const fn conflicts_with_suffix_columns(self) -> bool {
         match self {
-            Self::Pivot | Self::Jsonb | Self::Columns | Self::Flatten => true,
+            Self::Pivot | Self::Jsonb | Self::Columns | Self::Flatten | Self::Skip => true,
             Self::StructuredPivot | Self::NormalizeDynamicKeys => false,
         }
     }
@@ -554,6 +574,7 @@ impl TomlStrategy {
             Self::Pivot => Some(UserOverride::Pivot),
             Self::Jsonb => Some(UserOverride::Jsonb),
             Self::Columns => Some(UserOverride::Columns),
+            Self::Skip => Some(UserOverride::Skip),
             Self::StructuredPivot | Self::Flatten | Self::NormalizeDynamicKeys => None,
         }
     }
@@ -596,7 +617,7 @@ fn already_overridden(
 /// True when `strategy` asks the root `schema` for one row per key, which has no parent row to be tied to (#172).
 fn refused_at_root(schema: &TableSchema, col_overrides: &HashMap<String, toml::Value>) -> bool {
     schema.parent_table.is_none()
-        && matches!(TomlStrategy::of(col_overrides), Some(Ok(s)) if s.one_row_per_key())
+        && matches!(TomlStrategy::of(col_overrides), Some(Ok(s)) if s.refused_on_root())
 }
 
 /// True when the overrides of a table rebuild its columns or take them to another table (`suffix_columns`, or a
@@ -643,6 +664,7 @@ fn apply_strategy_override(
     table_name: &str,
     col_overrides: &HashMap<String, toml::Value>,
     deferred_flatten: &mut Vec<DeferredFlatten>,
+    deferred_skip: &mut HashMap<String, UserOverride>,
 ) -> Vec<ConfigWarning> {
     let Some(toml::Value::String(strategy_str)) = col_overrides.get("strategy") else {
         return vec![];
@@ -698,6 +720,10 @@ fn apply_strategy_override(
                 table: table_name.to_string(),
                 strategy: strategy.name().to_string(),
             }]
+        }
+        TomlStrategy::Skip => {
+            eprintln!("  Override strategy: {table_name} → Skip");
+            deferred_skip.insert(table_name.to_string(), UserOverride::Skip);
         }
         TomlStrategy::Flatten => {
             let prefix =
@@ -1098,10 +1124,21 @@ pub fn apply_user_overrides(
         }
     }
 
+    let warnings = remove_skipped(schemas, overrides);
+    crate::schema::finalizer::exclude_absorbed_children(schemas);
+    prune_missing_groups(schemas);
+    warnings
+}
+
+/// Remove the tables `Skip` in `overrides`, their `_wide` companions and real children (`compute_skip_cascade`), and
+/// note their keys on the parents left (#167): the same for the IHM Skip and the TOML `skip` (217b).
+fn remove_skipped(
+    schemas: &mut Vec<TableSchema>,
+    overrides: &HashMap<String, UserOverride>,
+) -> Vec<SkipCascadeWarning> {
     let (removed, warnings) = compute_skip_cascade(schemas, overrides);
     record_skipped_children(schemas, &removed);
     schemas.retain(|s| !removed.contains(&s.name));
-    crate::schema::finalizer::exclude_absorbed_children(schemas);
     prune_missing_groups(schemas);
     warnings
 }
@@ -1965,6 +2002,61 @@ mod tests {
         let mut t = simple_table(name);
         t.parent_table = Some("root".to_string());
         t
+    }
+
+    // --- 217b: `strategy = "skip"` in the TOML, as the IHM Skip ---
+
+    /// `root` → `root_a` → `root_a_b`, and `root_c`.
+    fn skip_tree() -> Vec<TableSchema> {
+        let root = simple_table("root");
+        let mut a = TableSchema::new("root_a".to_string(), vec!["root".into(), "a".into()], 1);
+        a.parent_table = Some("root".to_string());
+        let mut b = TableSchema::new(
+            "root_a_b".to_string(),
+            vec!["root".into(), "a".into(), "b".into()],
+            2,
+        );
+        b.parent_table = Some("root_a".to_string());
+        vec![root, a, b, child_table("root_c")]
+    }
+
+    #[test]
+    fn toml_skip_removes_the_table_and_its_children_and_leaves_its_key_on_the_parent() {
+        let mut schemas = skip_tree();
+        let config: SchemaConfig = toml::from_str("[root_a]\nstrategy = \"skip\"\n").unwrap();
+        let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
+        assert_eq!(warnings, []);
+        let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["root", "root_c"]);
+        assert_eq!(schemas[0].skipped_children, ["a"], "#167: no anomaly for the skipped key");
+    }
+
+    #[test]
+    fn toml_skip_on_the_root_is_refused() {
+        let mut schemas = skip_tree();
+        let config: SchemaConfig = toml::from_str("[root]\nstrategy = \"Skip\"\n").unwrap();
+        let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
+        assert_eq!(
+            warnings,
+            [ConfigWarning::RootOverride {
+                table: "root".to_string(),
+                strategy: "skip".to_string()
+            }]
+        );
+        assert_eq!(schemas.len(), 4);
+    }
+
+    #[test]
+    fn toml_skip_gives_way_to_an_ihm_override() {
+        let mut schemas = skip_tree();
+        schemas[1].set_ui_override(Some(UserOverride::Jsonb));
+        let config: SchemaConfig = toml::from_str("[root_a]\nstrategy = \"skip\"\n").unwrap();
+        let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
+        assert!(
+            matches!(warnings.as_slice(), [ConfigWarning::AlreadyOverridden { .. }]),
+            "{warnings:?}"
+        );
+        assert!(schemas.iter().any(|s| s.name == "root_a"));
     }
 
     // --- #163: suffix_columns moves only the grid to a `_pivot` companion ---
