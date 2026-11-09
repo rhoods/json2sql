@@ -7,21 +7,22 @@
 //!
 //! Fonctions :
 //! - fn `build_suffix_to_bases` — énumère les découpages (base, suffixe) candidats sur `_`.
-//! - fn `assign_keys` — attribue chaque clé au suffixe le plus long qui la termine.
+//! - fn `assign_keys` — attribue chaque clé à la partie la plus longue qui la termine (ou la commence, #199).
 //! - fn `detect_suffix_schema` — détecte automatiquement la grille bases × suffixes et ses clés.
 //! - fn `grid_keys` — clés nues et clés de la grille d'une attribution.
-//! - fn `retained_assignment` — attribution des clés aux suffixes qui gardent assez de bases.
+//! - fn `retained_assignment` — attribution des clés aux suffixes d'une seule grille, chacun avec assez de bases.
+//! - fn `one_grid` — les suffixes d'une grille : ceux dont les bases sont celles de la grille (#199).
 //! - fn `build_suffix_cols_and_value_type` — construit les `SuffixColumn` + type de la colonne `value` de base.
 //! - fn `widest_type` — type le plus large des clés observées (`TEXT` s'il n'y en a pas).
-//! - fn `suffix_col_name` — nom de colonne d'un suffixe (`norm_value` pour `value`).
-//! - fn `declared_suffixes` — les `suffix_columns` d'une config TOML, avec leur `_` de tête.
-//! - fn `build_suffix_schema_from_list` — variante explicite (TOML `suffix_columns`) : suffixes déclarés et clés de la grille.
+//! - fn `suffix_col_name` — nom de colonne d'un suffixe ou d'un préfixe (`norm_name` pour `name`).
+//! - fn `declared_suffixes` — les `suffix_columns` (ou `prefix_columns`) d'une config TOML, avec leur `_` côté base.
+//! - fn `build_suffix_schema_from_list` — variante explicite (TOML `suffix_columns` ou `prefix_columns`) : parties déclarées et clés de la grille.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::schema::naming::sanitize_identifier;
 use crate::schema::stats::{ColumnStats, ObservedKeys};
-use crate::schema::table_schema::{SuffixColumn, SuffixSchema};
+use crate::schema::table_schema::{GridSide, SuffixColumn, SuffixSchema};
 use crate::schema::type_tracker::{widen_pg_types, PgType};
 
 /// Minimum fraction of the keys a proposed grid must cover (#163); the grid is only proposed (#200).
@@ -49,14 +50,18 @@ fn build_suffix_to_bases(all_keys: &[&str]) -> HashMap<String, HashSet<String>> 
     suffix_to_bases
 }
 
-/// Suffix → keys ending with it, each key under the longest suffix that ends it with a non-empty
-/// base (`fat_prepared_100g` goes to `_prepared_100g`, not `_100g`). Pass 2 matches the same way.
-fn assign_keys<'a>(keys: &[&'a str], suffixes: &[String]) -> BTreeMap<String, Vec<&'a str>> {
+/// Part → keys that have it at the `side` end, each key under the longest part with a non-empty base
+/// (`fat_prepared_100g` goes to `_prepared_100g`, not `_100g`). Pass 2 matches the same way.
+pub fn assign_keys<'a>(
+    keys: &[&'a str],
+    suffixes: &[String],
+    side: GridSide,
+) -> BTreeMap<String, Vec<&'a str>> {
     let mut assigned: BTreeMap<String, Vec<&'a str>> = BTreeMap::new();
     for &key in keys {
         let longest = suffixes
             .iter()
-            .filter(|s| key.len() > s.len() && key.ends_with(s.as_str()))
+            .filter(|s| side.base_of(key, s).is_some())
             .max_by_key(|s| s.len());
         if let Some(suffix) = longest {
             assigned.entry(suffix.clone()).or_default().push(key);
@@ -66,9 +71,9 @@ fn assign_keys<'a>(keys: &[&'a str], suffixes: &[String]) -> BTreeMap<String, Ve
 }
 
 /// The grid of a wide table, from its scalar keys (objects and arrays are child tables or PG array columns, never
-/// part of a grid): suffixes shared by at least `MIN_BASES` bases and by at least
-/// `coverage_threshold` of all the bases, with the keys it covers (suffixed keys and bare bases).
-/// The grid must also cover `coverage_threshold` of the table's scalar columns.
+/// part of a grid): suffixes shared by at least `MIN_BASES` bases and of the same bases (see [`one_grid`]), with the
+/// keys it covers (suffixed keys and bare bases). The grid must cover `coverage_threshold` of the table's scalar
+/// columns.
 ///
 /// Returns `None` if no grid is found above threshold.
 #[must_use]
@@ -77,11 +82,11 @@ pub fn detect_suffix_schema(
     coverage_threshold: f64,
 ) -> Option<(SuffixSchema, HashSet<String>)> {
     let keys: Vec<&str> = observed.keys().map(String::as_str).collect();
-    let assigned = retained_assignment(&keys, coverage_threshold);
+    let assigned = retained_assignment(&keys);
     if assigned.is_empty() {
         return None;
     }
-    let (bare, grid) = grid_keys(&keys, &assigned);
+    let (bare, grid) = grid_keys(&keys, &assigned, GridSide::Suffix);
     if (grid.len() as f64 / keys.len() as f64) < coverage_threshold {
         return None;
     }
@@ -89,6 +94,7 @@ pub fn detect_suffix_schema(
     let schema = SuffixSchema {
         suffix_cols,
         value_type,
+        side: GridSide::Suffix,
     };
     Some((schema, grid))
 }
@@ -98,10 +104,11 @@ pub fn detect_suffix_schema(
 fn grid_keys<'a>(
     keys: &[&'a str],
     assigned: &BTreeMap<String, Vec<&'a str>>,
+    side: GridSide,
 ) -> (Vec<&'a str>, HashSet<String>) {
     let bases: HashSet<&str> = assigned
         .iter()
-        .flat_map(|(s, ks)| ks.iter().map(move |k| &k[..k.len() - s.len()]))
+        .flat_map(|(s, ks)| ks.iter().filter_map(move |k| side.base_of(k, s)))
         .collect();
     let bare: Vec<&str> = keys.iter().copied().filter(|k| bases.contains(k)).collect();
     let grid = assigned
@@ -113,38 +120,55 @@ fn grid_keys<'a>(
     (bare, grid)
 }
 
-/// Assignment of the keys to the suffixes that keep `MIN_BASES` bases and `coverage_threshold`
-/// of all the bases. Assigning keys to their longest suffix can leave a shorter one with too few
-/// bases: it is dropped and the keys are assigned again, until nothing changes (the set of
-/// suffixes only shrinks).
-fn retained_assignment<'a>(
-    keys: &[&'a str],
-    coverage_threshold: f64,
-) -> BTreeMap<String, Vec<&'a str>> {
+/// Assignment of the keys to the suffixes of one grid (see [`one_grid`]), each suffix with `MIN_BASES` bases.
+/// Assigning keys to their longest suffix can leave a shorter one with too few bases, and dropping a suffix moves
+/// its keys: the keys are assigned again until nothing changes (the set of suffixes only shrinks).
+fn retained_assignment<'a>(keys: &[&'a str]) -> BTreeMap<String, Vec<&'a str>> {
     let mut suffixes: Vec<String> = build_suffix_to_bases(keys)
         .into_iter()
         .filter(|(_, bases)| bases.len() >= MIN_BASES)
         .map(|(suffix, _)| suffix)
         .collect();
     loop {
-        let assigned = assign_keys(keys, &suffixes);
-        let all_bases: HashSet<&str> = assigned
-            .iter()
-            .flat_map(|(s, ks)| ks.iter().map(move |k| &k[..k.len() - s.len()]))
-            .collect();
-        let kept: Vec<String> = assigned
-            .iter()
-            .filter(|(_, ks)| {
-                ks.len() >= MIN_BASES
-                    && ks.len() as f64 / all_bases.len() as f64 >= coverage_threshold
-            })
-            .map(|(s, _)| s.clone())
-            .collect();
+        let mut assigned = assign_keys(keys, &suffixes, GridSide::Suffix);
+        assigned.retain(|_, ks| ks.len() >= MIN_BASES);
+        let kept = one_grid(&assigned);
         if kept.len() == suffixes.len() {
             return assigned;
         }
         suffixes = kept;
     }
+}
+
+/// The suffixes of one grid among the assigned ones (#199): from a seed, a suffix joins when most of its bases are
+/// bases of the grid so far, so that suffixes of other names (`_at` of `created`, `_id` of `user`) stay out, rare
+/// ones of the same names (`_label`) join. Every suffix is tried as the seed; the grid with the most keys wins.
+fn one_grid(assigned: &BTreeMap<String, Vec<&str>>) -> Vec<String> {
+    let bases: Vec<(&String, HashSet<&str>)> = assigned
+        .iter()
+        .map(|(s, ks)| (s, ks.iter().map(|k| &k[..k.len() - s.len()]).collect()))
+        .collect();
+    let grid_from = |seed: usize| {
+        let mut grid_bases = bases[seed].1.clone();
+        let mut grid = vec![seed];
+        for (at, (_, b)) in bases.iter().enumerate() {
+            if at != seed && 2 * b.intersection(&grid_bases).count() > b.len() {
+                grid_bases.extend(b);
+                grid.push(at);
+            }
+        }
+        grid
+    };
+    let keys_of = |grid: &[usize]| grid.iter().map(|&at| bases[at].1.len()).sum::<usize>();
+    // `max_by_key` keeps the last of equal grids: reversed, the first seed in suffix order wins.
+    let best = (0..bases.len())
+        .rev()
+        .map(grid_from)
+        .max_by_key(|g| keys_of(g))
+        .unwrap_or_default();
+    let mut suffixes: Vec<String> = best.into_iter().map(|at| bases[at].0.clone()).collect();
+    suffixes.sort();
+    suffixes
 }
 
 /// Build `SuffixColumn` entries (in suffix order) and the base `value` column type, each typed
@@ -180,14 +204,13 @@ fn widest_type<'a>(keys: impl Iterator<Item = &'a ColumnStats>) -> PgType {
         .unwrap_or(PgType::Text)
 }
 
-/// Column name of a suffix: the suffix without its leading `_`, as an identifier. A suffix that
-/// starts with a digit keeps its `_` (`_100g`, not the opaque `c_100g`). `value` and `name`
-/// would clash with the pivot's own columns: `norm_value`, `norm_name`.
+/// Column name of a suffix or a prefix: the part without its `_` (`_unit`, `min_`), as an identifier. A part that
+/// starts with a digit keeps a leading `_` (`_100g`, not the opaque `c_100g`). `name` would clash
+/// with the pivot's own column: `norm_name`. `value` stays: the bare keys then take `bare_value` (#199).
 fn suffix_col_name(suffix: &str) -> String {
-    let bare = suffix.trim_start_matches('_');
+    let bare = suffix.trim_matches('_');
     let s = sanitize_identifier(bare);
     match s.as_str() {
-        "value" => "norm_value".to_string(),
         "name" => "norm_name".to_string(),
         _ if bare.starts_with(|c: char| c.is_ascii_digit()) => {
             // sanitize_identifier prefixed `c_` to the digit.
@@ -197,34 +220,34 @@ fn suffix_col_name(suffix: &str) -> String {
     }
 }
 
-/// The `suffix_columns` of a TOML config as suffixes: a leading `_` is added when missing.
+/// The `suffix_columns` (or `prefix_columns`) of a TOML config as parts: the `_` on the side of the base is added
+/// when missing (`unit` → `_unit`, `min` → `min_`).
 #[must_use]
-pub fn declared_suffixes(suffix_list: &[String]) -> Vec<String> {
+pub fn declared_suffixes(suffix_list: &[String], side: GridSide) -> Vec<String> {
     suffix_list
         .iter()
-        .map(|s| {
-            if s.starts_with('_') {
-                s.clone()
-            } else {
-                format!("_{s}")
-            }
+        .map(|s| match side {
+            GridSide::Suffix if !s.starts_with('_') => format!("_{s}"),
+            GridSide::Prefix if !s.ends_with('_') => format!("{s}_"),
+            _ => s.clone(),
         })
         .collect()
 }
 
-/// Used when the user declares `suffix_columns` in the TOML config: the declared suffixes (a
-/// leading `_` is added when missing), in their order, with the keys of the grid. `columns` are
-/// the table's scalar columns; keys go to their longest suffix, as in the detection, and only
+/// Used when the user declares `suffix_columns` (or `prefix_columns`, `side`) in the TOML config: the declared
+/// parts (see [`declared_suffixes`]), in their order, with the keys of the grid. `columns` are
+/// the table's scalar columns; keys go to their longest part, as in the detection, and only
 /// the bare keys of the grid type `value` (#163).
 #[must_use]
 pub fn build_suffix_schema_from_list(
     suffix_list: &[String],
+    side: GridSide,
     columns: &ObservedKeys,
 ) -> (SuffixSchema, HashSet<String>) {
-    let suffixes = declared_suffixes(suffix_list);
+    let suffixes = declared_suffixes(suffix_list, side);
     let keys: Vec<&str> = columns.keys().map(String::as_str).collect();
-    let assigned = assign_keys(&keys, &suffixes);
-    let (bare, grid) = grid_keys(&keys, &assigned);
+    let assigned = assign_keys(&keys, &suffixes, side);
+    let (bare, grid) = grid_keys(&keys, &assigned, side);
     let suffix_cols = suffixes
         .iter()
         .map(|suffix| SuffixColumn {
@@ -243,6 +266,7 @@ pub fn build_suffix_schema_from_list(
     let schema = SuffixSchema {
         suffix_cols,
         value_type,
+        side,
     };
     (schema, grid)
 }
@@ -299,6 +323,74 @@ mod tests {
         cols
     }
 
+    /// The suffixes of the grid detected in `cols`, in order; empty without a grid.
+    fn suffixes_of(cols: IndexMap<String, TypeTracker>) -> Vec<String> {
+        detect_suffix_schema(&entry_of(cols), SUFFIX_MIN_COVERAGE)
+            .map_or_else(Vec::new, |(s, _)| {
+                s.suffix_cols.into_iter().map(|c| c.suffix).collect()
+            })
+    }
+
+    #[test]
+    fn a_suffix_whose_names_are_not_those_of_the_grid_stays_out() {
+        // The #199 trap: `_at` dates other names than `_id` and `_name`, which share `user`, `product`…
+        let mut cols = grid(&["user", "order", "product", "store", "shop"], &["_id"]);
+        cols.extend(grid(&["user", "product", "store", "shop"], &["_name"]));
+        cols.extend(grid(&["created", "updated", "shipped", "paid"], &["_at"]));
+        cols.extend(["status", "amount", "note"].map(|k| (k.to_string(), make_text_tracker())));
+        assert_eq!(suffixes_of(cols), ["_id", "_name"]);
+    }
+
+    #[test]
+    fn a_rare_suffix_of_the_names_of_the_grid_joins_it() {
+        // OFF `nutriments`: `_label` has 26 names of ~100, all of them names of the grid; 30 % of the names is too much.
+        let bases: Vec<String> = (0..20).map(|i| format!("n{i}")).collect();
+        let bases: Vec<&str> = bases.iter().map(String::as_str).collect();
+        let mut cols = grid(&bases, &["", "_100g", "_unit"]);
+        cols.extend(grid(&bases[..4], &["_label"]));
+        assert_eq!(suffixes_of(cols), ["_100g", "_label", "_unit"]);
+    }
+
+    #[test]
+    fn two_grids_of_other_names_give_the_one_with_more_keys() {
+        let mut cols = grid(&["a", "b", "c", "d"], &["_min", "_max"]);
+        cols.extend(grid(&["p", "q", "r"], &["_x", "_y"]));
+        assert_eq!(suffixes_of(cols), ["_max", "_min"]);
+    }
+
+    #[test]
+    fn prefix_columns_take_the_start_of_the_keys() {
+        // `min_temperature`…: `min_` / `max_` are the columns, the measures the rows (#199).
+        let mut cols = grid(&["min_", "max_"], &["temperature", "wind", "rain"]);
+        cols.insert("temperature".to_string(), make_float_tracker());
+        cols.insert("note".to_string(), make_text_tracker());
+        let list = ["min".to_string(), "max_".to_string()];
+        let (schema, keys) =
+            build_suffix_schema_from_list(&list, GridSide::Prefix, &entry_of(cols));
+        assert_eq!(schema.side, GridSide::Prefix);
+        let parts: Vec<(&str, &str)> = schema
+            .suffix_cols
+            .iter()
+            .map(|c| (c.suffix.as_str(), c.col_name.as_str()))
+            .collect();
+        assert_eq!(parts, [("min_", "min"), ("max_", "max")]);
+        let mut keys: Vec<String> = keys.into_iter().collect();
+        keys.sort();
+        // `temperature` is the bare key of a base: it fills `value`; `note` stays out.
+        assert_eq!(
+            keys,
+            [
+                "max_rain",
+                "max_temperature",
+                "max_wind",
+                "min_rain",
+                "min_temperature",
+                "min_wind",
+                "temperature"
+            ]
+        );
+    }
+
     #[test]
     fn a_key_seen_only_as_null_does_not_widen_its_suffix_column() {
         let mut cols = grid(&["fat", "salt", "sugars"], &["", "_100g"]);
@@ -320,9 +412,12 @@ mod tests {
         assert_eq!(suffix_col_name("_100g"), "_100g");
         assert_eq!(suffix_col_name("_100"), "_100");
         assert_eq!(suffix_col_name("_unit"), "unit");
-        // Reserved by the pivot's own `name` / `value` columns.
-        assert_eq!(suffix_col_name("_value"), "norm_value");
+        // `value` is the suffix's (#199); `name` is the pivot's own column.
+        assert_eq!(suffix_col_name("_value"), "value");
         assert_eq!(suffix_col_name("_name"), "norm_name");
+        // A prefix (#199).
+        assert_eq!(suffix_col_name("min_"), "min");
+        assert_eq!(suffix_col_name("2021_"), "_2021");
     }
 
     #[test]
@@ -447,30 +542,20 @@ mod tests {
     }
 
     #[test]
-    fn test_value_suffix_renamed_to_norm_value() {
+    fn the_value_suffix_is_the_value_column() {
+        // #199: `fat_value` fills `value`; the bare `fat` gets `bare_value` (wide_strategies), not the reverse.
         let mut cols: IndexMap<String, TypeTracker> = IndexMap::new();
         for base in ["calcium", "iron", "zinc"] {
             cols.insert(base.to_string(), make_float_tracker());
             cols.insert(format!("{base}_value"), make_float_tracker());
         }
-
-        let result = detect_suffix_schema(&entry_of(cols), 0.3);
-        assert!(result.is_some());
-        let (schema, _) = result.unwrap();
+        let (schema, _) = detect_suffix_schema(&entry_of(cols), 0.3).expect("grid");
         let col_names: Vec<&str> = schema
             .suffix_cols
             .iter()
             .map(|s| s.col_name.as_str())
             .collect();
-        // `_value` suffix must be renamed to avoid collision with base `value` column
-        assert!(
-            !col_names.contains(&"value"),
-            "should not have raw 'value' col name"
-        );
-        assert!(
-            col_names.contains(&"norm_value"),
-            "should have 'norm_value'"
-        );
+        assert_eq!(col_names, ["value"]);
     }
 
     /// Cas `OpenFoodFacts` : une chaîne rare dans une colonne de suffixe ne passe plus la colonne

@@ -459,6 +459,76 @@ async fn test_toml_suffix_columns_keep_every_unit() {
 }
 
 // ---------------------------------------------------------------------------
+// [issue #199] `prefix_columns` : `min_temp`, `max_temp`… donnent une ligne par mesure (`name`) et une colonne par
+// préfixe (`min`, `max`). Une clé absente laisse sa colonne à NULL ; une clé hors de la grille reste dans la table.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_toml_prefix_columns_give_one_row_per_measure() {
+    use json2sql::schema::config::apply_overrides_complete;
+    common::with_schema_url(|client, schema, url| async move {
+        let path = common::fixture("prefix_columns_stats.jsonl");
+        let mut p1 = pass1::runner::run(&path, &common::pass1_config("obs"), None).unwrap();
+        let config =
+            SchemaConfig::from_file(&common::fixture("prefix_columns_stats.toml")).unwrap();
+        assert_eq!(
+            apply_overrides_complete(&mut p1.schemas, &config).unwrap(),
+            []
+        );
+        db::ddl::create_tables_no_constraints(&client, &p1.schemas, &schema, false, None)
+            .await
+            .unwrap();
+        let p2 = pass2::runner::run(
+            &path,
+            &p1.schemas,
+            &client,
+            &url,
+            &common::pass2_config("obs", &schema),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(p2.anomaly_collector.summaries().len(), 0);
+
+        let mut rows: Vec<(i64, String, Option<f64>, Option<f64>)> = client
+            .query(
+                &format!(
+                    "SELECT o.id::bigint, v.name, v.min, v.max \
+                     FROM \"{schema}\".\"obs_meteo_pivot\" v \
+                     JOIN \"{schema}\".\"obs_meteo\" m ON v.j2s_obs_meteo_id = m.j2s_id \
+                     JOIN \"{schema}\".\"obs\" o ON m.j2s_obs_id = o.j2s_id"
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+            .collect();
+        rows.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        let expected = [
+            (1, "temp", Some(2.5), Some(9.5)),
+            (1, "wind", Some(0.5), Some(40.5)),
+            (2, "temp", Some(-1.5), Some(4.5)),
+            (2, "wind", None, Some(22.5)),
+        ]
+        .map(|(id, name, min, max)| (id, name.to_string(), min, max));
+        assert_eq!(rows, expected);
+        let stations: Vec<String> = client
+            .query(
+                &format!("SELECT station FROM \"{schema}\".\"obs_meteo\" ORDER BY station"),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert_eq!(stations, ["a", "b"]);
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
 // [issue #170] `flatten` ne remonte dans le parent que les champs simples d'un objet.
 // Avant #170, il s'appliquait aussi à un tableau d'objets (la colonne restait NULL),
 // à une table Jsonb (colonne `data` NULL) et à un objet qui a ses propres tables

@@ -202,7 +202,7 @@ pub fn apply_structured_pivot_split(
         !suffix_schema
             .suffix_cols
             .iter()
-            .any(|sc| k.len() > sc.suffix.len() && k.ends_with(sc.suffix.as_str()))
+            .any(|sc| suffix_schema.side.base_of(k, &sc.suffix).is_some())
     });
     let companion =
         structured_pivot_companion(schema, companion_name.clone(), suffix_schema, has_bare_keys);

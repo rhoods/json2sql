@@ -14,6 +14,7 @@
 //! - fn `Presence::push_row` — ajoute une ligne : une présence par colonne, les colonnes manquantes sont absentes.
 //! - fn `Presence::rows` — nombre de lignes échantillonnées.
 //! - fn `Presence::present_count` — nombre de lignes où une colonne est présente.
+//! - fn `Presence::together` — nombre de lignes où deux colonnes sont présentes ensemble (#199).
 //! - fn `Presence::informative_columns` — colonnes présentes dans 2 % à 98 % des lignes.
 //! - fn `Presence::phi_matrix` — φ ajusté par richesse entre toutes les colonnes informatives.
 //! - struct `PresenceStrata` — lignes de chaque strate de richesse et comptes de présence de chaque colonne dans ces strates.
@@ -85,6 +86,15 @@ impl Presence {
         self.bits[column]
             .iter()
             .map(|word| word.count_ones() as usize)
+            .sum()
+    }
+
+    /// Number of rows where `a` and `b` are both present (#199).
+    pub fn together(&self, a: usize, b: usize) -> usize {
+        self.bits[a]
+            .iter()
+            .zip(&self.bits[b])
+            .map(|(x, y)| (x & y).count_ones() as usize)
             .sum()
     }
 

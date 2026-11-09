@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Config TOML, overrides de l'IHM et snapshot du schéma
-verified_at: 28a6e29
+verified_at: 0c42853
 files:
   - src/schema/config.rs
   - src/schema/persistence.rs
@@ -139,6 +139,7 @@ Ce que chaque avertissement laisse de côté. Tous sont des avertissements : rie
 | `InvalidOverride` | `columns` ou `suffix_columns` sur une table dont la stratégie inférée n'est pas `Columns` | l'override |
 | `AlreadyOverridden` | `strategy` ou `suffix_columns` sur une table qui a déjà un autre override (IHM, ou TOML gardé par le snapshot) ; le même override est ignoré sans avertissement (#129) | `strategy` et `suffix_columns` |
 | `ConflictingOverride` | `strategy` (reconnue, autre que `structured_pivot`) avec `suffix_columns` | `strategy` |
+| `BothGrids` | `suffix_columns` et `prefix_columns` dans la même section (#199) | `prefix_columns` |
 | `ArrayColumnOverride` | un type forcé sur une colonne tableau (#84) | ce type |
 | `RootOverride` | `strategy = "pivot"` sur la table racine, qui n'a pas de ligne parente (#172) | la stratégie |
 | `ColumnGroupsMalformed` | `column_groups` qui n'est pas une table de listes | les groupes de la table |
@@ -250,8 +251,8 @@ IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snap
   comme `tests/fixtures/`). La forme `[table.columns]` des deux docs donne une clé `columns` dont la valeur est une
   table : `apply_column_type_overrides` saute toute valeur qui n'est pas une chaîne. Vérifié : aucun override, aucun
   avertissement. De même `age = 5`, un `max_depth` hors de 0..255 (remplacé par 1), un `suffix_columns` sans chaîne.
-- **Des noms réservés.** `strategy`, `suffix_columns`, `id_column`, `prefix`, `max_depth` et `column_groups` sont des
-  clés de la table : une colonne qui porte un de ces noms ne peut pas être typée. Une table nommée `group` ne peut pas
+- **Des noms réservés.** `strategy`, `suffix_columns`, `prefix_columns`, `id_column`, `prefix`, `max_depth` et
+  `column_groups` sont des clés de la table : une colonne qui porte un de ces noms ne peut pas être typée. Une table nommée `group` ne peut pas
   être configurée : `[group]` est lu comme les groupes de fusion (erreur de lecture du TOML, vérifié).
 - **Les docs annonçaient ce que le TOML refuse.** `strategy = "ignore"` donne `UnknownStrategy` (vérifié) ; Skip
   n'existe que dans l'IHM. usage.md et schema-inference.md ne citent plus `ignore` depuis #200 ; usage.md ne décrit

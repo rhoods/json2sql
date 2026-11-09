@@ -25,6 +25,18 @@ colonnes. `--suggest` les écrit dans un TOML ; l'utilisateur garde ce qui lui c
 `--schema-config`. Le reste se demande table par table : dans le TOML (`strategy = …`), dans l'écran Strategy de
 l'IHM, ou avec `--group-columns` pour les groupes de colonnes. JSONB n'est jamais choisi seul.
 
+> **TOML ou snapshot : deux fichiers différents.**
+>
+> | | TOML (`--schema-config`) | Snapshot (JSON) |
+> |---|---|---|
+> | Contenu | des règles : `strategy`, `suffix_columns`, `prefix_columns`, `column_groups`, `flatten`, `[group.*]`, types | le résultat de la Pass 1, et les choix faits dans l'IHM (Pivot, Jsonb, Skip, groupes de colonnes cochés) |
+> | Écrit par | l'utilisateur, ou `--suggest` | la CLI (`--schema-output`), l'IHM (Save) |
+> | Lu par | **la CLI seulement** | la CLI (`--schema-input`), l'IHM (Load) |
+>
+> L'IHM ne lit pas le TOML : les grilles, les `column_groups` du TOML, `flatten` et les fusions `[group.*]` ne
+> s'appliquent qu'en CLI. La CLI écrit son snapshot **avant** d'appliquer le TOML : chargé dans l'IHM, il ne contient
+> pas ce que le TOML a fait.
+
 ---
 
 ## Par défaut : une table par objet (`columns`)
@@ -163,9 +175,8 @@ Pour des clés qui combinent un nom et un suffixe répété (`calories`, `calori
                                  "salt": 1, "salt_100g": 2, "salt_serving": 3}}
 ```
 
-La grille n'est **jamais appliquée seule** (#200) : les noms trouvent une grille dans n'importe quel domaine, y compris
-des grilles absurdes (`user_id`, `created_at`, `user_name` donnent les suffixes `_id`, `_at`, `_name`). Elle s'applique
-quand le TOML la demande :
+La grille n'est **jamais appliquée seule** (#200) : les noms seuls peuvent former une grille dans n'importe quel
+domaine. Elle s'applique quand le TOML la demande :
 
 ```bash
 json2sql --input tests/fixtures/structured_pivot.jsonl --table products --dry-run                                # sans
@@ -202,17 +213,55 @@ CREATE TABLE products_nutrients_pivot (
 ```
 
 - La colonne d'un suffixe porte le nom du suffixe. Un suffixe qui commence par un chiffre garde son `_` (`_100g`),
-  car un nom de colonne ne peut pas commencer par un chiffre. `_value` devient `norm_value` et `_name` devient
-  `norm_name`, pour ne pas se confondre avec les colonnes `value` et `name`.
-- `value` n'existe que si l'objet a des clés sans suffixe (`calories` seul).
+  car un nom de colonne ne peut pas commencer par un chiffre. `_name` devient `norm_name`, pour ne pas se confondre
+  avec la colonne `name`.
+- `value` n'existe que si l'objet a des clés sans suffixe (`calories` seul). Si la grille a aussi un suffixe `_value`,
+  c'est lui qui remplit `value` (`fat_value`), et la clé sans suffixe (`fat`) remplit `bare_value` (#199).
 - Une clé va au suffixe le plus long qui la termine : `fat_prepared_100g` va dans `prepared_100g`, pas dans `_100g`.
 - La grille du TOML passe avant le split : une table large et creuse qui a une grille garde ses colonnes de suffixes.
 
+**Les parties en début de clé (`prefix_columns`, #199).** Pour `min_temperature`, `max_temperature`, `min_wind`… les
+colonnes sont au début des clés :
+
+```toml
+[meteo]
+prefix_columns = ["min_", "max_", "avg_"]
+```
+
+donne `meteo_pivot (name, min, max, avg)`, une ligne par mesure (`name = 'temperature'`). Un `_` est ajouté à la fin
+d'un préfixe qui n'en a pas (`min` devient `min_`). Avec `suffix_columns` dans la même section, `suffix_columns`
+s'applique et `prefix_columns` est ignoré, avec un avertissement.
+
 **La proposer.** `--suggest FICHIER` cherche une grille dans chaque table d'au moins 20 colonnes de données et l'écrit
 **en commentaire** sous la section de la table : `# suffix_columns = ["_100g", "_serving"]`. Enlever le `#` l'applique.
-Une grille n'est proposée que si chaque suffixe revient avec au moins trois noms, et si elle couvre au moins 30 % des
-clés de l'objet : deux clés comme `en:celery_seed` et `en:mustard_seed` ne suffisent pas à créer un suffixe `_seed`.
-L'ancienne forme `strategy = "structured_pivot"` avec `suffix_columns` est toujours lue.
+L'ancienne forme `strategy = "structured_pivot"` avec `suffix_columns` est toujours lue. Une grille n'est proposée que
+si :
+
+- chaque suffixe revient avec au moins trois noms : deux clés comme `en:celery_seed` et `en:mustard_seed` ne suffisent
+  pas à créer un suffixe `_seed` ;
+- les suffixes portent les mêmes noms (#199) : la plupart des noms d'un suffixe doivent déjà être dans la grille.
+  `user_id`, `created_at`, `user_name` ne donnent plus `_at` avec `_id` et `_name`, car `_at` date d'autres noms ;
+- les suffixes sont remplis ensemble (#199), quand l'échantillon de lignes est lisible. Pour chaque suffixe, sur les
+  noms qu'il partage avec le plus rempli, on compte les objets où les deux clés sont remplies, sur ceux de la clé la
+  plus rare. À moins de la moitié, ce sont des **alternatives** (`air_temp_c` / `air_temp_f`, `title_fr` / `title_en`,
+  `revenue_2021` / `revenue_2022`, une seule par objet) : une colonne par suffixe serait presque toujours vide. Elles
+  sont écartées de la grille et nommées dans le rapport ; si aucun suffixe ne reste avec le plus rempli, rien n'est
+  proposé, et ces clés restent dans la table clé/valeur du split, une ligne par clé ;
+- elle couvre au moins 30 % des clés de l'objet.
+
+Une grille qui a **plus de suffixes que de noms** est à l'envers (#199) : `min_temperature`… donne 3 noms (`min`, `max`,
+`avg`) et 12 suffixes (les mesures). Elle est proposée en `# prefix_columns = ["avg_", "max_", "min_"]`, une ligne par
+mesure. La règle est la même quel que soit l'ordre des clés : `fr_title` donne `suffix_columns` (une ligne par
+langue), `title_fr` donne `prefix_columns`, et les deux mènent à `(name = 'fr', title, description…)`.
+
+Limites : le rapport dit « from the names alone » quand l'échantillon n'est pas lisible (un tableau sur le chemin de la
+table, ou `--limit 0`). Les alternatives ne sont alors pas repérées : avec 3 langues et 5 champs, une langue par
+objet, `title_fr`… serait proposé en `suffix_columns` avec une colonne par langue, surtout vide. Les clés en camelCase
+(`tempMin`) et le séparateur `-` (`energy-kcal`) ne sont pas découpés.
+
+> **Changement (#199).** Sur une table qui a `suffix_columns` avec `_value`, la colonne `norm_value` s'appelle
+> maintenant `value`, et l'ancienne `value` (la clé sans suffixe) s'appelle `bare_value` : les requêtes SQL sont à
+> reprendre, et un réimport dans une base créée avant garde l'ancien schéma sans `--drop-existing`.
 
 ---
 
@@ -284,7 +333,7 @@ règle pour la table racine et pour une table enfant, qu'elle ait des sous-objet
 
 Aucune clé n'est jetée : même une clé vue une seule fois va dans le compagnon (`--rare-threshold` n'existe plus, #200).
 Les colonnes tableau PostgreSQL et les objets enfants restent sur la table. Une table qui a une stratégie dans le TOML
-ou dans l'IHM (`strategy = "columns"` compris) n'est pas coupée.
+(`strategy = "columns"` compris) ou un choix dans l'IHM (Pivot, Jsonb) n'est pas coupée.
 
 **Types mélangés : les clés fréquentes en colonnes.**
 

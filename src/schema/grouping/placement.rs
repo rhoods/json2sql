@@ -72,6 +72,7 @@ fn nearest(vector: &[f64], centres: &[(usize, Vec<f64>)]) -> Vec<(usize, f64)> {
 #[cfg_attr(test, allow(clippy::disallowed_methods))]
 mod tests {
     use super::super::proposal::{ColumnName, DataStatus, Group};
+    use super::super::suffixes::CheckedGrid;
     use super::*;
 
     const SQRT_HALF: f64 = std::f64::consts::FRAC_1_SQRT_2;
@@ -127,7 +128,7 @@ mod tests {
             data: DataStatus::Off("test".to_string()),
             placements: Vec::new(),
             attachments: Vec::new(),
-            suffixes: Vec::new(),
+            suffixes: CheckedGrid::default(),
         }
     }
 

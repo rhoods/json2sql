@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Groupes de colonnes, proposition (--suggest) et application (TOML, --group-columns, IHM)
-verified_at: 28a6e29
+verified_at: 0c42853
 files:
   - src/schema/grouping/
   - src/schema/column_groups.rs
@@ -22,6 +22,10 @@ files:
   - tests/column_groups/mod.rs
   - tests/tc_column_groups.rs
 symbols:
+  - split_alternatives
+  - ASPECT_MIN_OVERLAP
+  - CheckedGrid::turn_if_upside_down
+  - suffix_grid
   - TomlStrategy::rebuilds_columns
   - TableSchema
   - TableSchema::takes_column_groups
@@ -139,6 +143,7 @@ plusieurs familles n'est confirmé que si un **signal de données** (tableau ci-
 | Seuils de la proposition | constantes en tête de `proposal.rs`, `LexicalParams::default`, `MIN_TABLE_COLUMNS` ; mesurer avec `tests/bench_column_groups.rs` (§ 4) | non |
 | Découpe des noms | `normalize` (`names.rs`) | non |
 | Sorties de `--suggest` | `to_toml`, `to_markdown` (`render.rs`) | non |
+| Grille proposée par `--suggest` : suffixes alternatifs, grille à l'envers (#199) | `split_alternatives`, `ASPECT_MIN_OVERLAP`, `CheckedGrid::turn_if_upside_down` (`suffixes.rs`), appelés par `suffix_grid` (`suggest.rs`) | non |
 | Règles d'un groupe appliqué | `apply_column_groups`, `judge`, `check_group`, `forbid_emptying`, `MIN_GROUP_COLUMNS` | non |
 | Nom des tables de groupe | `group_table_name` (`naming.rs`), `avoid_taken_names` | non |
 | Tables proposées | `eligible`, puis les filtres de `suggest` et de `name_proposals` (§ 3) | non |

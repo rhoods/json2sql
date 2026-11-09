@@ -703,6 +703,7 @@ mod tests {
                 suffix_col("_prepared_100g", "prepared_100g"),
             ],
             value_type: PgType::Integer,
+            side: crate::schema::table_schema::GridSide::Suffix,
         };
         let companion = crate::schema::wide_strategies::structured_pivot_companion(
             &parent,

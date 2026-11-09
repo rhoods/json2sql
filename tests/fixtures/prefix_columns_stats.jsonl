@@ -1,0 +1,2 @@
+{"id": 1, "meteo": {"min_temp": 2.5, "max_temp": 9.5, "min_wind": 0.5, "max_wind": 40.5, "station": "a"}}
+{"id": 2, "meteo": {"min_temp": -1.5, "max_temp": 4.5, "max_wind": 22.5, "station": "b"}}

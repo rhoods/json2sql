@@ -232,23 +232,22 @@ pub(super) fn insert_jsonb_object<S: RowSink>(
 
 /// Group JSON object keys by their base name: `base → { suffix → &Value }`.
 /// Keys with no matching suffix use an empty string as the suffix key (→ `value` column).
-/// A key goes to the longest suffix that ends it, as in Pass 1 (`fat_prepared_100g` →
-/// `_prepared_100g`, not `_100g`).
+/// A key goes to the longest suffix that ends it (or prefix that starts it, #199), as in Pass 1
+/// (`fat_prepared_100g` → `_prepared_100g`, not `_100g`).
 fn group_keys_by_base<'a>(
     entries: impl IntoIterator<Item = (&'a String, &'a Value)>,
     suffix_schema: &SuffixSchema,
 ) -> BTreeMap<String, HashMap<String, &'a Value>> {
     let mut groups: BTreeMap<String, HashMap<String, &'a Value>> = BTreeMap::new();
     for (key, val) in entries {
-        let matched_suffix = suffix_schema
+        let side = suffix_schema.side;
+        let matched = suffix_schema
             .suffix_cols
             .iter()
-            .filter(|sc| key.len() > sc.suffix.len() && key.ends_with(sc.suffix.as_str()))
-            .max_by_key(|sc| sc.suffix.len())
-            .map(|sc| sc.suffix.as_str());
-        match matched_suffix {
-            Some(suffix) => {
-                let base = &key[..key.len() - suffix.len()];
+            .filter_map(|sc| Some((sc.suffix.as_str(), side.base_of(key, &sc.suffix)?)))
+            .max_by_key(|(suffix, _)| suffix.len());
+        match matched {
+            Some((suffix, base)) => {
                 groups
                     .entry(base.to_string())
                     .or_default()
@@ -1295,7 +1294,7 @@ mod tests {
     // insert_structured_pivot_object tests
     // ---------------------------------------------------------------------------
 
-    use crate::schema::table_schema::{SuffixColumn, SuffixSchema};
+    use crate::schema::table_schema::{GridSide, SuffixColumn, SuffixSchema};
 
     fn make_structured_pivot_schema(
         name: &str,
@@ -1340,6 +1339,7 @@ mod tests {
                 })
                 .collect(),
             value_type: PgType::Text,
+            side: GridSide::Suffix,
         }
     }
 
@@ -1352,6 +1352,33 @@ mod tests {
         let groups = super::group_keys_by_base(&obj, &ss);
         let bases: Vec<&str> = groups.keys().map(String::as_str).collect();
         assert_eq!(bases, ["fat"]);
+    }
+
+    #[test]
+    fn a_prefix_grid_groups_keys_by_what_follows_the_prefix() {
+        // `min_temperature`, `max_temperature`: the base is the measure (#199).
+        let mut ss = make_suffix_schema(&["min_", "max_"]);
+        ss.side = GridSide::Prefix;
+        let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{"min_temperature": 1, "max_temperature": 9, "min_wind": 0, "wind": 4}"#,
+        )
+        .unwrap();
+        let groups = super::group_keys_by_base(&obj, &ss);
+        let shape: Vec<(&str, Vec<&str>)> = groups
+            .iter()
+            .map(|(base, parts)| {
+                let mut parts: Vec<&str> = parts.keys().map(String::as_str).collect();
+                parts.sort_unstable();
+                (base.as_str(), parts)
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("temperature", vec!["max_", "min_"]),
+                ("wind", vec!["", "min_"])
+            ]
+        );
     }
 
     #[test]

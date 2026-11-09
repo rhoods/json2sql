@@ -1,0 +1,2 @@
+[obs_meteo]
+prefix_columns = ["min_", "max_"]
