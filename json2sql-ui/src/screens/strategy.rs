@@ -287,6 +287,7 @@ pub fn StrategyScreen(mut state: Signal<AppState>) -> Element {
                                 detected_format: s.schema.detected_format.clone(),
                                 group_columns: s.schema.group_columns.iter().cloned().collect(),
                                 samples: s.schema.pass1_samples.clone(),
+                                source: s.project.source_file.as_deref().and_then(json2sql::schema::persistence::SourceFingerprint::of),
                             };
                             drop(s);
                             spawn(async move {

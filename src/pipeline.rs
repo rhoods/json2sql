@@ -264,8 +264,10 @@ fn finalized_schema(
     split: bool,
 ) -> Result<(Option<tempfile::NamedTempFile>, PathBuf, Pass1Result)> {
     let (stdin_temp, input_path) = resolve_input(std::mem::take(&mut cfg.input))?;
-    let mut pass1 = load_or_infer_schema(cfg, &input_path)?;
-    let warnings = post_process_schema(&mut pass1, cfg, split)?;
+    // a buffered stdin has no fingerprint worth keeping or checking (217b)
+    let source = stdin_temp.is_none().then_some(input_path.as_path());
+    let mut pass1 = load_or_infer_schema(cfg, &input_path, source)?;
+    let warnings = post_process_schema(&mut pass1, cfg, split, source)?;
     report_pass1_warnings(&pass1, cfg.depth_limit);
     for w in warnings {
         eprintln!("WARNING: {}", w.to_message());
@@ -293,13 +295,17 @@ fn resolve_input(input: Option<PathBuf>) -> Result<(Option<tempfile::NamedTempFi
 }
 
 /// Run Pass 1 or restore from snapshot, then print the inferred schema summary.
-fn load_or_infer_schema(cfg: &PipelineConfig, input_path: &Path) -> Result<Pass1Result> {
+fn load_or_infer_schema(
+    cfg: &PipelineConfig,
+    input_path: &Path,
+    source: Option<&Path>,
+) -> Result<Pass1Result> {
     let snapshot = match cfg.schema_input {
         Some(ref path) => Some(path.clone()),
         None => toml_snapshot(cfg)?,
     };
     let pass1 = if let Some(ref schema_path) = snapshot {
-        restore_from_snapshot(schema_path)?
+        restore_from_snapshot(schema_path, source)?
     } else {
         run_pass1_workers(input_path, cfg)?
     };
@@ -327,12 +333,26 @@ fn toml_snapshot(cfg: &PipelineConfig) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
+/// The snapshot was made from another JSON file than the input (size or date, 217b): a warning, the import goes on.
+fn warn_if_other_source(
+    fingerprint: Option<&crate::schema::persistence::SourceFingerprint>,
+    input: Option<&Path>,
+) {
+    if let Some(message) = fingerprint
+        .zip(input)
+        .and_then(|(fp, input)| fp.differs_from(input))
+    {
+        eprintln!("WARNING: {message}");
+    }
+}
+
+fn restore_from_snapshot(schema_path: &Path, source: Option<&Path>) -> Result<Pass1Result> {
     eprintln!(
         "Loading schema snapshot from '{}'...",
         schema_path.display()
     );
     let snap = crate::schema::persistence::load(schema_path)?;
+    warn_if_other_source(snap.source.as_ref(), source);
     let mut schemas = snap.schemas;
     let skip_cascade_warnings = if snap.strategy_overrides.is_empty() {
         Vec::new()
@@ -524,8 +544,9 @@ fn post_process_schema(
     pass1: &mut Pass1Result,
     cfg: &PipelineConfig,
     split: bool,
+    source: Option<&Path>,
 ) -> Result<Vec<crate::schema::config::ConfigWarning>> {
-    save_schema_snapshot(pass1, cfg)?;
+    save_schema_snapshot(pass1, cfg, source)?;
     let warnings = apply_schema_config(pass1, cfg)?;
     if split {
         crate::pass1::runner::split(pass1, &pass1_config(cfg));
@@ -604,7 +625,11 @@ fn apply_schema_config(
     Ok(warnings)
 }
 
-fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()> {
+fn save_schema_snapshot(
+    pass1: &Pass1Result,
+    cfg: &PipelineConfig,
+    source: Option<&Path>,
+) -> Result<()> {
     let Some(ref out_path) = cfg.schema_output else {
         return Ok(());
     };
@@ -620,6 +645,7 @@ fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()>
         detected_format: pass1.detected_format.clone(),
         group_columns: pass1.group_columns.clone(),
         samples: pass1.samples.clone(),
+        source: source.and_then(crate::schema::persistence::SourceFingerprint::of),
     };
     crate::schema::persistence::write_snapshot(&snapshot, out_path, false)?;
     eprintln!("Schema snapshot saved to '{}'.", out_path.display());
@@ -1120,6 +1146,16 @@ mod tests {
             !dir.path().join("pass1.json").exists(),
             "the CLI only reads the key"
         );
+    }
+
+    #[test]
+    fn schema_output_records_the_fingerprint_of_the_input() {
+        let file = wide_jsonl(60);
+        let snapshot = snapshot_of(cfg_for(&file));
+        let saved = crate::schema::persistence::load(snapshot.path()).unwrap();
+        let source = saved.source.expect("the CLI records its input");
+        assert_eq!(source.size, std::fs::metadata(file.path()).unwrap().len());
+        assert_eq!(source.differs_from(file.path()), None);
     }
 
     #[test]

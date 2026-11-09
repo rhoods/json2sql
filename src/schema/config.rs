@@ -134,7 +134,11 @@ impl SchemaConfig {
     /// the folder of the project moves with its files (217b).
     pub fn snapshot_path(&self, toml_path: &Path) -> Option<std::path::PathBuf> {
         let snapshot = self.snapshot.as_ref()?;
-        Some(toml_path.parent().map_or_else(|| snapshot.clone(), |dir| dir.join(snapshot)))
+        Some(
+            toml_path
+                .parent()
+                .map_or_else(|| snapshot.clone(), |dir| dir.join(snapshot)),
+        )
     }
 
     pub fn from_file(path: &Path) -> Result<Self> {
