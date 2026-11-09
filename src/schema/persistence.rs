@@ -10,6 +10,7 @@
 //! - struct `SourceFingerprint` — empreinte du JSON source (taille, date ; chemin affiché seulement), 217b.
 //! - fn `SourceFingerprint::of` — l'empreinte d'un fichier, `None` s'il ne se lit pas.
 //! - fn `SourceFingerprint::differs_from` — le message à afficher si un fichier n'a plus cette empreinte.
+//! - fn `modified_secs` — la date de modification d'un fichier en secondes depuis l'époque Unix.
 //! - fn `write_snapshot` — sérialise et écrit sur disque (écriture atomique via `.tmp` + rename si demandé).
 //! - fn `save` — construit un `SchemaSnapshot` sans overrides et l'écrit (non atomique).
 //! - fn `save_with_overrides` — idem, avec les overrides de stratégie utilisateur (écriture atomique).

@@ -22,7 +22,9 @@
 //! - fn `resolve_input` — bufferise stdin dans un fichier temporaire si aucun chemin n'est fourni.
 //!
 //! Pass 1 :
-//! - fn `load_or_infer_schema` — lance Pass 1 ou restaure un snapshot, affiche le résumé.
+//! - fn `load_or_infer_schema` — lance Pass 1 ou restaure un snapshot (`--schema-input`, sinon la clé `snapshot` du TOML), affiche le résumé.
+//! - fn `toml_snapshot` — le snapshot que nomme la clé `snapshot` du TOML, s'il existe (217b, lecture seule).
+//! - fn `warn_if_other_source` — avertit si le snapshot vient d'un autre JSON que l'entrée (empreinte, 217b).
 //! - fn `restore_from_snapshot` — charge un `SchemaSnapshot` et ré-applique les overrides persistés.
 //! - fn `pass1_config` — la config de Pass 1 tirée de la ligne de commande (seuils du split compris).
 //! - fn `run_pass1_workers` — lance Pass 1 séquentiel ou parallèle selon `num_workers`, sans le split des tables larges.
