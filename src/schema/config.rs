@@ -45,6 +45,8 @@
 //!   `strategy`/`suffix_columns` : sans bruit si c'est le même, avec `AlreadyOverridden` sinon (#129).
 //! - fn `rebuilds_columns` — vrai si les overrides d'une table reconstruisent ou déplacent ses colonnes (`pivot`, `jsonb`, `flatten`, `suffix_columns`).
 //! - fn `apply_overrides_complete` — enchaîne overrides + groupes de fusion + groupes de colonnes + `exclude_absorbed_children`.
+//! - fn `apply_config_file` — lit le TOML et l'applique (`apply_overrides_complete`, puis `reindex_stats`) : le même
+//!   appel pour la CLI et l'IHM (#217).
 //! - struct `SkipCascadeWarning` — table retirée par `Skip` ayant entraîné de vrais enfants en cascade.
 //! - fn `apply_user_overrides` — applique les overrides IHM (`Pivot`/`Jsonb`/`Skip`) après chargement
 //!   d'un snapshot ; `Skip` retire aussi la table `_wide` compagnon d'un `AutoSplit` et tout vrai
@@ -938,6 +940,19 @@ pub fn apply_overrides_complete(
     Ok(warnings)
 }
 
+/// Read the TOML at `path` and apply it with `apply_overrides_complete`, then move the statistics of the columns
+/// that went to a group table: what the CLI (`--schema-config`) and the UI both do, before the split (#200, #217).
+pub fn apply_config_file(
+    schemas: &mut Vec<TableSchema>,
+    stats: &mut Vec<crate::schema::stats::ColumnStats>,
+    path: &Path,
+) -> Result<Vec<ConfigWarning>> {
+    let config = SchemaConfig::from_file(path)?;
+    let warnings = apply_overrides_complete(schemas, &config)?;
+    crate::schema::column_groups::reindex_stats(schemas, stats);
+    Ok(warnings)
+}
+
 #[allow(clippy::too_many_lines)] // struct construction pipeline: generated cols → key col → union cols → strategy
 fn build_merged_keyed_pivot_schema(group_name: &str, cloned: &[TableSchema]) -> TableSchema {
     let refs: Vec<&TableSchema> = cloned.iter().collect();
@@ -1342,6 +1357,24 @@ fn parse_pg_type(s: &str) -> Option<PgType> {
 #[cfg_attr(test, allow(clippy::disallowed_methods, clippy::too_many_lines))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_toml_that_does_not_parse_is_an_error_naming_the_file_and_changes_nothing() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "[items\nstrategy = \"jsonb\"\n").unwrap();
+        let mut schemas = vec![TableSchema::new(
+            "items".to_string(),
+            vec!["items".to_string()],
+            0,
+        )];
+        let err = apply_config_file(&mut schemas, &mut Vec::new(), tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains(&tmp.path().display().to_string()),
+            "{err}"
+        );
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0].inferred_strategy, InferredStrategy::Columns);
+    }
 
     #[test]
     fn test_parse_pg_type() {

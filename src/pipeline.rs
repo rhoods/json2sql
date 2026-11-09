@@ -563,9 +563,11 @@ fn apply_schema_config(
         "\nApplying schema overrides from '{}'...",
         config_path.display()
     );
-    let config = crate::schema::config::SchemaConfig::from_file(config_path)?;
-    let warnings = crate::schema::config::apply_overrides_complete(&mut pass1.schemas, &config)?;
-    crate::schema::column_groups::reindex_stats(&pass1.schemas, &mut pass1.stats);
+    let warnings = crate::schema::config::apply_config_file(
+        &mut pass1.schemas,
+        &mut pass1.stats,
+        config_path,
+    )?;
     eprintln!("Schema after overrides: {} tables", pass1.schemas.len());
     Ok(warnings)
 }
