@@ -252,6 +252,7 @@ strategy = "jsonb"          # forcer une stratégie
 # strategy = "pivot"
 # strategy = "columns"
 # strategy = "flatten"
+# strategy = "skip"         # la table et ses enfants ne sont pas importés (comme Skip dans l'IHM)
 suffix_columns = ["_100g", "_unit"]  # la grille de suffixes (proposée par --suggest)
 
 [nom_table.columns]
@@ -260,7 +261,9 @@ ma_colonne = "INTEGER"      # forcer un type de colonne
 
 Les types forçables sont scalaires : une surcharge sur une colonne tableau est ignorée avec un avertissement. Forcer un type numérique sur une colonne de chaînes n'est pas une conversion : chaque chaîne devient `NULL` + anomalie (§ 1).
 
-Les surcharges sont appliquées après la Pass 1 et la sauvegarde du snapshot, **avant** le split des tables larges (#200), et suivies d'une nouvelle passe d'exclusion. Une table que le TOML règle (`strategy`, y compris `columns`) n'est pas coupée par le split.
+Les surcharges sont appliquées après la Pass 1 et la sauvegarde du snapshot, **avant** le split des tables larges (#200), et suivies d'une nouvelle passe d'exclusion. Une table que le TOML règle (`strategy`, y compris `columns`) n'est pas coupée par le split. `skip` passe en dernier,
+après `flatten`, par la même cascade que le Skip de l'IHM (`remove_skipped`). Une clé `snapshot` en tête du fichier
+nomme la Pass 1 à relire (relative au dossier du TOML, lecture seule).
 
 ### Groupes de colonnes (`column_groups`, #78)
 

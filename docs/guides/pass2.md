@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Pass 2, parcours du JSON et insertion dans PostgreSQL
-verified_at: 90ec6b6
+verified_at: 9cd4740
 files:
   - src/pass2/
   - src/db/copy_sink.rs
@@ -20,6 +20,7 @@ symbols:
   - record_missing_table
   - route_multi_collapse_children
   - apply_user_overrides
+  - remove_skipped
   - run_interruptible
   - load_and_constrain
   - run_pass2
@@ -165,7 +166,8 @@ se partager, et les PK/FK ne sont posées qu'à la fin.
   vide (`{}`, `[]`), parent en `Jsonb` (le blob garde tout), colonne du même nom ou objet d'un enfant aplati
   (`flatten_sources` ; un tableau sous sa clé laisse une anomalie, ses colonnes ne lisent qu'un objet, #170),
   sur le parent ou sur l'une de ses tables de groupe (colonne tableau, type mixte), ou enfant retiré
-  par un `Skip` (`skipped_children`, rempli par `apply_user_overrides` et gardé dans le snapshot ; il y note aussi
+  par un `Skip` (`skipped_children`, rempli par `remove_skipped` pour le Skip de l'IHM et le `skip` du TOML, et gardé dans le
+  snapshot ; il y note aussi
   les clés de `child_routes` qui menaient à la table retirée). Même règle pour la table pivot d'un groupe
   `SiblingCollapseMulti` absente (`route_multi_collapse_children`) et pour une cible de `child_routes` absente
   (`dispatch_child_routes`, #177). Une nouvelle façon de retirer une table du schéma

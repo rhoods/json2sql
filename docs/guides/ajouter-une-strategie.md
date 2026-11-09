@@ -1,7 +1,7 @@
 ---
 type: recette
 sujet: Ajouter une stratégie de matérialisation
-verified_at: 90ec6b6
+verified_at: 9cd4740
 files:
   - src/schema/table_schema.rs
   - src/schema/strategies.rs
@@ -117,7 +117,7 @@ Les stratégies existantes, par origine :
 | `SiblingCollapse` | phase 2 (`finalize_cascading`) | TOML `[group.*]` | `sibling` |
 | `SiblingCollapseMulti` | phase 2 | — | `sibling` |
 | `AutoSplit` | phase 3 (racine large ; enfant large aux types mélangés) | — | non (le split est obligatoire) |
-| `Ignore` | jamais : projection de `UserOverride::Skip` | IHM (`Skip`) | — |
+| `Ignore` | jamais : projection de `UserOverride::Skip` | IHM (`Skip`), TOML `skip` (217b) | — |
 | `Flatten` | jamais | TOML `flatten` | — |
 
 Toute nouvelle stratégie passe par le **socle** (§ 4). Selon ses lignes dans ce tableau, ajoute ensuite :

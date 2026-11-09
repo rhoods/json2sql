@@ -7,6 +7,10 @@
 //! Fonctions :
 //! - fn `format_version` — version à écrire pour des schémas : 2, ou 3 si une table est découpée en groupes de colonnes.
 //! - struct `SchemaSnapshot` — snapshot sérialisable d'un résultat Pass 1 (schémas, stats, overrides).
+//! - struct `SourceFingerprint` — empreinte du JSON source (taille, date ; chemin affiché seulement), 217b.
+//! - fn `SourceFingerprint::of` — l'empreinte d'un fichier, `None` s'il ne se lit pas.
+//! - fn `SourceFingerprint::differs_from` — le message à afficher si un fichier n'a plus cette empreinte.
+//! - fn `modified_secs` — la date de modification d'un fichier en secondes depuis l'époque Unix.
 //! - fn `write_snapshot` — sérialise et écrit sur disque (écriture atomique via `.tmp` + rename si demandé).
 //! - fn `save` — construit un `SchemaSnapshot` sans overrides et l'écrit (non atomique).
 //! - fn `save_with_overrides` — idem, avec les overrides de stratégie utilisateur (écriture atomique).
@@ -76,6 +80,61 @@ pub struct SchemaSnapshot {
     /// program ignores it and loses nothing, so the format version does not change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub samples: Vec<crate::schema::grouping::sample::StoredSample>,
+    /// The JSON file the Pass 1 read (217b): a snapshot reloaded with another file warns. Absent in older snapshots,
+    /// which an older program reads without it (no data is lost).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceFingerprint>,
+}
+
+/// The JSON source of a snapshot: compared by size and modification date, not by path, so that a project folder can
+/// move with its files (217b). The path is kept to name the file in the warning.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SourceFingerprint {
+    pub path: std::path::PathBuf,
+    pub size: u64,
+    /// Seconds since the Unix epoch; `None` where the platform gives no date.
+    pub modified: Option<u64>,
+}
+
+impl SourceFingerprint {
+    /// The fingerprint of `path`, `None` if its metadata cannot be read.
+    pub fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            size: meta.len(),
+            modified: modified_secs(&meta),
+        })
+    }
+
+    /// The warning to show when `path` is not the file this fingerprint was taken from (`None`: same size and date).
+    pub fn differs_from(&self, path: &Path) -> Option<String> {
+        let now = Self::of(path);
+        if now
+            .as_ref()
+            .is_some_and(|f| f.size == self.size && f.modified == self.modified)
+        {
+            return None;
+        }
+        Some(format!(
+            "the snapshot was made from '{}' ({} bytes); '{}' is not that file any more ({}): the schema may not match \
+             its rows, run Pass 1 again",
+            self.path.display(),
+            self.size,
+            path.display(),
+            now.map_or_else(|| "unreadable".to_string(), |f| format!("{} bytes", f.size)),
+        ))
+    }
+}
+
+fn modified_secs(meta: &std::fs::Metadata) -> Option<u64> {
+    let modified = meta.modified().ok()?;
+    Some(
+        modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs(),
+    )
 }
 
 /// Serialize and write a snapshot to disk (atomic for `save_with_overrides`, direct for `save`).
@@ -118,6 +177,7 @@ pub fn save(
         detected_format: Some(detected_format),
         group_columns: Vec::new(),
         samples: Vec::new(),
+        source: None,
     };
     write_snapshot(&snapshot, path, false)
 }
@@ -149,6 +209,7 @@ pub fn save_with_overrides(
         detected_format: Some(detected_format),
         group_columns: Vec::new(),
         samples: Vec::new(),
+        source: None,
     };
     write_snapshot(&snapshot, path, true)
 }
@@ -230,7 +291,34 @@ mod tests {
             detected_format: None,
             group_columns: vec![],
             samples: vec![],
+            source: None,
         }
+    }
+
+    // --- 217b: the fingerprint of the JSON source ---
+
+    #[test]
+    fn the_fingerprint_of_an_unchanged_source_says_nothing_and_a_changed_one_is_named() {
+        let src = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(src.path(), "{\"a\": 1}\n").unwrap();
+        let fp = SourceFingerprint::of(src.path()).expect("a file has metadata");
+        assert_eq!(fp.size, 9);
+        assert_eq!(fp.differs_from(src.path()), None);
+        std::fs::write(src.path(), "{\"a\": 1}\n{\"a\": 2}\n").unwrap();
+        let message = fp.differs_from(src.path()).expect("the size changed");
+        assert!(
+            message.contains(&src.path().display().to_string()),
+            "{message}"
+        );
+        assert!(fp.differs_from(Path::new("/nonexistent/x.json")).is_some());
+    }
+
+    #[test]
+    fn a_snapshot_without_a_source_is_still_read_and_written_without_one() {
+        let json = serde_json::to_string(&empty_snapshot()).unwrap();
+        assert!(!json.contains("\"source\""), "{json}");
+        let back = parse_snapshot(json.as_bytes()).unwrap();
+        assert_eq!(back.source, None);
     }
 
     #[test]

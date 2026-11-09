@@ -22,7 +22,9 @@
 //! - fn `resolve_input` — bufferise stdin dans un fichier temporaire si aucun chemin n'est fourni.
 //!
 //! Pass 1 :
-//! - fn `load_or_infer_schema` — lance Pass 1 ou restaure un snapshot, affiche le résumé.
+//! - fn `load_or_infer_schema` — lance Pass 1 ou restaure un snapshot (`--schema-input`, sinon la clé `snapshot` du TOML), affiche le résumé.
+//! - fn `toml_snapshot` — le snapshot que nomme la clé `snapshot` du TOML, s'il existe (217b, lecture seule).
+//! - fn `warn_if_other_source` — avertit si le snapshot vient d'un autre JSON que l'entrée (empreinte, 217b).
 //! - fn `restore_from_snapshot` — charge un `SchemaSnapshot` et ré-applique les overrides persistés.
 //! - fn `pass1_config` — la config de Pass 1 tirée de la ligne de commande (seuils du split compris).
 //! - fn `run_pass1_workers` — lance Pass 1 séquentiel ou parallèle selon `num_workers`, sans le split des tables larges.
@@ -264,8 +266,10 @@ fn finalized_schema(
     split: bool,
 ) -> Result<(Option<tempfile::NamedTempFile>, PathBuf, Pass1Result)> {
     let (stdin_temp, input_path) = resolve_input(std::mem::take(&mut cfg.input))?;
-    let mut pass1 = load_or_infer_schema(cfg, &input_path)?;
-    let warnings = post_process_schema(&mut pass1, cfg, split)?;
+    // a buffered stdin has no fingerprint worth keeping or checking (217b)
+    let source = stdin_temp.is_none().then_some(input_path.as_path());
+    let mut pass1 = load_or_infer_schema(cfg, &input_path, source)?;
+    let warnings = post_process_schema(&mut pass1, cfg, split, source)?;
     report_pass1_warnings(&pass1, cfg.depth_limit);
     for w in warnings {
         eprintln!("WARNING: {}", w.to_message());
@@ -293,9 +297,17 @@ fn resolve_input(input: Option<PathBuf>) -> Result<(Option<tempfile::NamedTempFi
 }
 
 /// Run Pass 1 or restore from snapshot, then print the inferred schema summary.
-fn load_or_infer_schema(cfg: &PipelineConfig, input_path: &Path) -> Result<Pass1Result> {
-    let pass1 = if let Some(ref schema_path) = cfg.schema_input {
-        restore_from_snapshot(schema_path)?
+fn load_or_infer_schema(
+    cfg: &PipelineConfig,
+    input_path: &Path,
+    source: Option<&Path>,
+) -> Result<Pass1Result> {
+    let snapshot = match cfg.schema_input {
+        Some(ref path) => Some(path.clone()),
+        None => toml_snapshot(cfg)?,
+    };
+    let pass1 = if let Some(ref schema_path) = snapshot {
+        restore_from_snapshot(schema_path, source)?
     } else {
         run_pass1_workers(input_path, cfg)?
     };
@@ -303,12 +315,46 @@ fn load_or_infer_schema(cfg: &PipelineConfig, input_path: &Path) -> Result<Pass1
     Ok(pass1)
 }
 
-fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
+/// The snapshot the `snapshot` key of the TOML names, when that file exists (217b); otherwise Pass 1 runs. Read only:
+/// the CLI writes a snapshot with `--schema-output`, and `--schema-input` wins over the key.
+fn toml_snapshot(cfg: &PipelineConfig) -> Result<Option<PathBuf>> {
+    let Some(ref toml) = cfg.schema_config else {
+        return Ok(None);
+    };
+    let Some(path) = crate::schema::config::SchemaConfig::from_file(toml)?.snapshot_path(toml)
+    else {
+        return Ok(None);
+    };
+    if path.exists() {
+        return Ok(Some(path));
+    }
+    eprintln!(
+        "Snapshot '{}' of the schema config not found: running Pass 1.",
+        path.display()
+    );
+    Ok(None)
+}
+
+/// The snapshot was made from another JSON file than the input (size or date, 217b): a warning, the import goes on.
+fn warn_if_other_source(
+    fingerprint: Option<&crate::schema::persistence::SourceFingerprint>,
+    input: Option<&Path>,
+) {
+    if let Some(message) = fingerprint
+        .zip(input)
+        .and_then(|(fp, input)| fp.differs_from(input))
+    {
+        eprintln!("WARNING: {message}");
+    }
+}
+
+fn restore_from_snapshot(schema_path: &Path, source: Option<&Path>) -> Result<Pass1Result> {
     eprintln!(
         "Loading schema snapshot from '{}'...",
         schema_path.display()
     );
     let snap = crate::schema::persistence::load(schema_path)?;
+    warn_if_other_source(snap.source.as_ref(), source);
     let mut schemas = snap.schemas;
     let skip_cascade_warnings = if snap.strategy_overrides.is_empty() {
         Vec::new()
@@ -500,8 +546,9 @@ fn post_process_schema(
     pass1: &mut Pass1Result,
     cfg: &PipelineConfig,
     split: bool,
+    source: Option<&Path>,
 ) -> Result<Vec<crate::schema::config::ConfigWarning>> {
-    save_schema_snapshot(pass1, cfg)?;
+    save_schema_snapshot(pass1, cfg, source)?;
     let warnings = apply_schema_config(pass1, cfg)?;
     if split {
         crate::pass1::runner::split(pass1, &pass1_config(cfg));
@@ -516,15 +563,18 @@ fn post_process_schema(
 /// the opt-out). Runs after the snapshot is saved, so that a snapshot never holds automatic groups and a TOML given
 /// later still wins (D1). Its warnings say they come from the strategy.
 fn apply_group_columns(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<()> {
-    if !cfg.group_columns && pass1.group_columns.is_empty() {
+    let (left_to_toml, auto) = toml_column_group_tables(cfg)?;
+    if !cfg.group_columns && pass1.group_columns.is_empty() && auto.is_empty() {
         return Ok(());
     }
-    let left_to_toml = toml_column_group_tables(cfg)?;
     let ticked = pass1.group_columns.clone();
     let warnings = crate::schema::grouping::auto::apply_name_groups(
         &mut pass1.schemas,
         &pass1.samples,
-        |t| (cfg.group_columns || ticked.contains(&t.name)) && !left_to_toml.contains(&t.name),
+        |t| {
+            (cfg.group_columns || ticked.contains(&t.name) || auto.contains(&t.name))
+                && !left_to_toml.contains(&t.name)
+        },
     )?;
     crate::schema::column_groups::reindex_stats(&pass1.schemas, &mut pass1.stats);
     for w in warnings {
@@ -537,19 +587,24 @@ fn apply_group_columns(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<
     Ok(())
 }
 
-/// The tables whose section of the `--schema-config` TOML has a `column_groups` key.
+/// The tables whose section of the `--schema-config` TOML has a `column_groups` key: those with their own groups (or
+/// `{}`, the opt-out), then those with `"auto"` (217b), which get the automatic groups as with `--group-columns`.
 // shortcut: reads the small TOML a second time after apply_schema_config; pass the parsed config down if it grows.
-fn toml_column_group_tables(cfg: &PipelineConfig) -> Result<HashSet<String>> {
+fn toml_column_group_tables(cfg: &PipelineConfig) -> Result<(HashSet<String>, HashSet<String>)> {
     let Some(ref path) = cfg.schema_config else {
-        return Ok(HashSet::new());
+        return Ok((HashSet::new(), HashSet::new()));
     };
     let config = crate::schema::config::SchemaConfig::from_file(path)?;
-    Ok(config
+    let (auto, own): (Vec<_>, Vec<_>) = config
         .tables
         .into_iter()
-        .filter(|(_, keys)| keys.contains_key("column_groups"))
-        .map(|(table, _)| table)
-        .collect())
+        .filter_map(|(table, keys)| {
+            keys.get("column_groups")
+                .map(|g| (table, crate::schema::column_groups::is_auto(g)))
+        })
+        .partition(|(_, auto)| *auto);
+    let names = |v: Vec<(String, bool)>| v.into_iter().map(|(t, _)| t).collect();
+    Ok((names(own), names(auto)))
 }
 
 fn apply_schema_config(
@@ -572,7 +627,11 @@ fn apply_schema_config(
     Ok(warnings)
 }
 
-fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()> {
+fn save_schema_snapshot(
+    pass1: &Pass1Result,
+    cfg: &PipelineConfig,
+    source: Option<&Path>,
+) -> Result<()> {
     let Some(ref out_path) = cfg.schema_output else {
         return Ok(());
     };
@@ -588,6 +647,7 @@ fn save_schema_snapshot(pass1: &Pass1Result, cfg: &PipelineConfig) -> Result<()>
         detected_format: pass1.detected_format.clone(),
         group_columns: pass1.group_columns.clone(),
         samples: pass1.samples.clone(),
+        source: source.and_then(crate::schema::persistence::SourceFingerprint::of),
     };
     crate::schema::persistence::write_snapshot(&snapshot, out_path, false)?;
     eprintln!("Schema snapshot saved to '{}'.", out_path.display());
@@ -921,6 +981,37 @@ mod tests {
         );
     }
 
+    /// 217b: `column_groups = "auto"` asks for the automatic groups on that table only, without `--group-columns`.
+    #[test]
+    fn column_groups_auto_in_the_toml_splits_that_table_by_its_names() {
+        let file = wide_jsonl(60);
+        let (cfg, _toml) = with_toml(cfg_for(&file), "[root]\ncolumn_groups = \"auto\"\n");
+        let mut cfg = cfg;
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg, true).unwrap();
+        assert_eq!(
+            pass1
+                .schemas
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["root", "root_kiwi", "root_zulu"]
+        );
+        let root = TableSchema::new("root".to_string(), vec!["root".to_string()], 0);
+        assert_eq!(
+            apply_schema_config(&mut minimal_pass1(vec![root]), &cfg).unwrap(),
+            [],
+            "\"auto\" is not a malformed column_groups"
+        );
+    }
+
+    #[test]
+    fn another_string_in_column_groups_is_still_malformed() {
+        let file = wide_jsonl(60);
+        let (mut cfg, _toml) = with_toml(cfg_for(&file), "[root]\ncolumn_groups = \"yes\"\n");
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg, true).unwrap();
+        assert_eq!(pass1.schemas.len(), 1);
+    }
+
     #[test]
     fn without_group_columns_nothing_is_split() {
         let file = wide_jsonl(60);
@@ -1021,6 +1112,52 @@ mod tests {
     fn sorted(mut names: Vec<String>) -> Vec<String> {
         names.sort();
         names
+    }
+
+    /// 217b: the `snapshot` key of the TOML, relative to its folder, is read instead of running Pass 1.
+    #[test]
+    fn the_snapshot_named_by_the_toml_is_read_without_reading_the_input() {
+        let file = wide_jsonl(60);
+        let dir = tempfile::tempdir().unwrap();
+        table_names(PipelineConfig {
+            schema_output: Some(dir.path().join("pass1.json")),
+            ..cfg_for(&file)
+        });
+        let toml = dir.path().join("json2sql.toml");
+        std::fs::write(&toml, "snapshot = \"pass1.json\"\n").unwrap();
+        let cfg = PipelineConfig {
+            input: Some("/nonexistent/input.json".into()),
+            schema_config: Some(toml),
+            ..minimal_pipeline_cfg(None)
+        };
+        assert_eq!(table_names(cfg), ["root"]);
+    }
+
+    #[test]
+    fn a_snapshot_named_by_the_toml_that_is_missing_means_a_pass1() {
+        let file = wide_jsonl(60);
+        let dir = tempfile::tempdir().unwrap();
+        let toml = dir.path().join("json2sql.toml");
+        std::fs::write(&toml, "snapshot = \"pass1.json\"\n").unwrap();
+        let cfg = PipelineConfig {
+            schema_config: Some(toml),
+            ..cfg_for(&file)
+        };
+        assert_eq!(table_names(cfg), ["root"]);
+        assert!(
+            !dir.path().join("pass1.json").exists(),
+            "the CLI only reads the key"
+        );
+    }
+
+    #[test]
+    fn schema_output_records_the_fingerprint_of_the_input() {
+        let file = wide_jsonl(60);
+        let snapshot = snapshot_of(cfg_for(&file));
+        let saved = crate::schema::persistence::load(snapshot.path()).unwrap();
+        let source = saved.source.expect("the CLI records its input");
+        assert_eq!(source.size, std::fs::metadata(file.path()).unwrap().len());
+        assert_eq!(source.differs_from(file.path()), None);
     }
 
     #[test]

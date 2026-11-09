@@ -21,6 +21,7 @@
 //!
 //! Fonctions :
 //! - fn `apply_column_groups` — applique les `column_groups` d'une config ; avertissements pour les groupes invalides.
+//! - fn `is_auto` — vrai pour `column_groups = "auto"` : les groupes automatiques par les noms, après le split (217b).
 //! - fn `dissolve_column_groups` — remet les colonnes des groupes d'une table dans la table et retire les tables de groupe.
 //! - fn `prune_missing_groups` — retire des tables les noms de groupes dont la table n'existe plus.
 //! - fn `reindex_stats` — rattache les statistiques d'une colonne déplacée à la table de son groupe.
@@ -85,6 +86,8 @@ pub fn apply_column_groups(
         .tables
         .iter()
         .filter_map(|(table, keys)| keys.get("column_groups").map(|groups| (table, groups)))
+        // "auto": the groups by the names, made after the split (`--group-columns`, 217b)
+        .filter(|(_, groups)| !is_auto(groups))
         .collect();
     tables.sort_by(|a, b| a.0.cmp(b.0));
     let mut warnings = Vec::new();
@@ -92,6 +95,11 @@ pub fn apply_column_groups(
         warnings.extend(apply_to_table(schemas, table, groups)?);
     }
     Ok(warnings)
+}
+
+/// `column_groups = "auto"` (217b): the table gets the automatic groups by the names, as `--group-columns` does.
+pub fn is_auto(groups: &toml::Value) -> bool {
+    groups.as_str() == Some("auto")
 }
 
 /// Puts the columns of the group tables of `parent` back into it and removes those tables.

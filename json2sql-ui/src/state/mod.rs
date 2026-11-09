@@ -980,6 +980,7 @@ mod tests {
             detected_format: None,
             group_columns: vec!["products".to_string()],
             samples: Vec::new(),
+            source: None,
         });
         assert_eq!(
             s.schema.group_columns,
@@ -1027,6 +1028,7 @@ mod tests {
             detected_format: None,
             group_columns: Vec::new(),
             samples: Vec::new(),
+            source: None,
         });
 
         s.clear_snapshot();
@@ -1055,6 +1057,7 @@ mod tests {
             detected_format: None,
             group_columns: Vec::new(),
             samples: Vec::new(),
+            source: None,
             strategy_overrides: {
                 let mut m = HashMap::new();
                 m.insert("t".to_string(), UserOverride::Jsonb);
@@ -1091,6 +1094,7 @@ mod tests {
             detected_format: None,
             group_columns: Vec::new(),
             samples: Vec::new(),
+            source: None,
             strategy_overrides: HashMap::new(),
         };
         let mut s = AppState::default();
