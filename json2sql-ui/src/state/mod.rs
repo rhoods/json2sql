@@ -16,6 +16,7 @@
 //! - fn `format_bytes` — formate un nombre d'octets en unités SI lisibles
 //! - fn `pass1_registry_config` — seuils de la Pass 1 de l'IHM, pour la Pass 1 et le split d'un snapshot chargé (#200)
 //! - fn `apply_toml_then_split` — le TOML du projet puis le split des tables larges, dans l'ordre de la CLI, après une Pass 1 ou un snapshot (#217) ; le split a lieu même si le TOML échoue
+//! - fn `load_snapshot_with_toml` — charge un snapshot puis lui applique `apply_toml_then_split` (#217)
 //! - struct `Pass1Progress` — état de progression de la Pass 1 (compteurs + logs)
 //! - fn `Pass1Progress::push_log` — ajoute une ligne au ring-buffer de logs
 //! - struct `Pass2Progress` — état de progression de la Pass 2 (compteurs, phases DDL/streaming/contraintes)
@@ -167,6 +168,28 @@ pub fn apply_toml_then_split(
         schemas, stats, registry,
     ));
     warnings
+}
+
+/// Load the snapshot at `path`, then the TOML and the split (`apply_toml_then_split`): a CLI snapshot is saved before
+/// both (#200); one the UI saved already has them, and the same TOML changes nothing (#129). The inner result is the
+/// TOML's: when it fails, the snapshot is still loaded, without it.
+pub fn load_snapshot_with_toml(
+    path: &std::path::Path,
+    toml: Option<&std::path::Path>,
+    registry: &json2sql::schema::registry::RegistryConfig,
+) -> json2sql::error::Result<(
+    json2sql::schema::persistence::SchemaSnapshot,
+    json2sql::error::Result<Vec<ConfigWarning>>,
+)> {
+    let mut snap = json2sql::schema::persistence::load(path)?;
+    let warnings = apply_toml_then_split(
+        &mut snap.schemas,
+        &mut snap.stats,
+        &mut snap.overflow_warnings,
+        toml,
+        registry,
+    );
+    Ok((snap, warnings))
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +398,8 @@ pub struct SchemaState {
     pub pass1_stats: Vec<ColumnStats>,
     /// True when schemas were loaded from a saved snapshot rather than a live Pass 1 run.
     pub schema_snapshot_loaded: bool,
+    /// The snapshot loaded, reloaded when the TOML of the project changes (#217).
+    pub snapshot_path: Option<PathBuf>,
     /// Warnings from TOML config overrides (unknown table, column, type, strategy).
     pub config_warnings: Vec<ConfigWarning>,
     /// JSON format detected during Pass 1, or loaded from snapshot. Used to skip
@@ -397,6 +422,7 @@ impl Default for SchemaState {
             column_collisions: Vec::new(),
             pass1_stats: Vec::new(),
             schema_snapshot_loaded: false,
+            snapshot_path: None,
             config_warnings: Vec::new(),
             detected_format: None,
         }
@@ -417,6 +443,7 @@ impl SchemaState {
         self.selected_table_indices = HashSet::from([0]);
         self.last_selected_idx = 0;
         self.schema_snapshot_loaded = false;
+        self.snapshot_path = None;
         self.config_warnings = Vec::new();
         self.detected_format = None;
     }
@@ -781,6 +808,111 @@ mod tests {
         );
         assert!(warnings.is_err());
         assert!(names(&r.schemas).len() > 1, "{:?}", names(&r.schemas));
+    }
+
+    /// The schema of `r` once its TOML and the split are applied, as JSON (comparable).
+    fn finalized(r: &mut json2sql::pass1::runner::Pass1Result, toml: &TempFile) -> String {
+        let warnings = apply_toml_then_split(
+            &mut r.schemas,
+            &mut r.stats,
+            &mut r.overflow_warnings,
+            Some(&toml.0),
+            &pass1_registry_config(HashSet::new()),
+        );
+        assert_eq!(warnings.expect("a TOML that parses"), []);
+        serde_json::to_string(&r.schemas).expect("serialize")
+    }
+
+    /// `r` saved as a snapshot (`persistence::save`, as `--schema-output` does).
+    fn snapshot_of(r: &json2sql::pass1::runner::Pass1Result) -> TempFile {
+        let file = TempFile::with("snapshot.json", "");
+        json2sql::schema::persistence::save(
+            &r.schemas,
+            r.total_rows,
+            &r.truncated_names,
+            &r.column_collisions,
+            &r.stats,
+            &r.overflow_warnings,
+            r.detected_format.clone().expect("a format"),
+            &file.0,
+        )
+        .expect("save the snapshot");
+        file
+    }
+
+    const JSONB_ITEMS: &str = "[items]\nstrategy = \"jsonb\"\n";
+
+    #[test]
+    fn a_snapshot_loaded_with_the_toml_gives_the_schema_of_a_pass1_with_it() {
+        let (mut direct, _input, toml) = wide_pass1(JSONB_ITEMS);
+        let direct = finalized(&mut direct, &toml);
+        // a CLI snapshot: saved before the TOML and the split (#200)
+        let (before, _input2, _) = wide_pass1("");
+        let snapshot = snapshot_of(&before);
+        let (snap, warnings) = load_snapshot_with_toml(
+            &snapshot.0,
+            Some(&toml.0),
+            &pass1_registry_config(HashSet::new()),
+        )
+        .expect("load");
+        assert_eq!(warnings.expect("a TOML that parses"), []);
+        assert_eq!(
+            serde_json::to_string(&snap.schemas).expect("serialize"),
+            direct
+        );
+    }
+
+    #[test]
+    fn a_snapshot_saved_after_the_toml_reloads_with_it_unchanged() {
+        let (mut r, _input, toml) = wide_pass1(JSONB_ITEMS);
+        let once = finalized(&mut r, &toml);
+        // what Save writes in the UI: the schema after the TOML and the split
+        let snapshot = snapshot_of(&r);
+        let (snap, warnings) = load_snapshot_with_toml(
+            &snapshot.0,
+            Some(&toml.0),
+            &pass1_registry_config(HashSet::new()),
+        )
+        .expect("load");
+        assert_eq!(
+            warnings.expect("a TOML that parses"),
+            [],
+            "#129: the same override is ignored silently"
+        );
+        assert_eq!(
+            serde_json::to_string(&snap.schemas).expect("serialize"),
+            once
+        );
+    }
+
+    /// Limit (#217, until the snapshot holds only the Pass 1 in 217b): a snapshot the UI saved is already split, and
+    /// a grid of the TOML is refused on its `AutoSplit` table, with a warning; the CLI does the same (`--schema-input`).
+    #[test]
+    fn a_grid_of_the_toml_is_refused_on_a_snapshot_already_split() {
+        let (mut r, _input, toml) = wide_pass1("[items]\nsuffix_columns = [\"0\", \"1\", \"2\"]\n");
+        let split = apply_toml_then_split(
+            &mut r.schemas,
+            &mut r.stats,
+            &mut r.overflow_warnings,
+            None,
+            &pass1_registry_config(HashSet::new()),
+        );
+        assert_eq!(split.expect("no TOML, no error"), []);
+        let snapshot = snapshot_of(&r);
+        let (snap, warnings) = load_snapshot_with_toml(
+            &snapshot.0,
+            Some(&toml.0),
+            &pass1_registry_config(HashSet::new()),
+        )
+        .expect("load");
+        assert!(
+            matches!(
+                warnings.expect("a TOML that parses").as_slice(),
+                [json2sql::schema::config::ConfigWarning::InvalidOverride { .. }]
+            ),
+            "the grid is refused with a warning"
+        );
+        assert_eq!(names(&snap.schemas), ["items", "items_wide"]);
     }
 
     // --- Sub-struct defaults ---
