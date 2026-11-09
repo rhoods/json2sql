@@ -261,6 +261,8 @@ pub struct ProjectState {
     pub drop_existing: bool,
     /// Optional directory where anomaly NDJSON files are streamed during Pass 2.
     pub anomaly_dir: Option<PathBuf>,
+    /// TOML of rules (`--schema-config`) applied after Pass 1 or a snapshot load, before the split (#217).
+    pub schema_config: Option<PathBuf>,
     /// Optional directory for Pass 2 temporary files (default: system temp dir).
     pub temp_dir: Option<PathBuf>,
     /// True while the "Test connection" check is in flight.
@@ -295,6 +297,7 @@ impl Default for ProjectState {
             pg_schema: "public".to_string(),
             drop_existing: false,
             anomaly_dir: None,
+            schema_config: None,
             temp_dir: None,
             pg_testing: false,
             pg_ok: None,

@@ -60,6 +60,8 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let mut picking_source = use_signal(|| false);
     let mut picking_anomaly = use_signal(|| false);
     let mut picking_schema = use_signal(|| false);
+    let mut picking_toml = use_signal(|| false);
+    let mut toml_error: Signal<Option<String>> = use_signal(|| None);
     let mut picker_error: Signal<Option<String>> = use_signal(|| None);
     let mut load_error: Signal<Option<String>> = use_signal(|| None);
 
@@ -77,6 +79,11 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let source_large = size_bytes.is_some_and(|b| b > 5 * 1_073_741_824);
 
     let snapshot_loaded = state.read().schema.schema_snapshot_loaded;
+    let schema_config = state.read().project.schema_config.clone();
+    let schema_config_label = schema_config
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     let snapshot_tables = state.read().schema.schemas.len();
 
     let pg_ok = state.read().project.pg_ok;
@@ -349,6 +356,62 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                             "✕"
                                         }
                                     }
+                                }
+                                // Schema config (TOML, #217): read at once so that a syntax error shows here
+                                div { class: "field-row mt-sm",
+                                    label { "Schema config (TOML)" }
+                                    input {
+                                        class: "input grow",
+                                        r#type: "text",
+                                        readonly: true,
+                                        placeholder: "— none —",
+                                        title: "Rules applied after Pass 1 or a snapshot load, as --schema-config does",
+                                        value: "{schema_config_label}",
+                                    }
+                                    button {
+                                        class: "btn sm",
+                                        disabled: picking_toml(),
+                                        onclick: move |_| async move {
+                                            if picking_toml() { return; }
+                                            picking_toml.set(true);
+                                            toml_error.set(None);
+                                            match pick_file(&[("Schema config", "*.toml")]).await {
+                                                PickResult::Selected(path) => {
+                                                    let checked = path.clone();
+                                                    let res = tokio::task::spawn_blocking(move || {
+                                                        json2sql::schema::config::SchemaConfig::from_file(&checked)
+                                                    }).await;
+                                                    match res {
+                                                        Ok(Ok(_)) => {
+                                                            state.write().project.schema_config = Some(path);
+                                                            crate::config::try_save(&state.read().project);
+                                                        }
+                                                        Ok(Err(e)) => toml_error.set(Some(format!("Failed: {e}"))),
+                                                        Err(_) => toml_error.set(Some("Task panicked".to_string())),
+                                                    }
+                                                }
+                                                PickResult::Cancelled => {}
+                                                PickResult::NotAvailable => {
+                                                    toml_error.set(Some("File picker unavailable".to_string()));
+                                                }
+                                            }
+                                            picking_toml.set(false);
+                                        },
+                                        if picking_toml() { "Reading…" } else { "Load .toml…" }
+                                    }
+                                    if schema_config.is_some() {
+                                        button {
+                                            class: "btn ghost sm",
+                                            onclick: move |_| {
+                                                state.write().project.schema_config = None;
+                                                crate::config::try_save(&state.read().project);
+                                            },
+                                            "✕"
+                                        }
+                                    }
+                                }
+                                if let Some(ref err) = toml_error() {
+                                    p { style: "color:var(--danger);font-size:var(--fs-xs);margin:6px 0 0;", "{err}" }
                                 }
                                 // Schema snapshot
                                 div { class: "field-row mt-sm",
