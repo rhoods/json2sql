@@ -516,15 +516,18 @@ fn post_process_schema(
 /// the opt-out). Runs after the snapshot is saved, so that a snapshot never holds automatic groups and a TOML given
 /// later still wins (D1). Its warnings say they come from the strategy.
 fn apply_group_columns(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<()> {
-    if !cfg.group_columns && pass1.group_columns.is_empty() {
+    let (left_to_toml, auto) = toml_column_group_tables(cfg)?;
+    if !cfg.group_columns && pass1.group_columns.is_empty() && auto.is_empty() {
         return Ok(());
     }
-    let left_to_toml = toml_column_group_tables(cfg)?;
     let ticked = pass1.group_columns.clone();
     let warnings = crate::schema::grouping::auto::apply_name_groups(
         &mut pass1.schemas,
         &pass1.samples,
-        |t| (cfg.group_columns || ticked.contains(&t.name)) && !left_to_toml.contains(&t.name),
+        |t| {
+            (cfg.group_columns || ticked.contains(&t.name) || auto.contains(&t.name))
+                && !left_to_toml.contains(&t.name)
+        },
     )?;
     crate::schema::column_groups::reindex_stats(&pass1.schemas, &mut pass1.stats);
     for w in warnings {
@@ -537,19 +540,24 @@ fn apply_group_columns(pass1: &mut Pass1Result, cfg: &PipelineConfig) -> Result<
     Ok(())
 }
 
-/// The tables whose section of the `--schema-config` TOML has a `column_groups` key.
+/// The tables whose section of the `--schema-config` TOML has a `column_groups` key: those with their own groups (or
+/// `{}`, the opt-out), then those with `"auto"` (217b), which get the automatic groups as with `--group-columns`.
 // shortcut: reads the small TOML a second time after apply_schema_config; pass the parsed config down if it grows.
-fn toml_column_group_tables(cfg: &PipelineConfig) -> Result<HashSet<String>> {
+fn toml_column_group_tables(cfg: &PipelineConfig) -> Result<(HashSet<String>, HashSet<String>)> {
     let Some(ref path) = cfg.schema_config else {
-        return Ok(HashSet::new());
+        return Ok((HashSet::new(), HashSet::new()));
     };
     let config = crate::schema::config::SchemaConfig::from_file(path)?;
-    Ok(config
+    let (auto, own): (Vec<_>, Vec<_>) = config
         .tables
         .into_iter()
-        .filter(|(_, keys)| keys.contains_key("column_groups"))
-        .map(|(table, _)| table)
-        .collect())
+        .filter_map(|(table, keys)| {
+            keys.get("column_groups")
+                .map(|g| (table, crate::schema::column_groups::is_auto(g)))
+        })
+        .partition(|(_, auto)| *auto);
+    let names = |v: Vec<(String, bool)>| v.into_iter().map(|(t, _)| t).collect();
+    Ok((names(own), names(auto)))
 }
 
 fn apply_schema_config(
@@ -919,6 +927,37 @@ mod tests {
             table_names(grouped(&file)),
             ["root", "root_kiwi", "root_zulu"]
         );
+    }
+
+    /// 217b: `column_groups = "auto"` asks for the automatic groups on that table only, without `--group-columns`.
+    #[test]
+    fn column_groups_auto_in_the_toml_splits_that_table_by_its_names() {
+        let file = wide_jsonl(60);
+        let (cfg, _toml) = with_toml(cfg_for(&file), "[root]\ncolumn_groups = \"auto\"\n");
+        let mut cfg = cfg;
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg, true).unwrap();
+        assert_eq!(
+            pass1
+                .schemas
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["root", "root_kiwi", "root_zulu"]
+        );
+        let root = TableSchema::new("root".to_string(), vec!["root".to_string()], 0);
+        assert_eq!(
+            apply_schema_config(&mut minimal_pass1(vec![root]), &cfg).unwrap(),
+            [],
+            "\"auto\" is not a malformed column_groups"
+        );
+    }
+
+    #[test]
+    fn another_string_in_column_groups_is_still_malformed() {
+        let file = wide_jsonl(60);
+        let (mut cfg, _toml) = with_toml(cfg_for(&file), "[root]\ncolumn_groups = \"yes\"\n");
+        let (_temp, _path, pass1) = finalized_schema(&mut cfg, true).unwrap();
+        assert_eq!(pass1.schemas.len(), 1);
     }
 
     #[test]

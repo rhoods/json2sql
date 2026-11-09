@@ -556,7 +556,9 @@ impl TomlStrategy {
         match self {
             Self::Pivot | Self::Jsonb | Self::Flatten => true,
             // the group tables of a skipped table go with it (real children)
-            Self::Columns | Self::StructuredPivot | Self::Skip | Self::NormalizeDynamicKeys => false,
+            Self::Columns | Self::StructuredPivot | Self::Skip | Self::NormalizeDynamicKeys => {
+                false
+            }
         }
     }
 
@@ -2028,7 +2030,11 @@ mod tests {
         assert_eq!(warnings, []);
         let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["root", "root_c"]);
-        assert_eq!(schemas[0].skipped_children, ["a"], "#167: no anomaly for the skipped key");
+        assert_eq!(
+            schemas[0].skipped_children,
+            ["a"],
+            "#167: no anomaly for the skipped key"
+        );
     }
 
     #[test]
@@ -2053,7 +2059,10 @@ mod tests {
         let config: SchemaConfig = toml::from_str("[root_a]\nstrategy = \"skip\"\n").unwrap();
         let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
         assert!(
-            matches!(warnings.as_slice(), [ConfigWarning::AlreadyOverridden { .. }]),
+            matches!(
+                warnings.as_slice(),
+                [ConfigWarning::AlreadyOverridden { .. }]
+            ),
             "{warnings:?}"
         );
         assert!(schemas.iter().any(|s| s.name == "root_a"));
