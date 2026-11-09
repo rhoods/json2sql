@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Config TOML, overrides de l'IHM et snapshot du schéma
-verified_at: 0c42853
+verified_at: 16b8ac8
 files:
   - src/schema/config.rs
   - src/schema/persistence.rs
@@ -14,6 +14,7 @@ files:
   - json2sql-ui/src/screens/common/overrides.rs
   - json2sql-ui/src/screens/strategy.rs
   - json2sql-ui/src/screens/setup.rs
+  - json2sql-ui/src/screens/analysis.rs
   - docs/functional/usage.md
   - docs/technical/schema-inference.md
   - tests/integration_overrides.rs
@@ -28,6 +29,9 @@ symbols:
   - ConfigWarning::to_message
   - apply_overrides
   - apply_overrides_complete
+  - apply_config_file
+  - apply_toml_then_split
+  - load_snapshot_with_toml
   - apply_strategy_override
   - apply_suffix_columns_override
   - suffix_columns_already_applied
@@ -102,13 +106,13 @@ pages sont en partie fausses** (§ 3). Ajouter une stratégie a sa propre fiche 
 
 ## Rôle
 
-Après la Pass 1, deux sources peuvent changer le schéma : le **TOML** de `--schema-config` (CLI seulement :
-l'IHM n'en lit jamais) et les **overrides de l'IHM** (`UserOverride` Pivot, Jsonb, Skip, gardés dans le snapshot).
+Après la Pass 1, deux sources peuvent changer le schéma : le **TOML** de `--schema-config` (lu aussi par l'IHM,
+Setup > Schema config, #217) et les **overrides de l'IHM** (`UserOverride` Pivot, Jsonb, Skip, gardés dans le snapshot).
 Chaque `TableSchema` garde sa stratégie inférée et un override par source ; `TableSchema::effective_strategy` choisit
 dans l'ordre IHM, puis TOML, puis inférée. Le **snapshot** (`SchemaSnapshot`, un JSON) enregistre le résultat de la
 Pass 1 pour le recharger sans relire le fichier : `--schema-output` / `--schema-input` en CLI, Save / Load dans l'IHM.
 Depuis #200, les surcharges passent **avant** le split des tables larges : le TOML voit toutes les clés, et une table
-qu'il règle n'est pas coupée. Le snapshot de la CLI est écrit avant le TOML ; celui de l'IHM, après son split.
+qu'il règle n'est pas coupée. Le snapshot de la CLI est écrit avant le TOML ; celui de l'IHM, après le TOML et le split.
 
 ## 1. Où intervenir
 
@@ -174,7 +178,7 @@ CLI : run_pipeline
                                    qui finit par exclude_absorbed_children
   post_process_schema
     ├─ save_schema_snapshot (--schema-output) : le schéma AVANT le TOML et le split (#200)
-    ├─ apply_schema_config : SchemaConfig::from_file → apply_overrides_complete
+    ├─ apply_schema_config → apply_config_file : SchemaConfig::from_file → apply_overrides_complete → reindex_stats
     │     ├─ apply_overrides, table par table :
     │     │    already_overridden : une table qui a déjà un override saute strategy et suffix_columns
     │     │    dissolve_column_groups si rebuilds_columns
@@ -187,7 +191,10 @@ CLI : run_pipeline
     ├─ split (pass1::runner) : les tables larges et creuses que le TOML n'a pas réglées (voir finalisation.md)
     └─ apply_group_columns (--group-columns, tables cochées du snapshot ; toml_column_group_tables relit le TOML)
 
-IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snapshot)
+IHM : Pass 1 (AnalysisScreen : run_before_split) ou Load (setup.rs : load_snapshot_with_toml → persistence::load)
+  apply_toml_then_split : apply_config_file (TOML du projet, s'il y en a un) → split_wide_tables
+    avertissements → SchemaState.config_warnings (bannière de Strategy) ; un TOML illisible laisse le schéma sans lui
+  AppState::load_snapshot (Load) ; changer de TOML recharge le snapshot (SchemaState.snapshot_path)
   StrategyScreen : boutons Pivot / Jsonb / Skip → strategy_overrides ; Save → SchemaSnapshot → write_snapshot
   build_effective_schemas → apply_user_overrides sur une copie → le worker reçoit les schémas effectifs
 ```
@@ -207,6 +214,10 @@ IHM : Pass 1 (AnalysisScreen) ou Load (setup.rs → load → AppState::load_snap
   ignoré sans bruit (snapshot rechargé avec son TOML, usage normal), un autre donne `AlreadyOverridden` (l'IHM gagne,
   comme dans `effective_strategy`). Côté IHM, `kept_toml_rebuild` : sur des colonnes déjà reconstruites par le TOML,
   Pivot et Columns sont refusés (avertissement sur stderr seulement : l'IHM ne l'affiche pas), Jsonb reconstruit.
+  Depuis #217, l'IHM y arrive dans un usage normal : un TOML `jsonb` sur `t`, puis Pivot cliqué sur `t`. Le Pivot
+  est ignoré, mais `strategy_overrides` le garde : Strategy montre Pivot, l'import fait Jsonb (suite de #217).
+  Autre limite : un snapshot enregistré par l'IHM est déjà coupé, et une grille du TOML y est refusée sur la table
+  `AutoSplit` (`InvalidOverride`, test `a_grid_of_the_toml_is_refused_on_a_snapshot_already_split`).
   Vérifié en `--dry-run` sur les quatre enchaînements. **Limites** : `structured_pivot` / `suffix_columns` et
   `flatten` ne posent pas `toml_override`. Rejouer les mêmes `suffix_columns` sur un snapshot ne change rien
   (`suffix_columns_already_applied`, #163) ; d'autres suffixes donnent `InvalidOverride`. Un `pivot` posé ensuite sur

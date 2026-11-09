@@ -31,11 +31,18 @@ l'IHM, ou avec `--group-columns` pour les groupes de colonnes. JSONB n'est jamai
 > |---|---|---|
 > | Contenu | des règles : `strategy`, `suffix_columns`, `prefix_columns`, `column_groups`, `flatten`, `[group.*]`, types | le résultat de la Pass 1, et les choix faits dans l'IHM (Pivot, Jsonb, Skip, groupes de colonnes cochés) |
 > | Écrit par | l'utilisateur, ou `--suggest` | la CLI (`--schema-output`), l'IHM (Save) |
-> | Lu par | **la CLI seulement** | la CLI (`--schema-input`), l'IHM (Load) |
+> | Lu par | la CLI (`--schema-config`), l'IHM (Setup > Schema config) | la CLI (`--schema-input`), l'IHM (Load) |
 >
-> L'IHM ne lit pas le TOML : les grilles, les `column_groups` du TOML, `flatten` et les fusions `[group.*]` ne
-> s'appliquent qu'en CLI. La CLI écrit son snapshot **avant** d'appliquer le TOML : chargé dans l'IHM, il ne contient
-> pas ce que le TOML a fait.
+> L'IHM applique le TOML comme la CLI (#217) : après la Pass 1 ou le chargement du snapshot, **avant** le split des
+> tables larges. Ses avertissements s'affichent en tête de l'écran Strategy. Changer de TOML recharge le snapshot,
+> sans Pass 1. La CLI écrit son snapshot **avant** le TOML ; celui de l'IHM (Save) est écrit après le TOML et le
+> split.
+>
+> **Limites** (corrigées par la suite de #217) : sur un snapshot enregistré par l'IHM, les tables larges sont déjà
+> coupées, et une grille du TOML (`suffix_columns`, `prefix_columns`) y est refusée (avertissement
+> `InvalidOverride`) : partir d'un snapshot de la CLI ou relancer la Pass 1. Les choix Pivot, Jsonb et Skip de
+> l'écran Strategy ne sont pas écrits dans le TOML, et Pivot sur une table que le TOML a mise en Jsonb (ou en
+> Pivot) est ignoré, alors que l'écran l'affiche.
 
 ---
 
