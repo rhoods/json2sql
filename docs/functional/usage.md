@@ -266,6 +266,10 @@ ALTER SYSTEM SET max_wal_senders = 0;
 
 Le fichier TOML permet de forcer des stratégies de stockage ou des types de colonnes que l'inférence automatique ne peut pas deviner.
 
+L'IHM lit le même fichier (Setup > Schema config, #217) et l'applique comme la CLI, après la Pass 1 ou le chargement
+d'un snapshot et avant le split ; voir l'encadré « TOML ou snapshot » de [strategies.md](strategies.md) pour ses
+limites.
+
 ### Format général
 
 ```toml
@@ -333,8 +337,9 @@ members = ["people_home", "people_work"]
   garde déjà leurs données.
 - Ne nommez pas le groupe comme la clé JSON d'un de ses membres (`[group.home]`) : ce membre ne serait pas importé et
   laisserait des anomalies.
-- Les groupes sont appliqués après les surcharges de chaque table et avant `column_groups`. L'IHM ne lit pas le TOML ;
-  un snapshot écrit par `--schema-output` est pris avant le TOML et ne garde pas la table fusionnée.
+- Les groupes sont appliqués après les surcharges de chaque table et avant `column_groups`. L'IHM applique le même TOML
+  (Setup > Schema config) ; un snapshot écrit par `--schema-output` est pris avant le TOML et ne garde pas la table
+  fusionnée.
 
 ### Stratégies disponibles
 

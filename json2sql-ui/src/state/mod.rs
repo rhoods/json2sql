@@ -15,6 +15,8 @@
 //! - fn `PgConfig::is_complete` — vérifie que les champs de connexion sont renseignés
 //! - fn `format_bytes` — formate un nombre d'octets en unités SI lisibles
 //! - fn `pass1_registry_config` — seuils de la Pass 1 de l'IHM, pour la Pass 1 et le split d'un snapshot chargé (#200)
+//! - fn `apply_toml_then_split` — le TOML du projet puis le split des tables larges, dans l'ordre de la CLI, après une Pass 1 ou un snapshot (#217) ; le split a lieu même si le TOML échoue
+//! - fn `load_snapshot_with_toml` — charge un snapshot puis lui applique `apply_toml_then_split` (#217)
 //! - struct `Pass1Progress` — état de progression de la Pass 1 (compteurs + logs)
 //! - fn `Pass1Progress::push_log` — ajoute une ligne au ring-buffer de logs
 //! - struct `Pass2Progress` — état de progression de la Pass 2 (compteurs, phases DDL/streaming/contraintes)
@@ -149,6 +151,47 @@ pub fn format_bytes(b: u64) -> String {
     }
 }
 
+/// The TOML of the project (if any), then the split of the wide tables: the order of the CLI, after a Pass 1 or a
+/// snapshot load (#200, #217). The split runs even when the TOML fails, so that the Pass 1 is never lost.
+pub fn apply_toml_then_split(
+    schemas: &mut Vec<TableSchema>,
+    stats: &mut Vec<ColumnStats>,
+    overflow: &mut Vec<OverflowWarning>,
+    toml: Option<&std::path::Path>,
+    registry: &json2sql::schema::registry::RegistryConfig,
+) -> json2sql::error::Result<Vec<ConfigWarning>> {
+    let warnings = toml.map_or_else(
+        || Ok(Vec::new()),
+        |path| json2sql::schema::config::apply_config_file(schemas, stats, path),
+    );
+    overflow.extend(json2sql::schema::registry::split_wide_tables(
+        schemas, stats, registry,
+    ));
+    warnings
+}
+
+/// Load the snapshot at `path`, then the TOML and the split (`apply_toml_then_split`): a CLI snapshot is saved before
+/// both (#200); one the UI saved already has them, and the same TOML changes nothing (#129). The inner result is the
+/// TOML's: when it fails, the snapshot is still loaded, without it.
+pub fn load_snapshot_with_toml(
+    path: &std::path::Path,
+    toml: Option<&std::path::Path>,
+    registry: &json2sql::schema::registry::RegistryConfig,
+) -> json2sql::error::Result<(
+    json2sql::schema::persistence::SchemaSnapshot,
+    json2sql::error::Result<Vec<ConfigWarning>>,
+)> {
+    let mut snap = json2sql::schema::persistence::load(path)?;
+    let warnings = apply_toml_then_split(
+        &mut snap.schemas,
+        &mut snap.stats,
+        &mut snap.overflow_warnings,
+        toml,
+        registry,
+    );
+    Ok((snap, warnings))
+}
+
 // ---------------------------------------------------------------------------
 // Pass 1 runner defaults
 // ---------------------------------------------------------------------------
@@ -261,6 +304,8 @@ pub struct ProjectState {
     pub drop_existing: bool,
     /// Optional directory where anomaly NDJSON files are streamed during Pass 2.
     pub anomaly_dir: Option<PathBuf>,
+    /// TOML of rules (`--schema-config`) applied after Pass 1 or a snapshot load, before the split (#217).
+    pub schema_config: Option<PathBuf>,
     /// Optional directory for Pass 2 temporary files (default: system temp dir).
     pub temp_dir: Option<PathBuf>,
     /// True while the "Test connection" check is in flight.
@@ -295,6 +340,7 @@ impl Default for ProjectState {
             pg_schema: "public".to_string(),
             drop_existing: false,
             anomaly_dir: None,
+            schema_config: None,
             temp_dir: None,
             pg_testing: false,
             pg_ok: None,
@@ -352,6 +398,8 @@ pub struct SchemaState {
     pub pass1_stats: Vec<ColumnStats>,
     /// True when schemas were loaded from a saved snapshot rather than a live Pass 1 run.
     pub schema_snapshot_loaded: bool,
+    /// The snapshot loaded, reloaded when the TOML of the project changes (#217).
+    pub snapshot_path: Option<PathBuf>,
     /// Warnings from TOML config overrides (unknown table, column, type, strategy).
     pub config_warnings: Vec<ConfigWarning>,
     /// JSON format detected during Pass 1, or loaded from snapshot. Used to skip
@@ -374,6 +422,7 @@ impl Default for SchemaState {
             column_collisions: Vec::new(),
             pass1_stats: Vec::new(),
             schema_snapshot_loaded: false,
+            snapshot_path: None,
             config_warnings: Vec::new(),
             detected_format: None,
         }
@@ -394,6 +443,7 @@ impl SchemaState {
         self.selected_table_indices = HashSet::from([0]);
         self.last_selected_idx = 0;
         self.schema_snapshot_loaded = false;
+        self.snapshot_path = None;
         self.config_warnings = Vec::new();
         self.detected_format = None;
     }
@@ -659,6 +709,211 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- TOML then split (#217) ---
+
+    /// A Pass 1 (before the split, UI thresholds) of 40 rows: `id` and `name` everywhere, 15 keys `rare_*` seen in
+    /// two rows each, so `items` is wide and sparse. Returns the result and the TOML path (removed on drop).
+    fn wide_pass1(toml: &str) -> (json2sql::pass1::runner::Pass1Result, TempFile, TempFile) {
+        use std::fmt::Write;
+        let mut lines = String::new();
+        for i in 0..40 {
+            let rare = format!(",\"rare_{0}\": \"v{0}\"", i % 20);
+            let rare = if i % 20 < 15 { rare.as_str() } else { "" };
+            writeln!(lines, "{{\"id\": {i}, \"name\": \"n{i}\"{rare}}}").expect("write a row");
+        }
+        let input = TempFile::with("items.jsonl", &lines);
+        let toml = TempFile::with("schema.toml", toml);
+        let config = json2sql::pass1::runner::Pass1Config {
+            root_table: "items".to_string(),
+            registry: pass1_registry_config(HashSet::new()),
+            num_workers: Some(1),
+        };
+        let result =
+            json2sql::pass1::runner::run_before_split(&input.0, &config, None).expect("Pass 1");
+        (result, input, toml)
+    }
+
+    /// A file in the temp dir, unique per test, removed on drop.
+    struct TempFile(PathBuf);
+    impl TempFile {
+        fn with(name: &str, content: &str) -> Self {
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("j2s-ui-{}-{n}-{name}", std::process::id()));
+            std::fs::write(&path, content).expect("write the temp file");
+            Self(path)
+        }
+    }
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn names(schemas: &[TableSchema]) -> Vec<&str> {
+        let mut names: Vec<&str> = schemas.iter().map(|t| t.name.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[test]
+    fn without_a_toml_the_wide_table_is_split() {
+        let (mut r, _input, _toml) = wide_pass1("");
+        let warnings = apply_toml_then_split(
+            &mut r.schemas,
+            &mut r.stats,
+            &mut r.overflow_warnings,
+            None,
+            &pass1_registry_config(HashSet::new()),
+        );
+        assert_eq!(warnings.expect("no TOML, no error"), []);
+        assert!(names(&r.schemas).len() > 1, "{:?}", names(&r.schemas));
+    }
+
+    #[test]
+    fn a_table_the_toml_sets_is_not_split_and_its_warnings_come_back() {
+        let (mut r, _input, toml) =
+            wide_pass1("[items]\nstrategy = \"jsonb\"\n\n[ghost]\nage = \"INTEGER\"\n");
+        let warnings = apply_toml_then_split(
+            &mut r.schemas,
+            &mut r.stats,
+            &mut r.overflow_warnings,
+            Some(&toml.0),
+            &pass1_registry_config(HashSet::new()),
+        );
+        assert_eq!(
+            warnings.expect("a TOML that parses"),
+            [json2sql::schema::config::ConfigWarning::UnknownTable(
+                "ghost".to_string()
+            )]
+        );
+        assert_eq!(names(&r.schemas), ["items"]);
+        assert_eq!(
+            *r.schemas[0].effective_strategy(),
+            json2sql::schema::table_schema::InferredStrategy::Jsonb
+        );
+    }
+
+    #[test]
+    fn a_toml_that_fails_still_leaves_a_split_schema() {
+        let (mut r, _input, toml) = wide_pass1("[items\n");
+        let warnings = apply_toml_then_split(
+            &mut r.schemas,
+            &mut r.stats,
+            &mut r.overflow_warnings,
+            Some(&toml.0),
+            &pass1_registry_config(HashSet::new()),
+        );
+        assert!(warnings.is_err());
+        assert!(names(&r.schemas).len() > 1, "{:?}", names(&r.schemas));
+    }
+
+    /// The schema of `r` once its TOML and the split are applied, as JSON (comparable).
+    fn finalized(r: &mut json2sql::pass1::runner::Pass1Result, toml: &TempFile) -> String {
+        let warnings = apply_toml_then_split(
+            &mut r.schemas,
+            &mut r.stats,
+            &mut r.overflow_warnings,
+            Some(&toml.0),
+            &pass1_registry_config(HashSet::new()),
+        );
+        assert_eq!(warnings.expect("a TOML that parses"), []);
+        serde_json::to_string(&r.schemas).expect("serialize")
+    }
+
+    /// `r` saved as a snapshot (`persistence::save`, as `--schema-output` does).
+    fn snapshot_of(r: &json2sql::pass1::runner::Pass1Result) -> TempFile {
+        let file = TempFile::with("snapshot.json", "");
+        json2sql::schema::persistence::save(
+            &r.schemas,
+            r.total_rows,
+            &r.truncated_names,
+            &r.column_collisions,
+            &r.stats,
+            &r.overflow_warnings,
+            r.detected_format.clone().expect("a format"),
+            &file.0,
+        )
+        .expect("save the snapshot");
+        file
+    }
+
+    const JSONB_ITEMS: &str = "[items]\nstrategy = \"jsonb\"\n";
+
+    #[test]
+    fn a_snapshot_loaded_with_the_toml_gives_the_schema_of_a_pass1_with_it() {
+        let (mut direct, _input, toml) = wide_pass1(JSONB_ITEMS);
+        let direct = finalized(&mut direct, &toml);
+        // a CLI snapshot: saved before the TOML and the split (#200)
+        let (before, _input2, _) = wide_pass1("");
+        let snapshot = snapshot_of(&before);
+        let (snap, warnings) = load_snapshot_with_toml(
+            &snapshot.0,
+            Some(&toml.0),
+            &pass1_registry_config(HashSet::new()),
+        )
+        .expect("load");
+        assert_eq!(warnings.expect("a TOML that parses"), []);
+        assert_eq!(
+            serde_json::to_string(&snap.schemas).expect("serialize"),
+            direct
+        );
+    }
+
+    #[test]
+    fn a_snapshot_saved_after_the_toml_reloads_with_it_unchanged() {
+        let (mut r, _input, toml) = wide_pass1(JSONB_ITEMS);
+        let once = finalized(&mut r, &toml);
+        // what Save writes in the UI: the schema after the TOML and the split
+        let snapshot = snapshot_of(&r);
+        let (snap, warnings) = load_snapshot_with_toml(
+            &snapshot.0,
+            Some(&toml.0),
+            &pass1_registry_config(HashSet::new()),
+        )
+        .expect("load");
+        assert_eq!(
+            warnings.expect("a TOML that parses"),
+            [],
+            "#129: the same override is ignored silently"
+        );
+        assert_eq!(
+            serde_json::to_string(&snap.schemas).expect("serialize"),
+            once
+        );
+    }
+
+    /// Limit (#217, until the snapshot holds only the Pass 1 in 217b): a snapshot the UI saved is already split, and
+    /// a grid of the TOML is refused on its `AutoSplit` table, with a warning; the CLI does the same (`--schema-input`).
+    #[test]
+    fn a_grid_of_the_toml_is_refused_on_a_snapshot_already_split() {
+        let (mut r, _input, toml) = wide_pass1("[items]\nsuffix_columns = [\"0\", \"1\", \"2\"]\n");
+        let split = apply_toml_then_split(
+            &mut r.schemas,
+            &mut r.stats,
+            &mut r.overflow_warnings,
+            None,
+            &pass1_registry_config(HashSet::new()),
+        );
+        assert_eq!(split.expect("no TOML, no error"), []);
+        let snapshot = snapshot_of(&r);
+        let (snap, warnings) = load_snapshot_with_toml(
+            &snapshot.0,
+            Some(&toml.0),
+            &pass1_registry_config(HashSet::new()),
+        )
+        .expect("load");
+        assert!(
+            matches!(
+                warnings.expect("a TOML that parses").as_slice(),
+                [json2sql::schema::config::ConfigWarning::InvalidOverride { .. }]
+            ),
+            "the grid is refused with a warning"
+        );
+        assert_eq!(names(&snap.schemas), ["items", "items_wide"]);
+    }
 
     // --- Sub-struct defaults ---
 

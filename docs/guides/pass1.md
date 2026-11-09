@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Pass 1, lecture du fichier, observation des types et échantillon
-verified_at: 28a6e29
+verified_at: 7c755c8
 files:
   - src/pass1/
   - src/io/reader.rs
@@ -98,8 +98,8 @@ La Pass 1 lit le fichier une fois, en entier, et **observe** chaque objet racine
 un `TypeTracker` compte les types vus. Elle garde aussi un échantillon borné de lignes (`RowSampler`, pour les groupes
 de colonnes, #91). Elle ne décide rien elle-même : à la fin, `SchemaRegistry::finalize_before_split` passe la main à
 la finalisation (`SchemaFinalizer` : noms, tables sœurs), qui produit les `TableSchema` **avant le split des tables
-larges** (#200). `run` et `run_parallel` coupent ensuite les tables larges (`split_wide_tables`) ; la CLI appelle
-`run_before_split` / `run_parallel_before_split` et ne coupe qu'après le snapshot et le TOML. Les échantillons sont pris
+larges** (#200). `run` et `run_parallel` coupent ensuite les tables larges (`split_wide_tables`) ; la CLI et l'IHM (#217) appellent
+`run_before_split` / `run_parallel_before_split` et ne coupent qu'après le TOML (et, en CLI, le snapshot). Les échantillons sont pris
 sur une copie coupée (`SchemaRegistry::split_view`) : les groupes automatiques qui les lisent viennent après le split.
 
 `registry.rs` est la **frontière** : `SchemaRegistry` réunit l'observation (`SchemaObserver`) et la finalisation. Cette
@@ -139,7 +139,8 @@ Les types inférés, et le type PostgreSQL (`PgType`) qu'ils donnent quand ils s
 ```text
 CLI : run_pipeline → load_or_infer_schema ─┬─ --schema-input : restore_from_snapshot (pas de Pass 1)
                                             └─ run_pass1_workers ─┐
-IHM : AnalysisScreen ─────────────────────────────────────────────┴─► workers > 1 ? run_parallel : run
+IHM : AnalysisScreen ─────────────────────────────────────────────┴─► workers > 1 ? run_parallel_before_split
+                                                                       : run_before_split (puis TOML et split, #217)
 inspect (CLI) : run_inspect → build_inspect_registry (seuils désactivés), N premiers objets, sans stats
 
 run (séquentiel)

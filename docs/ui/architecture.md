@@ -54,6 +54,10 @@ Méthodes de lifecycle :
 - `apply_progress_event(ProgressEvent)` — applique un événement de progression Pass 1 ou Pass 2
 - `load_snapshot()` / `clear_snapshot()` — charge/efface un schéma sauvegardé
 
+Fonctions du TOML (#217, `state/mod.rs`) :
+- `apply_toml_then_split(...)` — le TOML du projet (`ProjectState.schema_config`, gardé dans `last_project.toml`), puis le split des tables larges : appelée à la fin de la Pass 1 (`AnalysisScreen`) ; le split a lieu même si le TOML échoue
+- `load_snapshot_with_toml(path, toml, registry)` — charge un snapshot puis appelle `apply_toml_then_split` ; Setup s'en sert au Load et quand le TOML change (`SchemaState.snapshot_path`). Les avertissements vont dans `SchemaState.config_warnings` (bannière de Strategy)
+
 Méthodes de sélection (sur `SchemaState`, champ `schema: SchemaState`) :
 - `apply_click(i, ctrl)` — clic simple ou Ctrl+clic : sélectionne `i` seul, ou toggle dans la sélection existante
 - `apply_shift_click(i, anchor, visible_indices)` — Shift+clic : remplace la sélection par la plage `[anchor..i]` restreinte aux indices visibles

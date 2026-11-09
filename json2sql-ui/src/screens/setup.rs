@@ -5,6 +5,9 @@
 //!
 //! Fonctions :
 //! - fn `SetupScreen` — composant : les 4 accordéons (source, sorties optionnelles, cible PG, options avancées), lance le picker de fichier et déclenche le test de connexion
+//! - fn `load_snapshot_into` — charge un snapshot avec le TOML du projet puis le split, dans l'état ; l'erreur du TOML à afficher (#217)
+//! - fn `put_snapshot` — met le snapshot chargé dans l'état, avec les avertissements de son TOML et les tables à cocher
+//! - fn `reload_snapshot` — recharge le snapshot chargé quand le TOML du projet change, sans Pass 1 (#217)
 //! - fn `PgConnectionForm` — composant : formulaire de connexion `PostgreSQL` (hôte/port/base/identifiants)
 #![allow(clippy::disallowed_methods, clippy::derive_partial_eq_without_eq)]
 use dioxus::prelude::*;
@@ -60,6 +63,8 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let mut picking_source = use_signal(|| false);
     let mut picking_anomaly = use_signal(|| false);
     let mut picking_schema = use_signal(|| false);
+    let mut picking_toml = use_signal(|| false);
+    let mut toml_error: Signal<Option<String>> = use_signal(|| None);
     let mut picker_error: Signal<Option<String>> = use_signal(|| None);
     let mut load_error: Signal<Option<String>> = use_signal(|| None);
 
@@ -77,6 +82,11 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
     let source_large = size_bytes.is_some_and(|b| b > 5 * 1_073_741_824);
 
     let snapshot_loaded = state.read().schema.schema_snapshot_loaded;
+    let schema_config = state.read().project.schema_config.clone();
+    let schema_config_label = schema_config
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     let snapshot_tables = state.read().schema.schemas.len();
 
     let pg_ok = state.read().project.pg_ok;
@@ -350,6 +360,64 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                         }
                                     }
                                 }
+                                // Schema config (TOML, #217): read at once so that a syntax error shows here
+                                div { class: "field-row mt-sm",
+                                    label { "Schema config (TOML)" }
+                                    input {
+                                        class: "input grow",
+                                        r#type: "text",
+                                        readonly: true,
+                                        placeholder: "— none —",
+                                        title: "Rules applied after Pass 1 or a snapshot load, as --schema-config does",
+                                        value: "{schema_config_label}",
+                                    }
+                                    button {
+                                        class: "btn sm",
+                                        disabled: picking_toml(),
+                                        onclick: move |_| async move {
+                                            if picking_toml() { return; }
+                                            picking_toml.set(true);
+                                            toml_error.set(None);
+                                            match pick_file(&[("Schema config", "*.toml")]).await {
+                                                PickResult::Selected(path) => {
+                                                    let checked = path.clone();
+                                                    let res = tokio::task::spawn_blocking(move || {
+                                                        json2sql::schema::config::SchemaConfig::from_file(&checked)
+                                                    }).await;
+                                                    match res {
+                                                        Ok(Ok(_)) => {
+                                                            state.write().project.schema_config = Some(path);
+                                                            crate::config::try_save(&state.read().project);
+                                                            toml_error.set(reload_snapshot(state).await);
+                                                        }
+                                                        Ok(Err(e)) => toml_error.set(Some(format!("Failed: {e}"))),
+                                                        Err(_) => toml_error.set(Some("Task panicked".to_string())),
+                                                    }
+                                                }
+                                                PickResult::Cancelled => {}
+                                                PickResult::NotAvailable => {
+                                                    toml_error.set(Some("File picker unavailable".to_string()));
+                                                }
+                                            }
+                                            picking_toml.set(false);
+                                        },
+                                        if picking_toml() { "Reading…" } else { "Load .toml…" }
+                                    }
+                                    if schema_config.is_some() {
+                                        button {
+                                            class: "btn ghost sm",
+                                            onclick: move |_| async move {
+                                                state.write().project.schema_config = None;
+                                                crate::config::try_save(&state.read().project);
+                                                toml_error.set(reload_snapshot(state).await);
+                                            },
+                                            "✕"
+                                        }
+                                    }
+                                }
+                                if let Some(ref err) = toml_error() {
+                                    p { style: "color:var(--danger);font-size:var(--fs-xs);margin:6px 0 0;", "{err}" }
+                                }
                                 // Schema snapshot
                                 div { class: "field-row mt-sm",
                                     label { "Schema snapshot" }
@@ -370,30 +438,14 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
                                             let result = pick_file(&[("Schema snapshot", "*.json")]).await;
                                             match result {
                                                 PickResult::Selected(path) => {
-                                                    let config = crate::state::pass1_registry_config(state.read().project.disabled_strategies.clone());
-                                                    let res = tokio::task::spawn_blocking(move || {
-                                                        // A CLI snapshot is saved before the split (#200); one the UI saved is already split, and splitting again changes nothing.
-                                                        json2sql::schema::persistence::load(&path).map(|mut snap| {
-                                                            let overflow = json2sql::schema::registry::split_wide_tables(&mut snap.schemas, &snap.stats, &config);
-                                                            snap.overflow_warnings.extend(overflow);
-                                                            snap
-                                                        })
-                                                    }).await;
+                                                    let res = load_snapshot_into(state, path).await;
                                                     picking_schema.set(false);
                                                     match res {
-                                                        Ok(Ok(snap)) => {
-                                                            state.write().load_snapshot(snap);
-                                                            if state.read().project.group_columns {
-                                                                let ticked = {
-                                                                    let s = state.read();
-                                                                    crate::screens::splittable_tables(&s.schema.schemas, &s.schema.strategy_overrides, &s.schema.pass1_samples)
-                                                                };
-                                                                state.write().schema.group_columns.extend(ticked);
-                                                            }
+                                                        Ok(toml_err) => {
+                                                            toml_error.set(toml_err);
                                                             active_step.set(2);
                                                         }
-                                                        Ok(Err(e)) => load_error.set(Some(format!("Failed: {e}"))),
-                                                        Err(_) => load_error.set(Some("Task panicked".to_string())),
+                                                        Err(e) => load_error.set(Some(e)),
                                                     }
                                                 }
                                                 PickResult::Cancelled => { picking_schema.set(false); }
@@ -822,6 +874,68 @@ pub fn SetupScreen(mut state: Signal<AppState>) -> Element {
 // ---------------------------------------------------------------------------
 // Sub-component: PostgreSQL connection form (step-body of step 3)
 // ---------------------------------------------------------------------------
+
+/// Load the snapshot at `path` with the TOML of the project, then the split (`load_snapshot_with_toml`), into the
+/// state. `Err`: the snapshot did not load; `Ok(Some)`: it did, without the TOML, which failed (#217).
+#[allow(clippy::future_not_send)] // Dioxus signals are not Send: the handlers run on the local executor
+async fn load_snapshot_into(
+    state: Signal<AppState>,
+    path: std::path::PathBuf,
+) -> Result<Option<String>, String> {
+    let config =
+        crate::state::pass1_registry_config(state.read().project.disabled_strategies.clone());
+    let toml = state.read().project.schema_config.clone();
+    let loaded = path.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        crate::state::load_snapshot_with_toml(&loaded, toml.as_deref(), &config)
+    })
+    .await;
+    match res {
+        Ok(Ok((snap, toml_res))) => Ok(put_snapshot(state, path, snap, toml_res)),
+        Ok(Err(e)) => Err(format!("Failed: {e}")),
+        Err(_) => Err("Task panicked".to_string()),
+    }
+}
+
+/// The loaded snapshot into the state, with the warnings of its TOML and the tables to tick (`group_columns`).
+/// Returns the error of the TOML to show.
+fn put_snapshot(
+    mut state: Signal<AppState>,
+    path: std::path::PathBuf,
+    snap: json2sql::schema::persistence::SchemaSnapshot,
+    toml_res: json2sql::error::Result<Vec<json2sql::schema::config::ConfigWarning>>,
+) -> Option<String> {
+    let mut s = state.write();
+    s.load_snapshot(snap);
+    s.schema.snapshot_path = Some(path);
+    let (warnings, toml_err) = match toml_res {
+        Ok(warnings) => (warnings, None),
+        Err(e) => (
+            Vec::new(),
+            Some(format!(
+                "Failed: {e} — the snapshot is loaded without the TOML"
+            )),
+        ),
+    };
+    s.schema.config_warnings = warnings;
+    if s.project.group_columns {
+        let ticked = crate::screens::splittable_tables(
+            &s.schema.schemas,
+            &s.schema.strategy_overrides,
+            &s.schema.pass1_samples,
+        );
+        s.schema.group_columns.extend(ticked);
+    }
+    toml_err
+}
+
+/// After the TOML of the project changed: reload the snapshot loaded, if any, so that the new TOML applies to it
+/// without Pass 1 (the choices made since the load go back to those of the snapshot). Returns the error to show.
+#[allow(clippy::future_not_send)] // see load_snapshot_into
+async fn reload_snapshot(state: Signal<AppState>) -> Option<String> {
+    let path = state.read().schema.snapshot_path.clone()?;
+    load_snapshot_into(state, path).await.unwrap_or_else(Some)
+}
 
 #[component]
 fn PgConnectionForm(mut state: Signal<AppState>) -> Element {

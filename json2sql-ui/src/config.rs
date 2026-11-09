@@ -38,6 +38,9 @@ pub struct ProjectConfig {
     pub drop_existing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anomaly_dir: Option<PathBuf>,
+    /// TOML of rules applied after Pass 1 or a snapshot load (#217).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_config: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temp_dir: Option<PathBuf>,
     pub workers: usize,
@@ -68,6 +71,7 @@ impl Default for ProjectConfig {
             pg_schema: "public".to_string(),
             drop_existing: false,
             anomaly_dir: None,
+            schema_config: None,
             temp_dir: None,
             workers: 1,
             pass2_parallel: std::thread::available_parallelism()
@@ -93,6 +97,7 @@ impl ProjectConfig {
             pg_schema: p.pg_schema.clone(),
             drop_existing: p.drop_existing,
             anomaly_dir: p.anomaly_dir.clone(),
+            schema_config: p.schema_config.clone(),
             temp_dir: p.temp_dir.clone(),
             workers: p.workers,
             pass2_parallel: p.pass2_parallel,
@@ -118,6 +123,7 @@ impl ProjectConfig {
         p.pg_schema.clone_from(&self.pg_schema);
         p.drop_existing = self.drop_existing;
         p.anomaly_dir.clone_from(&self.anomaly_dir);
+        p.schema_config.clone_from(&self.schema_config);
         p.temp_dir.clone_from(&self.temp_dir);
         p.workers = self.workers;
         p.pass2_parallel = self.pass2_parallel;
@@ -303,6 +309,25 @@ mod tests {
         assert_eq!(parsed.workers, cfg.workers);
         assert_eq!(parsed.pass2_parallel, cfg.pass2_parallel);
         assert_eq!(parsed.skip_constraints, cfg.skip_constraints);
+    }
+
+    #[test]
+    fn the_schema_config_path_round_trips_and_is_absent_from_an_old_project() {
+        let p = ProjectState {
+            schema_config: Some(PathBuf::from("/tmp/off/json2sql.toml")),
+            ..Default::default()
+        };
+        let toml_str = toml::to_string(&ProjectConfig::from_project(&p)).expect("serialize");
+        let mut back = ProjectState::default();
+        toml::from_str::<ProjectConfig>(&toml_str)
+            .expect("deserialize")
+            .apply_to(&mut back);
+        assert_eq!(back.schema_config, p.schema_config);
+
+        let old = "pg_host = \"h\"\npg_port = 5432\npg_database = \"d\"\npg_username = \"u\"\n\
+            pg_schema = \"public\"\ndrop_existing = false\nworkers = 1\npass2_parallel = 2\n";
+        let parsed: ProjectConfig = toml::from_str(old).expect("a project saved before #217 loads");
+        assert_eq!(parsed.schema_config, None);
     }
 
     #[test]

@@ -77,17 +77,27 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         }
 
         let disabled_strategies = state.read().project.disabled_strategies.clone();
+        let schema_config = state.read().project.schema_config.clone();
         let handle = tokio::task::spawn_blocking(move || {
             let config = json2sql::pass1::runner::Pass1Config {
                 root_table,
                 registry: crate::state::pass1_registry_config(disabled_strategies),
                 num_workers: Some(workers),
             };
-            if workers > 1 {
-                json2sql::pass1::runner::run_parallel(&source_file, &config, Some(tx))
+            let mut result = if workers > 1 {
+                json2sql::pass1::runner::run_parallel_before_split(&source_file, &config, Some(tx))
             } else {
-                json2sql::pass1::runner::run(&source_file, &config, Some(tx))
-            }
+                json2sql::pass1::runner::run_before_split(&source_file, &config, Some(tx))
+            }?;
+            // The TOML sees every key, then the split, as in the CLI (#200, #217).
+            let toml = crate::state::apply_toml_then_split(
+                &mut result.schemas,
+                &mut result.stats,
+                &mut result.overflow_warnings,
+                schema_config.as_deref(),
+                &config.registry,
+            );
+            Ok::<_, json2sql::error::J2sError>((result, toml))
         });
 
         state.write().abort_handle = Some(handle.abort_handle());
@@ -101,8 +111,24 @@ pub fn AnalysisScreen(mut state: Signal<AppState>) -> Element {
         }
 
         match handle.await {
-            Ok(Ok(result)) => {
+            Ok(Ok((result, toml))) => {
                 let mut s = state.write();
+                match toml {
+                    Ok(warnings) => {
+                        for w in &warnings {
+                            s.schema
+                                .pass1_progress
+                                .push_log(format!("WARNING: {}", w.to_message()));
+                        }
+                        s.schema.config_warnings = warnings;
+                    }
+                    Err(e) => {
+                        s.schema.config_warnings.clear();
+                        s.schema.pass1_progress.push_log(format!(
+                            "Schema config error: {e} — the schema is shown without the TOML"
+                        ));
+                    }
+                }
                 s.schema.schemas = result.schemas;
                 s.schema.overflow_warnings = result.overflow_warnings;
                 s.schema.truncated_names = result.truncated_names;

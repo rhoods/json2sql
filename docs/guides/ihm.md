@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: IHM, état, écrans, composants, persistance du projet
-verified_at: 28a6e29
+verified_at: 7c755c8
 files:
   - json2sql-ui/src/main.rs
   - json2sql-ui/src/state/
@@ -24,6 +24,10 @@ symbols:
   - AppState::load_snapshot
   - pass1_registry_config
   - split_wide_tables
+  - apply_toml_then_split
+  - load_snapshot_with_toml
+  - run_before_split
+  - run_parallel_before_split
   - AppState::clear_snapshot
   - AppState::apply_progress_event
   - AppState::apply_worker_result
@@ -95,7 +99,8 @@ avec le worker (commande d'annulation, reconnexion, fichier résultat, écran Re
 
 L'IHM est une application Dioxus de bureau. Tout son état tient dans un seul `AppState`, partagé par un
 `Signal<AppState>` que chaque écran reçoit. Elle fait tourner la Pass 1 **dans son propre processus**
-(`AnalysisScreen` appelle `run` ou `run_parallel`), puis confie la Pass 2 à un **sous-processus**, `json2sql-worker`
+(`AnalysisScreen` appelle `run_before_split` ou `run_parallel_before_split`, puis applique le TOML du projet et le
+split, #217), puis confie la Pass 2 à un **sous-processus**, `json2sql-worker`
 (`ImportScreen` appelle `spawn_worker` avec un `WorkerConfig`). Entre les deux, l'utilisateur choisit des stratégies
 (overrides) et des groupes de colonnes, appliqués à une copie des schémas par `build_effective_schemas`.
 
@@ -133,9 +138,11 @@ main : CSS (design_css) + scripts, fenêtre
        ├─ find_active_socket : un worker tourne encore → AppScreen::Resume
        └─ match sur AppScreen (sans cas par défaut) → un écran, qui reçoit le Signal<AppState>
 
-SetupScreen : chaque champ modifié → try_save ; snapshot → split_wide_tables (seuils de pass1_registry_config,
-             #200 : un snapshot de la CLI n'est pas coupé) → AppState::load_snapshot
-  └─ AnalysisScreen : Pass 1 dans l'IHM (Pass1Config + pass1_registry_config → run / run_parallel, split compris)
+SetupScreen : chaque champ modifié → try_save ; TOML (Schema config) lu au choix, chemin dans ProjectState ;
+             snapshot → load_snapshot_with_toml → apply_toml_then_split (TOML, puis split_wide_tables aux seuils de
+             pass1_registry_config, #200, #217) → AppState::load_snapshot ; changer de TOML recharge le snapshot
+  └─ AnalysisScreen : Pass 1 dans l'IHM (Pass1Config + pass1_registry_config → run_before_split /
+       run_parallel_before_split → apply_toml_then_split) ; avertissements du TOML → config_warnings
        ├─ ProgressEvent → AppState::apply_progress_event
        └─ résultat → SchemaState (schemas, échantillons…) ; cases des groupes : splittable_tables
   └─ StrategyScreen : overrides et groupes dans SchemaState ; liste : display_schemas → build_table_rows → TableListPanel
@@ -287,8 +294,8 @@ Vues en écrivant la fiche, pas tranchées.
 3. **`SchemaState::clear` recopie `Default` champ par champ.** `AppState::load_snapshot` ne relit pas
    `overflow_warnings`, pourtant écrit dans le snapshot : les avertissements de débordement disparaissent au
    rechargement.
-4. **Un champ jamais écrit.** `config_warnings` de `SchemaState` est lu et remis à zéro, jamais rempli : la bannière
-   des avertissements de config ne peut pas s'afficher. (`absorbed_names` est désormais calculé, #130.)
+4. ~~**Un champ jamais écrit.**~~ `config_warnings` de `SchemaState` est rempli depuis #217 par le TOML du projet
+   (Pass 1 ou Load) : la bannière de Strategy l'affiche. (`absorbed_names` est désormais calculé, #130.)
 5. **Hooks après un `return` anticipé** dans `PreviewScreen` (§ 3).
 6. **Les tests de l'IHM ne tournaient pas en CI** (§ 3). (Le job « Coverage » les lance désormais, #144.)
 7. **docs/ui/architecture.md décalé** : il décrit `state.rs`, `strategy_configurator.rs`, un enum `WideStrategy`,
