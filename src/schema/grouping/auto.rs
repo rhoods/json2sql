@@ -122,6 +122,7 @@ fn confirmed_config(proposals: &[TableProposal]) -> SchemaConfig {
         })
         .collect();
     SchemaConfig {
+        snapshot: None,
         group: HashMap::new(),
         tables,
     }

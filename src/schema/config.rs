@@ -8,6 +8,7 @@
 //! - struct `GroupConfig` — définition d'un groupe de fusion (`SiblingCollapse` manuel).
 //! - struct `SchemaConfig` — config TOML complète (groupes de fusion + overrides par table).
 //! - fn `SchemaConfig::from_file` — charge et parse le fichier TOML.
+//! - fn `SchemaConfig::snapshot_path` — le snapshot de la clé `snapshot`, relatif au dossier du TOML (217b).
 //! - enum `ConfigWarning` — warning non-fatal (table/colonne/type/stratégie/groupe inconnu).
 //! - fn `ConfigWarning::to_message` — message lisible pour chaque variante de warning.
 //! - struct `DeferredFlatten` — override `flatten` en attente (mutation globale).
@@ -119,12 +120,23 @@ pub struct SchemaConfig {
     /// Groupes de fusion : `nom_résultant` → { strategy, members }
     #[serde(default)]
     pub group: HashMap<String, GroupConfig>,
+    /// The Pass 1 of the project (217b), read instead of running it again: relative to the folder of the TOML, see
+    /// `snapshot_path`. A table named `snapshot` cannot be configured, as one named `group`.
+    #[serde(default)]
+    pub snapshot: Option<std::path::PathBuf>,
     /// Overrides par table : `table_name` → { `colonne_ou_strategy` → valeur }
     #[serde(flatten)]
     pub tables: HashMap<String, HashMap<String, toml::Value>>,
 }
 
 impl SchemaConfig {
+    /// The snapshot of the `snapshot` key, relative to the folder of the TOML at `toml_path` (an absolute path is kept):
+    /// the folder of the project moves with its files (217b).
+    pub fn snapshot_path(&self, toml_path: &Path) -> Option<std::path::PathBuf> {
+        let snapshot = self.snapshot.as_ref()?;
+        Some(toml_path.parent().map_or_else(|| snapshot.clone(), |dir| dir.join(snapshot)))
+    }
+
     pub fn from_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(J2sError::Io)?;
         toml::from_str(&content).map_err(|e| {
@@ -1511,6 +1523,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("ghost".to_string(), HashMap::new());
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1544,6 +1557,7 @@ mod tests {
         );
         tables.insert("users".to_string(), cols);
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1580,6 +1594,7 @@ mod tests {
         );
         tables.insert("users".to_string(), cols);
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1617,6 +1632,7 @@ mod tests {
         cols.insert("tags".to_string(), toml::Value::String("text".to_string()));
         tables.insert("users".to_string(), cols);
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1660,6 +1676,7 @@ mod tests {
         );
         tables.insert("tags".to_string(), cols);
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1696,6 +1713,7 @@ mod tests {
         );
         tables.insert("users".to_string(), cols);
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1728,6 +1746,7 @@ mod tests {
         );
         tables.insert("users".to_string(), cols);
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1758,6 +1777,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("flat".to_string(), toml_strategy("columns"));
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1779,6 +1799,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("metrics".to_string(), toml_strategy("columns"));
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1808,6 +1829,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("events".to_string(), toml_strategy("columns"));
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1825,6 +1847,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("tags".to_string(), toml_strategy("pivot"));
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1845,6 +1868,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("blob".to_string(), toml_strategy("jsonb"));
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1882,6 +1906,7 @@ mod tests {
             cols_with_strategy_and_suffix("pivot"),
         );
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1916,6 +1941,7 @@ mod tests {
             cols_with_strategy_and_suffix("Structured_Pivot"),
         );
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1938,6 +1964,7 @@ mod tests {
             cols_with_strategy_and_suffix("pvot"),
         );
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -1970,6 +1997,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("nutrients".to_string(), cols);
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -2004,6 +2032,26 @@ mod tests {
         let mut t = simple_table(name);
         t.parent_table = Some("root".to_string());
         t
+    }
+
+    // --- 217b: the `snapshot` key, relative to the folder of the TOML ---
+
+    #[test]
+    fn the_snapshot_key_is_relative_to_the_folder_of_the_toml_and_is_not_a_table() {
+        let config: SchemaConfig =
+            toml::from_str("snapshot = \"pass1.json\"\n\n[items]\nage = \"INTEGER\"\n").unwrap();
+        assert_eq!(
+            config.snapshot_path(Path::new("/proj/off/json2sql.toml")),
+            Some(std::path::PathBuf::from("/proj/off/pass1.json"))
+        );
+        assert_eq!(config.tables.keys().collect::<Vec<_>>(), ["items"]);
+        let absolute: SchemaConfig = toml::from_str("snapshot = \"/data/p.json\"\n").unwrap();
+        assert_eq!(
+            absolute.snapshot_path(Path::new("/proj/off/json2sql.toml")),
+            Some(std::path::PathBuf::from("/data/p.json"))
+        );
+        let none: SchemaConfig = toml::from_str("[items]\nage = \"INTEGER\"\n").unwrap();
+        assert_eq!(none.snapshot_path(Path::new("json2sql.toml")), None);
     }
 
     // --- 217b: `strategy = "skip"` in the TOML, as the IHM Skip ---
@@ -2109,6 +2157,7 @@ mod tests {
             .collect();
         let cols = HashMap::from([("suffix_columns".to_string(), toml::Value::Array(list))]);
         SchemaConfig {
+            snapshot: None,
             tables: HashMap::from([("nutrients".to_string(), cols)]),
             group: HashMap::new(),
         }
@@ -2146,6 +2195,7 @@ mod tests {
             })
             .collect();
         SchemaConfig {
+            snapshot: None,
             tables: HashMap::from([("nutrients".to_string(), cols)]),
             group: HashMap::new(),
         }
@@ -2346,6 +2396,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("metrics".to_string(), suffix_columns_only("_100g"));
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -2378,6 +2429,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("nutrients".to_string(), suffix_columns_only("_100g"));
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -2406,6 +2458,7 @@ mod tests {
             cols_with_strategy_and_suffix("pivot"),
         );
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -2450,6 +2503,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("nutrients".to_string(), cols);
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -2483,6 +2537,7 @@ mod tests {
             },
         );
         let config = SchemaConfig {
+            snapshot: None,
             tables: HashMap::new(),
             group,
         };
@@ -2509,6 +2564,7 @@ mod tests {
             },
         );
         let config = SchemaConfig {
+            snapshot: None,
             tables: HashMap::new(),
             group,
         };
@@ -2654,7 +2710,11 @@ mod tests {
                 members: vec!["a".to_string(), "b".to_string()],
             },
         );
-        let config = SchemaConfig { group, tables };
+        let config = SchemaConfig {
+            group,
+            snapshot: None,
+            tables,
+        };
         let warnings = apply_overrides_complete(&mut schemas, &config).unwrap();
         assert!(warnings
             .iter()
@@ -2668,6 +2728,7 @@ mod tests {
     fn apply_overrides_complete_no_warnings_clean_config() {
         let mut schemas = vec![simple_table("users")];
         let config = SchemaConfig {
+            snapshot: None,
             tables: HashMap::new(),
             group: HashMap::new(),
         };
@@ -2689,6 +2750,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("users".to_string(), toml_strategy("jsonb"));
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -2716,6 +2778,7 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("images".to_string(), toml_strategy("jsonb"));
         let config = SchemaConfig {
+            snapshot: None,
             tables,
             group: HashMap::new(),
         };
@@ -3329,6 +3392,7 @@ mod tests {
 
     fn toml_config(table: &str, keys: HashMap<String, toml::Value>) -> SchemaConfig {
         SchemaConfig {
+            snapshot: None,
             tables: HashMap::from([(table.to_string(), keys)]),
             group: HashMap::new(),
         }

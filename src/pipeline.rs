@@ -294,13 +294,37 @@ fn resolve_input(input: Option<PathBuf>) -> Result<(Option<tempfile::NamedTempFi
 
 /// Run Pass 1 or restore from snapshot, then print the inferred schema summary.
 fn load_or_infer_schema(cfg: &PipelineConfig, input_path: &Path) -> Result<Pass1Result> {
-    let pass1 = if let Some(ref schema_path) = cfg.schema_input {
+    let snapshot = match cfg.schema_input {
+        Some(ref path) => Some(path.clone()),
+        None => toml_snapshot(cfg)?,
+    };
+    let pass1 = if let Some(ref schema_path) = snapshot {
         restore_from_snapshot(schema_path)?
     } else {
         run_pass1_workers(input_path, cfg)?
     };
     print_schema_summary(&pass1);
     Ok(pass1)
+}
+
+/// The snapshot the `snapshot` key of the TOML names, when that file exists (217b); otherwise Pass 1 runs. Read only:
+/// the CLI writes a snapshot with `--schema-output`, and `--schema-input` wins over the key.
+fn toml_snapshot(cfg: &PipelineConfig) -> Result<Option<PathBuf>> {
+    let Some(ref toml) = cfg.schema_config else {
+        return Ok(None);
+    };
+    let Some(path) = crate::schema::config::SchemaConfig::from_file(toml)?.snapshot_path(toml)
+    else {
+        return Ok(None);
+    };
+    if path.exists() {
+        return Ok(Some(path));
+    }
+    eprintln!(
+        "Snapshot '{}' of the schema config not found: running Pass 1.",
+        path.display()
+    );
+    Ok(None)
 }
 
 fn restore_from_snapshot(schema_path: &Path) -> Result<Pass1Result> {
@@ -1060,6 +1084,42 @@ mod tests {
     fn sorted(mut names: Vec<String>) -> Vec<String> {
         names.sort();
         names
+    }
+
+    /// 217b: the `snapshot` key of the TOML, relative to its folder, is read instead of running Pass 1.
+    #[test]
+    fn the_snapshot_named_by_the_toml_is_read_without_reading_the_input() {
+        let file = wide_jsonl(60);
+        let dir = tempfile::tempdir().unwrap();
+        table_names(PipelineConfig {
+            schema_output: Some(dir.path().join("pass1.json")),
+            ..cfg_for(&file)
+        });
+        let toml = dir.path().join("json2sql.toml");
+        std::fs::write(&toml, "snapshot = \"pass1.json\"\n").unwrap();
+        let cfg = PipelineConfig {
+            input: Some("/nonexistent/input.json".into()),
+            schema_config: Some(toml),
+            ..minimal_pipeline_cfg(None)
+        };
+        assert_eq!(table_names(cfg), ["root"]);
+    }
+
+    #[test]
+    fn a_snapshot_named_by_the_toml_that_is_missing_means_a_pass1() {
+        let file = wide_jsonl(60);
+        let dir = tempfile::tempdir().unwrap();
+        let toml = dir.path().join("json2sql.toml");
+        std::fs::write(&toml, "snapshot = \"pass1.json\"\n").unwrap();
+        let cfg = PipelineConfig {
+            schema_config: Some(toml),
+            ..cfg_for(&file)
+        };
+        assert_eq!(table_names(cfg), ["root"]);
+        assert!(
+            !dir.path().join("pass1.json").exists(),
+            "the CLI only reads the key"
+        );
     }
 
     #[test]
