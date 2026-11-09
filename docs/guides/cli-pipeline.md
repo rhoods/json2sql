@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: CLI et pipeline d'import, des options de la ligne de commande aux rapports
-verified_at: 90ec6b6
+verified_at: 9cd4740
 files:
   - src/cli.rs
   - src/main.rs
@@ -31,6 +31,7 @@ symbols:
   - resolve_input
   - load_or_infer_schema
   - restore_from_snapshot
+  - toml_snapshot
   - run_pass1_workers
   - report_pass1_warnings
   - post_process_schema
@@ -97,7 +98,8 @@ main (src/main.rs)
    └─ sinon → run_pipeline (src/pipeline.rs)
         ├─ finalized_schema
         │   ├─ resolve_input : stdin copié dans un fichier temporaire (le fichier est lu deux fois)
-        │   ├─ load_or_infer_schema : restore_from_snapshot (--schema-input) ou run_pass1_workers
+        │   ├─ load_or_infer_schema : restore_from_snapshot (--schema-input, ou la clé snapshot du TOML :
+        │   │                         toml_snapshot, 217b) ou run_pass1_workers
         │   ├─ report_pass1_warnings
         │   └─ post_process_schema : save_schema_snapshot → apply_schema_config → split (pass1::runner)
         │                            → apply_group_columns → emit_schema_report

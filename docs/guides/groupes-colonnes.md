@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Groupes de colonnes, proposition (--suggest) et application (TOML, --group-columns, IHM)
-verified_at: 90ec6b6
+verified_at: 9cd4740
 files:
   - src/schema/grouping/
   - src/schema/column_groups.rs
@@ -98,6 +98,7 @@ symbols:
   - save_schema_snapshot
   - apply_group_columns
   - toml_column_group_tables
+  - is_auto
   - apply_overrides_complete
   - apply_user_overrides
   - build_effective_schemas
@@ -171,8 +172,8 @@ CLI : post_process_schema (pipeline.rs)
   ├─ save_schema_snapshot                       ← avant le TOML : ni groupes du TOML, ni groupes automatiques
   ├─ apply_schema_config → apply_overrides_complete → apply_column_groups (TOML), reindex_stats
   ├─ split (pass1::runner)                      ← les groupes du TOML passent avant, ceux de --group-columns après
-  └─ apply_group_columns (--group-columns, ou tables cochées dans le snapshot de l'IHM ;
-     sauf tables dont le TOML a une clé column_groups : toml_column_group_tables)
+  └─ apply_group_columns (--group-columns, tables cochées dans le snapshot de l'IHM, ou column_groups = "auto"
+     (is_auto, 217b) ; sauf tables dont le TOML a leurs propres column_groups : toml_column_group_tables)
        └─ apply_name_groups (auto.rs)
             ├─ name_proposals : tables eligible, pas déjà découpées, triées par nom
             │    └─ proposal_for(table, signals_of(table, échantillon Pass 1))

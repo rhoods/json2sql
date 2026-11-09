@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: Config TOML, overrides de l'IHM et snapshot du schéma
-verified_at: 16b8ac8
+verified_at: 9cd4740
 files:
   - src/schema/config.rs
   - src/schema/persistence.rs
@@ -90,6 +90,13 @@ symbols:
   - save_schema_snapshot
   - apply_group_columns
   - toml_column_group_tables
+  - toml_snapshot
+  - warn_if_other_source
+  - SchemaConfig::snapshot_path
+  - record_skipped_children
+  - SourceFingerprint
+  - remove_skipped
+  - is_auto
   - AppState::load_snapshot
   - build_effective_schemas
   - StrategyScreen
@@ -164,7 +171,7 @@ Les overrides de stratégie, qui les pose et ce qu'en fait `apply_single_user_ov
 | `Columns` | TOML `strategy = "columns"` (`toml_override`, si la table est inférée `Columns`) | pose `ui_override` si la table est `Columns`, ne change rien d'autre ; refusé si le TOML a déjà reconstruit les colonnes (`kept_toml_rebuild`) |
 | `Pivot` | TOML et IHM | reconstruit les colonnes (`apply_wide_strategy_columns`), remet la stratégie inférée ; refusé si le TOML les a déjà reconstruites autrement, gardées si c'est le même |
 | `Jsonb` | TOML et IHM | reconstruit les colonnes, même déjà reconstruites par le TOML ; gardées si c'est le même |
-| `Skip` | IHM seulement (le TOML refuse `ignore`) | rien : `compute_skip_cascade` retire la table, son compagnon `_wide` et ses enfants |
+| `Skip` | IHM, et TOML `skip` (217b ; `ignore` reste refusé) | rien : `remove_skipped` (`compute_skip_cascade`, `record_skipped_children`) retire la table, son compagnon `_wide` et ses enfants ; le `skip` du TOML passe par la même fonction, après `flatten` |
 | `Flatten` | personne : le TOML `flatten` passe par `apply_flatten`, qui retire l'enfant | **rien** |
 
 ## 2. Flux
@@ -172,7 +179,8 @@ Les overrides de stratégie, qui les pose et ce qu'en fait `apply_single_user_ov
 ```text
 CLI : run_pipeline
   load_or_infer_schema ─┬─ Pass 1
-                        └─ --schema-input : restore_from_snapshot
+                        └─ --schema-input, sinon la clé snapshot du TOML (toml_snapshot, si le fichier existe) :
+                           restore_from_snapshot (warn_if_other_source : empreinte du JSON source)
                               load (version, migration de strategy_overrides vers ui_override)
                               └─ apply_user_overrides (si strategy_overrides n'est pas vide),
                                    qui finit par exclude_absorbed_children
@@ -189,7 +197,8 @@ CLI : run_pipeline
     │     ├─ apply_column_groups (column_groups)
     │     └─ exclude_absorbed_children
     ├─ split (pass1::runner) : les tables larges et creuses que le TOML n'a pas réglées (voir finalisation.md)
-    └─ apply_group_columns (--group-columns, tables cochées du snapshot ; toml_column_group_tables relit le TOML)
+    └─ apply_group_columns (--group-columns, tables cochées du snapshot, column_groups = "auto" ;
+                            toml_column_group_tables relit le TOML : groupes propres, puis "auto")
 
 IHM : Pass 1 (AnalysisScreen : run_before_split) ou Load (setup.rs : load_snapshot_with_toml → persistence::load)
   apply_toml_then_split : apply_config_file (TOML du projet, s'il y en a un) → split_wide_tables
@@ -264,9 +273,10 @@ IHM : Pass 1 (AnalysisScreen : run_before_split) ou Load (setup.rs : load_snapsh
   avertissement. De même `age = 5`, un `max_depth` hors de 0..255 (remplacé par 1), un `suffix_columns` sans chaîne.
 - **Des noms réservés.** `strategy`, `suffix_columns`, `prefix_columns`, `id_column`, `prefix`, `max_depth` et
   `column_groups` sont des clés de la table : une colonne qui porte un de ces noms ne peut pas être typée. Une table nommée `group` ne peut pas
-  être configurée : `[group]` est lu comme les groupes de fusion (erreur de lecture du TOML, vérifié).
+  être configurée : `[group]` est lu comme les groupes de fusion (erreur de lecture du TOML, vérifié). De même
+  `snapshot` (217b), lu comme le chemin du snapshot.
 - **Les docs annonçaient ce que le TOML refuse.** `strategy = "ignore"` donne `UnknownStrategy` (vérifié) ; Skip
-  n'existe que dans l'IHM. usage.md et schema-inference.md ne citent plus `ignore` depuis #200 ; usage.md ne décrit
+  s'écrit `skip` dans le TOML depuis 217b. usage.md et schema-inference.md ne citent plus `ignore` depuis #200 ; usage.md ne décrit
   pas les clés `prefix`, `max_depth` et `id_column` de `flatten` (#131).
 - **Les noms de stratégie du TOML sont lus une fois** (#132, #200) : `TomlStrategy::parse`, puis `rebuilds_columns`,
   `conflicting_strategy_override`, `already_overridden` (par `user_override`) et `apply_strategy_override` décident

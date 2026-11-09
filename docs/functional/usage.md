@@ -273,8 +273,10 @@ limites.
 ### Format général
 
 ```toml
+snapshot = "pass1.json"     # la Pass 1 du projet, relative au dossier du TOML (facultatif, voir plus bas)
+
 [nom_table]
-strategy = "jsonb"          # jsonb | pivot | columns | flatten
+strategy = "jsonb"          # jsonb | pivot | columns | flatten | skip
 
 [nom_table_nutrients]
 suffix_columns = ["_100g", "_unit", "_serving"]   # la grille de suffixes (proposée par --suggest)
@@ -284,6 +286,18 @@ ma_colonne = "INTEGER"      # forcer un type : INTEGER | BIGINT | TEXT | VARCHAR
 ```
 
 Ces types sont scalaires : une surcharge de type sur une colonne tableau est ignorée avec un avertissement, la colonne reste un tableau.
+
+### Garder la Pass 1 à côté du TOML (`snapshot`)
+
+La clé `snapshot`, en tête du fichier, nomme un snapshot de la Pass 1 (`--schema-output`). Un chemin relatif part du
+dossier du TOML : le TOML et son snapshot se déplacent ensemble.
+
+- Si le fichier existe, `--schema-config` le lit au lieu de relancer la Pass 1 ; sinon la Pass 1 tourne, avec un
+  message. La CLI ne l'écrit jamais : `--schema-output` le crée. `--schema-input` passe avant la clé.
+- Le snapshot garde la taille et la date du JSON lu par la Pass 1. Rechargé avec un autre fichier, il donne un
+  avertissement (`WARNING: the snapshot was made from …`) et l'import continue : relancer la Pass 1 si le fichier a
+  vraiment changé. Le chemin n'est pas comparé, pour qu'un dossier déplacé ne prévienne pas.
+- Une table nommée `snapshot` ne peut pas être configurée (comme `group`).
 
 ### Découper une table en groupes de colonnes (`column_groups`)
 
@@ -297,6 +311,9 @@ packaging = ["packaging_materials_tags", "packaging_recycling_tags", "packaging_
 
 - La table du groupe s'appelle `{table}_{groupe}` (53 octets au plus, un hash si c'est plus long). Elle reprend l'identifiant de la table d'origine (`j2s_id`) et une clé étrangère vers elle ; la table d'origine garde les colonnes qui ne sont dans aucun groupe, ainsi que ses autres tables enfants.
 - Les groupes sont appliqués après les surcharges de types, de stratégie et `flatten`, dans l'ordre alphabétique de leurs noms, et **avant** le split : un groupe peut prendre des clés que le split aurait envoyées en clé/valeur, et une table de groupe encore large et creuse passe à son tour par le split.
+- `column_groups = "auto"` demande les groupes automatiques par les noms sur cette table seulement, comme
+  `--group-columns` (après le split, sur les colonnes qui restent). Une table qui a ses propres groupes, ou
+  `column_groups = {}`, n'en reçoit pas.
 - Un groupe est ignoré, avec un avertissement, si une colonne est inconnue, générée par json2sql (`j2s_*`), déjà dans un autre groupe, si le groupe a moins de 3 colonnes ou si le nom de table qu'il aurait existe déjà. Une table dont la stratégie n'est ni `columns` ni `AutoSplit`, ou dont toutes les colonnes partiraient, n'est pas découpée.
 - À l'import, la table d'un groupe reçoit une ligne par objet de la table d'origine qui a au moins une valeur dans les colonnes du groupe. Une valeur est tout sauf `null`, `""`, `[]` et `{}` (la règle de `--suggest`). La ligne reprend le `j2s_id` de la ligne d'origine : `LEFT JOIN {table}_{groupe} USING (j2s_id)` redonne la table de départ. Quand toutes les colonnes d'un groupe sont vides, il n'y a pas de ligne et la jointure rend ces colonnes à `NULL`, y compris celles qui contenaient `""` ou `[]`. `--dry-run` affiche le DDL.
 - Une valeur de groupe qui ne rentre pas dans le type de sa colonne est une anomalie de la table du groupe (fichier d'anomalies au nom de cette table) ; chaque ligne de groupe écrite compte dans le taux de `--max-anomaly-rate`, au même titre que les lignes des autres tables.
@@ -352,6 +369,7 @@ Exemples de schémas SQL avec et sans chaque stratégie : [strategies.md](strate
 | `pivot` | EAV générique `(parent_id, key, value)` |
 | `suffix_columns = [...]` | La grille de suffixes : les clés à suffixes dans une table `{table}_pivot` : `(parent_id, name, value, suffixe1, ...)` ; les autres colonnes restent. Ancienne forme, toujours lue : `strategy = "structured_pivot"` avec `suffix_columns` |
 | `flatten` | L'objet enfant remonté en colonnes préfixées dans sa table parente (`prefix`, `max_depth`) |
+| `skip` | La table n'est pas importée, ni ses tables enfants (et son compagnon `_wide`) ; sa clé ne donne pas d'anomalie sur la table parente. Refusé sur la table racine. Comme Skip dans l'IHM |
 
 ### Exemple réel — OpenFoodFacts
 
