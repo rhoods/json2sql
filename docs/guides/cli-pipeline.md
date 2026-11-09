@@ -1,7 +1,7 @@
 ---
 type: carte
 sujet: CLI et pipeline d'import, des options de la ligne de commande aux rapports
-verified_at: 28a6e29
+verified_at: 90ec6b6
 files:
   - src/cli.rs
   - src/main.rs
